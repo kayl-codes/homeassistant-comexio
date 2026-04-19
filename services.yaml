@@ -1,10 +1,10 @@
 # Version: 0.2.0
 generate_web_io:
   name: Web-IO Export
-  description: Erzeugt ein JSON für den Import in Comexio oder lädt es direkt hoch.
+  description: Generates a JSON for Comexio import or uploads it directly.
   fields:
     upload:
-      name: Direkt hochladen
-      description: Wenn aktiv, wird die Geräteklasse direkt an Comexio gesendet.
+      name: Direct upload
+      description: If enabled, the device class is sent directly to Comexio.
       selector:
         boolean:
