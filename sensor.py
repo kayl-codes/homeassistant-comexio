@@ -1,4 +1,4 @@
-# Version: 0.1.3
+# Version: 0.1.4
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
