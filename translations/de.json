@@ -1,20 +1,33 @@
 {
   "config": {
     "error": {
-      "server_id_exists": "Dieser Server-ID Name wird bereits verwendet.",
-      "cannot_connect": "Verbindung fehlgeschlagen",
-      "invalid_auth": "Ungültige Anmeldedaten",
-      "unknown": "Unerwarteter Fehler"
+      "server_id_exists": "Dieser Instanz-Name wird bereits verwendet.",
+      "cannot_connect": "Verbindung zu Comexio fehlgeschlagen.",
+      "invalid_auth": "Ungültige Anmeldedaten (UI User/Pass).",
+      "unknown": "Unerwarteter Fehler aufgetreten."
     },
     "step": {
       "user": {
+        "title": "Comexio IO-Server hinzufügen",
         "data": {
-          "server_id": "Instanz Name (z.B. iosrv1)",
+          "server_id": "Instanz Name (Präfix für IDs)",
           "webio_name": "Name der Geräteklasse in Comexio",
-          "scan_interval": "Abfrage-Intervall (Minuten)",
-          "import_markers": "Merker importieren",
-          "import_ios": "Ein/Ausgänge importieren"
+          "host": "Host / IP-Adresse",
+          "username": "Benutzername (Admin-Oberfläche)",
+          "password": "Passwort (Admin-Oberfläche)",
+          "api_username": "API Benutzername (Basic Auth)",
+          "api_password": "API Passwort (Basic Auth)",
+          "import_markers": "Merker als Entitäten anlegen",
+          "import_ios": "Ein- und Ausgänge anlegen",
+          "scan_interval": "Hintergrund-Abfrageintervall"
         }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "webio_sync": {
+        "name": "Web-IO Smart Sync"
       }
     }
   }
