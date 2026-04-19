@@ -1,0 +1,21 @@
+{
+  "config": {
+    "error": {
+      "server_id_exists": "Dieser Server-ID Name wird bereits verwendet.",
+      "cannot_connect": "Verbindung fehlgeschlagen",
+      "invalid_auth": "Ungültige Anmeldedaten",
+      "unknown": "Unerwarteter Fehler"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "server_id": "Instanz Name (z.B. iosrv1)",
+          "webio_name": "Name der Geräteklasse in Comexio",
+          "scan_interval": "Abfrage-Intervall (Minuten)",
+          "import_markers": "Merker importieren",
+          "import_ios": "Ein/Ausgänge importieren"
+        }
+      }
+    }
+  }
+}

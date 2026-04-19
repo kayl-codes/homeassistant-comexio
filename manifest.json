@@ -1,0 +1,11 @@
+{
+  "domain": "comexio",
+  "name": "Comexio",
+  "version": "0.2.0",
+  "documentation": "",
+  "dependencies": [],
+  "codeowners": [],
+  "requirements": ["cryptography"],
+  "config_flow": true,
+  "iot_class": "local_push"
+}
