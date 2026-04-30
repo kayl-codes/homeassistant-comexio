@@ -1,10 +1,18 @@
-# Version: 0.2.0
+# Version: 0.3.1
 generate_web_io:
-  name: Web-IO Export
-  description: Generates a JSON for Comexio import or uploads it directly.
+  name: Web-IO Export / Upload
+  description: Erzeugt ein JSON für den Comexio-Import oder lädt die Geräteklasse direkt auf den Server hoch.
   fields:
+    config_entry:
+      name: Comexio Instanz
+      description: Wähle die Comexio-Instanz aus, für die die Aktion ausgeführt werden soll.
+      required: true
+      selector:
+        config_entry:
+          integration: comexio
     upload:
-      name: Direct upload
-      description: If enabled, the device class is sent directly to Comexio.
+      name: Direkt hochladen
+      description: Falls aktiviert, wird die Geräteklasse direkt an Comexio gesendet und dort überschrieben.
+      default: false
       selector:
         boolean:

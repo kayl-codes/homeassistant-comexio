@@ -1,8 +1,9 @@
-# Version: 0.1.1
+# Version: 0.2.1
 import logging
-from homeassistant.components.number import NumberEntity
+from homeassistant.components.number import NumberEntity, NumberMode, NumberDeviceClass
+from homeassistant.const import UnitOfTemperature
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .const import DOMAIN, MARKER_TYPE_ANALOG
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -10,13 +11,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
     """Set up Comexio numbers (analog markers)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     
-    # Checkbox Filter
     if not entry.data.get("import_markers", True):
         return
 
     entities = []
     for marker in coordinator.data.get("markers", []):
-        if marker["type"] == MARKER_TYPE_ANALOG:
+        # We only use 'analog' markers for the number platform
+        if marker["type"] == "analog":
             entities.append(ComexioMarkerNumber(coordinator, coordinator.server_id, marker))
 
     async_add_entities(entities)
@@ -26,27 +27,50 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
 
     def __init__(self, coordinator, server_id, marker):
         super().__init__(coordinator)
-        self.marker = marker
-        self.server_id = server_id
+        self._marker_id = str(marker["id"])
         
-        self._attr_unique_id = f"comexio_{server_id}_m{marker['id']}_num"
-        self.entity_id = f"number.comexio_{server_id}_m{marker['id']}"
+        # Einzigartige ID für die Datenbank
+        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}_num"
+        # Anzeigename
         self._attr_name = marker["name"]
-        
-        # Standard range for markers
-        self._attr_native_min = 0
-        self._attr_native_max = 1000000  # High limit to be safe for all analog types
+
+        self._attr_native_min_value = 0.0
+        self._attr_native_max_value = 100.0
         self._attr_native_step = 0.1
-        self._attr_icon = "mdi:gauge"
+        self._attr_mode = NumberMode.AUTO
+
+        # Intelligence: Detect Temperature Setpoints
+        if marker.get("type_raw") == 3:
+            self._attr_icon = "mdi:timer-outline"
+        else:
+            name_lower = marker["name"].lower()
+            if any(x in name_lower for x in ["soll", "temp", "setpoint"]):
+                self._attr_device_class = NumberDeviceClass.TEMPERATURE
+                self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+                self._attr_native_max_value = 50.0
+            else:
+                self._attr_icon = "mdi:gauge"
 
     @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": f"Comexio Server {self.coordinator.server_id}",
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+    
+    @property
     def native_value(self):
-        """Return value cleaned by API logic."""
-        val = self.coordinator.marker_states.get(self.marker["id"], 0)
-        return float(val)
+        """Return the current value from coordinator cache."""
+        val = self.coordinator.marker_states.get(self._marker_id, 0)
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
 
-    async def async_set_native_value(self, value):
-        """Send value via API."""
-        if await self.coordinator.api.set_value("marker", self.marker["id"], value):
-            self.coordinator.marker_states[self.marker["id"]] = value
-            self.async_write_ha_state()
+    async def async_set_native_value(self, value: float):
+        """Update the value via API and update local cache."""
+        if await self.coordinator.api.set_value("marker", self._marker_id, value):
+            # Update coordinator cache immediately for responsive UI
+            self.coordinator.update_marker(self._marker_id, value)

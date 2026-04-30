@@ -1,4 +1,4 @@
-# Version: 0.2.1
+# Version: 0.4.0
 DOMAIN = "comexio"
 
 CONF_HOST = "host"
@@ -11,11 +11,10 @@ CONF_API_USERNAME = "api_username"
 CONF_API_PASSWORD = "api_password"
 
 # webHook
-WEBHOOK_ID = "comexio_webhook"
-DEFAULT_NAME = "Comexio"
-CONF_WEBIO_NAME = "webio_name"
+#WEBHOOK_ID = "comexio_webhook"
 
-# Marker types
-MARKER_TYPE_DIGITAL = "digital"
-MARKER_TYPE_ANALOG = "analog"
-MARKER_TYPE_INTERVAL = "interval"
+DEFAULT_NAME = "Comexio"
+
+SCAN_INTERVAL_MIN = 1
+SCAN_INTERVAL_MAX = 1440
+SCAN_INTERVAL_DEFAULT = 15

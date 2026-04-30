@@ -1,14 +1,13 @@
-# Version: 0.2.2
-import voluptuous as vol
-import logging
-
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
     NumberSelector, 
     NumberSelectorConfig, 
     NumberSelectorMode
 )
+import voluptuous as vol
+import logging
 
 from .const import (
     DOMAIN, 
@@ -18,11 +17,15 @@ from .const import (
     CONF_SERVER_ID,
     CONF_API_USERNAME,
     CONF_API_PASSWORD,
-    CONF_WEBIO_NAME
+    SCAN_INTERVAL_MIN,
+    SCAN_INTERVAL_MAX,
+    SCAN_INTERVAL_DEFAULT
 )
 from .api import ComexioAPI
+from .options_flow import ComexioOptionsFlow
 
 _LOGGER = logging.getLogger(__name__)
+
 
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect."""
@@ -36,11 +39,15 @@ class ServerIdExists(HomeAssistantError):
 class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Comexio with detailed validation."""
     VERSION = 1
-
+    
     async def async_step_user(self, user_input=None):
         """Handle the initial setup step when a user adds the integration."""
         errors = {}
         
+        # Add additional debug logs to trace execution
+        _LOGGER.debug("ComexioConfigFlow: Entered async_step_user")
+        _LOGGER.debug("ComexioConfigFlow: Current entries: %s", self._async_current_entries())
+
         # Generate a suggestion for the server ID based on existing entries
         current_entries = self._async_current_entries()
         suggested_id = f"iosrv{len(current_entries) + 1}"
@@ -90,10 +97,10 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required("import_markers", default=True): bool,
             vol.Required("import_ios", default=True): bool,
             vol.Required("webio_name", default="HomeAssistant_v1"): str,
-            vol.Required("scan_interval", default=15): NumberSelector(
+            vol.Required("scan_interval", default=SCAN_INTERVAL_DEFAULT): NumberSelector(
                 NumberSelectorConfig(
-                    min=5, 
-                    max=60, 
+                    min=SCAN_INTERVAL_MIN, 
+                    max=SCAN_INTERVAL_MAX, 
                     step=1, 
                     mode=NumberSelectorMode.SLIDER,
                     unit_of_measurement="min"
@@ -106,6 +113,12 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=schema,
             errors=errors
         )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        """Get the options flow for this handler."""
+        return ComexioOptionsFlow(config_entry)
 
     async def _test_connection(self, user_input):
         """Test if the login works using UI credentials."""

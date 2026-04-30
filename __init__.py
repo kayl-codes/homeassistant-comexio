@@ -1,4 +1,4 @@
-# Version: 0.2.0
+# Version: 0.4.0
 from datetime import timedelta
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
@@ -11,11 +11,17 @@ from .const import (
 )
 from .api import ComexioAPI
 from .coordinator import ComexioCoordinator
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
+# Add a test log to verify logger initialization
+_LOGGER.debug("Testing logger initialization in __init__.py")
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Comexio from a config entry."""
+    _LOGGER.info("Comexio__init__: Entered async_setup_entry")
+
     hass.data.setdefault(DOMAIN, {})
     server_id = entry.data[CONF_SERVER_ID]
 
@@ -29,58 +35,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         api_pass=entry.data.get(CONF_API_PASSWORD),
     )
 
-    await api.login()
+    try:
+        await api.login()
+    except Exception as e:
+        _LOGGER.error("Failed to log in to Comexio API: %s", e)
+        return False
 
     # Initialize Coordinator
     coordinator = ComexioCoordinator(hass, api)
     coordinator.server_id = server_id
     coordinator.config_entry = entry
+    api.config_entry = entry
     
     # Set custom update interval from config
-    interval = entry.data.get("scan_interval", 15)
+    conf = {**entry.data, **entry.options}
+    interval = conf.get("scan_interval", 15)
     coordinator.update_interval = timedelta(minutes=interval)
     
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception as e:
+        _LOGGER.error("Failed to refresh coordinator data: %s", e)
+        return False
+
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     # Set up platforms
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "switch", "number", "button"])
+    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "switch", "number", "button", "binary_sensor"])
 
-    # ---------------------------
-    # Service: Smart Web-IO Sync
-    # ---------------------------
-    async def handle_generate_web_io(call: ServiceCall):
-        do_upload = call.data.get("upload", False)
-        try:
-            web_io_json = api.generate_web_io_json(server_id, coordinator.data)
-            
-            if not do_upload:
-                persistent_notification.async_create(
-                    hass, f"```json\n{web_io_json}\n```",
-                    title=f"Comexio Preview ({server_id})"
-                )
-                return
-
-            # Smart Upload Logic
-            base_id, deletable = await api.get_web_io_base_info(server_id)
-            if base_id:
-                if deletable:
-                    await api.delete_web_io_base(base_id)
-                else:
-                    persistent_notification.async_create(
-                        hass, "Klasse in Benutzung! Bitte manuell pflegen.", 
-                        title="Sync Blockiert"
-                    )
-                    return
-
-            success, new_id = await api.upload_web_io(server_id, web_io_json)
-            msg = f"Sync erfolgreich! ID: {new_id}" if success else f"Fehler: {new_id}"
-            persistent_notification.async_create(hass, msg, title="Comexio Sync")
-
-        except Exception as e:
-            _LOGGER.exception("Service Error: %s", e)
-
-    hass.services.async_register(DOMAIN, "generate_web_io", handle_generate_web_io)
+    # Set up services
+    await async_setup_services(hass)
 
     # ---------------------------
     # Webhook Setup
@@ -101,8 +85,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handle_webhook)
     except ValueError: pass
 
+    entry.async_on_unload(entry.add_update_listener(update_listener))
     hass.data[DOMAIN][entry.entry_id + "_webhook"] = webhook_id
+
+#    # ---------------------------
+#    # Entitäten-Bereinigung (Cleanup)
+#    # ---------------------------
+#    from homeassistant.helpers import entity_registry as er
+#    ent_reg = er.async_get(hass)
+#    
+#    # Hole alle IDs der aktuell vom Coordinator erkannten Objekte
+#    active_unique_ids = set()
+#    for m in coordinator.data.get("markers", []):
+#        # Wir müssen hier alle möglichen Suffixe abbilden, die wir in sensor.py etc nutzen
+#        active_unique_ids.add(f"comexio_{server_id}_m{m['id']}_num")
+#        active_unique_ids.add(f"comexio_{server_id}_m{m['id']}_sw")
+#    for io in coordinator.data.get("io", []):
+#        active_unique_ids.add(f"{server_id}_{io['id']}_io_sensor")
+#        active_unique_ids.add(f"{server_id}_{io['id']}_io_binary_sensor")
+#        active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_sw")
+#    
+#    # Füge die Buttons hinzu (die sind immer aktiv)
+#    active_unique_ids.add(f"comexio_{server_id}_webio_sync_btn")
+#    active_unique_ids.add(f"comexio_{server_id}_cancel_sync_btn")
+#
+#    # Lösche alles aus der Registry, was nicht in active_unique_ids ist
+#    for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+#        if entity_entry.unique_id not in active_unique_ids:
+#            _LOGGER.info("Cleaning up orphaned entity: %s", entity_entry.entity_id)
+#            ent_reg.async_remove(entity_entry.entity_id)
+
     return True
+
+async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
+    """Handle options update."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Unload and cleanup."""
@@ -110,7 +127,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     if webhook_id:
         webhook.async_unregister(hass, webhook_id)
     
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor", "switch", "number", "button"])
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor", "switch", "number", "button", "binary_sensor"])
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
         hass.data[DOMAIN].pop(entry.entry_id + "_webhook", None)
