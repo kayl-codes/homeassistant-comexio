@@ -30,7 +30,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
             webio_name = conf.get("webio_name", "HomeAssistant")
             
-            web_io_json = api.generate_web_io_json(server_id, webio_name, coordinator.data)
+            web_io_json = api.generate_webio_json(server_id, webio_name, coordinator.data)
             
             if not do_upload:
                 persistent_notification.async_create(
@@ -40,12 +40,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 return
 
             # Ab hier beginnt der Upload-Prozess
-            base_info = await api.get_web_io_base_info(webio_name)
+            base_info = await api.get_webio_base_info(webio_name)
             if base_info:
                 base_id, deletable = base_info
                 if deletable:
                     _LOGGER.info("Base class is deletable, performing clean reinstall.")
-                    await api.delete_web_io_base(base_id)
+                    await api.delete_webio_base(base_id)
                 else:
                     # Hier könntest du später den "langsamen" Delta-Sync triggern
                     persistent_notification.async_create(

@@ -4,7 +4,15 @@ from homeassistant.helpers import issue_registry as ir
 import logging
 
 from .api import ComexioAPI
-from .const import DOMAIN
+
+from .const import (
+    DOMAIN, 
+    CONF_HOST, 
+    CONF_USERNAME, 
+    CONF_PASSWORD, 
+    CONF_API_USERNAME,
+    CONF_API_PASSWORD
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,15 +122,43 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # ABBRUCH-WEICHE: Wenn überhaupt keine Webhooks in Comexio vorhanden sind!
             if not com_map:
-                # Check if the user has permanently ignored this warning via Repairs UI
                 is_ignored = conf.get("audit_ignored", False)
-
                 if not is_ignored:
                     ir.async_create_issue(
                         self.hass, DOMAIN, f"sync_mismatch_{self.server_id}",
-                        is_fixable=True, severity=ir.IssueSeverity.ERROR,
+                        is_fixable=True, 
+                        severity=ir.IssueSeverity.ERROR,
                         translation_key="missing_webio_class",
                         translation_placeholders={"server_id": self.server_id},
+                        data={
+                            "entry_id": self.config_entry.entry_id,
+                            "counts": {
+                                "type": 0,
+                                "missing": len(ha_map),
+                                "rename": 0,
+                                "orphan": 0,
+                                "all": len(ha_map)
+                            }
+                        }
+                    )
+                return final_data
+
+            # FALL 2: Gerät ist da, aber wir haben inhaltliche Differenzen (Delta)
+            # (Hier folgt dein bestehender Code für type_mismatches, missing_items, etc.)
+            mismatches = set()
+            if mismatches:
+                ir.async_create_issue(
+                        self.hass, DOMAIN, f"sync_mismatch_{self.server_id}",
+                        is_fixable=True, severity=ir.IssueSeverity.ERROR,
+                        translation_key="sync_mismatch",
+                        translation_placeholders={
+                            "ha_count": str(len(ha_map)), 
+                            "com_count": str(len(com_map)), 
+                            "t_count": str(len(type_mismatches)),
+                            "m_count": str(len(missing_items)),
+                            "r_count": str(len(renamed_items)),
+                            "o_count": str(len(orphans))
+                        },
                         data={
                             "entry_id": self.config_entry.entry_id,
                             "counts": {
@@ -134,13 +170,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
                             }
                         }
                     )
-                
                 # Log warning only once per failure cycle
                 if not self.last_audit_failed:
                     _LOGGER.warning("[%s] ⚠️ Audit abgebrochen: Web-IO Gerät/Klasse fehlt! Bitte Erst-Einrichtung starten.", self.server_id)
                     self.last_audit_failed = True
-                
-                return final_data
+
+            else:
+                # Alles okay -> Issue löschen
+                ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
 
             # Reset failure flag if audit succeeds (Web-IO exists again)
             self.last_audit_failed = False
@@ -232,12 +269,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Issue Management
             if mismatches:
-#                summary_lines = []
-#                if type_mismatches: summary_lines.append(f"* 🔧 **Typ-Konflikte:** {len(type_mismatches)}")
-#                if missing_items:   summary_lines.append(f"* ➕ **Fehlend:** {len(missing_items)}")
-#                if renamed_items:   summary_lines.append(f"* ✏️ **Umbenannt:** {len(renamed_items)}")
-#                if orphans:         summary_lines.append(f"* 🗑️ **Verwaist:** {len(orphans)}")
-#                summary_text = "\n".join(summary_lines)
                 issue_data_counts = {
                     "type": len(type_mismatches),
                     "missing": len(missing_items),
@@ -246,28 +277,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "all": len(mismatches)
                 }
 
-#                ir.async_create_issue(
-#                    self.hass, DOMAIN, f"sync_mismatch_{self.server_id}",
-#                    is_fixable=True, 
-#                    severity=ir.IssueSeverity.WARNING,
-#                    translation_key="sync_mismatch",
-#                    translation_placeholders={
-#                        "ha": str(len(ha_map)), 
-#                        "com": str(len(com_map)), 
-#                        "delta": str(len(mismatches)),
-#                        "summary": summary_text
-#                    },
-#                    data={
-#                        "entry_id": self.config_entry.entry_id,
-#                        "counts": {
-#                            "type": len(type_mismatches),
-#                            "missing": len(missing_items),
-#                            "rename": len(renamed_items),
-#                            "orphan": len(orphans),
-#                            "all": len(mismatches)
-#                        }
-#                    }
-#                )
                 ir.async_create_issue(
                     self.hass, DOMAIN, f"sync_mismatch_{self.server_id}",
                     is_fixable=True, 

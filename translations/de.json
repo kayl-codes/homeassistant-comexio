@@ -50,7 +50,7 @@
   "issues": {
     "sync_mismatch": {
       "title": "Comexio Web-IO nicht synchron",
-      "description": "Die Konfiguration weicht ab ({ha} vs. {com} Befehle).",
+      "description": "Die Konfiguration weicht ab ({ha_count} vs. {com_count} Befehle).",
       "fix_flow": {
         "step": {
           "select_action": {

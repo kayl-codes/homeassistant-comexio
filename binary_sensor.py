@@ -31,7 +31,7 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
         self._io_id = io["id"]
         
         # Unique ID as the stable anchor in HA
-        self._attr_unique_id = f"{server_id}_{self._io_id}_io_binary_sensor"
+        self._attr_unique_id = f"comexio_{server_id}_{self._io_id}_io_binary_sensor"
         self._attr_name = io['name']
 
         # Intelligence: Automatic Device Class assignment based on name

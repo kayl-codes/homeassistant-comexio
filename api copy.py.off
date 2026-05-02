@@ -305,20 +305,20 @@ class ComexioAPI:
             return match.group(1) if match else None
 
     async def can_delete_device(self, device_id):
-        """
-        Prüft, ob das Gerät gelöscht werden kann, ohne es wirklich zu zerstören,
-        oder wertet die Fehlermeldung eines echten Löschversuchs aus.
-        """
-        url = f"http://{self.host}/admin/web_io/delete_device/?id={device_id}"
-        headers = {"Referer": f"http://{self.host}/admin/web_io/home"}
-        
-        async with self.session.get(url, headers=headers) as resp:
-            html = await resp.text()
-            if "Das Gerät kann nicht gelöscht werden" in html:
-                _LOGGER.info("[%s] Web-IO Device %s ist in Logik eingebunden (In-Use).", self.host, device_id)
-                return False
-            # Falls kein Fehler kam, war der Löschvorgang erfolgreich
-            return True
+    """
+    Prüft, ob das Gerät gelöscht werden kann, ohne es wirklich zu zerstören,
+    oder wertet die Fehlermeldung eines echten Löschversuchs aus.
+    """
+    url = f"http://{self.host}/admin/web_io/delete_device/?id={device_id}"
+    headers = {"Referer": f"http://{self.host}/admin/web_io/home"}
+    
+    async with self.session.get(url, headers=headers) as resp:
+        html = await resp.text()
+        if "Das Gerät kann nicht gelöscht werden" in html:
+            _LOGGER.info("[%s] Web-IO Device %s ist in Logik eingebunden (In-Use).", self.host, device_id)
+            return False
+        # Falls kein Fehler kam, war der Löschvorgang erfolgreich
+        return True
         
     async def delete_webio_device(self, device_id):
         """

@@ -3,7 +3,6 @@ import logging
 import asyncio
 import datetime
 import json
-import socket
 import voluptuous as vol
 
 from homeassistant.components.button import ButtonEntity
@@ -13,7 +12,6 @@ from homeassistant.helpers.network import get_url
 from homeassistant.helpers import entity_platform, config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.const import EntityCategory
-from urllib.parse import urlparse
 
 from .const import DOMAIN
 
@@ -83,135 +81,65 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     async def async_handle_press(self, action: str = "full_sync") -> None:
         """Execute the sync logic with mode selection."""
         self.coordinator.in_sync = True
-        self.async_write_ha_state()
+        self.async_write_ha_state()        
 
-        start_time = datetime.datetime.now()
         api = self.coordinator.api
         webio_name = self.coordinator.config_entry.data.get("webio_name", "HomeAssistant")
         notif_id = f"comexio_sync_{self.server_id}"
         is_de = self.hass.config.language == "de"
+        
+        start_msg = f"Aktion '{action}' läuft..." if is_de else f"Action '{action}' in progress..."
+        persistent_notification.async_create(self.hass, start_msg, title="Comexio Sync", notification_id=notif_id)
 
         try:
-            # 0. Vorab-Check: Besteht das Gerät schon? (Nötig für die Logik-Entscheidung)
-            dev_id = await api.get_webio_device_info(webio_name)
-            base_info = await api.get_webio_base_info(webio_name)
-            effective_action = action
-
             # 1. Versuche die URL aus den HA-Einstellungen zu bekommen
             ha_url = get_url(self.hass, require_ssl=False, prefer_external=False, allow_internal=True)
-            ha_address = urlparse(ha_url).hostname
+            ha_address = ha_url.replace("http://", "").replace("https://", "").split(":")[0]
             
-            # 2. Safety-Check: If HA returns 'localhost' or is empty, find the network IP
-            if ha_address in [None, "localhost", "127.0.0.1", "::1"]:
+            # 2. Sicherheits-Check: Wenn HA 'localhost' oder '127.0.0.1' liefert
+            if ha_address in ["localhost", "127.0.0.1", "::1"]:
+                # Nutze die IP, über die HA mit dem Internet kommuniziert
+                import socket
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                try:
-                    # Does not actually connect, but finds the interface used for internet
-                    s.connect(("8.8.8.8", 80))
-                    ha_address = s.getsockname()[0]
-                except Exception:
-                    ha_address = "127.0.0.1" # Absolute fallback
-                finally:
-                    s.close()
+                s.connect(("8.8.8.8", 80))
+                ha_address = s.getsockname()[0]
+                s.close()
+            
+            dev_id = await api.get_web_io_device_info(webio_name)
+            base_info = await api.get_web_io_base_info(webio_name)
             
             if base_info:
                 base_id, deletable = base_info
                 
-                # --- AUTO-MODE LOGIC (button.py) ---
-                audit_data = getattr(self.coordinator, "last_audit_results", {})
-                orphan_count = len(audit_data.get("orphan", []))
-
-                # 1. Check: If no device instance exists at all, we MUST recreate/create fresh
-                if not dev_id:
-                    _LOGGER.info("[%s] No device instance found. Forcing recreate.", self.server_id)
-                    effective_action = "recreate"
-
-                # 2. Check: Your speed-optimization for low-volume orphans
-                elif action == "delete_orphans" and orphan_count <= 3:
-                    _LOGGER.info("[%s] Choosing Delta-Sync: Low volume of orphans (%d).", self.server_id, orphan_count)
-                    effective_action = "delete_orphans"
-
-                # 3. All other cases: Try the Fast-Track (Delete device)
-                else:
-                    _LOGGER.info("[%s] Attempting Fast-Track for action: %s", self.server_id, action)
-                    # dev_id is guaranteed to exist here due to the checks above
-                    if await api.delete_webio_device(dev_id):
+                # --- AUTO-MODE LOGIK ---
+                # Wir ermitteln dynamisch den besten Modus für den Full Sync
+                effective_action = action
+                if action == "full_sync":
+                    # Check 1: Is there a device instance we can try to drop?
+                    if dev_id:
+                        _LOGGER.info("[%s] Attempting Fast-Track by deleting device %s", self.server_id, dev_id)
+                        if await api.delete_web_io_device(dev_id):
+                            effective_action = "recreate"
+                            _LOGGER.info("[%s] Fast-Track enabled: Device was not in use.", self.server_id)
+                        else:
+                            effective_action = "full_sync"
+                            _LOGGER.info("[%s] Fallback to Full-Sync: Device is in use.", self.server_id)
+                    else:
+                        # No device yet, so we can always recreate/create fresh
                         effective_action = "recreate"
-                        _LOGGER.info("[%s] Fast-Track enabled: Device is not in use.", self.server_id)
-                    else:
-                        effective_action = action
-                        _LOGGER.info("[%s] Fallback to Delta-Sync: Device is in use.", self.server_id)
-
-                # --- Benachrichtigung basierend auf der finalen Entscheidung ---
-                if effective_action == "recreate":
-                    if action == "full_sync" and not dev_id:
-                        status_msg = (
-                            "🛠️ **Initial Setup Mode**\n"
-                            "Erstelle neue Web-IO Klasse und Gerät...\n"
-                            "Bitte ca. 20-30 Sekunden warten."
-                        ) if is_de else (
-                            "🛠️ **Initial Setup Mode**\n"
-                            "Creating new Web-IO class and device instance...\n"
-                            "Please wait approx. 20-30 seconds."
-                        )
-                    else:
-                        status_msg = (
-                            f"Modus: `{action}`\n"
-                            "🚀 **Fast-Track aktiv:** Schnelle Neuanlage wird durchgeführt (~20s)."
-                        ) if is_de else (
-                            f"Mode: `{action}`\n"
-                            "🚀 **Fast-Track active:** Performing high-speed recreation (~20s)."
-                        )
-                    persistent_notification.async_create(self.hass, status_msg, title="Comexio Sync", notification_id=notif_id)
-                else:
-                    start_msg = f"Aktion '{action}' läuft (Delta-Sync)..." if is_de else f"Action '{action}' in progress (Delta-Sync)..."
-                    persistent_notification.async_create(self.hass, start_msg, title="Comexio Sync", notification_id=notif_id)
 
                 # --- FALL A: Radikaler schneller Neuaufbau ---
                 if effective_action == "recreate":
-                    if action != "recreate" and action != "full_sync":
-                        turbo_msg = (
-                            f"Modus: `{action}`\n"
-                            "🚀 **Fast-Track aktiv:** webIO Gerät ist ungenutzt.\n"
-                            "Führe vollständige Schnell-Neuanlage durch (~20s)."
-                        )
-                        persistent_notification.async_create(
-                            self.hass, turbo_msg, title="Comexio Sync", notification_id=notif_id
-                        )
-
-                    _LOGGER.info("[%s] Performing high-speed recreation (Fast-Track).", self.server_id)
+                    _LOGGER.info("[%s] Dropping device base %s", self.server_id, base_id)
+                    await api.delete_web_io_base(base_id)
+                    await asyncio.sleep(2)
                     
-                    base_info = await api.get_webio_base_info(webio_name)
-                    if base_info:
-                        base_id, now_deletable = base_info
-                        if now_deletable:
-                            _LOGGER.info("[%s] Dropping device base %s", self.server_id, base_id)
-                            await api.delete_webio_base(base_id)
-                            await asyncio.sleep(0.5) # Give Comexio time to breathe
-                        else:
-                            _LOGGER.warning("[%s] Base %s still blocked! Upload might fail.", self.server_id, base_id)
-
-                    web_io_json = api.generate_webio_json(self.server_id, webio_name, self.coordinator.data)
+                    web_io_json = api.generate_web_io_json(self.server_id, webio_name, self.coordinator.data)
                     success, res_id = await api.upload_web_io(self.server_id, webio_name, web_io_json)
-                    
-                    if success:
-                        await api.create_webio_device(webio_name, res_id, ha_address)
-                        
-                        # Update counters for final report
-                        audit_data = getattr(self.coordinator, "last_audit_results", {})
-                        added   = len(audit_data.get("missing", []))
-                        updated = len(audit_data.get("type", []))
-                        renamed = len(audit_data.get("rename", []))
-                        removed = len(audit_data.get("orphan", []))
-
-                        # Calculate effective duration
-                        duration = datetime.datetime.now() - start_time
-                        duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
-
-                        if is_de:
-                            msg = f"Vollständige Neuanlage erfolgreich (Dauer: {duration_str})."
-                        else:
-                            msg = f"Full recreation successful (Duration: {duration_str})."
-                    else:
+                    if success: 
+                        await api.create_web_io_device(webio_name, res_id, ha_address)
+                        msg = "Vollständige Neuanlage erfolgreich." if is_de else "Full recreation complete."
+                    else: 
                         raise Exception(f"Upload failed: {res_id}")
                 
                 # --- FALL B: Sicherer Delta Sync oder gezielte Einzelreparatur ---
@@ -342,10 +270,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             
             else:
                 # --- CASE 3: INITIAL INSTALLATION ---
-                web_io_json = api.generate_webio_json(self.server_id, webio_name, self.coordinator.data)
+                web_io_json = api.generate_web_io_json(self.server_id, webio_name, self.coordinator.data)
                 success, res_id = await api.upload_web_io(self.server_id, webio_name, web_io_json)
                 if success: 
-                    await api.create_webio_device(webio_name, res_id, ha_address)
+                    await api.create_web_io_device(webio_name, res_id, ha_address)
                     msg = "Erst-Einrichtung abgeschlossen." if is_de else "Initial setup finished."
 
             # reset missing/ignore flag
@@ -364,19 +292,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             persistent_notification.async_create(self.hass, f"Error: {e}", title="Sync Failed", notification_id=notif_id)
 
         finally:
-            # 1. flag reset
+            # 1. Flag zurücksetzen
             self.coordinator.in_sync = False
             self.coordinator.cancel_sync = False
             
             # 2. Dem Comexio-Server kurz Zeit geben, den Schreibvorgang abzuschließen
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.5)
             
             # 3. UI-Button zurücksetzen
             self.async_write_ha_state()
             
             # 4. Integration restarten (notwendig!)
             _LOGGER.info("[%s] Erzwinge Reload der Integration nach Sync...", self.server_id)
-            await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
+            self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
 
 class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
     """Button to interrupt an ongoing Comexio sync process."""

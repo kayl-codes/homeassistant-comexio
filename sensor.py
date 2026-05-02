@@ -56,7 +56,7 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
         self._io_id = io["id"]
         
         # Stable Unique ID for the HA database
-        self._attr_unique_id = f"{server_id}_{self._io_id}_io_sensor"
+        self._attr_unique_id = f"comexio_{server_id}_{self._io_id}_io_sensor"
         # Name used for initial entity_id generation
         self._attr_name = io['name']
         

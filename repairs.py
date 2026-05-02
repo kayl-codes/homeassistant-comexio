@@ -122,6 +122,7 @@ class ComexioRepairFlow(RepairsFlow):
                 "full_sync": "🚀 Initial Setup (Create class & device)",
                 "ignore": "🔇 Ignore message (Do not use Web-IO)"
             }
+            default_action = "full_sync" 
         else:
             # 1. Daten holen
             counts = self.issue_data.get("counts", {})
