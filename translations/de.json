@@ -55,7 +55,7 @@
         "step": {
           "select_action": {
             "title": "Web-IO Reparatur",
-            "description": "Die Analyse hat Abweichungen festgestellt:\n\n* 🔧 **Typ-Konflikte:** {t_count}\n* ➕ **Fehlend:** {m_count}\n* ✏️ **Umbenannt:** {r_count}\n* 🗑️ **Verwaist:** {o_count}\n\nGesamt: {ha_count} (HA) zu {com_count} (Comexio).\n\nBitte wähle eine Aktion aus:\n\n💡 **Hinweis:** Die Integration prüft automatisch, ob das Web-IO Gerät in Comexio ungenutzt ist. Falls ja, wird unabhängig von der gewählten Option eine **Neu-Einrichtung** durchgeführt, die in (~20 Sek.) erledigt ist.\n\n"
+            "description": "{summary_text}"
           }
         }
       }

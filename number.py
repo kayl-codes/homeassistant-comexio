@@ -1,4 +1,4 @@
-# Version: 0.2.1
+# Version: 0.6.0
 import logging
 from homeassistant.components.number import NumberEntity, NumberMode, NumberDeviceClass
 from homeassistant.const import UnitOfTemperature

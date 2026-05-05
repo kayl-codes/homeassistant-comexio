@@ -1,4 +1,4 @@
-# Version: 0.4.0
+# Version: 0.6.0
 from datetime import timedelta
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
@@ -15,6 +15,8 @@ from .coordinator import ComexioCoordinator
 from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = ["sensor", "switch", "number", "button", "binary_sensor"]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Comexio from a config entry."""
@@ -59,7 +61,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     # Set up platforms
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "switch", "number", "button", "binary_sensor"])
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Set up services
     await async_setup_services(hass)
@@ -70,7 +72,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     webhook_id = f"comexio_{server_id}"
     async def handle_webhook(hass, webhook_id, request):
         try:
-            data = await request.json()
+            try:
+                data = await request.json()
+            except Exception:
+                _LOGGER.error("Received non-JSON payload on webhook %s", webhook_id)
+                return
             val = data.get("value")
             if data.get("type") == "io":
                 coordinator.update_io_by_name(data.get("ext"), data.get("io"), val)
@@ -89,28 +95,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # ---------------------------
     # Entitäten-Bereinigung (Cleanup)
     # ---------------------------
-    platforms = ["sensor", "switch", "number", "button", "binary_sensor"]
     ent_reg = er.async_get(hass)
     
-    # Hole alle IDs der aktuell vom Coordinator erkannten Objekte
+    # Get all IDs of objects currently recognized by the coordinator
     active_unique_ids = set()
     for m in coordinator.data.get("markers", []):
-        # Wir müssen hier alle möglichen Suffixe abbilden, die wir in sensor.py etc nutzen
-        active_unique_ids.add(f"comexio_{server_id}_m{m['id']}_num")
-        active_unique_ids.add(f"comexio_{server_id}_m{m['id']}_sw")
+        # Match exactly what platforms like number.py or switch.py define
+        if m.get("type") == "analog":
+            active_unique_ids.add(f"comexio_{server_id}_m{m['id']}_num")
+        else:
+            active_unique_ids.add(f"comexio_{server_id}_m{m['id']}_sw")
+
     for io in coordinator.data.get("io", []):
-        active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_sensor")
-        active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_binary_sensor")
-        active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_sw")
+        if not io.get("is_binary"):
+            active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_sensor")
+        elif io.get("identifier", "").startswith("Q"):
+            active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_sw")
+        else:
+            active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_binary_sensor")
     
-    # Füge die Buttons hinzu (die sind immer aktiv)
+    # Add buttons (these are always active)
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_btn")
     active_unique_ids.add(f"comexio_{server_id}_cancel_sync_btn")
 
-    # Lösche alles aus der Registry, was nicht in active_unique_ids ist
+    # Delete anything from the registry that is not in active_unique_ids
+    _LOGGER.debug("Comexio Cleanup: protecting %d active unique IDs", len(active_unique_ids))
     for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        #_LOGGER.debug("Comexio Cleanup: checking entity %s (Unique ID: %s)", entity_entry.entity_id, entity_entry.unique_id)
         if entity_entry.unique_id not in active_unique_ids:
-            _LOGGER.info("Cleaning up orphaned entity: %s", entity_entry.entity_id)
+            _LOGGER.info("Cleaning up orphaned entity: %s (Unique ID: %s)", 
+                         entity_entry.entity_id, entity_entry.unique_id)
             ent_reg.async_remove(entity_entry.entity_id)
 
     return True
@@ -125,7 +139,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     if webhook_id:
         webhook.async_unregister(hass, webhook_id)
     
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor", "switch", "number", "button", "binary_sensor"])
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
         hass.data[DOMAIN].pop(entry.entry_id + "_webhook", None)

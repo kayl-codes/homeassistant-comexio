@@ -1,3 +1,4 @@
+# Version: 0.6.0
 from homeassistant import config_entries
 import voluptuous as vol
 from homeassistant.helpers.selector import (
@@ -21,7 +22,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self, config_entry):
         """Initialize options flow."""
-        super().__init__()   # (config_entry) <= do not use ! else you will get error 500 !
+        super().__init__()
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""

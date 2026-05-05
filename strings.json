@@ -52,7 +52,7 @@
         "step": {
           "select_action": {
             "title": "Web-IO Repair",
-            "description": "The analysis has detected differences:\n\n* 🔧 **Type conflicts:** {t_count}\n* ➕ **Missing:** {m_count}\n* ✏️ **Renamed:** {r_count}\n* 🗑️ **Orphaned:** {o_count}\n\nTotal: {ha_count} (HA) vs {com_count} (Comexio).\n\nPlease select an action:\n\n💡 **Note:** The integration automatically checks if the Web-IO device in Comexio is currently unused. If so, a **fresh setup** will be performed regardless of the selected option, which will be completed in (~20 sec.).\n\n"
+            "description": "{summary_text}"
           }
         }
       }

@@ -1,4 +1,4 @@
-# Version: 0.3.0
+# Version: 0.6.0
 import re
 import logging
 from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass

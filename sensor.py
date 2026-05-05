@@ -1,4 +1,4 @@
-# Version: 0.3.0
+# Version: 0.6.0
 from homeassistant.components.sensor import (
     SensorEntity,
     SensorDeviceClass,

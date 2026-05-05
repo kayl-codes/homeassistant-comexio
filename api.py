@@ -1,4 +1,4 @@
-# Version: 0.4.0
+# Version: 0.6.0
 import re
 import json
 import aiohttp
@@ -8,10 +8,14 @@ import base64
 import time
 import io
 import asyncio
+import socket
+from urllib.parse import urlparse
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from multidict import MultiDict
+from homeassistant.helpers.network import get_url
 
 # Mandatory DOMAIN import for Audit logic
+from .const import DOMAIN, KNOWN_DOMAINS
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,6 +72,50 @@ class ComexioAPI:
             _LOGGER.warning("Failed to clean value: %s", val)
             return 0
 
+    async def get_ha_address(self):
+        """
+        Dynamically determines the Home Assistant address (DNS:Port or IP:Port) 
+        to be used for Comexio webhooks.
+        """
+        try:
+            internal_url = self.hass.config.internal_url
+            port = 8123
+            fallback_ip = None
+
+            if internal_url:
+                parsed = urlparse(internal_url)
+                port = parsed.port or 8123
+                fallback_ip = parsed.hostname
+
+            def resolve_dns():
+                for domain in KNOWN_DOMAINS:
+                    test_host = f"homeassistant.{domain}"
+                    try:
+                        socket.gethostbyname(test_host)
+                        return test_host
+                    except socket.error:
+                        continue
+                return None
+
+            hostname = await self.hass.async_add_executor_job(resolve_dns)
+            
+            if not hostname:
+                if not fallback_ip or fallback_ip in ["localhost", "127.0.0.1", "::1"]:
+                    def get_local_ip():
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        try:
+                            s.connect(("8.8.8.8", 80))
+                            return s.getsockname()[0]
+                        except Exception: return "127.0.0.1"
+                        finally: s.close()
+                    hostname = await self.hass.async_add_executor_job(get_local_ip)
+                else:
+                    hostname = fallback_ip
+
+            return f"{hostname}:{port}"
+        except Exception as e:
+            _LOGGER.error("Failed to determine HA address: %s", e)
+            return "127.0.0.1:8123"
 
     def _encrypt_block(self, data_str, mod, exp):
         """RSA encryption logic matching Comexio v11 (PKCS1v15)."""
@@ -176,7 +224,7 @@ class ComexioAPI:
         Processes the raw configuration and performs a technical audit.
         Uses dynamic IO type mapping to determine binary vs analog states and units.
         """
-        data = {"markers": [], "io": [], "webio_commands": {}}
+        data = {"markers": [], "io": [], "webio_commands": {}, "device_id": None, "device_ip": None}
         live_states = live_states or {}
                 
         # 1. Determine the configured Web-IO name for this instance
@@ -184,11 +232,6 @@ class ComexioAPI:
         if self.config_entry:
             conf_data = {**self.config_entry.data, **self.config_entry.options}
             webio_name = conf_data.get("webio_name", "HomeAssistant")
-        elif DOMAIN in self.hass.data:
-            for coord in self.hass.data[DOMAIN].values():
-                if coord.api == self:
-                    webio_name = coord.config_entry.data.get("webio_name", "HomeAssistant")
-                    break
 
         # 2. Map Webhooks (Web-IO Commands) from Comexio for Audit
         web_devices = conf.get("WebDevices", {})
@@ -198,6 +241,12 @@ class ComexioAPI:
         for d_id, d_data in web_devices.items():
             if d_data.get("Name") == webio_name:
                 target_dev_id = str(d_id)
+                data["device_id"] = target_dev_id
+                data["device_ip"] = d_data.get("Ip")
+                
+                # Fix: 0 nicht als False werten
+                raw_base_id = d_data.get("BaseId")
+                data["base_id"] = str(raw_base_id) if raw_base_id is not None else None
                 break
         
         if target_dev_id and target_dev_id in fub_10:
@@ -287,10 +336,6 @@ class ComexioAPI:
                 async with self.session.get(url_win) as win_resp:
                     win_html = await win_resp.text()
                     
-                    # debug state
-                    deletable = f"delete_web_device_base/?id={b_id}" in win_html
-                    _LOGGER.debug("Audit Web-IO Base: ID %s, HTML contains delete-link: %s", b_id, deletable)
-                    
                     return (b_id, f"delete_web_device_base/?id={b_id}" in win_html)
         return None
 
@@ -304,22 +349,6 @@ class ComexioAPI:
             match = re.search(pattern, html, re.IGNORECASE)
             return match.group(1) if match else None
 
-    async def can_delete_device(self, device_id):
-        """
-        Prüft, ob das Gerät gelöscht werden kann, ohne es wirklich zu zerstören,
-        oder wertet die Fehlermeldung eines echten Löschversuchs aus.
-        """
-        url = f"http://{self.host}/admin/web_io/delete_device/?id={device_id}"
-        headers = {"Referer": f"http://{self.host}/admin/web_io/home"}
-        
-        async with self.session.get(url, headers=headers) as resp:
-            html = await resp.text()
-            if "Das Gerät kann nicht gelöscht werden" in html:
-                _LOGGER.info("[%s] Web-IO Device %s ist in Logik eingebunden (In-Use).", self.host, device_id)
-                return False
-            # Falls kein Fehler kam, war der Löschvorgang erfolgreich
-            return True
-        
     async def delete_webio_device(self, device_id):
         """
         Tries to delete the device instance. 
@@ -327,11 +356,14 @@ class ComexioAPI:
         """
         url = f"http://{self.host}/admin/web_io/delete_device/?id={device_id}"
         headers = {
+            "X-Requested-With": "XMLHttpRequest",
             "X-Requested-With": "XMLHttpRequest", 
             "Referer": f"http://{self.host}/admin/web_io/home"
         }
+        _LOGGER.debug("Deleting Web-IO device %s via GET: %s", device_id, url)
         async with self.session.get(url, headers=headers) as resp:
             html = await resp.text()
+            
             # Check for jQuery UI error state which indicates the device is in use
             if 'class="ui-state-error' in html or "ui-state-error" in html:
                 _LOGGER.warning("Device %s is in use within Comexio logic and cannot be deleted.", device_id)
@@ -346,6 +378,44 @@ class ComexioAPI:
         async with self.session.get(url, headers=headers) as resp:
             return resp.status == 200
 
+    async def update_webio_device_ip(self, device_id, ha_address):
+        """
+        Updates the server address (IP:Port) of an existing device.
+        Uses the specific POST format required by Comexio's main save handler.
+        """
+        _LOGGER.info("Updating Web-IO device %s address to %s", device_id, ha_address)
+        url = f"http://{self.host}/admin/web_io/save"
+        
+        webio_name = "HomeAssistant_v1"
+        if self.config_entry:
+            webio_name = self.config_entry.data.get("webio_name", "HomeAssistant_v1")
+
+        # Construct the payload based on user observations.
+        device_data = {
+            "web_device_id": str(device_id),
+            f"name_{device_id}": webio_name,
+            f"ip_{device_id}": ha_address,
+            f"username_{device_id}": "",
+            f"password_{device_id}": "",
+            f"checkca_{device_id}": "1",
+            f"pinnedpubkey_{device_id}": ""
+        }
+        
+        payload = {
+            "no_reload": "true",
+            "JSON": json.dumps(device_data)
+        }
+        
+        headers = {
+            "X-Requested-With": "XMLHttpRequest", 
+            "Referer": f"http://{self.host}/admin/web_io/home"
+        }
+        
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            if resp.status == 200:
+                result = await resp.json(content_type=None)
+                return result.get("save") == 1
+            return False
 
     async def delete_single_command(self, cmd_id, device_id):
         """Removes an individual command instance (Delta Sync)."""
@@ -365,67 +435,61 @@ class ComexioAPI:
         
         # Base64 identifier for Comexio
         if existing_cmd_id:
-            # Update format: {"src":"command","id":"879"}
-            cmd_ref = json.dumps({"src":"command","id": str(existing_cmd_id)})
+            # Update format exactly like original Comexio trace: {"src":"command","id":1324}
+            cmd_ref = json.dumps({"src":"command","id": int(existing_cmd_id)}, separators=(',', ':'))
             cmd_id_b64 = base64.b64encode(cmd_ref.encode()).decode()
         else:
             # New format: {"src":"command","id":null}
             cmd_id_b64 = "eyJzcmMiOiJjb21tYW5kIiwiaWQiOm51bGx9"
         
         payload = {
-            "deviceBaseId": base_id,
-            "dlg_web_device_id": device_id,
+            "dlg_web_device_id": str(device_id),
             "protocol": 0,
             "parameter": cmd_payload["Parameter"],
             "header_modifier": "Content-Type: application/json",
             "data": cmd_payload["Data"],
+            "port": "",
             "post_get": 1,
             "authentication": 0,
+            "req_freq": "",
+            "reply_interpreter": "",
             "id_cmd_io_0": cmd_id_b64,
             "name_cmd_io_0": cmd_payload["Name"],
+            "function_cmd_io_0": "1_1_0",
+            "input_cmd_io_0": 1,
             "type_cmd_io_0": cmd_payload["TypeId"],
+            "send_on_one_cmd_io_0": 0,
             "min_cmd_io_0": 0,
             "max_cmd_io_0": cmd_payload["Max"],
-            "input_cmd_io_0": 1,
+            "default_value_cmd_io_0": "",
+            "id_cmd_io_sample": "",
+            "name_cmd_io_sample": "",
+            "function_cmd_io_sample": "0_1_0",
+            "input_cmd_io_sample": 1,
+            "type_cmd_io_sample": 2,
+            "send_on_one_cmd_io_sample": 0,
+            "min_cmd_io_sample": 0,
+            "max_cmd_io_sample": 1,
+            "default_value_cmd_io_sample": "",
             "DefaultActive": 1
         }
-        async with self.session.post(url, data=payload) as resp:
+        
+        if existing_cmd_id:
+            payload["id"] = str(existing_cmd_id)
+        else:
+            payload["deviceBaseId"] = str(base_id) if base_id is not None else "0"
+        
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"http://{self.host}/admin/web_io/home"
+        }
+        
+        #_LOGGER.debug("Sending save_single_command payload: %s", payload)
+        
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            resp_text = await resp.text()
+            #_LOGGER.debug("save_single_command response [%s]: %s", resp.status, resp_text)
             return resp.status == 200
-
-    async def perform_delta_sync(self, base_id, device_id, parsed_data, com_commands):
-        """Perform a targeted update of commands with wrong types or missing entries."""
-        _LOGGER.info("Starting Delta Sync for Web-IO device %s", device_id)
-        
-        # Get server_id and webio_name from config_entry for correct JSON generation
-        conf_data = {**self.config_entry.data, **self.config_entry.options}
-        server_id = conf_data.get("server_id", "unknown")
-        webio_name = conf_data.get("webio_name", "HomeAssistant")
-
-        # Pass the correct parameters
-        correct_json_str = self.generate_webio_json(server_id, webio_name, parsed_data)
-        correct_data = json.loads(correct_json_str)
-        
-        for correct_cmd in correct_data.get("commands", []):
-            cmd_name = correct_cmd["Name"]
-            existing = com_commands.get(cmd_name)
-            
-            # Fall 1: Der Befehl existiert bereits
-            if existing:
-                # Wenn der Typ nicht stimmt, machen wir ein Update
-                if int(existing.get("typeId", 1)) != correct_cmd["TypeId"]:
-                    _LOGGER.info("Fixing type for command %s", cmd_name)
-                    await self.save_single_command(
-                        base_id, 
-                        device_id, 
-                        correct_cmd, 
-                        existing_cmd_id=existing.get("cmdId")
-                    )
-            # Fall 2: Der Befehl fehlt komplett
-            else:
-                _LOGGER.info("Adding missing command %s", cmd_name)
-                await self.save_single_command(base_id, device_id, correct_cmd)
-                
-        return True
 
     def generate_webio_json(self, server_id, webio_name, parsed_data):
         """Generates JSON for import with instant activation flag."""
@@ -505,10 +569,13 @@ class ComexioAPI:
             return False, await resp.text()
 
 
-    async def create_webio_device(self, name, base_id, ha_ip):
-        """Creates a device instance."""
+    async def create_webio_device(self, name, base_id, ha_address=None):
+        """Creates a device instance. Automatically determines HA address if not provided."""
+        if not ha_address:
+            ha_address = await self.get_ha_address()
+            
         url = f"http://{self.host}/admin/web_io/saveDeviceWindow"
-        payload = {"name": name, "ip": ha_ip, "web_device_base": base_id, "username": "", "password": "", "web_device_base_sample": "none", "identifier": "", "form_login": "2"}
+        payload = {"name": name, "ip": ha_address, "web_device_base": base_id, "username": "", "password": "", "web_device_base_sample": "none", "identifier": "", "form_login": "2"}
         async with self.session.post(url, data=payload, headers={"X-Requested-With": "XMLHttpRequest"}) as resp:
             return resp.status == 200
 
