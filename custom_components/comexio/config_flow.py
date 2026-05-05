@@ -90,14 +90,14 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Define the form schema with all required and optional fields
         schema = vol.Schema({
             vol.Required(CONF_SERVER_ID, default=suggested_id): str,
-            vol.Required(CONF_HOST, default="192.168.0.250"): str,
+            vol.Required(CONF_HOST, default="192.168.1.100"): str,
             vol.Required(CONF_USERNAME, default="admin"): str,
             vol.Required(CONF_PASSWORD): str,
             vol.Optional(CONF_API_USERNAME, default="ComexioApiUser"): str,
-            vol.Optional(CONF_API_PASSWORD, default="#S3cur34Com3x1o11!"): str,
+            vol.Optional(CONF_API_PASSWORD, default="ComexioApiPass"): str,
             vol.Required("import_markers", default=True): bool,
             vol.Required("import_ios", default=True): bool,
-            vol.Required("webio_name", default="HomeAssistant_v1"): str,
+            vol.Required("webio_name", default="HomeAssistant"): str,
             vol.Required("scan_interval", default=SCAN_INTERVAL_DEFAULT): NumberSelector(
                 NumberSelectorConfig(
                     min=SCAN_INTERVAL_MIN, 
