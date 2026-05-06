@@ -1,12 +1,21 @@
 # Version: 0.6.0
+from typing import Any
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorDeviceClass,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
+from .coordinator import ComexioCoordinator
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, 
+    entry: ConfigEntry, 
+    async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up Comexio binary sensors (digital inputs)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     
@@ -25,7 +34,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
     """Representation of a Comexio Digital Input."""
 
-    def __init__(self, coordinator, server_id, io):
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
         """Initialize the binary sensor."""
         super().__init__(coordinator)
         self._io_id = io["id"]
@@ -44,7 +53,7 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
             self._attr_device_class = BinarySensorDeviceClass.DOOR
 
     @property
-    def device_info(self):
+    def device_info(self) -> dict[str, Any]:
         """Link entity to the parent Comexio server device."""
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
@@ -54,7 +63,7 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
         }
 
     @property
-    def is_on(self):
+    def is_on(self) -> bool:
         """Return true if the binary sensor is active."""
         # Convert Comexio numeric states (1.0/0.0) to boolean
         value = self.coordinator.io_states.get(self._io_id, 0)

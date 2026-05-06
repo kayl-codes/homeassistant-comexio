@@ -1,13 +1,22 @@
 # Version: 0.6.0
+from typing import Any
 import re
 import logging
 from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
+from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, 
+    entry: ConfigEntry, 
+    async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up Comexio switches (digital markers and digital outputs)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     entities = []
@@ -33,7 +42,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a digital Comexio Marker as a Switch."""
 
-    def __init__(self, coordinator, server_id, marker):
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
         """Initialize the marker switch."""
         super().__init__(coordinator)
         self._marker_id = str(marker["id"])
@@ -42,7 +51,7 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
         self._attr_device_class = SwitchDeviceClass.SWITCH
 
     @property
-    def device_info(self):
+    def device_info(self) -> dict[str, Any]:
         """Link entity to the parent Comexio server device."""
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
@@ -52,17 +61,17 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
         }
     
     @property
-    def is_on(self):
+    def is_on(self) -> bool:
         """Return true if the digital marker is active."""
         val = self.coordinator.marker_states.get(self._marker_id, 0)
         return float(val) >= 1.0
 
-    async def async_turn_on(self, **kwargs):
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the marker on."""
         if await self.coordinator.api.set_value("marker", self._marker_id, 1):
             self.coordinator.update_marker(self._marker_id, 1)
 
-    async def async_turn_off(self, **kwargs):
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the marker off."""
         if await self.coordinator.api.set_value("marker", self._marker_id, 0):
             self.coordinator.update_marker(self._marker_id, 0)
@@ -70,7 +79,7 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
 class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a Comexio Digital Output (Relay) as a Switch."""
 
-    def __init__(self, coordinator, server_id, io):
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
         """Initialize the relay switch."""
         super().__init__(coordinator)
         self._io_id = str(io["id"])
@@ -83,7 +92,7 @@ class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
         self._attr_device_class = SwitchDeviceClass.OUTLET
 
     @property
-    def device_info(self):
+    def device_info(self) -> dict[str, Any]:
         """Link entity to the parent Comexio server device."""
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
@@ -93,17 +102,17 @@ class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
         }
 
     @property
-    def is_on(self):
+    def is_on(self) -> bool:
         """Return true if the relay is active."""
         val = self.coordinator.io_states.get(self._io_id, 0)
         return float(val) >= 1.0
 
-    async def async_turn_on(self, **kwargs):
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the relay on via API."""
         if await self.coordinator.api.set_value("io", self._io_id, 1, self._ext_name, self._identifier):
             self.coordinator.update_io_by_name(self._ext_name, self._identifier, 1)
 
-    async def async_turn_off(self, **kwargs):
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the relay off via API."""
         if await self.coordinator.api.set_value("io", self._io_id, 0, self._ext_name, self._identifier):
             self.coordinator.update_io_by_name(self._ext_name, self._identifier, 0)

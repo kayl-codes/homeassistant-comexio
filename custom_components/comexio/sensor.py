@@ -1,4 +1,5 @@
 # Version: 0.6.0
+from typing import Any
 from homeassistant.components.sensor import (
     SensorEntity,
     SensorDeviceClass,
@@ -16,7 +17,11 @@ from homeassistant.const import (
     UnitOfSpeed,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
+from .coordinator import ComexioCoordinator
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -32,7 +37,11 @@ UNIT_TO_DEVICE_CLASS = {
     "%": SensorDeviceClass.HUMIDITY, # Often used for humidity in Comexio
 }
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, 
+    entry: ConfigEntry, 
+    async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up Comexio sensors based on dynamic type mapping."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     
@@ -50,7 +59,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 class ComexioIOSensor(CoordinatorEntity, SensorEntity):
     """Representation of an analog Comexio Input/Output."""
 
-    def __init__(self, coordinator, server_id, io):
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._io_id = io["id"]
@@ -72,7 +81,7 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
             self._attr_device_class = UNIT_TO_DEVICE_CLASS[unit]
 
     @property
-    def device_info(self):
+    def device_info(self) -> dict[str, Any]:
         """Link entity to the parent Comexio server device."""
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
@@ -82,6 +91,6 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
         }
 
     @property
-    def native_value(self):
+    def native_value(self) -> float | str | None:
         """Return the current value from coordinator cache."""
         return self.coordinator.io_states.get(self._io_id)

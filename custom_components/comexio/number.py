@@ -1,13 +1,22 @@
 # Version: 0.6.0
+from typing import Any
 import logging
 from homeassistant.components.number import NumberEntity, NumberMode, NumberDeviceClass
 from homeassistant.const import UnitOfTemperature
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
+from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, 
+    entry: ConfigEntry, 
+    async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up Comexio numbers (analog markers)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     
@@ -25,7 +34,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
     """Representation of an analog Comexio Marker as a Number."""
 
-    def __init__(self, coordinator, server_id, marker):
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
         super().__init__(coordinator)
         self._marker_id = str(marker["id"])
         
@@ -52,7 +61,7 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
                 self._attr_icon = "mdi:gauge"
 
     @property
-    def device_info(self):
+    def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": f"Comexio Server {self.coordinator.server_id}",
@@ -61,7 +70,7 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
         }
     
     @property
-    def native_value(self):
+    def native_value(self) -> float:
         """Return the current value from coordinator cache."""
         val = self.coordinator.marker_states.get(self._marker_id, 0)
         try:
@@ -69,7 +78,7 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
         except (ValueError, TypeError):
             return 0.0
 
-    async def async_set_native_value(self, value: float):
+    async def async_set_native_value(self, value: float) -> None:
         """Update the value via API and update local cache."""
         if await self.coordinator.api.set_value("marker", self._marker_id, value):
             # Update coordinator cache immediately for responsive UI

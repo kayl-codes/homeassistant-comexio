@@ -1,4 +1,5 @@
 # Version: 0.6.0
+from typing import Any
 import logging
 import asyncio
 import datetime
@@ -14,6 +15,9 @@ from homeassistant.helpers import entity_platform, config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from urllib.parse import urlparse
 
 from .const import (
@@ -22,10 +26,15 @@ from .const import (
     SYNC_DURATION_WRITE,
     SYNC_DURATION_RECREATE
 )
+from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, 
+    entry: ConfigEntry, 
+    async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up the Comexio sync button."""
     coordinator   = hass.data[DOMAIN][entry.entry_id]
     sync_button   = ComexioSyncButton(coordinator, coordinator.server_id)
@@ -45,7 +54,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     """Button for automated Web-IO lifecycle management with Deep Delta Sync."""
 
-    def __init__(self, coordinator, server_id):
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
         self.coordinator = coordinator
         self.server_id = server_id
@@ -54,7 +63,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self._attr_icon = "mdi:cloud-upload"
 
     @property
-    def device_info(self):
+    def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": f"Comexio Server {self.coordinator.server_id}",
@@ -75,7 +84,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return not getattr(self.coordinator, "in_sync", False)
 
     @property
-    def extra_state_attributes(self):
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Show status text in attributes."""
         return {
             "syncing": getattr(self.coordinator, "in_sync", False),
@@ -345,7 +354,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
     """Button to interrupt an ongoing Comexio sync process."""
 
-    def __init__(self, coordinator, server_id):
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
         self.coordinator = coordinator
         self.server_id = server_id
@@ -356,7 +365,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.DIAGNOSTIC 
 
     @property
-    def device_info(self):
+    def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": f"Comexio Server {self.coordinator.server_id}",
