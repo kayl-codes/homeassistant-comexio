@@ -8,6 +8,7 @@ from homeassistant.helpers.selector import (
     NumberSelectorMode
 )
 import voluptuous as vol
+import socket
 import logging
 
 from .const import (
@@ -20,7 +21,9 @@ from .const import (
     CONF_API_PASSWORD,
     SCAN_INTERVAL_MIN,
     SCAN_INTERVAL_MAX,
-    SCAN_INTERVAL_DEFAULT
+    SCAN_INTERVAL_DEFAULT,
+    KNOWN_DOMAINS,
+    DEFAULT_HOST
 )
 from .api import ComexioAPI
 from .options_flow import ComexioOptionsFlow
@@ -52,8 +55,24 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Generate a suggestion for the server ID based on existing entries
         current_entries = self._async_current_entries()
         suggested_id = f"iosrv{len(current_entries) + 1}"
+        
+        default_host = DEFAULT_HOST
 
-        if user_input is not None:
+        if user_input is None:
+            # Auto-discovery attempt to find the Comexio IP before showing the form
+            def guess_ip():
+                for domain in [""] + KNOWN_DOMAINS:
+                    test_host = "comexio" if not domain else f"comexio.{domain}"
+                    try:
+                        return socket.gethostbyname(test_host)
+                    except socket.error:
+                        pass
+                return DEFAULT_HOST
+            
+            default_host = await self.hass.async_add_executor_job(guess_ip)
+            _LOGGER.debug("Auto-discovered default host: %s", default_host)
+        else:
+            default_host = user_input.get(CONF_HOST, DEFAULT_HOST)
             _LOGGER.debug("Processing user input for Comexio setup: %s", user_input[CONF_HOST])
             try:
                 # 1. Validation: Check if the chosen Server ID is already taken
@@ -90,7 +109,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Define the form schema with all required and optional fields
         schema = vol.Schema({
             vol.Required(CONF_SERVER_ID, default=suggested_id): str,
-            vol.Required(CONF_HOST, default="192.168.1.100"): str,
+            vol.Required(CONF_HOST, default=default_host): str,
             vol.Required(CONF_USERNAME, default="admin"): str,
             vol.Required(CONF_PASSWORD): str,
             vol.Optional(CONF_API_USERNAME, default="ComexioApiUser"): str,

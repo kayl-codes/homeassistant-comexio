@@ -24,6 +24,8 @@ SYNC_DURATION_DELETE = 4
 SYNC_DURATION_WRITE = 35
 SYNC_DURATION_RECREATE = 79
 
+DEFAULT_HOST = "192.168.1.100"
+
 # need for ha ip dns validation, to avoid false positives
 KNOWN_DOMAINS = [
     "fritz.box",

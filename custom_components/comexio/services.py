@@ -2,7 +2,7 @@
 import logging
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.components import persistent_notification
-# STELLE SICHER, DASS DIESE ZEILE SO AUSSIEHT:
+# MAKE SURE THIS LINE LOOKS LIKE THIS:
 from .const import DOMAIN 
 
 _LOGGER = logging.getLogger(__name__)
@@ -12,10 +12,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     async def handle_generate_web_io(call: ServiceCall):
         """Service to preview or upload the Web-IO configuration."""
-        # Hole die entry_id aus dem Service-Call
+        # Get the entry_id from the service call
         entry_id = call.data.get("config_entry")
         
-        # Validierung: Existiert die Instanz in unseren Daten?
+        # Validation: Does the instance exist in our data?
         if entry_id not in hass.data[DOMAIN]:
             _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
             return
@@ -26,7 +26,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         do_upload = call.data.get("upload", False)
         
         try:
-            # webio_name aus den Options oder Daten des spezifischen Entries
+            # Get webio_name from options or data of the specific entry
             conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
             webio_name = conf.get("webio_name", "HomeAssistant")
             
@@ -39,7 +39,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 )
                 return
 
-            # Ab hier beginnt der Upload-Prozess
+            # Upload process starts here
             base_info = await api.get_webio_base_info(webio_name)
             if base_info:
                 base_id, deletable = base_info
@@ -47,7 +47,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     _LOGGER.info("Base class is deletable, performing clean reinstall.")
                     await api.delete_webio_base(base_id)
                 else:
-                    # Hier könntest du später den "langsamen" Delta-Sync triggern
+                    # You could trigger the "slow" delta sync here later
                     persistent_notification.async_create(
                         hass, 
                         f"Klasse '{webio_name}' ist in Comexio-Logik eingebunden und kann nicht gelöscht werden. "
@@ -61,7 +61,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             persistent_notification.async_create(hass, msg, title=f"Comexio Sync ({server_id})")
 
         except Exception as e:
-            _LOGGER.exception("Fehler im Comexio Service: %s", e)
+            _LOGGER.exception("Error in Comexio service: %s", e)
 
     if not hass.services.has_service(DOMAIN, "generate_web_io"):
         hass.services.async_register(DOMAIN, "generate_web_io", handle_generate_web_io)

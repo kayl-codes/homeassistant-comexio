@@ -3,7 +3,7 @@ from datetime import timedelta
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.components import webhook, persistent_notification
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import entity_registry as er, device_registry as dr
 import logging
 
 from .const import (
@@ -60,6 +60,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
+    # ---------------------------
+    # Explicit Device Registration
+    # ---------------------------
+    # Registers the device early to prevent frontend crashes during the first setup.
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, server_id)},
+        name=f"Comexio Server {server_id}",
+        manufacturer="Comexio",
+        model="IO-Server",
+    )
+
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -93,7 +106,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data[DOMAIN][entry.entry_id + "_webhook"] = webhook_id
 
     # ---------------------------
-    # Entitäten-Bereinigung (Cleanup)
+    # Entity Cleanup
     # ---------------------------
     ent_reg = er.async_get(hass)
     

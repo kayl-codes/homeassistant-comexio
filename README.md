@@ -1,4 +1,4 @@
-# Comexio Integration for Home Assistant
+# <img src="icon.png" width="40" align="center"> Comexio Integration for Home Assistant
 
 🌍 *[🇩🇪 Auf Deutsch lesen (Read this in German)](#-deutsch)*
 
@@ -89,7 +89,7 @@ This project is licensed under the MIT License.
 
 🌍 *[🇬🇧 Read this in English](#comexio-integration-for-home-assistant)*
 
-# Comexio Integration für Home Assistant
+# <img src="icon.png" width="40" align="center"> Comexio Integration für Home Assistant
 
 ![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)
 ![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)

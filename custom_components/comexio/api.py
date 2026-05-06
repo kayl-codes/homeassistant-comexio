@@ -244,7 +244,7 @@ class ComexioAPI:
                 data["device_id"] = target_dev_id
                 data["device_ip"] = d_data.get("Ip")
                 
-                # Fix: 0 nicht als False werten
+                # Fix: Do not treat 0 as False
                 raw_base_id = d_data.get("BaseId")
                 data["base_id"] = str(raw_base_id) if raw_base_id is not None else None
                 break
@@ -496,7 +496,7 @@ class ComexioAPI:
         webhook_path = f"/api/webhook/comexio_{server_id}"
         commands = []
         
-        # 1. Web-IO für Merker erzeugen
+        # 1. Create Web-IO for markers
         for m in parsed_data.get("markers", []):
             is_ana = m['type'] == "analog"
             lua = f"function data(a)\r\n  local d = {{ id=\"{m['id']}\", value=a, type=\"marker\" }}\r\n  return json_stringify(d)\r\nend"
@@ -518,7 +518,7 @@ class ComexioAPI:
                 "io": []
             })
             
-        # 2. Web-IO für IOs erzeugen
+        # 2. Create Web-IO for IOs
         for io_item in parsed_data.get("io", []):
             # check data type
             is_ana = not io_item.get("is_binary", False)

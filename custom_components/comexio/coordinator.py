@@ -152,15 +152,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             ip_mismatch = False
             if com_device_id and com_device_ip:
                 if com_device_ip != ha_address:
-                    # Textuelle Abweichung erkannt, prüfe DNS-Auflösung
                     try:
                         ha_host, ha_port = ha_address.rsplit(":", 1)
                         com_host, com_port = com_device_ip.rsplit(":", 1)
                         
                         if ha_port != com_port:
+                            # Textual deviation detected, check DNS resolution
                             ip_mismatch = True
                         else:
-                            # Ports sind identisch, vergleiche aufgelöste IPs
+                            # Ports are identical, compare resolved IPs
                             def resolve(name):
                                 try: return socket.gethostbyname(name)
                                 except (socket.error, socket.gaierror): return name
@@ -170,7 +170,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                             if ha_ip != com_ip:
                                 ip_mismatch = True
                     except ValueError:
-                        # Fallback bei unerwartetem Format
+                        # Fallback on unexpected format
                         ip_mismatch = True
 
             # Compare HA entities with Comexio commands to find inconsistencies

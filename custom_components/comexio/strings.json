@@ -29,6 +29,7 @@
       "init": {
         "title": "Comexio Settings",
         "data": {
+          "host": "Host / IP Address",
           "password": "Admin UI Password",
           "api_password": "API Basic Auth Password",
           "scan_interval": "Background polling interval (min)",

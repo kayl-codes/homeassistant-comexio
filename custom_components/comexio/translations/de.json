@@ -29,6 +29,7 @@
       "init": {
         "title": "Comexio Einstellungen",
         "data": {
+          "host": "Host / IP-Adresse",
           "password": "Passwort Admin-Oberfläche",
           "api_password": "API Passwort (Basic Auth)",
           "scan_interval": "Abfrageintervall (Minuten)",

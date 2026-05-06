@@ -8,6 +8,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_HOST,
     CONF_USERNAME,
     CONF_PASSWORD,
     CONF_API_USERNAME,
@@ -34,6 +35,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
+                vol.Required(CONF_HOST, default=conf.get(CONF_HOST)): str,
                 vol.Required(CONF_USERNAME, default=conf.get(CONF_USERNAME)): str,
                 vol.Required(CONF_PASSWORD, default=conf.get(CONF_PASSWORD)): str,
                 vol.Optional(CONF_API_USERNAME, default=conf.get(CONF_API_USERNAME)): str,

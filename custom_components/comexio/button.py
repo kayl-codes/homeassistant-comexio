@@ -361,7 +361,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"comexio_{server_id}_cancel_sync_btn"
         self._attr_name = "Comexio Sync abbrechen"
         self._attr_icon = "mdi:stop-circle-outline"
-        # 'diagnostic' sorgt dafür, dass der Button unter 'Konfiguration' gruppiert wird
+        # 'diagnostic' ensures the button is grouped under 'Configuration'
         self._attr_entity_category = EntityCategory.DIAGNOSTIC 
 
     @property
