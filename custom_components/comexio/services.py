@@ -50,14 +50,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     # You could trigger the "slow" delta sync here later
                     persistent_notification.async_create(
                         hass, 
-                        f"Klasse '{webio_name}' ist in Comexio-Logik eingebunden und kann nicht gelöscht werden. "
-                        "Bitte nutze den Smart-Sync Button für Einzel-Updates.", 
-                        title="Bulk-Sync blockiert"
+                        f"Class '{webio_name}' is in use by Comexio logic and cannot be deleted. "
+                        "Please use the Smart-Sync button for individual updates.", 
+                        title="Bulk-Sync blocked"
                     )
                     return
 
             success, result_val = await api.upload_web_io(server_id, webio_name, web_io_json)
-            msg = f"Sync erfolgreich! Basis-ID: {result_val}" if success else f"Fehler beim Upload: {result_val}"
+            msg = f"Sync successful! Base-ID: {result_val}" if success else f"Upload failed: {result_val}"
             persistent_notification.async_create(hass, msg, title=f"Comexio Sync ({server_id})")
 
         except Exception as e:

@@ -2,7 +2,7 @@
 from typing import Any
 import logging
 from homeassistant.components.number import NumberEntity, NumberMode, NumberDeviceClass
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import UnitOfTemperature, PERCENTAGE
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -34,6 +34,8 @@ async def async_setup_entry(
 class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
     """Representation of an analog Comexio Marker as a Number."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
         super().__init__(coordinator)
         self._marker_id = str(marker["id"])
@@ -53,7 +55,11 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
             self._attr_icon = "mdi:timer-outline"
         else:
             name_lower = marker["name"].lower()
-            if any(x in name_lower for x in ["soll", "temp", "setpoint"]):
+            if "%" in name_lower or any(x in name_lower for x in ["rollo", "jalousie", "blind", "dimmer"]):
+                self._attr_native_unit_of_measurement = PERCENTAGE
+                self._attr_native_max_value = 100.0
+                self._attr_icon = "mdi:window-shutter" if any(x in name_lower for x in ["rollo", "jalousie", "blind"]) else "mdi:percent"
+            elif any(x in name_lower for x in ["soll", "temp", "setpoint"]):
                 self._attr_device_class = NumberDeviceClass.TEMPERATURE
                 self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
                 self._attr_native_max_value = 50.0

@@ -15,7 +15,9 @@ from .const import (
     CONF_API_PASSWORD,
     SCAN_INTERVAL_MIN,
     SCAN_INTERVAL_MAX,
-    SCAN_INTERVAL_DEFAULT
+    SCAN_INTERVAL_DEFAULT,
+    CONF_ENABLE_NOTIFICATIONS,
+    DEFAULT_ENABLE_NOTIFICATIONS
 )
 
 class ComexioOptionsFlow(config_entries.OptionsFlow):
@@ -51,6 +53,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                         unit_of_measurement="min"
                     )
                 ),
+                vol.Required(CONF_ENABLE_NOTIFICATIONS, default=conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)): bool,
                 vol.Required("audit_ignored", default=conf.get("audit_ignored", False)): bool,
             }),
         )

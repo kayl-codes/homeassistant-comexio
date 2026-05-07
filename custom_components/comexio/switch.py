@@ -42,6 +42,8 @@ async def async_setup_entry(
 class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a digital Comexio Marker as a Switch."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
         """Initialize the marker switch."""
         super().__init__(coordinator)
@@ -78,6 +80,8 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
 
 class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a Comexio Digital Output (Relay) as a Switch."""
+
+    _attr_has_entity_name = True
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
         """Initialize the relay switch."""

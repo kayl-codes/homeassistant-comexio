@@ -10,6 +10,9 @@ CONF_SERVER_ID = "server_id"
 CONF_API_USERNAME = "api_username"
 CONF_API_PASSWORD = "api_password"
 
+CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
+DEFAULT_ENABLE_NOTIFICATIONS = True
+
 # webHook
 #WEBHOOK_ID = "comexio_webhook"
 

@@ -34,6 +34,8 @@ async def async_setup_entry(
 class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
     """Representation of a Comexio Digital Input."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
         """Initialize the binary sensor."""
         super().__init__(coordinator)

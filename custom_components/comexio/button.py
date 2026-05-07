@@ -24,7 +24,9 @@ from .const import (
     DOMAIN, 
     SYNC_DURATION_DELETE, 
     SYNC_DURATION_WRITE,
-    SYNC_DURATION_RECREATE
+    SYNC_DURATION_RECREATE,
+    CONF_ENABLE_NOTIFICATIONS,
+    DEFAULT_ENABLE_NOTIFICATIONS
 )
 from .coordinator import ComexioCoordinator
 
@@ -53,6 +55,8 @@ async def async_setup_entry(
 
 class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     """Button for automated Web-IO lifecycle management with Deep Delta Sync."""
+    
+    _attr_has_entity_name = True
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
@@ -61,6 +65,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"comexio_{server_id}_webio_sync_btn"
         self._attr_translation_key = "webio_sync"
         self._attr_icon = "mdi:cloud-upload"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -97,23 +102,30 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def async_handle_press(self, action: str = "full_sync") -> None:
         """Execute the sync logic with mode selection."""
-        msg = ""  # Initialized early to avoid UnboundLocalError in finally block or error catch
         self.coordinator.in_sync = True
-        self.async_write_ha_state()
 
+        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
+        notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
+        notif_id = f"comexio_sync_{self.server_id}"
+        
+        def _update_status(msg: str, is_error: bool = False, pct: int | None = None, step_info: str | None = None) -> None:
+            """Helper to update sensor state and optionally show a UI notification."""
+            self.coordinator.sync_progress_text = msg
+            if pct is not None: self.coordinator.sync_progress_pct = pct
+            if step_info is not None: self.coordinator.sync_current_step = step_info
+            self.coordinator.async_set_updated_data(self.coordinator.data)
+            if notify_enabled:
+                title = "Comexio Sync Failed" if is_error else f"Comexio Sync ({self.server_id})"
+                persistent_notification.async_create(self.hass, msg, title=title, notification_id=notif_id)
+
+        msg = ""
+        _update_status("Initializing sync process...", pct=0, step_info="Initializing")
         start_time = datetime.datetime.now()
         api = self.coordinator.api
         webio_name = self.coordinator.config_entry.data.get("webio_name", "HomeAssistant")
-        notif_id = f"comexio_sync_{self.server_id}"
-        is_de = self.hass.config.language == "de"
 
         try:
-            # Provide immediate user feedback via notification
-            persistent_notification.async_create(
-                self.hass, 
-                "Analysiere Comexio-Konfiguration..." if is_de else "Analyzing Comexio configuration...", 
-                title="Comexio Sync", notification_id=notif_id
-            )
+            _update_status("Analyzing Comexio configuration...", pct=5, step_info="Analyzing configuration")
 
             # Check if the Web-IO device instance is already present
             dev_id = await api.get_webio_device_info(webio_name)
@@ -159,14 +171,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
             if effective_action == "recreate":
                 if action == "full_sync" and not dev_id:
-                    status_msg = "🛠️ **Initial Setup**\nErstelle Web-IO Klasse..." if is_de else "🛠️ **Initial Setup**\nCreating Web-IO class..."
+                    status_msg = "🛠️ **Initial Setup**\nCreating Web-IO class..."
                 else:
-                    status_msg = (
-                        f"🚀 **Fast-Track aktiv**\nSchnelle Neuanlage läuft (~{SYNC_DURATION_RECREATE}s)..." 
-                        if is_de else 
-                        f"🚀 **Fast-Track active**\nHigh-speed recreation in progress (~{SYNC_DURATION_RECREATE}s)..."
-                    )
-                persistent_notification.async_create(self.hass, status_msg, title="Comexio Sync", notification_id=notif_id)
+                    status_msg = f"🚀 **Fast-Track active**\nHigh-speed recreation in progress (~{SYNC_DURATION_RECREATE}s)..."
+                _update_status(status_msg, pct=10, step_info="Creating Web-IO class")
 
                 # --- case A: rebuild ---
                 base_info = await api.get_webio_base_info(webio_name) # Check for existing device class
@@ -174,15 +182,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 if base_info:
                     base_id, base_deletable = base_info
                     if base_deletable:
-                        del_msg = f"{status_msg}\n\n🗑️ Lösche alte Klasse..." if is_de else f"{status_msg}\n\n🗑️ Deleting old class..."
-                        persistent_notification.async_create(self.hass, del_msg, title="Comexio Sync", notification_id=notif_id)
+                        _update_status(f"{status_msg}\n\n🗑️ Deleting old class...", pct=15, step_info="Deleting old class")
                         await api.delete_webio_base(base_id)
                         await asyncio.sleep(0.5)
                     else:
                         _LOGGER.warning("[%s] Base %s still blocked by other logic. Reusing base structure.", self.server_id, base_id)
 
-                up_msg = f"{status_msg}\n\n📤 Übertrage Konfiguration..." if is_de else f"{status_msg}\n\n📤 Uploading configuration..."
-                persistent_notification.async_create(self.hass, up_msg, title="Comexio Sync", notification_id=notif_id)
+                _update_status(f"{status_msg}\n\n📤 Uploading configuration...", pct=50, step_info="Uploading configuration")
                 web_io_json = api.generate_webio_json(self.server_id, webio_name, self.coordinator.data)
                 success, res_id = await api.upload_web_io(self.server_id, webio_name, web_io_json)
                 
@@ -190,7 +196,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     await api.create_webio_device(webio_name, res_id, ha_address)
                     duration = datetime.datetime.now() - start_time
                     duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
-                    msg = f"✅ Neuanlage erfolgreich ({duration_str})." if is_de else f"✅ Recreation successful ({duration_str})."
+                    msg = f"✅ Recreation successful ({duration_str})."
                 else:
                     raise Exception(f"Upload failed: {res_id}")
             
@@ -198,11 +204,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             else:
                 # Delta-Sync: Targeted updates for individual commands
                 _LOGGER.info("[%s] Performing targeted Delta Sync for mode: %s", self.server_id, effective_action)
-                persistent_notification.async_create(
-                    self.hass, 
-                    f"Aktion '{action}' läuft (Delta-Sync)..." if is_de else f"Action '{action}' in progress (Delta-Sync)...", 
-                    title="Comexio Sync", notification_id=notif_id
-                )
+                _update_status(f"Action '{action}' in progress (Delta-Sync)...", pct=5, step_info="Preparing Delta-Sync")
                 
                 base_id = audit_data.get("com_base_id")
                 
@@ -252,25 +254,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     eta_t = (datetime.datetime.now() + datetime.timedelta(seconds=eta_s)).strftime("%H:%M:%S")
                     
                     labels = {
-                        "de": {"rename": "✏️ Umbenennen", "delete": "🗑️ Entfernen", "create": "➕ Hinzufügen", "type": "🔧 Typ-Fix"},
-                        "en": {"rename": "✏️ Rename", "delete": "🗑️ Remove", "create": "➕ Add", "type": "🔧 Type-Fix"}
+                        "rename": "✏️ Rename", "delete": "🗑️ Remove", "create": "➕ Add", "type": "🔧 Type-Fix"
                     }
-                    l_key = "de" if is_de else "en"
-                    t_label = labels[l_key].get(task_type, task_type)
+                    t_label = labels.get(task_type, task_type)
                     
-                    if is_de:
-                        prog_msg = (f"**Modus:** `{action}` (Fallback: Delta-Sync)\n**Fortschritt:** Schritt {current + 1} von {total_tasks}\n"
-                                    f"**Aktuell:** {t_label}: `{task_name}`\n\n---\n"
-                                    f"🕒 **Start:** {start_time.strftime('%H:%M:%S')} (Laufzeit: {elaps_str})\n"
-                                    f"🏁 **Fertig:** ~{eta_t} (Rest: {rem_str})\n\n"
-                                    f"🛑 **AKTION ABBRECHEN**")
-                    else:
-                        prog_msg = (f"**Mode:** `{effective_action}`\n**Progress:** Step {current + 1} of {total_tasks}\n"
-                                    f"**Current:** {t_label}: `{task_name}`\n\n---\n"
-                                    f"🕒 **Start:** {start_time.strftime('%H:%M:%S')} (Runtime: {elaps_str})\n"
-                                    f"🏁 **Done:** ~{eta_t} (Remaining: {rem_str})\n\n"
-                                    f"🛑 **ABORT ACTION**")
-                    persistent_notification.async_create(self.hass, prog_msg, title=f"Comexio Sync ({self.server_id})", notification_id=notif_id)
+                    prog_msg = (f"**Mode:** `{effective_action}`\n**Progress:** Step {current + 1} of {total_tasks}\n"
+                                f"**Current:** {t_label}: `{task_name}`\n\n---\n"
+                                f"🕒 **Start:** {start_time.strftime('%H:%M:%S')} (Runtime: {elaps_str})\n"
+                                f"🏁 **Done:** ~{eta_t} (Remaining: {rem_str})")
+                                #f"\n\n🛑 **ABORT ACTION**"
+                    
+                    pct_val = int((current / total_tasks) * 100)
+                    _update_status(prog_msg, pct=pct_val, step_info=f"Step {current + 1}/{total_tasks} | {t_label}: '{task_name}' | Rem: {rem_str}")
 
                 added, removed, updated, renamed = 0, 0, 0, 0
                 for idx, task in enumerate(tasks_to_do):
@@ -301,25 +296,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     com_dev_id = audit_data.get("com_device_id")
                     # Explicitly update IP as save_single_command does not update device-level settings
                     if com_dev_id and ha_addr:
-                        status = "🌐 **Reparatur läuft:** Aktualisiere HA IP-Adresse..." if is_de else "🌐 **Repair in progress:** Updating HA IP address..."
-                        persistent_notification.async_create(self.hass, status, title="Comexio Sync", notification_id=notif_id)
+                        _update_status("🌐 **Repair in progress:** Updating HA IP address...", pct=95, step_info="Updating HA IP address")
                         updated_ip = await api.update_webio_device_ip(com_dev_id, ha_addr)
 
                 duration = datetime.datetime.now() - start_time
                 duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
                 plan_str = f"{total_eta_seconds // 60}:{total_eta_seconds % 60:02d} min"
-                if is_de:
-                    if added + updated + renamed + removed == 0 and updated_ip:
-                        msg = f"✅ **Comexio Server-Adresse aktualisiert**\n\nDie IP-Adresse wurde erfolgreich im Web-IO Gerät hinterlegt.\n⏱ Duration: {duration_str} (Plan: {plan_str})"
-                    else:
-                        msg = (f"✅ **Comexio Sync abgeschlossen**\n\nResultat: {added} neu, {updated} Typ-Fix, {renamed} umbenannt, {removed} entfernt" + 
-                              (", IP-Adresse aktualisiert" if updated_ip else "") + f".\n⏱ Duration: {duration_str} (Plan: {plan_str})")
+                if added + updated + renamed + removed == 0 and updated_ip:
+                    msg = f"✅ **Comexio Server Address updated**\n\nThe IP address has been successfully updated in the Web-IO device.\n⏱ Duration: {duration_str} (Plan: {plan_str})"
                 else:
-                    if added + updated + renamed + removed == 0 and updated_ip:
-                        msg = f"✅ **Comexio Server Address updated**\n\nThe IP address has been successfully updated in the Web-IO device.\n⏱ Duration: {duration_str} (Plan: {plan_str})"
-                    else:
-                        msg = (f"✅ **Comexio Sync Finished**\n\nResults: +{added}, {updated} updated, {renamed} renamed, -{removed} removed" +
-                              (", IP-Address updated" if updated_ip else "") + f".\n⏱ Duration: {duration_str} (Plan: {plan_str})")
+                    msg = (f"✅ **Comexio Sync Finished**\n\nResults: +{added}, {updated} updated, {renamed} renamed, -{removed} removed" +
+                          (", IP-Address updated" if updated_ip else "") + f".\n⏱ Duration: {duration_str} (Plan: {plan_str})")
 
             # Reset missing/ignore flag
             new_options = dict(self.coordinator.config_entry.options)
@@ -329,17 +316,21 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             )
             self.coordinator.last_audit_failed = False
 
-            persistent_notification.async_create(self.hass, msg, title="Success", notification_id=notif_id)
+            _update_status(msg, pct=100, step_info="Done")
         
         except Exception as e:
             self.coordinator.in_sync = False
             _LOGGER.exception("[%s] Sync failed", self.server_id)
-            persistent_notification.async_create(self.hass, f"Error: {e}", title="Sync Failed", notification_id=notif_id)
+            _update_status(f"Error: {e}", is_error=True)
 
         finally:
             # 1. Flag reset
             self.coordinator.in_sync = False
             self.coordinator.cancel_sync = False
+            self.coordinator.sync_progress_text = "Idle"
+            self.coordinator.sync_progress_pct = None
+            self.coordinator.sync_current_step = None
+            self.coordinator.async_set_updated_data(self.coordinator.data)
             
             # 2. Give the Comexio server a moment to finish the write operation
             await asyncio.sleep(0.5)
@@ -353,13 +344,15 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
 class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
     """Button to interrupt an ongoing Comexio sync process."""
+    
+    _attr_has_entity_name = True
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
         self.coordinator = coordinator
         self.server_id = server_id
         self._attr_unique_id = f"comexio_{server_id}_cancel_sync_btn"
-        self._attr_name = "Comexio Sync abbrechen"
+        self._attr_translation_key = "cancel_sync"
         self._attr_icon = "mdi:stop-circle-outline"
         # 'diagnostic' ensures the button is grouped under 'Configuration'
         self._attr_entity_category = EntityCategory.DIAGNOSTIC 

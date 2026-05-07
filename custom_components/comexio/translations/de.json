@@ -33,6 +33,7 @@
           "password": "Passwort Admin-Oberfläche",
           "api_password": "API Passwort (Basic Auth)",
           "scan_interval": "Abfrageintervall (Minuten)",
+          "enable_notifications": "Fortschritts-Popups während des Syncs anzeigen",
           "audit_ignored": "Warnung bei fehlender Web-IO Klasse ignorieren"
         }
       }
@@ -41,7 +42,20 @@
   "entity": {
     "button": {
       "webio_sync": {
-        "name": "Web-IO Smart Sync"
+        "name": "WebIO Sync Start"
+      },
+      "cancel_sync": {
+        "name": "WebIO Sync Abbruch"
+      }
+    },
+    "sensor": {
+      "sync_status": {
+        "name": "WebIO Sync Status",
+        "state": {
+          "idle": "Bereit",
+          "syncing": "Synchronisiert...",
+          "error": "Fehler"
+        }
       }
     }
   },

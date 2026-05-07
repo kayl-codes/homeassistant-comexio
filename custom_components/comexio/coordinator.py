@@ -33,6 +33,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.last_audit_failed = False
         self.last_summary_hash = None
         self.in_sync = False
+        self.sync_progress_text = "Idle"
+        self.sync_progress_pct = None
+        self.sync_current_step = None
         self.last_audit_results = {}
         self.cancel_sync = False
 
