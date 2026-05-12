@@ -1,0 +1,88 @@
+{
+  "config": {
+    "error": {
+      "server_id_exists": "This instance name is already in use.",
+      "cannot_connect": "Connection to Comexio failed.",
+      "invalid_auth": "Invalid credentials (UI User/Pass).",
+      "unknown": "An unexpected error occurred."
+    },
+    "step": {
+      "user": {
+        "title": "Add Comexio IO-Server",
+        "data": {
+          "server_id": "Instance Name (Prefix for IDs)",
+          "webio_name": "Device Class Name in Comexio",
+          "host": "Host / IP Address",
+          "username": "Username (Admin UI)",
+          "password": "Password (Admin UI)",
+          "api_username": "API Username (Basic Auth)",
+          "api_password": "API Password (Basic Auth)",
+          "import_markers": "Create entities for markers",
+          "import_ios": "Create entities for IOs",
+          "scan_interval": "Background polling interval (min)"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Comexio Settings",
+        "data": {
+          "host": "Host / IP Address",
+          "password": "Admin UI Password",
+          "api_password": "API Basic Auth Password",
+          "scan_interval": "Background polling interval (min)",
+          "enable_notifications": "Show UI pop-up notifications during sync",
+          "audit_ignored": "Ignore missing Web-IO warnings"
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "webio_sync": {
+        "name": "WebIO Sync Start"
+      },
+      "cancel_sync": {
+        "name": "WebIO Sync Cancel"
+      }
+    },
+    "sensor": {
+      "sync_status": {
+        "name": "WebIO Sync State",
+        "state": {
+          "idle": "Idle",
+          "syncing": "Syncing",
+          "error": "Error"
+        }
+      }
+    }
+  },
+  "issues": {
+    "sync_mismatch": {
+      "title": "Comexio Web-IO out of sync",
+      "description": "Config has {com} / {ha} webIO commands.",
+      "fix_flow": {
+        "step": {
+          "select_action": {
+            "title": "Web-IO Repair",
+            "description": "{summary_text}"
+          }
+        }
+      }
+    },
+    "missing_webio_class": {
+      "title": "Comexio Web-IO class missing",
+      "description": "The Web-IO device class for server {server_id} was not found. Please perform an initial setup.",
+      "fix_flow": {
+        "step": {
+          "select_action": {
+            "title": "Initial Setup",
+            "description": "The required Web-IO device class was not found on your Comexio server.\n\nWould you like to create the class and the device now?"
+          }
+        }
+      }
+    }
+  }
+}

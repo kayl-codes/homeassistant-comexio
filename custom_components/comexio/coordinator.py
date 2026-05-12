@@ -33,6 +33,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.last_audit_failed = False
         self.last_summary_hash = None
         self.in_sync = False
+        self.sync_error = False
         self.sync_progress_text = "Idle"
         self.sync_progress_pct = None
         self.sync_current_step = None
@@ -77,7 +78,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             ha_map = {}
             for m in final_data["markers"]:
                 ha_map[f"M{m['id']}"] = {
-                    "name": f"HA M{m['id']} {m['name']}", 
+                    "name": f"HA {m['name']}", 
                     "type": m["type"]  # Trusting the preprocessing of api.py
                 }
             # 2. HA Map: IOs

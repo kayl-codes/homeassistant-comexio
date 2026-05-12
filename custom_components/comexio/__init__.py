@@ -68,7 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, server_id)},
-        name=f"Comexio Server {server_id}",
+        name=f"Comexio {server_id}",
         manufacturer="Comexio",
         model="IO-Server",
     )
@@ -128,9 +128,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_binary_sensor")
     
     # Add buttons (these are always active)
-    active_unique_ids.add(f"comexio_{server_id}_webio_sync_btn")
-    active_unique_ids.add(f"comexio_{server_id}_cancel_sync_btn")
-    active_unique_ids.add(f"comexio_{server_id}_sync_status")
+    active_unique_ids.add(f"comexio_{server_id}_webio_sync_start_btn")
+    active_unique_ids.add(f"comexio_{server_id}_webio_sync_cancel_btn")
+    active_unique_ids.add(f"comexio_{server_id}_webio_sync_status_sensor")
 
     # Delete anything from the registry that is not in active_unique_ids
     _LOGGER.debug("Comexio Cleanup: protecting %d active unique IDs", len(active_unique_ids))
@@ -155,6 +155,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        if coordinator and hasattr(coordinator, "api"):
+            await coordinator.api.close()
         hass.data[DOMAIN].pop(entry.entry_id + "_webhook", None)
     return unload_ok

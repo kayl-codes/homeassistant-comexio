@@ -89,7 +89,7 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
         """Link entity to the parent Comexio server device."""
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio Server {self.coordinator.server_id}",
+            "name": f"Comexio {self.coordinator.server_id}",
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
@@ -107,7 +107,7 @@ class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"comexio_{server_id}_sync_status"
+        self._attr_unique_id = f"comexio_{server_id}_webio_sync_status_sensor"
         self._attr_translation_key = "sync_status"
         self._attr_icon = "mdi:cloud-sync"
 
@@ -115,14 +115,18 @@ class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio Server {self.coordinator.server_id}",
+            "name": f"Comexio {self.coordinator.server_id}",
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
 
     @property
     def native_value(self) -> str:
-        return "syncing" if getattr(self.coordinator, "in_sync", False) else "idle"
+        if getattr(self.coordinator, "in_sync", False):
+            return "syncing"
+        if getattr(self.coordinator, "sync_error", False):
+            return "error"
+        return "idle"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

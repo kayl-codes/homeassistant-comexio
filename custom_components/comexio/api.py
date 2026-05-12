@@ -276,7 +276,7 @@ class ComexioAPI:
             
             data["markers"].append({
                 "id": m_id,
-                "name": m.get("Name"),
+                "name": f"M{m_id} {m.get('Name')}",
                 "type": m_type_str,
                 "type_raw": m_type_raw,
                 "value": self._clean_value(live_states.get(m_id, 0))
@@ -386,9 +386,10 @@ class ComexioAPI:
         _LOGGER.info("Updating Web-IO device %s address to %s", device_id, ha_address)
         url = f"http://{self.host}/admin/web_io/save"
         
-        webio_name = "HomeAssistant_v1"
+        webio_name = "HomeAssistant"
         if self.config_entry:
-            webio_name = self.config_entry.data.get("webio_name", "HomeAssistant_v1")
+            conf_data = {**self.config_entry.data, **self.config_entry.options}
+            webio_name = conf_data.get("webio_name", "HomeAssistant")
 
         # Construct the payload based on user observations.
         device_data = {
@@ -397,8 +398,9 @@ class ComexioAPI:
             f"ip_{device_id}": ha_address,
             f"username_{device_id}": "",
             f"password_{device_id}": "",
-            f"checkca_{device_id}": "1",
-            f"pinnedpubkey_{device_id}": ""
+            f"checkca_{device_id}": "0",
+            f"pinnedpubkey_{device_id}": "",
+            f"form_login_{device_id}": "2"
         }
         
         payload = {
@@ -502,22 +504,28 @@ class ComexioAPI:
             lua = f"function data(a)\r\n  local d = {{ id=\"{m['id']}\", value=a, type=\"marker\" }}\r\n  return json_stringify(d)\r\nend"
             
             commands.append({
-                "Name": f"HA M{m['id']} {m['name']}", 
-                "TypeId": 2 if is_ana else 1, 
-                "Min": 0, 
-                "Max": 100 if is_ana else 1, 
-                "Parameter": webhook_path, 
-                "HeaderModifier": "Content-Type: application/json", 
-                "Data": lua, 
-                "Protocol": 0, 
-                "PostGet": 1, 
-                "Authentication": 0, 
-                "Input": 1, 
-                "DefaultActive": 1, 
-                "BaseId": 0, 
+                "Name": f"HA {m['name']}",
+                "TypeId": 2 if is_ana else 1,
+                "Min": 0,
+                "Max": 100 if is_ana else 1,
+                "Parameter": webhook_path,
+                "HeaderModifier": "Content-Type: application/json",
+                "Data": lua,
+                "Protocol": 0,
+                "PostGet": 1,
+                "WebDeviceId": 0,
+                "Authentication": 0,
+                "Input": 1,
+                "ReqFreq": "",
+                "ReplyInterpreter": "",
+                "Port": "",
+                "SendOnOne": 0,
+                "Changed": 1,
+                "BaseId": 0,
+                "DefaultValue": "",
                 "io": []
             })
-            
+
         # 2. Create Web-IO for IOs
         for io_item in parsed_data.get("io", []):
             # check data type
@@ -532,25 +540,31 @@ class ComexioAPI:
             
             commands.append({
                 "Name": f"HA IO {io_item['ext_name']} {io_item['identifier']}",
-                "TypeId": 2 if is_ana else 1,      # 1 == Digital   2 == Analog
-                "Min": v_min, 
+                "TypeId": 2 if is_ana else 1,
+                "Min": v_min,
                 "Max": v_max,
-                "Parameter": webhook_path, 
-                "HeaderModifier": "Content-Type: application/json", 
-                "Data": lua, 
-                "Protocol": 0, 
-                "PostGet": 1, 
-                "Authentication": 0, 
-                "Input": 1, 
-                "DefaultActive": 1, 
-                "BaseId": 0, 
+                "Parameter": webhook_path,
+                "HeaderModifier": "Content-Type: application/json",
+                "Data": lua,
+                "Protocol": 0,
+                "PostGet": 1,
+                "WebDeviceId": 0,
+                "Authentication": 0,
+                "Input": 1,
+                "ReqFreq": "",
+                "ReplyInterpreter": "",
+                "Port": "",
+                "SendOnOne": 0,
+                "Changed": 1,
+                "BaseId": 0,
+                "DefaultValue": "",
                 "io": []
             })
             
         return json.dumps({
             "data": "web_io", 
             "format": 1, 
-            "base": {"Identifier": webio_name, "UseCookies": 0, "Login": 0, "BaseId": 0}, 
+            "base": {"Identifier": webio_name, "UseCookies": 0, "Login": 2, "BaseId": 0}, 
             "commands": commands
         })
 
@@ -575,7 +589,18 @@ class ComexioAPI:
             ha_address = await self.get_ha_address()
             
         url = f"http://{self.host}/admin/web_io/saveDeviceWindow"
-        payload = {"name": name, "ip": ha_address, "web_device_base": base_id, "username": "", "password": "", "web_device_base_sample": "none", "identifier": "", "form_login": "2"}
+        
+        payload = {
+            "name": name, 
+            "ip": ha_address, 
+            "web_device_base": base_id, 
+            "username": "", 
+            "password": "", 
+            "web_device_base_sample": "none", 
+            "identifier": "", 
+            "form_login": "2"
+        }
+        
         async with self.session.post(url, data=payload, headers={"X-Requested-With": "XMLHttpRequest"}) as resp:
             return resp.status == 200
 

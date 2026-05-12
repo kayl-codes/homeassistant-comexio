@@ -87,12 +87,12 @@ class ComexioRepairFlow(RepairsFlow):
 
             # Resolve the entity ID for the sync button
             ent_reg = er.async_get(self.hass)
-            sync_btn_uid = f"comexio_{server_id}_webio_sync_btn"
+            sync_btn_uid = f"comexio_{server_id}_webio_sync_start_btn"
             btn_entity_id = ent_reg.async_get_entity_id("button", DOMAIN, sync_btn_uid)
 
             # Prepare service call for the sync action
             service_data = {
-                "entity_id": btn_entity_id or f"button.comexio_{server_id}_webio_sync",
+                "entity_id": btn_entity_id or f"button.comexio_{server_id}_webio_sync_start",
                 "action": action
             }
 

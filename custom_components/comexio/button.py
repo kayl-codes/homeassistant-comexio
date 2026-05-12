@@ -62,7 +62,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         super().__init__(coordinator)
         self.coordinator = coordinator
         self.server_id = server_id
-        self._attr_unique_id = f"comexio_{server_id}_webio_sync_btn"
+        self._attr_unique_id = f"comexio_{server_id}_webio_sync_start_btn"
         self._attr_translation_key = "webio_sync"
         self._attr_icon = "mdi:cloud-upload"
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -71,7 +71,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio Server {self.coordinator.server_id}",
+            "name": f"Comexio {self.coordinator.server_id}",
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
@@ -103,6 +103,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     async def async_handle_press(self, action: str = "full_sync") -> None:
         """Execute the sync logic with mode selection."""
         self.coordinator.in_sync = True
+        self.coordinator.sync_error = False
 
         conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
         notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
@@ -151,12 +152,38 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 effective_action = "update_ip"
             else:
                 # Calculate estimated time for Delta-Sync
-                total_delta_write = len(missing_items) + len(renamed_items) + len(type_mismatches)
-                total_delta_sec = (total_delta_write * SYNC_DURATION_WRITE) + (len(orphans) * SYNC_DURATION_DELETE)
+                #total_delta_write = len(missing_items) + len(renamed_items) + len(type_mismatches)
+                #total_delta_sec = (total_delta_write * SYNC_DURATION_WRITE) + (len(orphans) * SYNC_DURATION_DELETE)
+                # Calculate the exact ETA for the chosen action
+                action_eta = 0
+                task_count = 0
                 
                 # Threshold for strategy change
-                if total_delta_sec > SYNC_DURATION_RECREATE and action == "full_sync":
-                    _LOGGER.info("[%s] Delta Sync ETA %ds > %ds. Attempting Fast-Track.", self.server_id, total_delta_sec, SYNC_DURATION_RECREATE)
+                #if total_delta_sec > SYNC_DURATION_RECREATE and action == "full_sync":
+                #    _LOGGER.info("[%s] Delta Sync ETA %ds > %ds. Attempting Fast-Track.", self.server_id, total_delta_sec, SYNC_DURATION_RECREATE)
+                #if total_delta_sec > SYNC_DURATION_RECREATE:
+                #    _LOGGER.info("[%s] Delta Sync ETA %ds > %ds. Attempting Fast-Track for action '%s'.", self.server_id, total_delta_sec, SYNC_DURATION_RECREATE, action)
+                if action in ("full_sync", "update_renames"):
+                    action_eta += len(renamed_items) * SYNC_DURATION_WRITE
+                    task_count += len(renamed_items)
+                if action in ("full_sync", "delete_orphans"):
+                    action_eta += len(orphans) * SYNC_DURATION_DELETE
+                    task_count += len(orphans)
+                if action in ("full_sync", "create_missing"):
+                    action_eta += len(missing_items) * SYNC_DURATION_WRITE
+                    task_count += len(missing_items)
+                if action in ("full_sync", "update_types"):
+                    action_eta += len(type_mismatches) * SYNC_DURATION_WRITE
+                    task_count += len(type_mismatches)
+                if action in ("full_sync", "update_ip") and audit_data.get("ip_mismatch"):
+                    action_eta += SYNC_DURATION_WRITE
+                    
+                if task_count > 1:
+                    action_eta += int(1.5 * (task_count - 1))
+                
+                # Smarter Strategy Decision
+                if action_eta > SYNC_DURATION_RECREATE:
+                    _LOGGER.info("[%s] Action '%s' ETA (%ds) > Fast-Track (%ds). Attempting Fast-Track.", self.server_id, action, action_eta, SYNC_DURATION_RECREATE)
                 
                     # Attempt deletion to check if the device is linked (Fast-Track check)
                     if await api.delete_webio_device(dev_id):
@@ -167,7 +194,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                         _LOGGER.info("[%s] Device is in use. Falling back to Delta-Sync.", self.server_id)
                 else:
                     effective_action = action
-                    _LOGGER.info("[%s] Using requested mode: %s. Skipping Fast-Track check.", self.server_id, effective_action)
+                    #_LOGGER.info("[%s] Using requested mode: %s. Skipping Fast-Track check.", self.server_id, effective_action)
+                    _LOGGER.info("[%s] Action '%s' ETA (%ds) is faster than Fast-Track. Proceeding exactly as requested.", self.server_id, action, action_eta)
 
             if effective_action == "recreate":
                 if action == "full_sync" and not dev_id:
@@ -239,8 +267,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
                 # Resolve exact entity_id of the cancel button dynamically for the Markdown Link
                 ent_reg = dr.er.async_get(self.hass) if hasattr(dr, 'er') else er.async_get(self.hass) # Ensure er is available, we will import it above or assume er is imported
-                cancel_btn_uid = f"comexio_{self.server_id}_cancel_sync_btn"
-                cancel_btn_id = ent_reg.async_get_entity_id("button", DOMAIN, cancel_btn_uid) or f"button.comexio_sync_abbrechen"
+                cancel_btn_uid = f"comexio_{self.server_id}_webio_sync_cancel_btn"
+                cancel_btn_id = ent_reg.async_get_entity_id("button", DOMAIN, cancel_btn_uid) or f"button.comexio_{self.server_id}_webio_sync_cancel"
 
                 def update_progress(current, task_name, task_type):
                     # Update progress UI for the user including time estimation
@@ -320,6 +348,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         
         except Exception as e:
             self.coordinator.in_sync = False
+            self.coordinator.sync_error = True
             _LOGGER.exception("[%s] Sync failed", self.server_id)
             _update_status(f"Error: {e}", is_error=True)
 
@@ -327,7 +356,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             # 1. Flag reset
             self.coordinator.in_sync = False
             self.coordinator.cancel_sync = False
-            self.coordinator.sync_progress_text = "Idle"
+            if not getattr(self.coordinator, "sync_error", False):
+                self.coordinator.sync_progress_text = "Idle"
             self.coordinator.sync_progress_pct = None
             self.coordinator.sync_current_step = None
             self.coordinator.async_set_updated_data(self.coordinator.data)
@@ -351,7 +381,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         super().__init__(coordinator)
         self.coordinator = coordinator
         self.server_id = server_id
-        self._attr_unique_id = f"comexio_{server_id}_cancel_sync_btn"
+        self._attr_unique_id = f"comexio_{server_id}_webio_sync_cancel_btn"
         self._attr_translation_key = "cancel_sync"
         self._attr_icon = "mdi:stop-circle-outline"
         # 'diagnostic' ensures the button is grouped under 'Configuration'
@@ -361,7 +391,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio Server {self.coordinator.server_id}",
+            "name": f"Comexio {self.coordinator.server_id}",
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }

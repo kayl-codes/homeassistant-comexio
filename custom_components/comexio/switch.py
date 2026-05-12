@@ -57,7 +57,7 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
         """Link entity to the parent Comexio server device."""
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio Server {self.coordinator.server_id}",
+            "name": f"Comexio {self.coordinator.server_id}",
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
@@ -100,7 +100,7 @@ class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
         """Link entity to the parent Comexio server device."""
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio Server {self.coordinator.server_id}",
+            "name": f"Comexio {self.coordinator.server_id}",
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
