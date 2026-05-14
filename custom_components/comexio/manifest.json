@@ -1,7 +1,7 @@
 {
   "domain": "comexio",
   "name": "Comexio",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "documentation": "https://github.com/kayl-codes/homeassistant-comexio",
   "issue_tracker": "https://github.com/kayl-codes/homeassistant-comexio/issues",
   "dependencies": ["webhook"],

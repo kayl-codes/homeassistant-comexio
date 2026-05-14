@@ -48,8 +48,8 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
         """Initialize the marker switch."""
         super().__init__(coordinator)
         self._marker_id = str(marker["id"])
-        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}_sw"
-        self._attr_name = marker["name"]
+        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}".lower()
+        self._attr_name = marker["ha_name"]
         self._attr_device_class = SwitchDeviceClass.SWITCH
 
     @property
@@ -90,8 +90,8 @@ class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
         self._ext_name = io["ext_name"]
         self._identifier = io["identifier"]
         
-        self._attr_unique_id = f"comexio_{server_id}_{self._io_id}_io_sw"
-        self._attr_name = io["name"]
+        self._attr_unique_id = f"comexio_{server_id}_{self._ext_name}_{self._identifier}".lower()
+        self._attr_name = io["ha_name"]
         # Real outputs are classified as OUTLET by default
         self._attr_device_class = SwitchDeviceClass.OUTLET
 

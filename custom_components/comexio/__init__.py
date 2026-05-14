@@ -113,19 +113,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Get all IDs of objects currently recognized by the coordinator
     active_unique_ids = set()
     for m in coordinator.data.get("markers", []):
-        # Match exactly what platforms like number.py or switch.py define
-        if m.get("type") == "analog":
-            active_unique_ids.add(f"comexio_{server_id}_m{m['id']}_num")
-        else:
-            active_unique_ids.add(f"comexio_{server_id}_m{m['id']}_sw")
+        active_unique_ids.add(f"comexio_{server_id}_m{m['id']}".lower())
 
     for io in coordinator.data.get("io", []):
-        if not io.get("is_binary"):
-            active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_sensor")
-        elif io.get("identifier", "").startswith("Q"):
-            active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_sw")
-        else:
-            active_unique_ids.add(f"comexio_{server_id}_{io['id']}_io_binary_sensor")
+        active_unique_ids.add(f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower())
     
     # Add buttons (these are always active)
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_start_btn")

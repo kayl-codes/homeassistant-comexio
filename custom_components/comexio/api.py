@@ -18,6 +18,16 @@ from homeassistant.helpers.network import get_url
 from .const import DOMAIN, KNOWN_DOMAINS
 from .const import DOMAIN
 
+class SafeDict(dict):
+    """Safe dictionary for string formatting that doesn't crash on missing keys."""
+    def __missing__(self, key):
+        return '{' + key + '}'
+
+class SafeDict(dict):
+    """Safe dictionary for string formatting that doesn't crash on missing keys."""
+    def __missing__(self, key):
+        return '{' + key + '}'
+
 _LOGGER = logging.getLogger(__name__)
 
 class ComexioAPI:
@@ -228,10 +238,16 @@ class ComexioAPI:
         live_states = live_states or {}
                 
         # 1. Determine the configured Web-IO name for this instance
-        webio_name = "HomeAssistant" 
+        webio_name = "HomeAssistant"
+        schema_marker = "M{MarkerId} {MarkerTitle}"
+        schema_io = "{ExtName} {IoId} {IoTitle}"
+        server_alias = "comexio"
         if self.config_entry:
             conf_data = {**self.config_entry.data, **self.config_entry.options}
             webio_name = conf_data.get("webio_name", "HomeAssistant")
+            schema_marker = conf_data.get("schema_marker", "M{MarkerId} {MarkerTitle}")
+            schema_io = conf_data.get("schema_io", "{ExtName} {IoId} {IoTitle}")
+            server_alias = conf_data.get("server_id", "comexio")
 
         # 2. Map Webhooks (Web-IO Commands) from Comexio for Audit
         web_devices = conf.get("WebDevices", {})
@@ -273,9 +289,18 @@ class ComexioAPI:
             
             # Map type: 1=Digital, 2/3=Analog
             m_type_str = "analog" if m_type_raw in [2, 3] else "digital"
+            m_title = m.get('Name', '')
+            
+            # Apply User Naming Schema
+            ha_name = schema_marker.format_map(SafeDict(
+                ServerAlias=server_alias, 
+                MarkerId=m_id, 
+                MarkerTitle=m_title
+            ))
             
             data["markers"].append({
                 "id": m_id,
+                "ha_name": " ".join(ha_name.split()),
                 "name": f"M{m_id} {m.get('Name')}",
                 "type": m_type_str,
                 "type_raw": m_type_raw,
@@ -304,11 +329,27 @@ class ComexioAPI:
                 if "\\u00b0C" in unit or "C" in unit:
                     unit = "°C"
 
+                desc = io_item.get("Description")
+                ident = io_item.get("Identifier")
+                if desc and desc.strip() and desc != ident:
+                    io_name = f"{ext_name} {ident} {desc.strip()}"
+                else:
+                    io_name = f"{ext_name} {ident}"
+                    
+                # Apply User Naming Schema
+                ha_name = schema_io.format_map(SafeDict(
+                    ServerAlias=server_alias,
+                    ExtName=ext_name,
+                    IoId=ident,
+                    IoTitle=desc if desc else ""
+                ))
+
                 data["io"].append({
                     "id": str(io_item.get("Id")), 
                     "ext_name": ext_name,
-                    "identifier": io_item.get("Identifier"),
-                    "name": io_item.get("Description") or io_item.get("Identifier"),
+                    "identifier": ident,
+                    "ha_name": " ".join(ha_name.split()),
+                    "name": io_name,
                     "is_binary": is_binary,
                     "unit": unit,
                     "min": v_min,
@@ -390,6 +431,13 @@ class ComexioAPI:
         if self.config_entry:
             conf_data = {**self.config_entry.data, **self.config_entry.options}
             webio_name = conf_data.get("webio_name", "HomeAssistant")
+            schema_marker = conf_data.get("schema_marker", "{ServerAlias} M{MarkerId} {MarkerTitle}")
+            schema_io = conf_data.get("schema_io", "{ServerAlias} {ExtName} {IoId} {IoTitle}")
+            server_alias = conf_data.get("server_id", "comexio")
+        else:
+            schema_marker = "{ServerAlias} M{MarkerId} {MarkerTitle}"
+            schema_io = "{ServerAlias} {ExtName} {IoId} {IoTitle}"
+            server_alias = "comexio"
 
         # Construct the payload based on user observations.
         device_data = {
@@ -523,6 +571,7 @@ class ComexioAPI:
                 "Changed": 1,
                 "BaseId": 0,
                 "DefaultValue": "",
+                "DefaultActive": 1,
                 "io": []
             })
 
@@ -558,6 +607,7 @@ class ComexioAPI:
                 "Changed": 1,
                 "BaseId": 0,
                 "DefaultValue": "",
+                "DefaultActive": 1,
                 "io": []
             })
             

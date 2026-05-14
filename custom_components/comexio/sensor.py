@@ -69,9 +69,8 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
         self._io_id = io["id"]
         
         # Stable Unique ID for the HA database
-        self._attr_unique_id = f"comexio_{server_id}_{self._io_id}_io_sensor"
-        # Name used for initial entity_id generation
-        self._attr_name = io['name']
+        self._attr_unique_id = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
+        self._attr_name = io['ha_name']
         
         # State class 'measurement' enables long-term statistics and graphs
         self._attr_state_class = SensorStateClass.MEASUREMENT

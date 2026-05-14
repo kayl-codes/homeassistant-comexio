@@ -32,9 +32,15 @@
           "host": "Host / IP-Adresse",
           "password": "Passwort Admin-Oberfläche",
           "api_password": "API Passwort (Basic Auth)",
+          "schema_marker": "Namensschema für Merker",
+          "schema_io": "Namensschema für IOs",
           "scan_interval": "Abfrageintervall (Minuten)",
           "enable_notifications": "Fortschritts-Popups während des Syncs anzeigen",
           "audit_ignored": "Warnung bei fehlender Web-IO Klasse ignorieren"
+        },
+        "data_description": {
+          "schema_marker": "Verfügbare Variablen: {MarkerId}, {MarkerTitle}",
+          "schema_io": "Verfügbare Variablen: {ExtName}, {IoId}, {IoTitle}"
         }
       }
     }

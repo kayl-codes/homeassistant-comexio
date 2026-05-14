@@ -41,9 +41,9 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
         self._marker_id = str(marker["id"])
         
         # Unique ID for the database
-        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}_num"
+        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}".lower()
         # Display name
-        self._attr_name = marker["name"]
+        self._attr_name = marker["ha_name"]
 
         self._attr_native_min_value = 0.0
         self._attr_native_max_value = 100.0

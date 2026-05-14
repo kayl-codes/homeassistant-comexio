@@ -6,6 +6,11 @@ CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_SERVER_ID = "server_id"
 
+CONF_SCHEMA_MARKER = "schema_marker"
+CONF_SCHEMA_IO = "schema_io"
+DEFAULT_SCHEMA_MARKER = "M{MarkerId} {MarkerTitle}"
+DEFAULT_SCHEMA_IO = "{ExtName} {IoId} {IoTitle}"
+
 # keys for API access
 CONF_API_USERNAME = "api_username"
 CONF_API_PASSWORD = "api_password"

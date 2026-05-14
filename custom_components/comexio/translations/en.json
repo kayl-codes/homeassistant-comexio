@@ -32,9 +32,15 @@
           "host": "Host / IP Address",
           "password": "Admin UI Password",
           "api_password": "API Basic Auth Password",
+          "schema_marker": "Naming Schema for Markers",
+          "schema_io": "Naming Schema for IOs",
           "scan_interval": "Background polling interval (min)",
           "enable_notifications": "Show UI pop-up notifications during sync",
           "audit_ignored": "Ignore missing Web-IO warnings"
+        },
+        "data_description": {
+          "schema_marker": "Available variables: {MarkerId}, {MarkerTitle}",
+          "schema_io": "Available variables: {ExtName}, {IoId}, {IoTitle}"
         }
       }
     }
