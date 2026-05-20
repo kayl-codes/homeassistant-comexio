@@ -1,20 +1,13 @@
-# Version: 0.6.0
+# Version: 0.7.2
 import asyncio
 import logging
+
+from homeassistant.components.repairs import RepairsFlow
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 import voluptuous as vol
 
-from homeassistant.core import HomeAssistant
-from homeassistant.components.repairs import RepairsFlow
-from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers import entity_registry as er
-
-from .const import (
-    DOMAIN, 
-    CONF_SERVER_ID, 
-    SYNC_DURATION_DELETE, 
-    SYNC_DURATION_WRITE,
-    SYNC_DURATION_RECREATE
-)
+from .const import CONF_SERVER_ID, DOMAIN, SYNC_DURATION_DELETE, SYNC_DURATION_RECREATE, SYNC_DURATION_WRITE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,7 +24,7 @@ async def async_create_fix_flow(hass: HomeAssistant, issue_id: str, data: dict |
 
 class ComexioRepairFlow(RepairsFlow):
     """Handler for Comexio repair flows."""
-    
+
     def __init__(self, issue_id: str, data: dict | None):
         self.issue_id = issue_id
         self.issue_data = data or {}
@@ -50,7 +43,7 @@ class ComexioRepairFlow(RepairsFlow):
 
         if user_input is not None:
             action = user_input["action"]
-            
+
             # Ensure the config entry is available for processing
             if not entry_id:
                 return self.async_abort(reason="missing_entry_id")
@@ -64,12 +57,12 @@ class ComexioRepairFlow(RepairsFlow):
             if action == "ignore":
                 new_options = dict(entry.options)
                 new_options["audit_ignored"] = True
-                
+
                 self.hass.config_entries.async_update_entry(entry, options=new_options)
-                
+
                 # Remove the issue from the repair registry
                 ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-                
+
                 return self.async_create_entry(title="Ignored", data={})
 
             # Trigger sync actions via the registered button service
@@ -93,7 +86,7 @@ class ComexioRepairFlow(RepairsFlow):
             # Prepare service call for the sync action
             service_data = {
                 "entity_id": btn_entity_id or f"button.comexio_{server_id}_webio_sync_start",
-                "action": action
+                "action": action,
             }
 
             try:
@@ -101,7 +94,7 @@ class ComexioRepairFlow(RepairsFlow):
                     DOMAIN,
                     "press_action",
                     service_data,
-                    blocking=False, # Use non-blocking to avoid UI timeout
+                    blocking=False,  # Use non-blocking to avoid UI timeout
                 )
 
                 coordinator = self.hass.data[DOMAIN][entry.entry_id]
@@ -112,8 +105,9 @@ class ComexioRepairFlow(RepairsFlow):
                 await coordinator.async_refresh()
 
                 return self.async_create_entry(
-                    title=f"Aktion '{action}' erfolgreich ausgeführt" if self.hass.config.language == "de" 
-                          else f"Action '{action}' executed successfully",
+                    title=f"Aktion '{action}' erfolgreich ausgeführt"
+                    if self.hass.config.language == "de"
+                    else f"Action '{action}' executed successfully",
                     data={},
                 )
 
@@ -125,7 +119,7 @@ class ComexioRepairFlow(RepairsFlow):
         is_de = self.hass.config.language == "de"
         issue_reg = ir.async_get(self.hass)
         issue = issue_reg.async_get_issue(DOMAIN, self.issue_id)
-        
+
         # Fallback to empty dict if issue is not found
         placeholders = dict(issue.translation_placeholders if issue else {})
 
@@ -137,14 +131,14 @@ class ComexioRepairFlow(RepairsFlow):
             if is_de:
                 options = {
                     "full_sync": "🚀 Initial Setup (Klasse & Gerät anlegen)",
-                    "ignore": "🔇 Nachricht ignorieren (Web-IO nicht nutzen)"
+                    "ignore": "🔇 Nachricht ignorieren (Web-IO nicht nutzen)",
                 }
             else:
                 options = {
                     "full_sync": "🚀 Initial Setup (Create class & device)",
-                    "ignore": "🔇 Ignore message (Do not use Web-IO)"
+                    "ignore": "🔇 Ignore message (Do not use Web-IO)",
                 }
-            default_action = "full_sync" 
+            default_action = "full_sync"
         else:
             # Provide detailed Delta-Sync options based on audit counts
             counts = self.issue_data.get("counts", {})
@@ -153,15 +147,17 @@ class ComexioRepairFlow(RepairsFlow):
             r_c = counts.get("rename", 0)
             o_c = counts.get("orphan", 0)
             i_c = counts.get("ip_mismatch", 0)
-            
+
             config_issues = t_c + m_c + r_c + o_c
             ha_count = placeholders.get("ha_count", "0")
             com_count = placeholders.get("com_count", "0")
 
             # Helper function for time calculation
             def format_time(sec):
-                if sec == 0: return ""
-                if sec < 60: return f" ~{sec}s"
+                if sec == 0:
+                    return ""
+                if sec < 60:
+                    return f" ~{sec}s"
                 return f" ~{sec // 60}:{sec % 60:02d} min"
 
             def get_time_for_count(c, is_delete=False):
@@ -192,7 +188,10 @@ class ComexioRepairFlow(RepairsFlow):
                     )
             else:
                 # CASE 2: Configuration issues (with optional IP mismatch)
-                header = "Die Analyse hat Abweichungen festgestellt:\n\n" if is_de else "The analysis has detected differences:\n\n"
+                if is_de:
+                    header = "Die Analyse hat Abweichungen festgestellt:\n\n"
+                else:
+                    header = "The analysis has detected differences:\n\n"
                 lines = []
                 if t_c > 0:
                     lines.append(f"* 🔧 **{'Typ-Konflikte' if is_de else 'Type conflicts'}:** {t_c}")
@@ -203,36 +202,46 @@ class ComexioRepairFlow(RepairsFlow):
                 if o_c > 0:
                     lines.append(f"* 🗑️ **{'Verwaist' if is_de else 'Orphaned'}:** {o_c}")
                 if i_c > 0:
-                    lines.append(f"* 🌐 **{'Server-Adresse' if is_de else 'Server Address'}:** {'Falsch' if is_de else 'Incorrect'}")
-                
-                footer = f"\n\nGesamt: {ha_count} (HA) zu {com_count} (Comexio)." if is_de else f"\n\nTotal: {ha_count} (HA) vs {com_count} (Comexio)."
-                summary = header + "\n".join(lines) + footer + "\n\n" + ("Bitte wähle eine Aktion aus:" if is_de else "Please select an action:")
+                    lines.append(
+                        f"* 🌐 **{'Server-Adresse' if is_de else 'Server Address'}:** "
+                        f"{'Falsch' if is_de else 'Incorrect'}"
+                    )
+
+                if is_de:
+                    footer = f"\n\nGesamt: {ha_count} (HA) zu {com_count} (Comexio)."
+                else:
+                    footer = f"\n\nTotal: {ha_count} (HA) vs {com_count} (Comexio)."
+
+                prompt = "Bitte wähle eine Aktion aus:" if is_de else "Please select an action:"
+                summary = header + "\n".join(lines) + footer + "\n\n" + prompt
 
                 # Append Fast-Track Note only if config issues exist
                 if total_sec > SYNC_DURATION_RECREATE:
                     if is_de:
                         summary += (
                             "\n\n💡 **Hinweis:** Die Integration prüft automatisch, ob das Web-IO Gerät "
-                            "in Comexio ungenutzt ist. Falls ja, wird unabhängig von der gewählten Option "
-                            f"eine **Neu-Einrichtung** durchgeführt, die in (~{SYNC_DURATION_RECREATE} Sek.) erledigt ist."
+                            "in Comexio ungenutzt ist. Falls ja, wird unabhängig von der gewählten "
+                            f"Option eine **Neu-Einrichtung** durchgeführt, die in "
+                            f"(~{SYNC_DURATION_RECREATE} Sek.) erledigt ist."
                         )
                     else:
                         summary += (
                             "\n\n💡 **Note:** The integration automatically checks if the Web-IO device "
-                            "in Comexio is currently unused. If so, a **fresh setup** will be performed "
-                            f"regardless of the selected option, which will be completed in (~{SYNC_DURATION_RECREATE} sec.)."
+                            "in Comexio is currently unused. If so, a **fresh setup** will be "
+                            f"performed regardless of the selected option, which will be "
+                            f"completed in (~{SYNC_DURATION_RECREATE} sec.)."
                         )
-            
+
             placeholders["summary_text"] = summary
 
             # Collect specific options with timestamps
             specific_options = {}
-            
+
             if counts.get("type", 0) > 0:
                 t = get_time_for_count(counts["type"])
                 label = "🔧 Typen korrigieren" if is_de else "🔧 Update Types Only"
                 specific_options["update_types"] = f"{label} ({counts['type']}x == {t})"
-            
+
             if counts.get("missing", 0) > 0:
                 t = get_time_for_count(counts["missing"])
                 label = "➕ Fehlende anlegen" if is_de else "➕ Create Missing Only"
@@ -247,16 +256,19 @@ class ComexioRepairFlow(RepairsFlow):
                 t = get_time_for_count(counts["orphan"], is_delete=True)
                 label = "🗑️ Waisen löschen" if is_de else "🗑️ Delete Orphans Only"
                 specific_options["delete_orphans"] = f"{label} ({counts['orphan']}x == {t})"
-            
+
             if counts.get("ip_mismatch", 0) > 0:
-                label = "🌐 HA Server-Adresse (IP:Port) aktualisieren" if is_de else "🌐 Update HA Server Address (IP:Port)"
+                if is_de:
+                    label = "🌐 HA Server-Adresse (IP:Port) aktualisieren"
+                else:
+                    label = "🌐 Update HA Server Address (IP:Port)"
                 specific_options["update_ip"] = f"{label} (~{SYNC_DURATION_WRITE}s)"
 
             # Calculate Full Sync ETA
             total_write = counts.get("type", 0) + counts.get("rename", 0) + counts.get("missing", 0)
             total_del = counts.get("orphan", 0)
             total_sec = (total_write * SYNC_DURATION_WRITE) + (total_del * SYNC_DURATION_DELETE)
-            
+
             # Always add IP duration if a mismatch exists (Delta Sync requires explicit update)
             if counts.get("ip_mismatch", 0) > 0:
                 total_sec += SYNC_DURATION_WRITE
@@ -282,7 +294,5 @@ class ComexioRepairFlow(RepairsFlow):
         return self.async_show_form(
             step_id="select_action",
             description_placeholders=placeholders,
-            data_schema=vol.Schema({
-                vol.Required("action", default=default_action): vol.In(options)
-            }),
+            data_schema=vol.Schema({vol.Required("action", default=default_action): vol.In(options)}),
         )

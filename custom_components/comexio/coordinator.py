@@ -1,22 +1,16 @@
-# Version: 0.6.0
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.helpers import issue_registry as ir
-import logging
+# Version: 0.7.2
 import json
+import logging
 import socket
 
-from .api import ComexioAPI
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import (
-    DOMAIN, 
-    CONF_HOST, 
-    CONF_USERNAME, 
-    CONF_PASSWORD, 
-    CONF_API_USERNAME,
-    CONF_API_PASSWORD
-)
+from .api import ComexioAPI
+from .const import CONF_API_PASSWORD, CONF_API_USERNAME, CONF_HOST, CONF_PASSWORD, CONF_USERNAME, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
 
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
@@ -54,7 +48,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             raw_config = await self.api.get_raw_config()
             marker_data = raw_config.get("FubModules", {}).get("2", {})
             max_id = max([int(m.get("Id", 0)) for m in marker_data.values()]) if marker_data else 0
-            
+
             live_states = await self.api.get_live_states(max_id)
             parsed_data = self.api.parse_config(raw_config, live_states)
 
@@ -62,37 +56,36 @@ class ComexioCoordinator(DataUpdateCoordinator):
             import_ios = conf.get("import_ios", True)
 
             final_data = {
-                "markers": parsed_data["markers"] if import_markers else [], 
-                "io": parsed_data["io"] if import_ios else [], 
-                "webio_commands": parsed_data.get("webio_commands", {})
+                "markers": parsed_data["markers"] if import_markers else [],
+                "io": parsed_data["io"] if import_ios else [],
+                "webio_commands": parsed_data.get("webio_commands", {}),
             }
 
             # Update local state cache to ensure the UI remains responsive
-            for m in final_data["markers"]: self.marker_states[m["id"]] = m["value"]
-            for io in final_data["io"]: self.io_states[io["id"]] = io["value"]
+            for m in final_data["markers"]:
+                self.marker_states[m["id"]] = m["value"]
+            for io in final_data["io"]:
+                self.io_states[io["id"]] = io["value"]
 
             # --- SMART AUDIT LOGIC ---
             com_commands = final_data["webio_commands"]
-            
+
             # 1. HA Map: Markers
             ha_map = {}
             for m in final_data["markers"]:
                 ha_map[f"M{m['id']}"] = {
-                    "name": f"HA {m['name']}", 
-                    "type": m["type"]  # Trusting the preprocessing of api.py
+                    "name": f"HA {m['name']}",
+                    "type": m["type"],  # Trusting the preprocessing of api.py
                 }
             # 2. HA Map: IOs
             for io in final_data["io"]:
                 key = f"IO_{io['ext_name']}_{io['identifier']}"
-                
-                # Since api.py now provides 'is_binary', derive 
+
+                # Since api.py now provides 'is_binary', derive
                 # the audit type ('digital'/'analog') here:
                 mapped_type = "digital" if io.get("is_binary") else "analog"
-                
-                ha_map[key] = {
-                    "name": f"HA IO {io['ext_name']} {io['identifier']}", 
-                    "type": mapped_type 
-                }
+
+                ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
 
             # 3. Comexio Map (Audit the counterpart on the server)
             com_map = {}
@@ -111,7 +104,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     elif parts[1] == "IO" and len(parts) >= 4:
                         # IO identification via "HA IO <Ext> <Ident>"
                         key = f"IO_{parts[2]}_{parts[3]}"
-                
+
                 if key not in com_map:
                     com_map[key] = []
                 com_map[key].append({"name": full_name, "type": mapped_type, "id": cmd_id})
@@ -122,21 +115,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.last_audit_results = {}
                 if not is_ignored and not self.in_sync:
                     ir.async_create_issue(
-                        self.hass, DOMAIN, f"sync_mismatch_{self.server_id}",
-                        is_fixable=True, 
+                        self.hass,
+                        DOMAIN,
+                        f"sync_mismatch_{self.server_id}",
+                        is_fixable=True,
                         severity=ir.IssueSeverity.ERROR,
                         translation_key="missing_webio_class",
                         translation_placeholders={"server_id": self.server_id},
                         data={
                             "entry_id": self.config_entry.entry_id,
-                            "counts": {
-                                "type": 0,
-                                "missing": len(ha_map),
-                                "rename": 0,
-                                "orphan": 0,
-                                "all": len(ha_map)
-                            }
-                        }
+                            "counts": {"type": 0, "missing": len(ha_map), "rename": 0, "orphan": 0, "all": len(ha_map)},
+                        },
                     )
                 return final_data
 
@@ -152,30 +141,31 @@ class ComexioCoordinator(DataUpdateCoordinator):
             ha_address = await self.api.get_ha_address()
             com_device_ip = parsed_data.get("device_ip")
             com_device_id = parsed_data.get("device_id")
-            
+
             ip_mismatch = False
-            if com_device_id and com_device_ip:
-                if com_device_ip != ha_address:
-                    try:
-                        ha_host, ha_port = ha_address.rsplit(":", 1)
-                        com_host, com_port = com_device_ip.rsplit(":", 1)
-                        
-                        if ha_port != com_port:
-                            # Textual deviation detected, check DNS resolution
-                            ip_mismatch = True
-                        else:
-                            # Ports are identical, compare resolved IPs
-                            def resolve(name):
-                                try: return socket.gethostbyname(name)
-                                except (socket.error, socket.gaierror): return name
-                            
-                            ha_ip = await self.hass.async_add_executor_job(resolve, ha_host)
-                            com_ip = await self.hass.async_add_executor_job(resolve, com_host)
-                            if ha_ip != com_ip:
-                                ip_mismatch = True
-                    except ValueError:
-                        # Fallback on unexpected format
+            if com_device_id and com_device_ip and com_device_ip != ha_address:
+                try:
+                    ha_host, ha_port = ha_address.rsplit(":", 1)
+                    com_host, com_port = com_device_ip.rsplit(":", 1)
+
+                    if ha_port != com_port:
+                        # Textual deviation detected, check DNS resolution
                         ip_mismatch = True
+                    else:
+                        # Ports are identical, compare resolved IPs
+                        def resolve(name):
+                            try:
+                                return socket.gethostbyname(name)
+                            except (OSError, socket.gaierror):
+                                return name
+
+                        ha_ip = await self.hass.async_add_executor_job(resolve, ha_host)
+                        com_ip = await self.hass.async_add_executor_job(resolve, com_host)
+                        if ha_ip != com_ip:
+                            ip_mismatch = True
+                except ValueError:
+                    # Fallback on unexpected format
+                    ip_mismatch = True
 
             # Compare HA entities with Comexio commands to find inconsistencies
             type_mismatches = []
@@ -183,7 +173,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             renamed_items = []
             orphans = []
             mismatches = set()
-            
+
             if ip_mismatch:
                 mismatches.add("ip_address")
 
@@ -194,28 +184,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     mismatches.add(f"missing_{key}")
                 else:
                     com_list = com_map[key]
-                    
+
                     # Try to find a perfect name match first
                     best_match = None
                     for com in com_list:
                         if com["name"] == ha["name"]:
                             best_match = com
                             break
-                    
+
                     # Fallback: if no perfect match, use the first one
                     if not best_match:
                         best_match = com_list[0]
-                        
+
                     is_renamed = False
-                    
+
                     # Name comparison
                     if ha["name"] != best_match["name"]:
-                        renamed_items.append({"id": best_match["id"], "name": ha["name"], "payload": payload_map.get(ha["name"])})
+                        renamed_items.append(
+                            {"id": best_match["id"], "name": ha["name"], "payload": payload_map.get(ha["name"])}
+                        )
                         mismatches.add(f"rename_{key}")
                         is_renamed = True
-                        
+
                     if not is_renamed and ha["type"] != best_match.get("type"):
-                        type_mismatches.append({"id": best_match["id"], "name": ha["name"], "payload": payload_map.get(ha["name"])})
+                        type_mismatches.append(
+                            {"id": best_match["id"], "name": ha["name"], "payload": payload_map.get(ha["name"])}
+                        )
                         mismatches.add(f"type_{key}")
 
                     # All other commands pointing to this key are duplicates -> Orphans
@@ -232,45 +226,66 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         mismatches.add(f"orphan_{com['id']}")
 
             self.last_audit_results = {
-                "type": type_mismatches, "missing": missing_items, 
-                "rename": renamed_items, "orphan": orphans,
+                "type": type_mismatches,
+                "missing": missing_items,
+                "rename": renamed_items,
+                "orphan": orphans,
                 "ip_mismatch": ip_mismatch,
                 "ha_address": ha_address,
                 "com_device_id": com_device_id,
-                "com_base_id": parsed_data.get("base_id")
+                "com_base_id": parsed_data.get("base_id"),
             }
 
             # 📈 --- AUDIT SUMMARY LOGGING ---
             if mismatches:
                 # Create a simple string representation to detect changes
-                current_summary_content = f"{len(type_mismatches)}-{len(missing_items)}-{len(renamed_items)}-{len(orphans)}-{ip_mismatch}"
-                
+                current_summary_content = (
+                    f"{len(type_mismatches)}-{len(missing_items)}-{len(renamed_items)}-{len(orphans)}-{ip_mismatch}"
+                )
+
                 # Only log details if the audit result differs from the previous run
                 if self.last_summary_hash != current_summary_content:
                     self.last_summary_hash = current_summary_content
 
                     # Consolidated warning for the Home Assistant log overview
-                    _LOGGER.warning("[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, Renames:%d, Orphans:%d, IP:%d)", 
-                                    self.server_id, len(mismatches), len(type_mismatches), len(missing_items), len(renamed_items), len(orphans), 1 if ip_mismatch else 0)
+                    _LOGGER.warning(
+                        "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
+                        "Renames:%d, Orphans:%d, IP:%d)",
+                        self.server_id,
+                        len(mismatches),
+                        len(type_mismatches),
+                        len(missing_items),
+                        len(renamed_items),
+                        len(orphans),
+                        1 if ip_mismatch else 0,
+                    )
                     if ip_mismatch:
-                        _LOGGER.warning("[%s] Server address mismatch: HA=%s, Comexio=%s", self.server_id, ha_address, com_device_ip)
+                        _LOGGER.warning(
+                            "[%s] Server address mismatch: HA=%s, Comexio=%s", self.server_id, ha_address, com_device_ip
+                        )
 
                     # Consolidated audit summary with details for each category
                     _LOGGER.info("=== ⚠️ COMEXIO AUDIT SUMMARY [%s] ===", self.server_id)
                     _LOGGER.info("🔧 Type-Mismatches (%d):", len(type_mismatches))
-                    for item in type_mismatches: _LOGGER.info("   -> %s", item['name'])
-                        
-                    _LOGGER.info("➕ Missing Webhooks (%d):", len(missing_items))
-                    for item in missing_items: _LOGGER.info("   -> %s", item['name'])
-                        
-                    _LOGGER.info("✏️ Renames (%d):", len(renamed_items))
-                    for item in renamed_items: _LOGGER.info("   -> %s", item['name'])
-                        
-                    _LOGGER.info("🗑️ Orphans (%d):", len(orphans))
-                    for item in orphans: _LOGGER.info("   -> %s", item['name'])
+                    for item in type_mismatches:
+                        _LOGGER.info("   -> %s", item["name"])
 
-                    if ip_mismatch: 
-                        _LOGGER.info("🌐 IP/Port Mismatch: Comexio expects %s, but HA is at %s", com_device_ip, ha_address)
+                    _LOGGER.info("➕ Missing Webhooks (%d):", len(missing_items))
+                    for item in missing_items:
+                        _LOGGER.info("   -> %s", item["name"])
+
+                    _LOGGER.info("✏️ Renames (%d):", len(renamed_items))
+                    for item in renamed_items:
+                        _LOGGER.info("   -> %s", item["name"])
+
+                    _LOGGER.info("🗑️ Orphans (%d):", len(orphans))
+                    for item in orphans:
+                        _LOGGER.info("   -> %s", item["name"])
+
+                    if ip_mismatch:
+                        _LOGGER.info(
+                            "🌐 IP/Port Mismatch: Comexio expects %s, but HA is at %s", com_device_ip, ha_address
+                        )
 
                     _LOGGER.info("========================================")
             else:
@@ -286,27 +301,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "rename": len(renamed_items),
                     "orphan": len(orphans),
                     "ip_mismatch": 1 if ip_mismatch else 0,
-                    "all": len(mismatches)
+                    "all": len(mismatches),
                 }
 
                 ir.async_create_issue(
-                    self.hass, DOMAIN, f"sync_mismatch_{self.server_id}",
-                    is_fixable=True, 
+                    self.hass,
+                    DOMAIN,
+                    f"sync_mismatch_{self.server_id}",
+                    is_fixable=True,
                     severity=ir.IssueSeverity.WARNING,
                     translation_key="sync_mismatch",
                     translation_placeholders={
-                        "ha_count": str(len(ha_map)), 
-                        "com_count": str(len(com_map)), 
+                        "ha_count": str(len(ha_map)),
+                        "com_count": str(len(com_map)),
                         "t_count": str(len(type_mismatches)),
                         "m_count": str(len(missing_items)),
                         "r_count": str(len(renamed_items)),
                         "o_count": str(len(orphans)),
-                        "i_count": str(1 if ip_mismatch else 0)
+                        "i_count": str(1 if ip_mismatch else 0),
                     },
-                    data={
-                        "entry_id": self.config_entry.entry_id,
-                        "counts": issue_data_counts
-                    }
+                    data={"entry_id": self.config_entry.entry_id, "counts": issue_data_counts},
                 )
             else:
                 ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
@@ -339,19 +353,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_config_entry_updated(self):
         """Handle config entry update (e.g. from Options Flow)."""
         _LOGGER.info("[%s] Configuration updated, reloading API settings", self.server_id)
-        
+
         # Merge data and options
         conf = {**self.config_entry.data, **self.config_entry.options}
-        
+
         # Update API instance with potentially new credentials
         self.api.host = conf.get(CONF_HOST)
         self.api.username = conf.get(CONF_USERNAME)
         self.api.password = conf.get(CONF_PASSWORD)
         self.api.api_user = conf.get(CONF_API_USERNAME)
         self.api.api_pass = conf.get(CONF_API_PASSWORD)
-        
+
         # Re-authenticate with new credentials
         await self.api.login()
-        
+
         # Trigger an immediate refresh to verify new settings
         await self.async_request_refresh()

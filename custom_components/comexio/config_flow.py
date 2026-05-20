@@ -1,31 +1,28 @@
-# Version: 0.6.0
+# Version: 0.7.2
+import logging
+import socket
+
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.selector import (
-    NumberSelector, 
-    NumberSelectorConfig, 
-    NumberSelectorMode
-)
+from homeassistant.helpers.selector import NumberSelector, NumberSelectorConfig, NumberSelectorMode
 import voluptuous as vol
-import socket
-import logging
 
-from .const import (
-    DOMAIN, 
-    CONF_HOST, 
-    CONF_USERNAME, 
-    CONF_PASSWORD, 
-    CONF_SERVER_ID,
-    CONF_API_USERNAME,
-    CONF_API_PASSWORD,
-    SCAN_INTERVAL_MIN,
-    SCAN_INTERVAL_MAX,
-    SCAN_INTERVAL_DEFAULT,
-    KNOWN_DOMAINS,
-    DEFAULT_HOST
-)
 from .api import ComexioAPI
+from .const import (
+    CONF_API_PASSWORD,
+    CONF_API_USERNAME,
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_SERVER_ID,
+    CONF_USERNAME,
+    DEFAULT_HOST,
+    DOMAIN,
+    KNOWN_DOMAINS,
+    SCAN_INTERVAL_DEFAULT,
+    SCAN_INTERVAL_MAX,
+    SCAN_INTERVAL_MIN,
+)
 from .options_flow import ComexioOptionsFlow
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,20 +31,24 @@ _LOGGER = logging.getLogger(__name__)
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect."""
 
+
 class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""
+
 
 class ServerIdExists(HomeAssistantError):
     """Error to indicate the Server ID is already in use."""
 
+
 class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Comexio with detailed validation."""
+
     VERSION = 1
-    
+
     async def async_step_user(self, user_input=None):
         """Handle the initial setup step when a user adds the integration."""
         errors = {}
-        
+
         # Add additional debug logs to trace execution
         _LOGGER.debug("ComexioConfigFlow: Entered async_step_user")
         _LOGGER.debug("ComexioConfigFlow: Current entries: %s", self._async_current_entries())
@@ -55,7 +56,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Generate a suggestion for the server ID based on existing entries
         current_entries = self._async_current_entries()
         suggested_id = f"iosrv{len(current_entries) + 1}"
-        
+
         default_host = DEFAULT_HOST
 
         if user_input is None:
@@ -65,10 +66,10 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     test_host = "comexio" if not domain else f"comexio.{domain}"
                     try:
                         return socket.gethostbyname(test_host)
-                    except socket.error:
+                    except OSError:
                         pass
                 return DEFAULT_HOST
-            
+
             default_host = await self.hass.async_add_executor_job(guess_ip)
             _LOGGER.debug("Auto-discovered default host: %s", default_host)
         else:
@@ -107,32 +108,30 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
 
         # Define the form schema with all required and optional fields
-        schema = vol.Schema({
-            vol.Required(CONF_SERVER_ID, default=suggested_id): str,
-            vol.Required(CONF_HOST, default=default_host): str,
-            vol.Required(CONF_USERNAME, default="admin"): str,
-            vol.Required(CONF_PASSWORD): str,
-            vol.Optional(CONF_API_USERNAME, default="ComexioApiUser"): str,
-            vol.Optional(CONF_API_PASSWORD, default="ComexioApiPass"): str,
-            vol.Required("import_markers", default=True): bool,
-            vol.Required("import_ios", default=True): bool,
-            vol.Required("webio_name", default="HomeAssistant"): str,
-            vol.Required("scan_interval", default=SCAN_INTERVAL_DEFAULT): NumberSelector(
-                NumberSelectorConfig(
-                    min=SCAN_INTERVAL_MIN, 
-                    max=SCAN_INTERVAL_MAX, 
-                    step=1, 
-                    mode=NumberSelectorMode.SLIDER,
-                    unit_of_measurement="min"
-                )
-            ),
-        })
-
-        return self.async_show_form(
-            step_id="user",
-            data_schema=schema,
-            errors=errors
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_SERVER_ID, default=suggested_id): str,
+                vol.Required(CONF_HOST, default=default_host): str,
+                vol.Required(CONF_USERNAME, default="admin"): str,
+                vol.Required(CONF_PASSWORD): str,
+                vol.Optional(CONF_API_USERNAME, default="ComexioApiUser"): str,
+                vol.Optional(CONF_API_PASSWORD, default="ComexioApiPass"): str,
+                vol.Required("import_markers", default=True): bool,
+                vol.Required("import_ios", default=True): bool,
+                vol.Required("webio_name", default="HomeAssistant"): str,
+                vol.Required("scan_interval", default=SCAN_INTERVAL_DEFAULT): NumberSelector(
+                    NumberSelectorConfig(
+                        min=SCAN_INTERVAL_MIN,
+                        max=SCAN_INTERVAL_MAX,
+                        step=1,
+                        mode=NumberSelectorMode.SLIDER,
+                        unit_of_measurement="min",
+                    )
+                ),
+            }
         )
+
+        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
     @staticmethod
     @callback
@@ -158,7 +157,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception as e:
             if not isinstance(e, InvalidAuth):
                 _LOGGER.error("Connection test failed: %s", e)
-                raise CannotConnect
-            raise e
+                raise CannotConnect from e
+            raise
         finally:
             await api.close()

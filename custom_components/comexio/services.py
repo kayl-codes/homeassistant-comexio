@@ -1,4 +1,4 @@
-# Version: 0.6.0
+# Version: 0.7.2
 import logging
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.components import persistent_notification

@@ -1,4 +1,4 @@
-# Version: 0.6.0
+# Version: 0.7.2
 from typing import Any
 from homeassistant.components.sensor import (
     SensorEntity,

@@ -1,4 +1,4 @@
-# Version: 0.6.0
+# Version: 0.7.2
 from homeassistant import config_entries
 import voluptuous as vol
 from homeassistant.helpers.selector import (
