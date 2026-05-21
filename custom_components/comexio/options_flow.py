@@ -35,10 +35,10 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         conf = {**self._config_entry.data, **self._config_entry.options}
 
         if user_input is not None:
-            # Prevent password exposure: Keep existing passwords if the fields are omitted
-            if CONF_PASSWORD not in user_input:
+            # Prevent password exposure: Reuse stored passwords when the user leaves fields blank
+            if CONF_PASSWORD in user_input and not user_input[CONF_PASSWORD]:
                 user_input[CONF_PASSWORD] = conf.get(CONF_PASSWORD, "")
-            if CONF_API_PASSWORD not in user_input:
+            if CONF_API_PASSWORD in user_input and not user_input[CONF_API_PASSWORD]:
                 user_input[CONF_API_PASSWORD] = conf.get(CONF_API_PASSWORD, "")
 
             return self.async_create_entry(title="", data=user_input)

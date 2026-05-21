@@ -43,14 +43,57 @@ def _is_local_address(host: str) -> bool:
     """Return True if host looks like a local IP or local hostname."""
     if not host:
         return False
-    host = host.strip("[]")
-    if ":" in host:
-        host, *_ = host.split(":")
+
+    host = host.strip()
+    if host.startswith("["):
+        closing = host.find("]")
+        if closing == -1:
+            return False
+        host = host[1:closing]
+    elif ":" in host:
+        host, _, _ = host.partition(":")
+
     with suppress(ValueError):
         ip = ipaddress.ip_address(host)
         if ip.is_private or ip.is_loopback or ip.is_link_local:
             return True
     return bool(LOCAL_HOSTNAME_RE.match(host))
+
+
+def _normalize_js_like_object(obj_str: str) -> str:
+    """Remove trailing commas before closing braces/brackets to make JS objects JSON-compatible."""
+    return re.sub(r",(\s*[}\]])", r"\1", obj_str)
+
+
+def _extract_js_object_literal(script_text: str, start_index: int) -> tuple[str | None, int]:
+    """Extract a JS object literal starting at start_index (pointing at '{')."""
+    if start_index >= len(script_text) or script_text[start_index] != "{":
+        return None, start_index
+
+    depth = 0
+    i = start_index
+    in_string: str | None = None
+    escape = False
+
+    while i < len(script_text):
+        ch = script_text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_string:
+                in_string = None
+        elif ch in ("'", '"'):
+            in_string = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return script_text[start_index : i + 1], i + 1
+        i += 1
+    return None, start_index
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -98,6 +141,12 @@ class ComexioAPI:
         # io_types holds mapping of IO type metadata. Default to {} for safe fallbacks.
         self.io_types: dict[str, Any] = {}
         self._auth_warned: bool = False
+        self._login_warned: bool = False
+
+    @property
+    def _base_url(self) -> str:
+        """Return the base URL for the Comexio IO-Server."""
+        return f"http://{self.host}"
 
     def _clean_value(self, val: Any) -> float:
         """Standardizes values: replaces German comma with dot and converts to numbers."""
@@ -142,18 +191,37 @@ class ComexioAPI:
                 if not fallback_ip or fallback_ip in ["localhost", "127.0.0.1", "::1"]:
 
                     def get_local_ip():
-                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        # Try private IPv4 routing first
                         try:
-                            s.connect(("8.8.8.8", 80))
-                            return s.getsockname()[0]
-                        except Exception:
-                            return "127.0.0.1"
-                        finally:
-                            s.close()
+                            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                                s.connect(("10.255.255.255", 1))
+                                return s.getsockname()[0]
+                        except OSError:
+                            pass
+
+                        # Fallback to IPv6 local routing (ULA prefix)
+                        try:
+                            with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
+                                s.connect(("fd00::", 1))
+                                return s.getsockname()[0]
+                        except OSError:
+                            pass
+
+                        try:
+                            return socket.gethostbyname(socket.gethostname())
+                        except OSError:
+                            pass
+
+                        return "127.0.0.1"
 
                     hostname = await self.hass.async_add_executor_job(get_local_ip)
                 else:
                     hostname = fallback_ip
+
+            # Wrap IPv6 addresses in brackets for URL compatibility
+            with suppress(ValueError):
+                if ipaddress.ip_address(hostname).version == 6:
+                    hostname = f"[{hostname}]"
 
             return f"{hostname}:{port}"
         except Exception as e:
@@ -165,15 +233,24 @@ class ComexioAPI:
         try:
             pub_key = rsa.RSAPublicNumbers(exp, mod).public_key()
             encrypted = pub_key.encrypt(data_str.encode("iso-8859-1"), padding.PKCS1v15())
-            return encrypted.hex().zfill(512)
+            required_len = ((pub_key.key_size + 7) // 8) * 2
+            return encrypted.hex().zfill(required_len)
         except Exception:
             _LOGGER.exception("RSA Block encryption failed")
             raise
 
     async def login(self) -> bool:
         """Performs the RSA login procedure for admin access."""
+        if not _is_local_address(self.host) and not self._login_warned:
+            _LOGGER.warning(
+                "Logging into Comexio over plain HTTP on a non-local address (%s). "
+                "Credentials may be transmitted in clear text.",
+                self.host,
+            )
+            self._login_warned = True
+
         _LOGGER.debug("Starting v11 RSA login procedure for host: %s", self.host)
-        url = f"http://{self.host}/board/home/login/"
+        url = f"{self._base_url}/board/home/login/"
 
         self.session.cookie_jar.update_cookies({"comexio-client-time": str(int(time.time()))})
         try:
@@ -199,7 +276,7 @@ class ComexioAPI:
 
             async with (
                 self.session.post(url, data=payload, headers={"Referer": url}) as resp,
-                self.session.get(f"http://{self.host}/admin/") as v_resp,
+                self.session.get(f"{self._base_url}/admin/") as v_resp,
             ):
                 html = await v_resp.text()
                 if "Anmeldung" not in html and html != "":
@@ -216,26 +293,39 @@ class ComexioAPI:
         This provides the source of truth for all device properties and units.
         """
         # 1. Fetch the main admin page to get global variables like $ioTypes
-        url_main = f"http://{self.host}/admin/"
+        url_main = f"{self._base_url}/admin/"
         async with self.session.get(url_main) as resp:
             if resp.status != 200:
                 _LOGGER.error("Failed to fetch admin page for IO types (HTTP %s)", resp.status)
-            else:
-                main_html = await resp.text()
+                return {}
 
-                # Extract $ioTypes for dynamic unit and type mapping
-                if type_match := re.search(r"var\s+\$ioTypes\s*=\s*({.*?});", main_html, re.DOTALL):
+            main_html = await resp.text()
+
+        # Extract $ioTypes for dynamic unit and type mapping
+        if assign_match := re.search(r"var\s+\$ioTypes\s*=\s*", main_html):
+            brace_index = main_html.find("{", assign_match.end())
+            if brace_index != -1:
+                raw_object, _ = _extract_js_object_literal(main_html, brace_index)
+                if raw_object:
                     try:
-                        clean_json = re.sub(r",(\s*[}\]])", r"\1", type_match[1])
+                        clean_json = _normalize_js_like_object(raw_object)
                         self.io_types = json.loads(clean_json)
                         _LOGGER.debug("Successfully loaded %d Comexio IO types", len(self.io_types))
                     except json.JSONDecodeError as exc:
                         _LOGGER.error("Failed to decode $ioTypes JSON: %s. Falling back to generic IOs.", exc)
+                        self.io_types = {}
                 else:
-                    _LOGGER.warning("Global IO types variable $ioTypes not found. Falling back to generic IOs.")
+                    _LOGGER.warning("Failed to parse $ioTypes object. Falling back to generic IOs.")
+                    self.io_types = {}
+            else:
+                _LOGGER.warning("Failed to locate opening brace for $ioTypes object. Falling back to generic IOs.")
+                self.io_types = {}
+        else:
+            _LOGGER.warning("Global IO types variable $ioTypes not found. Falling back to generic IOs.")
+            self.io_types = {}
 
         # 2. Fetch the function module page for the technical device configuration
-        url_conf = f"http://{self.host}/admin/function_function_module/home"
+        url_conf = f"{self._base_url}/admin/function_function_module/home"
         async with self.session.get(url_conf) as resp:
             if resp.status != 200:
                 _LOGGER.error("Failed to fetch function module page (HTTP %s)", resp.status)
@@ -244,17 +334,21 @@ class ComexioAPI:
 
         # Restrict search to script tags to avoid scanning entire HTML with a single DOTALL regex
         script_blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, re.DOTALL | re.IGNORECASE)
-        var_pattern = re.compile(r"var\s+\$([\w\d_]+)\s*=\s*(\{.*?\});", re.DOTALL)
-
-        def _normalize_js_like_object(obj_str: str) -> str:
-            """Remove trailing commas before closing braces/brackets to make JS objects JSON-compatible."""
-            return re.sub(r",(\s*[}\]])", r"\1", obj_str)
+        var_decl_pattern = re.compile(r"var\s+\$([\w\d_]+)\s*=\s*", re.DOTALL)
 
         result: dict[str, Any] = {}
         for script in script_blocks:
-            for m in var_pattern.finditer(script):
+            for m in var_decl_pattern.finditer(script):
                 var_name = m.group(1)
-                raw_obj = m.group(2)
+                search_start = m.end()
+                brace_index = script.find("{", search_start)
+                if brace_index == -1:
+                    continue
+
+                raw_obj, _ = _extract_js_object_literal(script, brace_index)
+                if raw_obj is None:
+                    continue
+
                 normalized_obj = _normalize_js_like_object(raw_obj)
 
                 try:
@@ -270,7 +364,7 @@ class ComexioAPI:
 
     async def get_live_states(self, marker_count: int) -> dict[str, Any]:
         """Fetches current live values for markers from the dashboard refresh endpoint."""
-        url = f"http://{self.host}/board/dashboard/refresh/"
+        url = f"{self._base_url}/board/dashboard/refresh/"
         markers_dict = {str(i): {"action": "get", "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)}
         markers_dict["messages"] = {"action": "messages"}
 
@@ -279,7 +373,7 @@ class ComexioAPI:
 
         headers = {
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"http://{self.host}/admin/",
+            "Referer": f"{self._base_url}/admin/",
             "User-Agent": "Mozilla/5.0",
         }
 
@@ -325,10 +419,10 @@ class ComexioAPI:
         self._process_device_info(conf, data, webio_name, fub_modules)
 
         # 3. Process Markers
-        self._process_markers(conf, data, live_states, schema_marker, server_alias, fub_modules)
+        self._process_markers(data, live_states, schema_marker, server_alias, fub_modules)
 
         # 4. Process IOs
-        self._process_ios(conf, data, schema_io, server_alias, fub_modules)
+        self._process_ios(data, schema_io, server_alias, fub_modules)
 
         _LOGGER.info(
             "Audit: %d Markers, %d IOs, %d Webhooks in Comexio for %s",
@@ -396,7 +490,6 @@ class ComexioAPI:
 
     def _process_markers(
         self,
-        conf: dict[str, Any],
         data: dict[str, Any],
         live_states: dict[str, Any],
         schema_marker: str,
@@ -405,7 +498,7 @@ class ComexioAPI:
     ) -> None:
         """Process markers from config."""
         for m in fub_modules.get("2", {}).values():
-            if not m.get("Name"):
+            if not m.get("Name") or m.get("Id") is None:
                 continue
 
             m_id = str(m.get("Id"))
@@ -428,7 +521,6 @@ class ComexioAPI:
 
     def _process_ios(
         self,
-        conf: dict[str, Any],
         data: dict[str, Any],
         schema_io: str,
         server_alias: str,
@@ -505,14 +597,20 @@ class ComexioAPI:
     # --- WEB-IO MANAGEMENT ---
     async def get_webio_base_info(self, webio_name: str) -> tuple[str, bool] | None:
         """Scans classes via add-page."""
-        url_add = f"http://{self.host}/admin/web_io/add"
+        url_add = f"{self._base_url}/admin/web_io/add"
         async with self.session.get(url_add) as resp:
+            if resp.status != 200:
+                _LOGGER.error("Failed to fetch Web-IO add page (HTTP %s)", resp.status)
+                return None
             html = await resp.text()
             pattern = rf'<option value="(\d+)"[^>]*>{re.escape(webio_name)}</option>'
             if match := re.search(pattern, html, re.IGNORECASE):
                 b_id = match[1]
-                url_win = f"http://{self.host}/admin/web_io/baseDeviceWindow/"
+                url_win = f"{self._base_url}/admin/web_io/baseDeviceWindow/"
                 async with self.session.get(url_win) as win_resp:
+                    if win_resp.status != 200:
+                        _LOGGER.error("Failed to fetch Web-IO base window (HTTP %s)", win_resp.status)
+                        return None
                     win_html = await win_resp.text()
 
                     return (b_id, f"delete_web_device_base/?id={b_id}" in win_html)
@@ -520,8 +618,11 @@ class ComexioAPI:
 
     async def get_webio_device_info(self, device_name: str) -> str | None:
         """Checks instance existence via HTML tabs."""
-        url_home = f"http://{self.host}/admin/web_io/home"
+        url_home = f"{self._base_url}/admin/web_io/home"
         async with self.session.get(url_home) as resp:
+            if resp.status != 200:
+                _LOGGER.error("Failed to fetch Web-IO home page (HTTP %s)", resp.status)
+                return None
             html = await resp.text()
             pattern = rf'<a id="tab-link-(\d+)"[^>]*>{re.escape(device_name)}</a>'
             return m[1] if (m := re.search(pattern, html, re.IGNORECASE)) else None
@@ -531,23 +632,28 @@ class ComexioAPI:
         Tries to delete the device instance.
         Returns True if successful, False if blocked by Comexio logic.
         """
-        url = f"http://{self.host}/admin/web_io/delete_device/?id={device_id}"
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"http://{self.host}/admin/web_io/home"}
+        url = f"{self._base_url}/admin/web_io/delete_device/?id={device_id}"
+        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
         _LOGGER.debug("Deleting Web-IO device %s via GET: %s", device_id, url)
         async with self.session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.error("Failed to delete Web-IO device %s (HTTP %s)", device_id, resp.status)
+                return False
             html = await resp.text()
 
             # Check for jQuery UI error state which indicates the device is in use
             if 'class="ui-state-error' in html or "ui-state-error" in html:
                 _LOGGER.warning("Device %s is in use within Comexio logic and cannot be deleted.", device_id)
                 return False
-            return resp.status == 200
+            return True
 
     async def delete_webio_base(self, base_id: str | int) -> bool:
         """Sends DELETE command for device class template."""
-        url = f"http://{self.host}/admin/web_io/delete_web_device_base/?id={base_id}"
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"http://{self.host}/admin/web_io/home"}
+        url = f"{self._base_url}/admin/web_io/delete_web_device_base/?id={base_id}"
+        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
         async with self.session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.error("Failed to delete Web-IO base %s (HTTP %s)", base_id, resp.status)
             return resp.status == 200
 
     async def update_webio_device_ip(self, device_id: str | int, ha_address: str) -> bool:
@@ -556,7 +662,7 @@ class ComexioAPI:
         Uses the specific POST format required by Comexio's main save handler.
         """
         _LOGGER.info("Updating Web-IO device %s address to %s", device_id, ha_address)
-        url = f"http://{self.host}/admin/web_io/save"
+        url = f"{self._base_url}/admin/web_io/save"
 
         webio_name = "HomeAssistant"
         if self.config_entry:
@@ -577,7 +683,7 @@ class ComexioAPI:
 
         payload = {"no_reload": "true", "JSON": json.dumps(device_data)}
 
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"http://{self.host}/admin/web_io/home"}
+        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
 
         async with self.session.post(url, data=payload, headers=headers) as resp:
             if resp.status == 200:
@@ -599,8 +705,10 @@ class ComexioAPI:
     async def delete_single_command(self, cmd_id: str | int, device_id: str | int) -> bool:
         """Removes an individual command instance (Delta Sync)."""
         _LOGGER.info("Deleting individual Web-IO command ID: %s", cmd_id)
-        url = f"http://{self.host}/admin/web_io/delete_web_command/?id={cmd_id}&dev={device_id}"
+        url = f"{self._base_url}/admin/web_io/delete_web_command/?id={cmd_id}&dev={device_id}"
         async with self.session.get(url) as resp:
+            if resp.status != 200:
+                _LOGGER.error("Failed to delete Web-IO command %s (HTTP %s)", cmd_id, resp.status)
             return resp.status == 200
 
     async def save_single_command(
@@ -615,7 +723,7 @@ class ComexioAPI:
         If existing_cmd_id is provided, an UPDATE is performed.
         """
         _LOGGER.info("Applying command: %s (Update: %s)", cmd_payload.get("Name"), existing_cmd_id is not None)
-        url = f"http://{self.host}/admin/web_io/save_command"
+        url = f"{self._base_url}/admin/web_io/save_command"
 
         # Base64 identifier for Comexio
         if existing_cmd_id:
@@ -663,7 +771,7 @@ class ComexioAPI:
         else:
             payload["deviceBaseId"] = str(base_id) if base_id is not None else "0"
 
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"http://{self.host}/admin/web_io/home"}
+        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
 
         # _LOGGER.debug("Sending save_single_command payload: %s", payload)
 
@@ -772,12 +880,12 @@ class ComexioAPI:
 
     async def upload_web_io(self, server_id: str, webio_name: str, web_io_json: str) -> tuple[bool, str]:
         """Uploads JSON class template."""
-        url = f"http://{self.host}/admin/web_io/upload_device_settings"
+        url = f"{self._base_url}/admin/web_io/upload_device_settings"
         file_data = io.BytesIO(web_io_json.encode("utf-8"))
         form = aiohttp.FormData()
         form.add_field("file", file_data, filename=f"ha_{server_id}.json", content_type="application/json")
         form.add_field("set_name", webio_name)
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"http://{self.host}/admin/web_io/home"}
+        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
         async with self.session.post(url, data=form, headers=headers) as resp:
             if resp.status == 200:
                 result = await resp.json(content_type=None)
@@ -790,7 +898,7 @@ class ComexioAPI:
         if not ha_address:
             ha_address = await self.get_ha_address()
 
-        url = f"http://{self.host}/admin/web_io/saveDeviceWindow"
+        url = f"{self._base_url}/admin/web_io/saveDeviceWindow"
 
         payload = {
             "name": name,
@@ -815,16 +923,15 @@ class ComexioAPI:
         identifier: str | None = None,
     ) -> bool:
         """API write via Basic Auth."""
-        auth = aiohttp.BasicAuth(self.api_user, self.api_pass) if self.api_user else None
+        auth = aiohttp.BasicAuth(self.api_user, self.api_pass or "") if self.api_user else None
 
-        if auth is not None and not self._auth_warned:
+        if auth is not None and not self._auth_warned and not _is_local_address(self.host):
             _LOGGER.warning(
-                "Using Basic Auth over plain HTTP for Comexio API writes. "
-                "Credentials and control traffic will be transmitted in clear text."
+                "Using Basic Auth over plain HTTP on a non-local address. Credentials may be transmitted in clear text."
             )
             self._auth_warned = True
 
-        url = f"http://{self.host}/api/"
+        url = f"{self._base_url}/api/"
         params: dict[str, Any] = {"action": "set", "value": value}
 
         if target_type == "marker":

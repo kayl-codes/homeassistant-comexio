@@ -10,7 +10,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS, DOMAIN, MARKER_INTERVAL_MAX_VALUE, MARKER_TYPE_INTERVAL
+from .const import DOMAIN, MARKER_INTERVAL_MAX_VALUE, MARKER_TYPE_INTERVAL
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -59,11 +59,8 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
         else:
             name_lower = marker["name"].lower()
 
-            # Fetch custom cover keywords from config
-            conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
-            kw_str = str(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
-            cover_kw = [kw.strip().lower() for kw in kw_str.split(",") if kw.strip()]
-            is_cover = any(x in name_lower for x in cover_kw)
+            # Use precomputed cover keywords from coordinator
+            is_cover = any(x in name_lower for x in coordinator.cover_keywords)
 
             if "%" in name_lower or is_cover or "dimmer" in name_lower:
                 self._attr_native_unit_of_measurement = PERCENTAGE

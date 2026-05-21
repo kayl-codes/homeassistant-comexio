@@ -10,7 +10,16 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import ComexioAPI
-from .const import CONF_API_PASSWORD, CONF_API_USERNAME, CONF_HOST, CONF_PASSWORD, CONF_USERNAME, DOMAIN
+from .const import (
+    CONF_API_PASSWORD,
+    CONF_API_USERNAME,
+    CONF_COVER_KEYWORDS,
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    DEFAULT_COVER_KEYWORDS,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +45,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.sync_current_step: str | None = None
         self.last_audit_results: dict[str, Any] = {}
         self.cancel_sync: bool = False
+        self.cover_keywords: list[str] = []
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
@@ -47,6 +57,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         try:
             conf = {**self.config_entry.data, **self.config_entry.options}
+
+            # Precompute cover keywords once per update
+            kw_str = str(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
+            self.cover_keywords = [kw.strip().lower() for kw in kw_str.split(",") if kw.strip()]
+
             # Fetch current raw configuration from the Comexio API
             raw_config = await self.api.get_raw_config()
             marker_data = raw_config.get("FubModules", {}).get("2", {})
