@@ -1,4 +1,4 @@
-# Version: 0.7.2
+# Version: 0.7.3
 import contextlib
 from datetime import timedelta
 import logging
@@ -103,7 +103,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handle_webhook)
 
     entry.async_on_unload(entry.add_update_listener(update_listener))
-    hass.data[DOMAIN][entry.entry_id + "_webhook"] = webhook_id
+    hass.data[DOMAIN][f"{entry.entry_id}_webhook"] = webhook_id
 
     # ---------------------------
     # Entity Cleanup
@@ -147,8 +147,7 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Unload and cleanup."""
-    webhook_id = hass.data[DOMAIN].get(entry.entry_id + "_webhook")
-    if webhook_id:
+    if webhook_id := hass.data[DOMAIN].get(f"{entry.entry_id}_webhook"):
         webhook.async_unregister(hass, webhook_id)
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
@@ -156,5 +155,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
         coordinator = hass.data[DOMAIN].pop(entry.entry_id)
         if coordinator and hasattr(coordinator, "api"):
             await coordinator.api.close()
-        hass.data[DOMAIN].pop(entry.entry_id + "_webhook", None)
+        hass.data[DOMAIN].pop(f"{entry.entry_id}_webhook", None)
     return unload_ok

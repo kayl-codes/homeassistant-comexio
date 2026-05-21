@@ -1,26 +1,19 @@
-# Version: 0.7.2
+# Version: 0.7.3
 from typing import Any
+
 from homeassistant.components.sensor import (
-    SensorEntity,
     SensorDeviceClass,
+    SensorEntity,
     SensorStateClass,
 )
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    UnitOfPower,
-    UnitOfElectricCurrent,
-    UnitOfTemperature,
-    UnitOfElectricPotential,
-    UnitOfFrequency,
-    PERCENTAGE,
-    LIGHT_LUX,
-    UnitOfPressure,
-    UnitOfSpeed,
     EntityCategory,
 )
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
 from .const import DOMAIN
 from .coordinator import ComexioCoordinator
 
@@ -35,28 +28,28 @@ UNIT_TO_DEVICE_CLASS = {
     "Pa": SensorDeviceClass.PRESSURE,
     "m/s": SensorDeviceClass.WIND_SPEED,
     "km/h": SensorDeviceClass.WIND_SPEED,
-    "%": SensorDeviceClass.HUMIDITY, # Often used for humidity in Comexio
+    "%": SensorDeviceClass.HUMIDITY,  # Often used for humidity in Comexio
 }
 
-async def async_setup_entry(
-    hass: HomeAssistant, 
-    entry: ConfigEntry, 
-    async_add_entities: AddEntitiesCallback
-) -> None:
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up Comexio sensors based on dynamic type mapping."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    
+
     entities = []
     if entry.data.get("import_ios", True):
-        for io in coordinator.data.get("io", []):
-            # Only analog values (is_binary=False) are created as sensors
-            if not io.get("is_binary"):
-                entities.append(ComexioIOSensor(coordinator, coordinator.server_id, io))
+        # Only analog values (is_binary=False) are created as sensors
+        entities.extend(
+            ComexioIOSensor(coordinator, coordinator.server_id, io)
+            for io in coordinator.data.get("io", [])
+            if not io.get("is_binary")
+        )
 
     # Add the system sync status sensor
     entities.append(ComexioSyncStatusSensor(coordinator, coordinator.server_id))
 
     async_add_entities(entities)
+
 
 class ComexioIOSensor(CoordinatorEntity, SensorEntity):
     """Representation of an analog Comexio Input/Output."""
@@ -67,18 +60,18 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._io_id = io["id"]
-        
+
         # Stable Unique ID for the HA database
         self._attr_unique_id = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
-        self._attr_name = io['ha_name']
-        
+        self._attr_name = io["ha_name"]
+
         # State class 'measurement' enables long-term statistics and graphs
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
         # Dynamic unit and device class mapping from Comexio type list
         unit = io.get("unit", "")
         self._attr_native_unit_of_measurement = unit
-        
+
         # Assign Device Class based on the unit provided by Comexio
         if unit in UNIT_TO_DEVICE_CLASS:
             self._attr_device_class = UNIT_TO_DEVICE_CLASS[unit]
@@ -97,6 +90,7 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> float | str | None:
         """Return the current value from coordinator cache."""
         return self.coordinator.io_states.get(self._io_id)
+
 
 class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
     """Representation of the integration's sync status."""
@@ -123,15 +117,12 @@ class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
     def native_value(self) -> str:
         if getattr(self.coordinator, "in_sync", False):
             return "syncing"
-        if getattr(self.coordinator, "sync_error", False):
-            return "error"
-        return "idle"
+        else:
+            return "error" if getattr(self.coordinator, "sync_error", False) else "idle"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        attrs = {
-            "progress_details": getattr(self.coordinator, "sync_progress_text", "Idle")
-        }
+        attrs = {"progress_details": getattr(self.coordinator, "sync_progress_text", "Idle")}
         if getattr(self.coordinator, "sync_progress_pct", None) is not None:
             attrs["progress"] = self.coordinator.sync_progress_pct
         if getattr(self.coordinator, "sync_current_step", None) is not None:

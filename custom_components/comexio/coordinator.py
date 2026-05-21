@@ -1,8 +1,11 @@
-# Version: 0.7.2
+# Version: 0.7.3
 import json
 import logging
 import socket
+from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -15,26 +18,26 @@ _LOGGER = logging.getLogger(__name__)
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
-    def __init__(self, hass, api: ComexioAPI):
+    def __init__(self, hass: HomeAssistant, api: ComexioAPI) -> None:
         super().__init__(hass, logger=_LOGGER, name=DOMAIN, update_interval=None)
-        self.api = api
+        self.api: ComexioAPI = api
         self.api.config_entry = None
-        self.server_id = None
-        self.config_entry = None
-        self.marker_states = {}
-        self.io_states = {}
-        self.audit_ignored = False
-        self.last_audit_failed = False
-        self.last_summary_hash = None
-        self.in_sync = False
-        self.sync_error = False
-        self.sync_progress_text = "Idle"
-        self.sync_progress_pct = None
-        self.sync_current_step = None
-        self.last_audit_results = {}
-        self.cancel_sync = False
+        self.server_id: str | None = None
+        self.config_entry: ConfigEntry | None = None
+        self.marker_states: dict[str, Any] = {}
+        self.io_states: dict[str, Any] = {}
+        self.audit_ignored: bool = False
+        self.last_audit_failed: bool = False
+        self.last_summary_hash: str | None = None
+        self.in_sync: bool = False
+        self.sync_error: bool = False
+        self.sync_progress_text: str = "Idle"
+        self.sync_progress_pct: int | None = None
+        self.sync_current_step: str | None = None
+        self.last_audit_results: dict[str, Any] = {}
+        self.cancel_sync: bool = False
 
-    async def _async_update_data(self):
+    async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
         if self.in_sync:
             _LOGGER.debug("[%s] Periodic audit skipped: Manual sync or repair is currently in progress", self.server_id)
@@ -47,7 +50,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Fetch current raw configuration from the Comexio API
             raw_config = await self.api.get_raw_config()
             marker_data = raw_config.get("FubModules", {}).get("2", {})
-            max_id = max([int(m.get("Id", 0)) for m in marker_data.values()]) if marker_data else 0
+            max_id = max(int(m.get("Id", 0)) for m in marker_data.values()) if marker_data else 0
 
             live_states = await self.api.get_live_states(max_id)
             parsed_data = self.api.parse_config(raw_config, live_states)
@@ -153,7 +156,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         ip_mismatch = True
                     else:
                         # Ports are identical, compare resolved IPs
-                        def resolve(name):
+                        def resolve(name: str) -> str:
                             try:
                                 return socket.gethostbyname(name)
                             except (OSError, socket.gaierror):
@@ -168,11 +171,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     ip_mismatch = True
 
             # Compare HA entities with Comexio commands to find inconsistencies
-            type_mismatches = []
-            missing_items = []
-            renamed_items = []
-            orphans = []
-            mismatches = set()
+            type_mismatches: list[dict[str, Any]] = []
+            missing_items: list[dict[str, Any]] = []
+            renamed_items: list[dict[str, Any]] = []
+            orphans: list[dict[str, Any]] = []
+            mismatches: set[str] = set()
 
             if ip_mismatch:
                 mismatches.add("ip_address")
@@ -331,7 +334,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.error("[%s] Data fetch failed: %s", self.server_id, e)
             raise
 
-    def update_marker(self, marker_id, value):
+    def update_marker(self, marker_id: str | int, value: float | int | str) -> None:
         marker_id_str = str(marker_id)
         self.marker_states[marker_id_str] = value
         if self.data and "markers" in self.data:
@@ -341,7 +344,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     break
         self.async_set_updated_data(self.data)
 
-    def update_io_by_name(self, ext_name, identifier, value):
+    def update_io_by_name(self, ext_name: str, identifier: str, value: float | int | str) -> None:
         if self.data and "io" in self.data:
             for io in self.data["io"]:
                 if io["ext_name"].lower() == ext_name.lower() and io["identifier"].lower() == identifier.lower():
@@ -350,7 +353,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     break
         self.async_set_updated_data(self.data)
 
-    async def async_config_entry_updated(self):
+    async def async_config_entry_updated(self) -> None:
         """Handle config entry update (e.g. from Options Flow)."""
         _LOGGER.info("[%s] Configuration updated, reloading API settings", self.server_id)
 

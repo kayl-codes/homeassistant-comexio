@@ -1,4 +1,4 @@
-# Version: 0.7.2
+# Version: 0.7.3
 import asyncio
 import datetime
 import logging
@@ -165,19 +165,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 #        "[%s] Delta Sync ETA %ds > %ds. Attempting Fast-Track for action '%s'.",
                 #        self.server_id, total_delta_sec, SYNC_DURATION_RECREATE, action
                 #    )
-                if action in ("full_sync", "update_renames"):
+                if action in {"full_sync", "update_renames"}:
                     action_eta += len(renamed_items) * SYNC_DURATION_WRITE
                     task_count += len(renamed_items)
-                if action in ("full_sync", "delete_orphans"):
+                if action in {"full_sync", "delete_orphans"}:
                     action_eta += len(orphans) * SYNC_DURATION_DELETE
                     task_count += len(orphans)
-                if action in ("full_sync", "create_missing"):
+                if action in {"full_sync", "create_missing"}:
                     action_eta += len(missing_items) * SYNC_DURATION_WRITE
                     task_count += len(missing_items)
-                if action in ("full_sync", "update_types"):
+                if action in {"full_sync", "update_types"}:
                     action_eta += len(type_mismatches) * SYNC_DURATION_WRITE
                     task_count += len(type_mismatches)
-                if action in ("full_sync", "update_ip") and audit_data.get("ip_mismatch"):
+                if action in {"full_sync", "update_ip"} and audit_data.get("ip_mismatch"):
                     action_eta += SYNC_DURATION_WRITE
 
                 if task_count > 1:
@@ -252,7 +252,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
                     msg = f"✅ Recreation successful ({duration_str})."
                 else:
-                    raise Exception(f"Upload failed: {res_id}")
+                    raise RuntimeError(f"Upload failed: {res_id}")
 
             # --- case B: fix step by step ---
             else:
@@ -265,20 +265,20 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 base_id = audit_data.get("com_base_id")
 
                 # Fallback: Resolve Base ID dynamically if missing (crucial for create_missing)
-                if not base_id or str(base_id) in ("0", "None"):
+                if not base_id or str(base_id) in {"0", "None"}:
                     b_info = await api.get_webio_base_info(webio_name)
                     if b_info:
                         base_id = b_info[0]
                         _LOGGER.debug("[%s] Resolved fallback Base ID: %s", self.server_id, base_id)
 
                 tasks_to_do = []
-                if effective_action in ("full_sync", "update_renames"):
+                if effective_action in {"full_sync", "update_renames"}:
                     tasks_to_do.extend([{"item": i, "type": "rename"} for i in renamed_items])
-                if effective_action in ("full_sync", "delete_orphans"):
+                if effective_action in {"full_sync", "delete_orphans"}:
                     tasks_to_do.extend([{"item": i, "type": "delete"} for i in orphans])
-                if effective_action in ("full_sync", "create_missing"):
+                if effective_action in {"full_sync", "create_missing"}:
                     tasks_to_do.extend([{"item": i, "type": "create"} for i in missing_items])
-                if effective_action in ("full_sync", "update_types"):
+                if effective_action in {"full_sync", "update_types"}:
                     tasks_to_do.extend([{"item": i, "type": "type"} for i in type_mismatches])
 
                 total_tasks = max(1, len(tasks_to_do))
@@ -351,7 +351,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
                 # Final step: Update Server Address (IP)
                 updated_ip = False
-                if effective_action in ("full_sync", "update_ip") and audit_data.get("ip_mismatch"):
+                if effective_action in {"full_sync", "update_ip"} and audit_data.get("ip_mismatch"):
                     ha_addr = audit_data.get("ha_address")
                     com_dev_id = audit_data.get("com_device_id")
                     # Explicitly update IP as save_single_command does not update device-level settings

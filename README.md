@@ -2,7 +2,7 @@
 
 🌍 *[🇩🇪 Auf Deutsch lesen (Read this in German)](#-deutsch)*
 
-![Version](https://img.shields.io/badge/version-0.7.2-blue.svg)
+![Version](https://img.shields.io/badge/version-0.7.3-blue.svg)
 ![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blueviolet.svg)
 
@@ -91,7 +91,7 @@ This project is licensed under the MIT License.
 
 # <img src="icon.png" width="40" align="center"> Comexio Integration für Home Assistant
 
-![Version](https://img.shields.io/badge/version-0.7.2-blue.svg)
+![Version](https://img.shields.io/badge/version-0.7.3-blue.svg)
 ![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blueviolet.svg)
 

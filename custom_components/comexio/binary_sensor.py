@@ -1,35 +1,36 @@
-# Version: 0.7.2
+# Version: 0.7.3
 from typing import Any
+
 from homeassistant.components.binary_sensor import (
-    BinarySensorEntity,
     BinarySensorDeviceClass,
+    BinarySensorEntity,
 )
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
 from .const import DOMAIN
 from .coordinator import ComexioCoordinator
 
-async def async_setup_entry(
-    hass: HomeAssistant, 
-    entry: ConfigEntry, 
-    async_add_entities: AddEntitiesCallback
-) -> None:
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up Comexio binary sensors (digital inputs)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    
+
     if not entry.data.get("import_ios", True):
         return
 
-    entities = []
-    for io in coordinator.data["io"]:
+    entities = [
+        ComexioBinarySensor(coordinator, coordinator.server_id, io)
+        for io in coordinator.data["io"]
         # 1. Must be a binary type according to Comexio $ioTypes
         # 2. Must NOT be an output (Q) to avoid duplication with switch.py
-        if io.get("is_binary") and not io["identifier"].startswith("Q"):
-            entities.append(ComexioBinarySensor(coordinator, coordinator.server_id, io))
+        if io.get("is_binary") and not io["identifier"].startswith("Q")
+    ]
 
     async_add_entities(entities)
+
 
 class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
     """Representation of a Comexio Digital Input."""
@@ -40,13 +41,13 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
         """Initialize the binary sensor."""
         super().__init__(coordinator)
         self._io_id = io["id"]
-        
+
         # Unique ID as the stable anchor in HA
         self._attr_unique_id = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
-        self._attr_name = io['ha_name']
+        self._attr_name = io["ha_name"]
 
         # Intelligence: Automatic Device Class assignment based on name
-        name_lower = io['name'].lower()
+        name_lower = io["name"].lower()
         if any(x in name_lower for x in ["bewegung", "presence", "präsenz"]):
             self._attr_device_class = BinarySensorDeviceClass.MOTION
         elif any(x in name_lower for x in ["fenster", "window"]):

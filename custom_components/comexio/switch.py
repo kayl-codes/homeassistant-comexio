@@ -1,32 +1,34 @@
-# Version: 0.7.2
-from typing import Any
-import re
+# Version: 0.7.3
 import logging
-from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.core import HomeAssistant
+import re
+from typing import Any
+
+from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
 from .const import DOMAIN
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_setup_entry(
-    hass: HomeAssistant, 
-    entry: ConfigEntry, 
-    async_add_entities: AddEntitiesCallback
-) -> None:
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up Comexio switches (digital markers and digital outputs)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     entities = []
 
     # 1. Digital Markers
     if entry.data.get("import_markers", True):
-        for marker in coordinator.data.get("markers", []):
-            # Only markers explicitly marked as digital in api.py
-            if marker["type"] == "digital":
-                entities.append(ComexioMarkerSwitch(coordinator, coordinator.server_id, marker))
+        # Only markers explicitly marked as digital in api.py
+        entities.extend(
+            ComexioMarkerSwitch(coordinator, coordinator.server_id, marker)
+            for marker in coordinator.data.get("markers", [])
+            if marker["type"] == "digital"
+        )
 
     # 2. Digital Outputs (Relays)
     if entry.data.get("import_ios", True):
@@ -38,6 +40,7 @@ async def async_setup_entry(
                 entities.append(ComexioIOSwitch(coordinator, coordinator.server_id, io))
 
     async_add_entities(entities)
+
 
 class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a digital Comexio Marker as a Switch."""
@@ -61,7 +64,7 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
-    
+
     @property
     def is_on(self) -> bool:
         """Return true if the digital marker is active."""
@@ -70,13 +73,20 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the marker on."""
-        if await self.coordinator.api.set_value("marker", self._marker_id, 1):
-            self.coordinator.update_marker(self._marker_id, 1)
+        if not await self.coordinator.api.set_value("marker", self._marker_id, 1):
+            raise HomeAssistantError(f"Failed to turn on marker {self._marker_id}")
+
+        self.coordinator.update_marker(self._marker_id, 1)
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the marker off."""
-        if await self.coordinator.api.set_value("marker", self._marker_id, 0):
-            self.coordinator.update_marker(self._marker_id, 0)
+        if not await self.coordinator.api.set_value("marker", self._marker_id, 0):
+            raise HomeAssistantError(f"Failed to turn off marker {self._marker_id}")
+
+        self.coordinator.update_marker(self._marker_id, 0)
+        self.async_write_ha_state()
+
 
 class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a Comexio Digital Output (Relay) as a Switch."""
@@ -89,7 +99,7 @@ class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
         self._io_id = str(io["id"])
         self._ext_name = io["ext_name"]
         self._identifier = io["identifier"]
-        
+
         self._attr_unique_id = f"comexio_{server_id}_{self._ext_name}_{self._identifier}".lower()
         self._attr_name = io["ha_name"]
         # Real outputs are classified as OUTLET by default
@@ -113,10 +123,16 @@ class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the relay on via API."""
-        if await self.coordinator.api.set_value("io", self._io_id, 1, self._ext_name, self._identifier):
-            self.coordinator.update_io_by_name(self._ext_name, self._identifier, 1)
+        if not await self.coordinator.api.set_value("io", self._io_id, 1, self._ext_name, self._identifier):
+            raise HomeAssistantError(f"Failed to turn on IO {self._ext_name} {self._identifier}")
+
+        self.coordinator.update_io_by_name(self._ext_name, self._identifier, 1)
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the relay off via API."""
-        if await self.coordinator.api.set_value("io", self._io_id, 0, self._ext_name, self._identifier):
-            self.coordinator.update_io_by_name(self._ext_name, self._identifier, 0)
+        if not await self.coordinator.api.set_value("io", self._io_id, 0, self._ext_name, self._identifier):
+            raise HomeAssistantError(f"Failed to turn off IO {self._ext_name} {self._identifier}")
+
+        self.coordinator.update_io_by_name(self._ext_name, self._identifier, 0)
+        self.async_write_ha_state()

@@ -1,0 +1,9 @@
+version: "1"
+
+rule_settings:
+  enable:
+    - default
+
+ignore:
+  - ".github/"
+  - "tests/"
