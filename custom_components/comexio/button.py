@@ -1,4 +1,4 @@
-# Version: 0.7.2
+# Version: 0.7.5
 import asyncio
 import datetime
 import logging
@@ -9,7 +9,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_platform
+from homeassistant.helpers import device_registry as dr, entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
@@ -40,7 +40,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     platform = entity_platform.async_get_current_platform()
     platform.async_register_entity_service(
         "press_action",
-        {vol.Required("action"): cv.string},
+        {
+            vol.Required("action"): vol.In(
+                [
+                    "full_sync",
+                    "update_types",
+                    "create_missing",
+                    "update_renames",
+                    "delete_orphans",
+                    "update_ip",
+                ]
+            )
+        },
         "async_handle_press",
     )
 
@@ -94,6 +105,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def async_handle_press(self, action: str = "full_sync") -> None:
         """Execute the sync logic with mode selection."""
+        if self.coordinator._sync_lock.locked():
+            _LOGGER.warning("[%s] Sync already in progress, ignoring concurrent request", self.server_id)
+            return
+        await self.coordinator._sync_lock.acquire()
         self.coordinator.in_sync = True
         self.coordinator.sync_error = False
 
@@ -165,19 +180,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 #        "[%s] Delta Sync ETA %ds > %ds. Attempting Fast-Track for action '%s'.",
                 #        self.server_id, total_delta_sec, SYNC_DURATION_RECREATE, action
                 #    )
-                if action in ("full_sync", "update_renames"):
+                if action in {"full_sync", "update_renames"}:
                     action_eta += len(renamed_items) * SYNC_DURATION_WRITE
                     task_count += len(renamed_items)
-                if action in ("full_sync", "delete_orphans"):
+                if action in {"full_sync", "delete_orphans"}:
                     action_eta += len(orphans) * SYNC_DURATION_DELETE
                     task_count += len(orphans)
-                if action in ("full_sync", "create_missing"):
+                if action in {"full_sync", "create_missing"}:
                     action_eta += len(missing_items) * SYNC_DURATION_WRITE
                     task_count += len(missing_items)
-                if action in ("full_sync", "update_types"):
+                if action in {"full_sync", "update_types"}:
                     action_eta += len(type_mismatches) * SYNC_DURATION_WRITE
                     task_count += len(type_mismatches)
-                if action in ("full_sync", "update_ip") and audit_data.get("ip_mismatch"):
+                if action in {"full_sync", "update_ip"} and audit_data.get("ip_mismatch"):
                     action_eta += SYNC_DURATION_WRITE
 
                 if task_count > 1:
@@ -252,7 +267,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
                     msg = f"✅ Recreation successful ({duration_str})."
                 else:
-                    raise Exception(f"Upload failed: {res_id}")
+                    raise RuntimeError(f"Upload failed: {res_id}")
 
             # --- case B: fix step by step ---
             else:
@@ -265,20 +280,20 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 base_id = audit_data.get("com_base_id")
 
                 # Fallback: Resolve Base ID dynamically if missing (crucial for create_missing)
-                if not base_id or str(base_id) in ("0", "None"):
+                if not base_id or str(base_id) in {"0", "None"}:
                     b_info = await api.get_webio_base_info(webio_name)
                     if b_info:
                         base_id = b_info[0]
                         _LOGGER.debug("[%s] Resolved fallback Base ID: %s", self.server_id, base_id)
 
                 tasks_to_do = []
-                if effective_action in ("full_sync", "update_renames"):
+                if effective_action in {"full_sync", "update_renames"}:
                     tasks_to_do.extend([{"item": i, "type": "rename"} for i in renamed_items])
-                if effective_action in ("full_sync", "delete_orphans"):
+                if effective_action in {"full_sync", "delete_orphans"}:
                     tasks_to_do.extend([{"item": i, "type": "delete"} for i in orphans])
-                if effective_action in ("full_sync", "create_missing"):
+                if effective_action in {"full_sync", "create_missing"}:
                     tasks_to_do.extend([{"item": i, "type": "create"} for i in missing_items])
-                if effective_action in ("full_sync", "update_types"):
+                if effective_action in {"full_sync", "update_types"}:
                     tasks_to_do.extend([{"item": i, "type": "type"} for i in type_mismatches])
 
                 total_tasks = max(1, len(tasks_to_do))
@@ -351,7 +366,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
                 # Final step: Update Server Address (IP)
                 updated_ip = False
-                if effective_action in ("full_sync", "update_ip") and audit_data.get("ip_mismatch"):
+                if effective_action in {"full_sync", "update_ip"} and audit_data.get("ip_mismatch"):
                     ha_addr = audit_data.get("ha_address")
                     com_dev_id = audit_data.get("com_device_id")
                     # Explicitly update IP as save_single_command does not update device-level settings
@@ -380,12 +395,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                         + f".\n⏱ Duration: {duration_str} (Plan: {plan_str})"
                     )
 
-            # Reset missing/ignore flag
-            new_options = dict(self.coordinator.config_entry.options)
-            new_options["audit_ignored"] = False
-            self.hass.config_entries.async_update_entry(self.coordinator.config_entry, options=new_options)
             self.coordinator.last_audit_failed = False
-
             _update_status(msg, pct=100, step_info="Done")
 
         except Exception as e:
@@ -404,13 +414,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             self.coordinator.sync_current_step = None
             self.coordinator.async_set_updated_data(self.coordinator.data)
 
-            # 2. Give the Comexio server a moment to finish the write operation
+            # 2. Reset audit_ignored. Set the skip flag first so the update_listener
+            #    suppresses its reload — the explicit reload below is the single reload (R2).
+            new_options = dict(self.coordinator.config_entry.options)
+            new_options["audit_ignored"] = False
+            self.coordinator._skip_next_listener_reload = True
+            self.hass.config_entries.async_update_entry(self.coordinator.config_entry, options=new_options)
+
+            # 3. Release sync lock before reload (old coordinator is replaced by reload anyway)
+            self.coordinator._sync_lock.release()
+
+            # 4. Give the Comexio server a moment to finish the write operation;
+            #    the update_listener task runs here, sees the skip flag, and returns. (R2)
             await asyncio.sleep(0.5)
 
-            # 3. Reset UI button
+            # 5. Reset UI button
             self.async_write_ha_state()
 
-            # 4. Restart integration (necessary!)
+            # 6. Restart integration (necessary!)
             _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
             await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
 

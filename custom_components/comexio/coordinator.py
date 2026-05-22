@@ -1,13 +1,26 @@
-# Version: 0.7.2
-import json
+# Version: 0.7.5
+import asyncio
 import logging
 import socket
+from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import ComexioAPI
-from .const import CONF_API_PASSWORD, CONF_API_USERNAME, CONF_HOST, CONF_PASSWORD, CONF_USERNAME, DOMAIN
+from .const import (
+    CONF_API_PASSWORD,
+    CONF_API_USERNAME,
+    CONF_COVER_KEYWORDS,
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_SERVER_ID,
+    CONF_USERNAME,
+    DEFAULT_COVER_KEYWORDS,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -15,26 +28,41 @@ _LOGGER = logging.getLogger(__name__)
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
-    def __init__(self, hass, api: ComexioAPI):
-        super().__init__(hass, logger=_LOGGER, name=DOMAIN, update_interval=None)
-        self.api = api
-        self.api.config_entry = None
-        self.server_id = None
-        self.config_entry = None
-        self.marker_states = {}
-        self.io_states = {}
-        self.audit_ignored = False
-        self.last_audit_failed = False
-        self.last_summary_hash = None
-        self.in_sync = False
-        self.sync_error = False
-        self.sync_progress_text = "Idle"
-        self.sync_progress_pct = None
-        self.sync_current_step = None
-        self.last_audit_results = {}
-        self.cancel_sync = False
+    def __init__(self, hass: HomeAssistant, api: ComexioAPI, entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            logger=_LOGGER,
+            name=DOMAIN,
+            update_interval=None,
+            config_entry=entry,
+        )
+        self.api: ComexioAPI = api
+        self.api.config_entry = entry
+        self.server_id: str = entry.data[CONF_SERVER_ID]
+        self.marker_states: dict[str, Any] = {}
+        self.io_states: dict[str, Any] = {}
+        # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
+        self._io_index: dict[tuple[str, str], dict[str, Any]] = {}
+        self.audit_ignored: bool = False
+        self.last_audit_failed: bool = False
+        self.last_summary_hash: str | None = None
+        self.in_sync: bool = False
+        self.sync_error: bool = False
+        self.sync_progress_text: str = "Idle"
+        self.sync_progress_pct: int | None = None
+        self.sync_current_step: str | None = None
+        self.last_audit_results: dict[str, Any] = {}
+        self.cancel_sync: bool = False
+        self.cover_keywords: list[str] = []
+        # R4: Lock to prevent concurrent sync runs
+        self._sync_lock: asyncio.Lock = asyncio.Lock()
+        # R2: Suppress update_listener reload when sync triggers the options write
+        self._skip_next_listener_reload: bool = False
+        # R1: Track which markers/IOs received a webhook update during the last API fetch
+        self._webhook_updated_markers: set[str] = set()
+        self._webhook_updated_io_ids: set[str] = set()
 
-    async def _async_update_data(self):
+    async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
         if self.in_sync:
             _LOGGER.debug("[%s] Periodic audit skipped: Manual sync or repair is currently in progress", self.server_id)
@@ -42,12 +70,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         _LOGGER.debug("[%s] Starting periodic configuration audit to detect mismatches", self.server_id)
 
+        # R1: Clear dirty sets before async fetches so any webhooks arriving during
+        # the HTTP round-trips are tracked and win over the (older) API snapshot.
+        self._webhook_updated_markers.clear()
+        self._webhook_updated_io_ids.clear()
+
         try:
             conf = {**self.config_entry.data, **self.config_entry.options}
+
+            # Precompute cover keywords once per update
+            kw_str = str(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
+            self.cover_keywords = [kw.strip().lower() for kw in kw_str.split(",") if kw.strip()]
+
             # Fetch current raw configuration from the Comexio API
             raw_config = await self.api.get_raw_config()
             marker_data = raw_config.get("FubModules", {}).get("2", {})
-            max_id = max([int(m.get("Id", 0)) for m in marker_data.values()]) if marker_data else 0
+            max_id = max(int(m.get("Id", 0)) for m in marker_data.values()) if marker_data else 0
 
             live_states = await self.api.get_live_states(max_id)
             parsed_data = self.api.parse_config(raw_config, live_states)
@@ -61,11 +99,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "webio_commands": parsed_data.get("webio_commands", {}),
             }
 
-            # Update local state cache to ensure the UI remains responsive
+            # R1: Merge API snapshot with any webhook values that arrived during the fetch.
+            # Webhooks that fired while awaiting get_raw_config / get_live_states already
+            # updated marker_states / io_states — prefer those over the (older) API value.
             for m in final_data["markers"]:
-                self.marker_states[m["id"]] = m["value"]
+                if m["id"] in self._webhook_updated_markers:
+                    m["value"] = self.marker_states.get(m["id"], m["value"])
+                else:
+                    self.marker_states[m["id"]] = m["value"]
+
             for io in final_data["io"]:
-                self.io_states[io["id"]] = io["value"]
+                if io["id"] in self._webhook_updated_io_ids:
+                    io["value"] = self.io_states.get(io["id"], io["value"])
+                else:
+                    self.io_states[io["id"]] = io["value"]
+
+            # Rebuild O(1) lookup index for webhook IO updates
+            self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
 
             # --- SMART AUDIT LOGIC ---
             com_commands = final_data["webio_commands"]
@@ -133,9 +183,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.last_audit_failed = False
 
             # Prepare payload map for future delta updates via button/repairs
-            webio_name = conf.get("webio_name", "HomeAssistant")
-            full_json = json.loads(self.api.generate_webio_json(self.server_id, webio_name, final_data))
-            payload_map = {cmd["Name"]: cmd for cmd in full_json.get("commands", [])}
+            payload_map = {cmd["Name"]: cmd for cmd in self.api.build_webio_commands(self.server_id, final_data)}
 
             # --- IP/Port Audit ---
             ha_address = await self.api.get_ha_address()
@@ -153,7 +201,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         ip_mismatch = True
                     else:
                         # Ports are identical, compare resolved IPs
-                        def resolve(name):
+                        def resolve(name: str) -> str:
                             try:
                                 return socket.gethostbyname(name)
                             except (OSError, socket.gaierror):
@@ -168,11 +216,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     ip_mismatch = True
 
             # Compare HA entities with Comexio commands to find inconsistencies
-            type_mismatches = []
-            missing_items = []
-            renamed_items = []
-            orphans = []
-            mismatches = set()
+            type_mismatches: list[dict[str, Any]] = []
+            missing_items: list[dict[str, Any]] = []
+            renamed_items: list[dict[str, Any]] = []
+            orphans: list[dict[str, Any]] = []
+            mismatches: set[str] = set()
 
             if ip_mismatch:
                 mismatches.add("ip_address")
@@ -331,9 +379,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.error("[%s] Data fetch failed: %s", self.server_id, e)
             raise
 
-    def update_marker(self, marker_id, value):
+    def update_marker(self, marker_id: str | int, value: float | int | str) -> None:
         marker_id_str = str(marker_id)
         self.marker_states[marker_id_str] = value
+        self._webhook_updated_markers.add(marker_id_str)  # R1: mark as received during possible fetch
         if self.data and "markers" in self.data:
             for m in self.data["markers"]:
                 if str(m["id"]) == marker_id_str:
@@ -341,16 +390,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     break
         self.async_set_updated_data(self.data)
 
-    def update_io_by_name(self, ext_name, identifier, value):
-        if self.data and "io" in self.data:
-            for io in self.data["io"]:
-                if io["ext_name"].lower() == ext_name.lower() and io["identifier"].lower() == identifier.lower():
-                    self.io_states[io["id"]] = value
-                    io["value"] = value
-                    break
+    def update_io_by_name(self, ext_name: str, identifier: str, value: float | int | str) -> None:
+        key = (ext_name.lower(), identifier.lower())
+        if io := self._io_index.get(key):
+            self.io_states[io["id"]] = value
+            io["value"] = value
+            self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
         self.async_set_updated_data(self.data)
 
-    async def async_config_entry_updated(self):
+    async def async_config_entry_updated(self) -> None:
         """Handle config entry update (e.g. from Options Flow)."""
         _LOGGER.info("[%s] Configuration updated, reloading API settings", self.server_id)
 

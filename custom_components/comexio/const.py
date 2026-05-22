@@ -1,4 +1,4 @@
-# Version: 0.7.2
+# Version: 0.7.5
 DOMAIN = "comexio"
 
 CONF_HOST = "host"
@@ -18,8 +18,11 @@ CONF_API_PASSWORD = "api_password"
 CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
 DEFAULT_ENABLE_NOTIFICATIONS = True
 
+CONF_COVER_KEYWORDS = "cover_keywords"
+DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
+
 # webHook
-#WEBHOOK_ID = "comexio_webhook"
+# WEBHOOK_ID = "comexio_webhook"
 
 DEFAULT_NAME = "Comexio"
 
@@ -31,6 +34,9 @@ SCAN_INTERVAL_DEFAULT = 15
 SYNC_DURATION_DELETE = 4
 SYNC_DURATION_WRITE = 35
 SYNC_DURATION_RECREATE = 79
+
+MARKER_TYPE_INTERVAL = 3
+MARKER_INTERVAL_MAX_VALUE = 86400
 
 DEFAULT_HOST = "192.168.1.100"
 
@@ -44,5 +50,5 @@ KNOWN_DOMAINS = [
     "tplinkwifi.net",
     "home.arpa",
     "mshome.net",
-    "internal"
+    "internal",
 ]

@@ -19,7 +19,8 @@
           "api_password": "API Password (Basic Auth)",
           "import_markers": "Create entities for markers",
           "import_ios": "Create entities for IOs",
-          "scan_interval": "Background polling interval (min)"
+          "scan_interval": "Background polling interval (min)",
+          "cover_keywords": "Keywords for cover detection"
         }
       }
     }
@@ -36,11 +37,13 @@
           "schema_io": "Naming Schema for IOs",
           "scan_interval": "Background polling interval (min)",
           "enable_notifications": "Show UI pop-up notifications during sync",
-          "audit_ignored": "Ignore missing Web-IO warnings"
+          "audit_ignored": "Ignore missing Web-IO warnings",
+          "cover_keywords": "Keywords for cover detection"
         },
         "data_description": {
-          "schema_marker": "Available variables: {MarkerId}, {MarkerTitle}",
-          "schema_io": "Available variables: {ExtName}, {IoId}, {IoTitle}"
+          "schema_marker": "Available variables: '{'MarkerId'}', '{'MarkerTitle'}'",
+          "schema_io": "Available variables: '{'ExtName'}', '{'IoId'}', '{'IoTitle'}'",
+          "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)"
         }
       }
     }
@@ -68,7 +71,7 @@
   "issues": {
     "sync_mismatch": {
       "title": "Comexio Web-IO out of sync",
-      "description": "Config has {com} / {ha} webIO commands.",
+      "description": "Config has {com_count} / {ha_count} webIO commands.",
       "fix_flow": {
         "step": {
           "select_action": {

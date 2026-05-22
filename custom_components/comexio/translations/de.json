@@ -19,7 +19,8 @@
           "api_password": "API Passwort (Basic Auth)",
           "import_markers": "Merker als Entitäten anlegen",
           "import_ios": "Ein- und Ausgänge anlegen",
-          "scan_interval": "Abfrageintervall (Minuten)"
+          "scan_interval": "Abfrageintervall (Minuten)",
+          "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
         }
       }
     }
@@ -36,11 +37,13 @@
           "schema_io": "Namensschema für IOs",
           "scan_interval": "Abfrageintervall (Minuten)",
           "enable_notifications": "Fortschritts-Popups während des Syncs anzeigen",
-          "audit_ignored": "Warnung bei fehlender Web-IO Klasse ignorieren"
+          "audit_ignored": "Warnung bei fehlender Web-IO Klasse ignorieren",
+          "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
         },
         "data_description": {
-          "schema_marker": "Verfügbare Variablen: {MarkerId}, {MarkerTitle}",
-          "schema_io": "Verfügbare Variablen: {ExtName}, {IoId}, {IoTitle}"
+          "schema_marker": "Verfügbare Variablen: '{'MarkerId'}', '{'MarkerTitle'}'",
+          "schema_io": "Verfügbare Variablen: '{'ExtName'}', '{'IoId'}', '{'IoTitle'}'",
+          "cover_keywords": "Kommaseparierte Liste (z.B. rollo, jalousie, blind)"
         }
       }
     }

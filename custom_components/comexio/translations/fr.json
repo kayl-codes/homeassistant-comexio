@@ -1,0 +1,97 @@
+{
+  "config": {
+    "error": {
+      "server_id_exists": "Ce nom d'instance est déjà utilisé.",
+      "cannot_connect": "La connexion à Comexio a échoué.",
+      "invalid_auth": "Identifiants invalides (Interface Utilisateur/Mot de passe).",
+      "unknown": "Une erreur inattendue s'est produite."
+    },
+    "step": {
+      "user": {
+        "title": "Ajouter un serveur IO Comexio",
+        "data": {
+          "server_id": "Nom de l'instance (Préfixe pour les ID)",
+          "webio_name": "Nom de la classe d'appareil dans Comexio",
+          "host": "Hôte / Adresse IP",
+          "username": "Nom d'utilisateur (Admin)",
+          "password": "Mot de passe (Admin)",
+          "api_username": "Nom d'utilisateur API (Basic Auth)",
+          "api_password": "Mot de passe API (Basic Auth)",
+          "import_markers": "Créer des entités pour les marqueurs",
+          "import_ios": "Créer des entités pour les IOs",
+          "scan_interval": "Intervalle d'interrogation en arrière-plan (min)",
+          "cover_keywords": "Mots-clés pour la détection des volets"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Paramètres Comexio",
+        "data": {
+          "host": "Hôte / Adresse IP",
+          "password": "Mot de passe Admin",
+          "api_password": "Mot de passe API (Basic Auth)",
+          "schema_marker": "Schéma de nommage pour les marqueurs",
+          "schema_io": "Schéma de nommage pour les IOs",
+          "scan_interval": "Intervalle d'interrogation en arrière-plan (min)",
+          "enable_notifications": "Afficher les notifications contextuelles pendant la synchronisation",
+          "audit_ignored": "Ignorer les avertissements de classe Web-IO manquante",
+          "cover_keywords": "Mots-clés pour la détection des volets"
+        },
+        "data_description": {
+          "schema_marker": "Variables disponibles : '{'MarkerId'}', '{'MarkerTitle'}'",
+          "schema_io": "Variables disponibles : '{'ExtName'}', '{'IoId'}', '{'IoTitle'}'",
+          "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "webio_sync": {
+        "name": "Démarrer la synchronisation WebIO"
+      },
+      "cancel_sync": {
+        "name": "Annuler la synchronisation WebIO"
+      }
+    },
+    "sensor": {
+      "sync_status": {
+        "name": "État de la synchronisation WebIO",
+        "state": {
+          "idle": "Inactif",
+          "syncing": "Synchronisation...",
+          "error": "Erreur"
+        }
+      }
+    }
+  },
+  "issues": {
+    "sync_mismatch": {
+      "title": "Web-IO Comexio désynchronisé",
+      "description": "La configuration diffère ({com_count} / {ha_count} commandes webIO).",
+      "fix_flow": {
+        "step": {
+          "select_action": {
+            "title": "Réparation Web-IO",
+            "description": "{summary_text}"
+          }
+        }
+      }
+    },
+    "missing_webio_class": {
+      "title": "Classe Web-IO Comexio manquante",
+      "description": "La classe d'appareil Web-IO pour le serveur {server_id} est introuvable. Veuillez effectuer la configuration initiale.",
+      "fix_flow": {
+        "step": {
+          "select_action": {
+            "title": "Configuration initiale",
+            "description": "La classe d'appareil Web-IO requise est introuvable sur votre serveur Comexio.\n\nVoulez-vous créer la classe et l'appareil maintenant ?"
+          }
+        }
+      }
+    }
+  }
+}
