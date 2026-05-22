@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 import logging
 import re
 from typing import Any
@@ -19,10 +19,11 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up Comexio switches (digital markers and digital outputs)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    conf = {**entry.data, **entry.options}
     entities = []
 
     # 1. Digital Markers
-    if entry.data.get("import_markers", True):
+    if conf.get("import_markers", True):
         # Only markers explicitly marked as digital in api.py
         entities.extend(
             ComexioMarkerSwitch(coordinator, coordinator.server_id, marker)
@@ -31,7 +32,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         )
 
     # 2. Digital Outputs (Relays)
-    if entry.data.get("import_ios", True):
+    if conf.get("import_ios", True):
         for io in coordinator.data.get("io", []):
             identifier = io.get("identifier", "")
             # Filter: Must be binary AND a real output (Identifier starts with Q followed by digits)

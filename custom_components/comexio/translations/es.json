@@ -41,8 +41,8 @@
           "cover_keywords": "Palabras clave para detectar persianas"
         },
         "data_description": {
-          "schema_marker": "Variables disponibles: {MarkerId}, {MarkerTitle}",
-          "schema_io": "Variables disponibles: {ExtName}, {IoId}, {IoTitle}",
+          "schema_marker": "Variables disponibles: '{'MarkerId'}', '{'MarkerTitle'}'",
+          "schema_io": "Variables disponibles: '{'ExtName'}', '{'IoId'}', '{'IoTitle'}'",
           "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)"
         }
       }
@@ -71,7 +71,7 @@
   "issues": {
     "sync_mismatch": {
       "title": "Web-IO de Comexio desincronizado",
-      "description": "La configuración difiere ({com} / {ha} comandos webIO).",
+      "description": "La configuración difiere ({com_count} / {ha_count} comandos webIO).",
       "fix_flow": {
         "step": {
           "select_action": {

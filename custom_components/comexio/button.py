@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 import asyncio
 import datetime
 import logging
@@ -9,7 +9,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_platform
+from homeassistant.helpers import device_registry as dr, entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
@@ -40,7 +40,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     platform = entity_platform.async_get_current_platform()
     platform.async_register_entity_service(
         "press_action",
-        {vol.Required("action"): cv.string},
+        {
+            vol.Required("action"): vol.In(
+                [
+                    "full_sync",
+                    "update_types",
+                    "create_missing",
+                    "update_renames",
+                    "delete_orphans",
+                    "update_ip",
+                ]
+            )
+        },
         "async_handle_press",
     )
 
@@ -94,6 +105,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def async_handle_press(self, action: str = "full_sync") -> None:
         """Execute the sync logic with mode selection."""
+        if self.coordinator._sync_lock.locked():
+            _LOGGER.warning("[%s] Sync already in progress, ignoring concurrent request", self.server_id)
+            return
+        await self.coordinator._sync_lock.acquire()
         self.coordinator.in_sync = True
         self.coordinator.sync_error = False
 
@@ -380,12 +395,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                         + f".\n⏱ Duration: {duration_str} (Plan: {plan_str})"
                     )
 
-            # Reset missing/ignore flag
-            new_options = dict(self.coordinator.config_entry.options)
-            new_options["audit_ignored"] = False
-            self.hass.config_entries.async_update_entry(self.coordinator.config_entry, options=new_options)
             self.coordinator.last_audit_failed = False
-
             _update_status(msg, pct=100, step_info="Done")
 
         except Exception as e:
@@ -404,13 +414,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             self.coordinator.sync_current_step = None
             self.coordinator.async_set_updated_data(self.coordinator.data)
 
-            # 2. Give the Comexio server a moment to finish the write operation
+            # 2. Reset audit_ignored. Set the skip flag first so the update_listener
+            #    suppresses its reload — the explicit reload below is the single reload (R2).
+            new_options = dict(self.coordinator.config_entry.options)
+            new_options["audit_ignored"] = False
+            self.coordinator._skip_next_listener_reload = True
+            self.hass.config_entries.async_update_entry(self.coordinator.config_entry, options=new_options)
+
+            # 3. Release sync lock before reload (old coordinator is replaced by reload anyway)
+            self.coordinator._sync_lock.release()
+
+            # 4. Give the Comexio server a moment to finish the write operation;
+            #    the update_listener task runs here, sees the skip flag, and returns. (R2)
             await asyncio.sleep(0.5)
 
-            # 3. Reset UI button
+            # 5. Reset UI button
             self.async_write_ha_state()
 
-            # 4. Restart integration (necessary!)
+            # 6. Restart integration (necessary!)
             _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
             await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
 

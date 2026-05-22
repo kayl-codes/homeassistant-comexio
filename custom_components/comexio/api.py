@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 import base64
 import binascii
 from contextlib import suppress
@@ -38,6 +38,12 @@ LOCAL_HOSTNAME_RE = re.compile(
     r"(?:[a-zA-Z0-9_-]+\.home))\.?$"
 )
 
+# Module-level compiled patterns for get_raw_config (used on every coordinator refresh).
+_IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
+_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
+_VAR_DECL_RE = re.compile(r"var\s+\$([\w\d_]+)\s*=\s*", re.DOTALL)
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
 
 def _is_local_address(host: str) -> bool:
     """Return True if host looks like a local IP or local hostname."""
@@ -62,7 +68,7 @@ def _is_local_address(host: str) -> bool:
 
 def _normalize_js_like_object(obj_str: str) -> str:
     """Remove trailing commas before closing braces/brackets to make JS objects JSON-compatible."""
-    return re.sub(r",(\s*[}\]])", r"\1", obj_str)
+    return _TRAILING_COMMA_RE.sub(r"\1", obj_str)
 
 
 def _extract_js_object_literal(script_text: str, start_index: int) -> tuple[str | None, int]:
@@ -192,25 +198,17 @@ class ComexioAPI:
 
                     def get_local_ip():
                         # Try private IPv4 routing first
-                        try:
-                            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                                s.connect(("10.255.255.255", 1))
-                                return s.getsockname()[0]
-                        except OSError:
-                            pass
+                        with suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                            s.connect(("10.255.255.255", 1))
+                            return s.getsockname()[0]
 
                         # Fallback to IPv6 local routing (ULA prefix)
-                        try:
-                            with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
-                                s.connect(("fd00::", 1))
-                                return s.getsockname()[0]
-                        except OSError:
-                            pass
+                        with suppress(OSError), socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
+                            s.connect(("fd00::", 1))
+                            return s.getsockname()[0]
 
-                        try:
+                        with suppress(OSError):
                             return socket.gethostbyname(socket.gethostname())
-                        except OSError:
-                            pass
 
                         return "127.0.0.1"
 
@@ -302,7 +300,7 @@ class ComexioAPI:
             main_html = await resp.text()
 
         # Extract $ioTypes for dynamic unit and type mapping
-        if assign_match := re.search(r"var\s+\$ioTypes\s*=\s*", main_html):
+        if assign_match := _IO_TYPES_DECL_RE.search(main_html):
             brace_index = main_html.find("{", assign_match.end())
             if brace_index != -1:
                 raw_object, _ = _extract_js_object_literal(main_html, brace_index)
@@ -333,12 +331,11 @@ class ComexioAPI:
             html = await resp.text()
 
         # Restrict search to script tags to avoid scanning entire HTML with a single DOTALL regex
-        script_blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, re.DOTALL | re.IGNORECASE)
-        var_decl_pattern = re.compile(r"var\s+\$([\w\d_]+)\s*=\s*", re.DOTALL)
+        script_blocks = _SCRIPT_BLOCK_RE.findall(html)
 
         result: dict[str, Any] = {}
         for script in script_blocks:
-            for m in var_decl_pattern.finditer(script):
+            for m in _VAR_DECL_RE.finditer(script):
                 var_name = m.group(1)
                 search_start = m.end()
                 brace_index = script.find("{", search_start)
@@ -780,10 +777,13 @@ class ComexioAPI:
             # _LOGGER.debug("save_single_command response [%s]: %s", resp.status, resp_text)
             return resp.status == 200
 
-    def generate_webio_json(self, server_id: str, webio_name: str, parsed_data: dict[str, Any]) -> str:
-        """Generates JSON for import with instant activation flag."""
+    def build_webio_commands(self, server_id: str, parsed_data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build the list of Web-IO command dicts for the given parsed configuration.
+
+        Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
+        """
         webhook_path = f"/api/webhook/comexio_{server_id}"
-        commands = []
+        commands: list[dict[str, Any]] = []
 
         # 1. Create Web-IO for markers
         for m in parsed_data.get("markers", []):
@@ -826,7 +826,6 @@ class ComexioAPI:
         for io_item in parsed_data.get("io", []):
             # check data type
             is_ana = not io_item.get("is_binary", False)
-            # unit = io_item.get("unit", "")
 
             # Use the authentic min/max from the Comexio type definition
             v_min = io_item.get("min", 0)
@@ -869,12 +868,16 @@ class ComexioAPI:
                 }
             )
 
+        return commands
+
+    def generate_webio_json(self, server_id: str, webio_name: str, parsed_data: dict[str, Any]) -> str:
+        """Generate the upload-ready JSON string for the Comexio Web-IO importer."""
         return json.dumps(
             {
                 "data": "web_io",
                 "format": 1,
                 "base": {"Identifier": webio_name, "UseCookies": 0, "Login": 2, "BaseId": 0},
-                "commands": commands,
+                "commands": self.build_webio_commands(server_id, parsed_data),
             }
         )
 

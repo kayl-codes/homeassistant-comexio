@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 from typing import Any
 
 from homeassistant.components.binary_sensor import (
@@ -17,16 +17,17 @@ from .coordinator import ComexioCoordinator
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up Comexio binary sensors (digital inputs)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    conf = {**entry.data, **entry.options}
 
-    if not entry.data.get("import_ios", True):
+    if not conf.get("import_ios", True):
         return
 
     entities = [
         ComexioBinarySensor(coordinator, coordinator.server_id, io)
-        for io in coordinator.data["io"]
+        for io in coordinator.data.get("io", [])
         # 1. Must be a binary type according to Comexio $ioTypes
         # 2. Must NOT be an output (Q) to avoid duplication with switch.py
-        if io.get("is_binary") and not io["identifier"].startswith("Q")
+        if io.get("is_binary") and not io.get("identifier", "").startswith("Q")
     ]
 
     async_add_entities(entities)

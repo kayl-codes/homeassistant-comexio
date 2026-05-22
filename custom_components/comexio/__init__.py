@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 import contextlib
 from datetime import timedelta
 import logging
@@ -6,6 +6,7 @@ import logging
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .api import ComexioAPI
@@ -35,17 +36,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         api_pass=entry.data.get(CONF_API_PASSWORD),
     )
 
-    try:
-        await api.login()
-    except Exception as e:
-        _LOGGER.error("Failed to log in to Comexio API: %s", e)
-        return False
-
-    # Initialize Coordinator
-    coordinator = ComexioCoordinator(hass, api)
-    coordinator.server_id = server_id
-    coordinator.config_entry = entry
-    api.config_entry = entry
+    # Initialize Coordinator (passes config_entry to base class, sets api.config_entry and server_id)
+    coordinator = ComexioCoordinator(hass, api, entry)
 
     # Set custom update interval from config
     conf = {**entry.data, **entry.options}
@@ -53,10 +45,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     coordinator.update_interval = timedelta(minutes=interval)
 
     try:
+        if not await api.login():
+            _LOGGER.error("Comexio login rejected for %s — check credentials", entry.data[CONF_HOST])
+            raise ConfigEntryAuthFailed
         await coordinator.async_config_entry_first_refresh()
-    except Exception as e:
-        _LOGGER.error("Failed to refresh coordinator data: %s", e)
-        return False
+    except Exception:
+        # Close the session on any setup failure to prevent leaks on retry (ConfigEntryNotReady)
+        await api.close()
+        raise
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
@@ -93,9 +89,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 return
             val = data.get("value")
             if data.get("type") == "io":
-                coordinator.update_io_by_name(data.get("ext"), data.get("io"), val)
+                ext = data.get("ext")
+                io_id = data.get("io")
+                if not ext or not io_id:
+                    _LOGGER.warning("Webhook IO event missing ext/io: %s", data)
+                    return
+                coordinator.update_io_by_name(ext, io_id, val)
             else:
-                coordinator.update_marker(data.get("id"), val)
+                marker_id = data.get("id")
+                if marker_id is None:
+                    _LOGGER.warning("Webhook marker event missing id: %s", data)
+                    return
+                coordinator.update_marker(marker_id, val)
         except Exception as e:
             _LOGGER.error("Webhook Error: %s", e)
 
@@ -142,6 +147,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     """Handle options update."""
+    # R2: The sync button sets this flag before writing audit_ignored to options,
+    # so we skip the listener-triggered reload and let the explicit reload in
+    # async_handle_press be the single reload after a sync.
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is not None and getattr(coordinator, "_skip_next_listener_reload", False):
+        coordinator._skip_next_listener_reload = False
+        _LOGGER.debug(
+            "[%s] update_listener: skipping reload (explicit reload pending after sync)", coordinator.server_id
+        )
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -156,4 +171,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
         if coordinator and hasattr(coordinator, "api"):
             await coordinator.api.close()
         hass.data[DOMAIN].pop(f"{entry.entry_id}_webhook", None)
+
+        # Remove global services when the last entry is unloaded
+        if not hass.config_entries.async_entries(DOMAIN):
+            hass.services.async_remove(DOMAIN, "generate_web_io")
+
     return unload_ok

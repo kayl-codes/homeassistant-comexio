@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -35,9 +35,10 @@ UNIT_TO_DEVICE_CLASS = {
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up Comexio sensors based on dynamic type mapping."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    conf = {**entry.data, **entry.options}
 
     entities = []
-    if entry.data.get("import_ios", True):
+    if conf.get("import_ios", True):
         # Only analog values (is_binary=False) are created as sensors
         entities.extend(
             ComexioIOSensor(coordinator, coordinator.server_id, io)

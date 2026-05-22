@@ -1,13 +1,13 @@
 {
   "domain": "comexio",
   "name": "Comexio",
-  "version": "0.7.3",
+  "version": "0.7.5",
   "documentation": "https://github.com/kayl-codes/homeassistant-comexio",
   "issue_tracker": "https://github.com/kayl-codes/homeassistant-comexio/issues",
   "dependencies": ["webhook"],
   "codeowners": ["@kayl-codes"],
   "requirements": ["cryptography>=42.0.0"],
   "config_flow": true,
-  "iot_class": "local_push",
-  "logins": []
+  "integration_type": "hub",
+  "iot_class": "local_push"
 }

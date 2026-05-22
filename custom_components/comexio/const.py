@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 DOMAIN = "comexio"
 
 CONF_HOST = "host"

@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 from homeassistant import config_entries
 from homeassistant.helpers.selector import NumberSelector, NumberSelectorConfig, NumberSelectorMode
 import voluptuous as vol

@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 import logging
 
 from homeassistant.components import persistent_notification

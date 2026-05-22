@@ -41,8 +41,8 @@
           "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
         },
         "data_description": {
-          "schema_marker": "Verfügbare Variablen: {MarkerId}, {MarkerTitle}",
-          "schema_io": "Verfügbare Variablen: {ExtName}, {IoId}, {IoTitle}",
+          "schema_marker": "Verfügbare Variablen: '{'MarkerId'}', '{'MarkerTitle'}'",
+          "schema_io": "Verfügbare Variablen: '{'ExtName'}', '{'IoId'}', '{'IoTitle'}'",
           "cover_keywords": "Kommaseparierte Liste (z.B. rollo, jalousie, blind)"
         }
       }

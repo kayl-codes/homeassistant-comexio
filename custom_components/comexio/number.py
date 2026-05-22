@@ -1,4 +1,4 @@
-# Version: 0.7.3
+# Version: 0.7.5
 import logging
 from typing import Any
 
@@ -19,8 +19,9 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up Comexio numbers (analog markers)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    conf = {**entry.data, **entry.options}
 
-    if not entry.data.get("import_markers", True):
+    if not conf.get("import_markers", True):
         return
 
     entities = [
