@@ -153,7 +153,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         key = parts[1]
                     elif parts[1] == "IO" and len(parts) >= 4:
                         # IO identification via "HA IO <Ext> <Ident>"
-                        key = f"IO_{parts[2]}_{parts[3]}"
+                        # ext_name may contain spaces → use last token as identifier
+                        key = f"IO_{ ' '.join(parts[2:-1]) }_{parts[-1]}"
 
                 if key not in com_map:
                     com_map[key] = []
