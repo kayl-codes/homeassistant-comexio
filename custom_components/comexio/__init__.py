@@ -102,7 +102,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                     return
                 coordinator.update_marker(marker_id, val)
         except Exception as e:
-            _LOGGER.error("Webhook Error: %s", e)
+            _LOGGER.exception("Webhook Error: %s", e)
 
     with contextlib.suppress(ValueError):
         webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handle_webhook)

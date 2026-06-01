@@ -376,7 +376,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return final_data
 
         except Exception as e:
-            _LOGGER.error("[%s] Data fetch failed: %s", self.server_id, e)
+            _LOGGER.exception("[%s] Data fetch failed: %s", self.server_id, e)
             raise
 
     def update_marker(self, marker_id: str | int, value: float | int | str) -> None:

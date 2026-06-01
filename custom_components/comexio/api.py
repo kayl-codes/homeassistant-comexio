@@ -1,6 +1,5 @@
 # Version: 0.7.5
 import base64
-import binascii
 from contextlib import suppress
 import io
 import ipaddress
@@ -41,8 +40,9 @@ LOCAL_HOSTNAME_RE = re.compile(
 # Module-level compiled patterns for get_raw_config (used on every coordinator refresh).
 _IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
 _SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
-_VAR_DECL_RE = re.compile(r"var\s+\$([\w\d_]+)\s*=\s*", re.DOTALL)
+_VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+_CONTENT_TYPE_JSON = "Content-Type: application/json"
 
 
 def _is_local_address(host: str) -> bool:
@@ -223,7 +223,7 @@ class ComexioAPI:
 
             return f"{hostname}:{port}"
         except Exception as e:
-            _LOGGER.error("Failed to determine HA address: %s", e)
+            _LOGGER.exception("Failed to determine HA address: %s", e)
             return "127.0.0.1:8123"
 
     def _encrypt_block(self, data_str: str, mod: int, exp: int) -> str:
@@ -281,8 +281,8 @@ class ComexioAPI:
                     _LOGGER.info("Successfully logged into Comexio Admin interface")
                     return True
             return False
-        except (aiohttp.ClientError, json.JSONDecodeError, KeyError, binascii.Error, ValueError) as e:
-            _LOGGER.error("Critical error during Comexio login: %s", e)
+        except (aiohttp.ClientError, ValueError, KeyError) as e:
+            _LOGGER.exception("Critical error during Comexio login: %s", e)
             return False
 
     async def get_raw_config(self) -> dict[str, Any]:
@@ -382,16 +382,15 @@ class ComexioAPI:
                 try:
                     data = await resp.json(content_type=None)
                     return data.get("result", {})
-                except Exception as json_error:
+                except Exception:
                     raw_text = await resp.text()
-                    _LOGGER.error(
-                        "Failed to parse live states response as JSON: %s; raw response: %s",
-                        json_error,
+                    _LOGGER.exception(
+                        "Failed to parse live states response as JSON; raw response: %s",
                         raw_text,
                     )
                     return {}
         except aiohttp.ClientError as err:
-            _LOGGER.error("HTTP request error fetching live states: %s", err)
+            _LOGGER.exception("HTTP request error fetching live states: %s", err)
             return {}
         except Exception as e:
             _LOGGER.exception("Unexpected error fetching live states: %s", e)
@@ -686,11 +685,10 @@ class ComexioAPI:
             if resp.status == 200:
                 try:
                     result = await resp.json(content_type=None)
-                except Exception as json_error:
+                except Exception:
                     raw_text = await resp.text()
-                    _LOGGER.error(
-                        "Failed to parse Web-IO device IP update response as JSON: %s; raw response: %s",
-                        json_error,
+                    _LOGGER.exception(
+                        "Failed to parse Web-IO device IP update response as JSON; raw response: %s",
                         raw_text,
                     )
                     return False
@@ -735,7 +733,7 @@ class ComexioAPI:
             "dlg_web_device_id": str(device_id),
             "protocol": 0,
             "parameter": cmd_payload["Parameter"],
-            "header_modifier": "Content-Type: application/json",
+            "header_modifier": _CONTENT_TYPE_JSON,
             "data": cmd_payload["Data"],
             "port": "",
             "post_get": 1,
@@ -803,7 +801,7 @@ class ComexioAPI:
                     "Min": 0,
                     "Max": 100 if is_ana else 1,
                     "Parameter": webhook_path,
-                    "HeaderModifier": "Content-Type: application/json",
+                    "HeaderModifier": _CONTENT_TYPE_JSON,
                     "Data": lua,
                     "Protocol": 0,
                     "PostGet": 1,
@@ -849,7 +847,7 @@ class ComexioAPI:
                     "Min": v_min,
                     "Max": v_max,
                     "Parameter": webhook_path,
-                    "HeaderModifier": "Content-Type: application/json",
+                    "HeaderModifier": _CONTENT_TYPE_JSON,
                     "Data": lua,
                     "Protocol": 0,
                     "PostGet": 1,
@@ -958,7 +956,7 @@ class ComexioAPI:
                     return False
                 return True
         except aiohttp.ClientError as err:
-            _LOGGER.error(
+            _LOGGER.exception(
                 "Comexio API write request error for %s with params=%s: %s",
                 url,
                 {k: v for k, v in params.items() if k != "value"},

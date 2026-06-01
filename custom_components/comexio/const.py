@@ -21,9 +21,6 @@ DEFAULT_ENABLE_NOTIFICATIONS = True
 CONF_COVER_KEYWORDS = "cover_keywords"
 DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
 
-# webHook
-# WEBHOOK_ID = "comexio_webhook"
-
 DEFAULT_NAME = "Comexio"
 
 SCAN_INTERVAL_MIN = 1
