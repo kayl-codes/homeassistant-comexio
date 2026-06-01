@@ -39,7 +39,7 @@ LOCAL_HOSTNAME_RE = re.compile(
 
 # Module-level compiled patterns for get_raw_config (used on every coordinator refresh).
 _IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
-_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script>", re.DOTALL | re.IGNORECASE)
+_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script\s*>", re.DOTALL | re.IGNORECASE)
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTENT_TYPE_JSON = "Content-Type: application/json"
@@ -310,7 +310,7 @@ class ComexioAPI:
                         self.io_types = json.loads(clean_json)
                         _LOGGER.debug("Successfully loaded %d Comexio IO types", len(self.io_types))
                     except json.JSONDecodeError as exc:
-                        _LOGGER.error("Failed to decode $ioTypes JSON: %s. Falling back to generic IOs.", exc)
+                        _LOGGER.exception("Failed to decode $ioTypes JSON: %s. Falling back to generic IOs.", exc)
                         self.io_types = {}
                 else:
                     _LOGGER.warning("Failed to parse $ioTypes object. Falling back to generic IOs.")
@@ -906,7 +906,7 @@ class ComexioAPI:
             "ip": ha_address,
             "web_device_base": base_id,
             "username": "",
-            "password": "",
+            "password": "",  # nosec B105
             "web_device_base_sample": "none",
             "identifier": "",
             "form_login": "2",

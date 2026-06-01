@@ -41,8 +41,8 @@
           "cover_keywords": "Mots-clés pour la détection des volets"
         },
         "data_description": {
-          "schema_marker": "Variables disponibles : '{'MarkerId'}', '{'MarkerTitle'}'",
-          "schema_io": "Variables disponibles : '{'ExtName'}', '{'IoId'}', '{'IoTitle'}'",
+          "schema_marker": "Variables disponibles : '{{MarkerId}}', '{{MarkerTitle}}'",
+          "schema_io": "Variables disponibles : '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)"
         }
       }
@@ -71,7 +71,6 @@
   "issues": {
     "sync_mismatch": {
       "title": "Web-IO Comexio désynchronisé",
-      "description": "La configuration diffère ({com_count} / {ha_count} commandes webIO).",
       "fix_flow": {
         "step": {
           "select_action": {
@@ -83,7 +82,6 @@
     },
     "missing_webio_class": {
       "title": "Classe Web-IO Comexio manquante",
-      "description": "La classe d'appareil Web-IO pour le serveur {server_id} est introuvable. Veuillez effectuer la configuration initiale.",
       "fix_flow": {
         "step": {
           "select_action": {

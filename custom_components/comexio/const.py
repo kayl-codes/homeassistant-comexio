@@ -3,7 +3,7 @@ DOMAIN = "comexio"
 
 CONF_HOST = "host"
 CONF_USERNAME = "username"
-CONF_PASSWORD = "password"
+CONF_PASSWORD = "password"  # nosec B105
 CONF_SERVER_ID = "server_id"
 
 CONF_SCHEMA_MARKER = "schema_marker"
