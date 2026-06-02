@@ -1,0 +1,95 @@
+{
+  "config": {
+    "error": {
+      "server_id_exists": "Este nombre de instancia ya está en uso.",
+      "cannot_connect": "Error de conexión con Comexio.",
+      "invalid_auth": "Credenciales no válidas (Usuario/Contraseña UI).",
+      "unknown": "Se ha producido un error inesperado."
+    },
+    "step": {
+      "user": {
+        "title": "Añadir servidor IO Comexio",
+        "data": {
+          "server_id": "Nombre de la instancia (Prefijo para IDs)",
+          "webio_name": "Nombre de la clase de dispositivo en Comexio",
+          "host": "Host / Dirección IP",
+          "username": "Usuario (Administrador)",
+          "password": "Contraseña (Administrador)",
+          "api_username": "Usuario API (Basic Auth)",
+          "api_password": "Contraseña API (Basic Auth)",
+          "import_markers": "Crear entidades para marcadores",
+          "import_ios": "Crear entidades para IOs",
+          "scan_interval": "Intervalo de consulta en segundo plano (min)",
+          "cover_keywords": "Palabras clave para detectar persianas"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Ajustes de Comexio",
+        "data": {
+          "host": "Host / Dirección IP",
+          "password": "Contraseña Administrador",
+          "api_password": "Contraseña API (Basic Auth)",
+          "schema_marker": "Esquema de nombres para marcadores",
+          "schema_io": "Esquema de nombres para IOs",
+          "scan_interval": "Intervalo de consulta en segundo plano (min)",
+          "enable_notifications": "Mostrar notificaciones emergentes durante la sincronización",
+          "audit_ignored": "Ignorar advertencias de clase Web-IO faltante",
+          "cover_keywords": "Palabras clave para detectar persianas"
+        },
+        "data_description": {
+          "schema_marker": "Variables disponibles: '{{MarkerId}}', '{{MarkerTitle}}'",
+          "schema_io": "Variables disponibles: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
+          "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "webio_sync": {
+        "name": "Iniciar Sincronización WebIO"
+      },
+      "cancel_sync": {
+        "name": "Cancelar Sincronización WebIO"
+      }
+    },
+    "sensor": {
+      "sync_status": {
+        "name": "Estado de la Sincronización WebIO",
+        "state": {
+          "idle": "Inactivo",
+          "syncing": "Sincronizando...",
+          "error": "Error"
+        }
+      }
+    }
+  },
+  "issues": {
+    "sync_mismatch": {
+      "title": "Web-IO de Comexio desincronizado",
+      "fix_flow": {
+        "step": {
+          "select_action": {
+            "title": "Reparación Web-IO",
+            "description": "{summary_text}"
+          }
+        }
+      }
+    },
+    "missing_webio_class": {
+      "title": "Falta la clase Web-IO de Comexio",
+      "fix_flow": {
+        "step": {
+          "select_action": {
+            "title": "Configuración Inicial",
+            "description": "No se encontró la clase de dispositivo Web-IO requerida en su servidor Comexio.\n\n¿Desea crear la clase y el dispositivo ahora?"
+          }
+        }
+      }
+    }
+  }
+}

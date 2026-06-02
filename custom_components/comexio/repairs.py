@@ -1,4 +1,4 @@
-# Version: 0.7.2
+# Version: 0.7.5
 import asyncio
 import logging
 
@@ -281,7 +281,7 @@ class ComexioRepairFlow(RepairsFlow):
                 options["full_sync"] = label
                 default_action = "full_sync"
             else:
-                default_action = list(specific_options.keys())[0] if specific_options else "full_sync"
+                default_action = next(iter(specific_options)) if specific_options else "full_sync"
 
             options.update(specific_options)
 

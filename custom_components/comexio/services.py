@@ -1,11 +1,14 @@
-# Version: 0.7.2
+# Version: 0.7.5
 import logging
-from homeassistant.core import HomeAssistant, ServiceCall
+
 from homeassistant.components import persistent_notification
+from homeassistant.core import HomeAssistant, ServiceCall
+
 # MAKE SURE THIS LINE LOOKS LIKE THIS:
-from .const import DOMAIN 
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
 
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Register additional services for the Comexio integration."""
@@ -14,7 +17,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """Service to preview or upload the Web-IO configuration."""
         # Get the entry_id from the service call
         entry_id = call.data.get("config_entry")
-        
+
         # Validation: Does the instance exist in our data?
         if entry_id not in hass.data[DOMAIN]:
             _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
@@ -24,18 +27,17 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         api = coordinator.api
         server_id = coordinator.server_id
         do_upload = call.data.get("upload", False)
-        
+
         try:
             # Get webio_name from options or data of the specific entry
             conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
             webio_name = conf.get("webio_name", "HomeAssistant")
-            
+
             web_io_json = api.generate_webio_json(server_id, webio_name, coordinator.data)
-            
+
             if not do_upload:
                 persistent_notification.async_create(
-                    hass, f"```json\n{web_io_json}\n```",
-                    title=f"Comexio Preview ({server_id})"
+                    hass, f"```json\n{web_io_json}\n```", title=f"Comexio Preview ({server_id})"
                 )
                 return
 
@@ -49,10 +51,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 else:
                     # You could trigger the "slow" delta sync here later
                     persistent_notification.async_create(
-                        hass, 
+                        hass,
                         f"Class '{webio_name}' is in use by Comexio logic and cannot be deleted. "
-                        "Please use the Smart-Sync button for individual updates.", 
-                        title="Bulk-Sync blocked"
+                        "Please use the Smart-Sync button for individual updates.",
+                        title="Bulk-Sync blocked",
                     )
                     return
 
