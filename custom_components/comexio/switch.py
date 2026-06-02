@@ -58,12 +58,12 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        """Link entity to the parent Comexio server device."""
         return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio {self.coordinator.server_id}",
+            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
+            "name": "Markers",
             "manufacturer": "Comexio",
-            "model": "IO-Server",
+            "model": "Marker Group",
+            "via_device": (DOMAIN, self.coordinator.server_id),
         }
 
     @property
@@ -108,12 +108,12 @@ class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        """Link entity to the parent Comexio server device."""
         return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio {self.coordinator.server_id}",
+            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
+            "name": self._ext_name,
             "manufacturer": "Comexio",
-            "model": "IO-Server",
+            "model": "Extension Module",
+            "via_device": (DOMAIN, self.coordinator.server_id),
         }
 
     @property
