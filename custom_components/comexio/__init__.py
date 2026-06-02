@@ -64,7 +64,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, server_id)},
-        name=f"Comexio {server_id}",
+        name=server_id,
         manufacturer="Comexio",
         model="IO-Server",
     )

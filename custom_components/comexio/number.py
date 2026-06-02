@@ -78,7 +78,7 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            "name": "Markers",
+            "name": f"{self.coordinator.server_id} Markers",
             "manufacturer": "Comexio",
             "model": "Marker Group",
             "via_device": (DOMAIN, self.coordinator.server_id),

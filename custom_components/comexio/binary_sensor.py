@@ -61,7 +61,7 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            "name": self._ext_name,
+            "name": f"{self.coordinator.server_id} {self._ext_name}",
             "manufacturer": "Comexio",
             "model": "Extension Module",
             "via_device": (DOMAIN, self.coordinator.server_id),

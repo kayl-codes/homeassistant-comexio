@@ -82,7 +82,7 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            "name": self._ext_name,
+            "name": f"{self.coordinator.server_id} {self._ext_name}",
             "manufacturer": "Comexio",
             "model": "Extension Module",
             "via_device": (DOMAIN, self.coordinator.server_id),
@@ -110,7 +110,7 @@ class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio {self.coordinator.server_id}",
+            "name": self.coordinator.server_id,
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }

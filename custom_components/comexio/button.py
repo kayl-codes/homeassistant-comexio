@@ -74,7 +74,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio {self.coordinator.server_id}",
+            "name": self.coordinator.server_id,
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
@@ -455,7 +455,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio {self.coordinator.server_id}",
+            "name": self.coordinator.server_id,
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
