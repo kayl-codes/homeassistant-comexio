@@ -39,7 +39,7 @@ LOCAL_HOSTNAME_RE = re.compile(
 
 # Module-level compiled patterns for get_raw_config (used on every coordinator refresh).
 _IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
-_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script\s*>", re.DOTALL | re.IGNORECASE)
+_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script[^>]*>", re.DOTALL | re.IGNORECASE)
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTENT_TYPE_JSON = "Content-Type: application/json"
@@ -671,7 +671,7 @@ class ComexioAPI:
             f"name_{device_id}": webio_name,
             f"ip_{device_id}": ha_address,
             f"username_{device_id}": "",
-            f"password_{device_id}": "",
+            f"password_{device_id}": "",  # nosec B105
             f"checkca_{device_id}": "0",
             f"pinnedpubkey_{device_id}": "",
             f"form_login_{device_id}": "2",

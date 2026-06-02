@@ -13,7 +13,7 @@ DEFAULT_SCHEMA_IO = "{ExtName} {IoId} {IoTitle}"
 
 # keys for API access
 CONF_API_USERNAME = "api_username"
-CONF_API_PASSWORD = "api_password"
+CONF_API_PASSWORD = "api_password"  # nosec B105
 
 CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
 DEFAULT_ENABLE_NOTIFICATIONS = True
