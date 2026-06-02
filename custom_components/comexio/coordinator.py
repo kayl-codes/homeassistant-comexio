@@ -204,7 +204,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         def resolve(name: str) -> str:
                             try:
                                 return socket.gethostbyname(name)
-                            except (OSError, socket.gaierror):
+                            except OSError:
                                 return name
 
                         ha_ip = await self.hass.async_add_executor_job(resolve, ha_host)
