@@ -32,7 +32,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     coordinator = hass.data[DOMAIN][entry.entry_id]
     sync_button = ComexioSyncButton(coordinator, coordinator.server_id)
     cancel_button = ComexioCancelSyncButton(coordinator, coordinator.server_id)
-    async_add_entities([sync_button, cancel_button])
+    migration_button = ComexioEntityIdMigrationButton(coordinator, coordinator.server_id)
+    async_add_entities([sync_button, cancel_button, migration_button])
 
     # Register the entity service.
     # As a custom integration, the service is registered under
@@ -470,3 +471,52 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         _LOGGER.warning("[%s] Manual cancel requested by user", self.server_id)
         self.coordinator.cancel_sync = True
         self.async_write_ha_state()
+
+
+class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
+    """Button to fix duplicate server_id in entity IDs."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_entity_id_fix_btn"
+        self._attr_translation_key = "entity_id_fix"
+        self._attr_icon = "mdi:identifier"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def available(self) -> bool:
+        """Active only when entity_id mismatches exist."""
+        return len(self.coordinator.entity_id_mismatches) > 0
+
+    async def async_press(self) -> None:
+        """Migrate entity_ids by removing the duplicate server_id prefix."""
+        from homeassistant.helpers import entity_registry as er, issue_registry as ir
+
+        ent_reg = er.async_get(self.hass)
+        migrated = 0
+
+        for mismatch in list(self.coordinator.entity_id_mismatches):
+            try:
+                ent_reg.async_update_entity(mismatch["current_id"], new_entity_id=mismatch["corrected_id"])
+                migrated += 1
+            except Exception:
+                _LOGGER.exception("[%s] Failed to migrate entity_id %s", self.server_id, mismatch["current_id"])
+
+        self.coordinator.entity_id_mismatches = []
+        ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
+
+        _LOGGER.info("[%s] Entity ID migration complete: %d IDs updated", self.server_id, migrated)
+        self.coordinator.async_set_updated_data(self.coordinator.data)

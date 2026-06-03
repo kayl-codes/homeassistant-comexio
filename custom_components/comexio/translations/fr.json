@@ -55,6 +55,9 @@
       },
       "cancel_sync": {
         "name": "Annuler la synchronisation WebIO"
+      },
+      "entity_id_fix": {
+        "name": "Correction des ID d'entité"
       }
     },
     "sensor": {
@@ -87,6 +90,17 @@
           "select_action": {
             "title": "Configuration initiale",
             "description": "La classe d'appareil Web-IO requise est introuvable sur votre serveur Comexio.\n\nVoulez-vous créer la classe et l'appareil maintenant ?"
+          }
+        }
+      }
+    },
+    "entity_id_mismatch": {
+      "title": "ID de serveur en double dans les ID d'entité ({server_id})",
+      "fix_flow": {
+        "step": {
+          "entity_id_fix": {
+            "title": "Corriger les ID d'entité",
+            "description": "{description}"
           }
         }
       }

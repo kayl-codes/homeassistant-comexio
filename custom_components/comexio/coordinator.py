@@ -14,6 +14,7 @@ from .const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
     CONF_COVER_KEYWORDS,
+    CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_HOST,
     CONF_PASSWORD,
     CONF_SERVER_ID,
@@ -53,6 +54,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.sync_current_step: str | None = None
         self.last_audit_results: dict[str, Any] = {}
         self.cancel_sync: bool = False
+        self.entity_id_mismatches: list[dict[str, str]] = []
         self.cover_keywords: list[str] = []
         # R4: Lock to prevent concurrent sync runs
         self._sync_lock: asyncio.Lock = asyncio.Lock()
@@ -116,6 +118,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Rebuild O(1) lookup index for webhook IO updates
             self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
+
+            # --- ENTITY-ID MISMATCH DETECTION ---
+            # Runs every poll so the migration button reflects the real state.
+            # The ignore flag only suppresses the repair issue, never the button.
+            mismatches = self.detect_entity_id_mismatches()
+            if mismatches and not conf.get(CONF_ENTITY_ID_MIGRATION_IGNORED, False):
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    f"entity_id_mismatch_{self.server_id}",
+                    is_fixable=True,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="entity_id_mismatch",
+                    translation_placeholders={"server_id": self.server_id, "count": str(len(mismatches))},
+                    data={"entry_id": self.config_entry.entry_id, "count": len(mismatches)},
+                )
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
 
             # --- SMART AUDIT LOGIC ---
             com_commands = final_data["webio_commands"]
@@ -417,3 +437,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         # Trigger an immediate refresh to verify new settings
         await self.async_request_refresh()
+
+    def detect_entity_id_mismatches(self) -> list[dict[str, str]]:
+        """Scan the entity registry for entries whose entity_id contains a duplicate server_id.
+
+        Returns a list of dicts with 'current_id' and 'corrected_id'.
+        """
+        from homeassistant.helpers import entity_registry as er
+
+        ent_reg = er.async_get(self.hass)
+        server_slug = self.server_id.lower()
+        double_prefix = f"comexio_{server_slug}_{server_slug}_"
+        single_prefix = f"comexio_{server_slug}_"
+
+        mismatches: list[dict[str, str]] = []
+        for entity_entry in er.async_entries_for_config_entry(ent_reg, self.config_entry.entry_id):
+            platform, slug = entity_entry.entity_id.split(".", 1)
+            if slug.startswith(double_prefix):
+                corrected_slug = single_prefix + slug[len(double_prefix) :]
+                corrected_id = f"{platform}.{corrected_slug}"
+                if not ent_reg.async_get(corrected_id):
+                    mismatches.append(
+                        {
+                            "current_id": entity_entry.entity_id,
+                            "corrected_id": corrected_id,
+                        }
+                    )
+
+        self.entity_id_mismatches = mismatches
+        return mismatches

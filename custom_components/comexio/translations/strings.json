@@ -55,6 +55,9 @@
       },
       "cancel_sync": {
         "name": "WebIO Sync Cancel"
+      },
+      "entity_id_fix": {
+        "name": "Fix Entity IDs"
       }
     },
     "sensor": {
@@ -87,6 +90,17 @@
           "select_action": {
             "title": "Initial Setup",
             "description": "The required Web-IO device class was not found on your Comexio server.\n\nWould you like to create the class and the device now?"
+          }
+        }
+      }
+    },
+    "entity_id_mismatch": {
+      "title": "Duplicate server ID in entity IDs ({server_id})",
+      "fix_flow": {
+        "step": {
+          "entity_id_fix": {
+            "title": "Fix Entity IDs",
+            "description": "{description}"
           }
         }
       }
