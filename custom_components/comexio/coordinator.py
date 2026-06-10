@@ -18,6 +18,7 @@ from .const import (
     CONF_HOST,
     CONF_PASSWORD,
     CONF_SERVER_ID,
+    CONF_STATISTICS_CLEANUP_IGNORED,
     CONF_USERNAME,
     DEFAULT_COVER_KEYWORDS,
     DOMAIN,
@@ -55,6 +56,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.last_audit_results: dict[str, Any] = {}
         self.cancel_sync: bool = False
         self.entity_id_mismatches: list[dict[str, str]] = []
+        self.orphaned_statistics: list[str] = []
         self.cover_keywords: list[str] = []
         # R4: Lock to prevent concurrent sync runs
         self._sync_lock: asyncio.Lock = asyncio.Lock()
@@ -136,6 +138,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 )
             else:
                 ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
+
+            # --- ORPHANED STATISTICS DETECTION ---
+            await self.async_check_orphaned_statistics(conf)
 
             # --- SMART AUDIT LOGIC ---
             com_commands = final_data["webio_commands"]
@@ -466,3 +471,57 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         self.entity_id_mismatches = mismatches
         return mismatches
+
+    async def async_check_orphaned_statistics(self, conf: dict[str, Any]) -> None:
+        """Detect orphaned long-term statistics and manage the corresponding repair issue."""
+        orphans = await self.async_detect_orphaned_statistics()
+        issue_id = f"statistics_orphaned_{self.server_id}"
+        if orphans and not conf.get(CONF_STATISTICS_CLEANUP_IGNORED, False):
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="statistics_orphaned",
+                translation_placeholders={"server_id": self.server_id, "count": str(len(orphans))},
+                data={"entry_id": self.config_entry.entry_id, "count": len(orphans)},
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+
+    async def async_detect_orphaned_statistics(self) -> list[str]:
+        """Return statistic_ids for this integration that no longer have a matching entity.
+
+        Only recorder-sourced sensor statistics under this server's prefix are considered.
+        Statistics of live entities (still in the registry) are never flagged.
+        """
+        from homeassistant.helpers import entity_registry as er
+
+        if "recorder" not in self.hass.config.components:
+            self.orphaned_statistics = []
+            return []
+
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import list_statistic_ids
+        except ImportError:
+            self.orphaned_statistics = []
+            return []
+
+        instance = get_instance(self.hass)
+        all_stats = await instance.async_add_executor_job(list_statistic_ids, self.hass)
+
+        ent_reg = er.async_get(self.hass)
+        prefix = f"sensor.comexio_{self.server_id.lower()}_"
+
+        orphans = [
+            stat["statistic_id"]
+            for stat in all_stats
+            if stat.get("source") == "recorder"
+            and stat["statistic_id"].startswith(prefix)
+            and ent_reg.async_get(stat["statistic_id"]) is None
+        ]
+
+        self.orphaned_statistics = orphans
+        return orphans

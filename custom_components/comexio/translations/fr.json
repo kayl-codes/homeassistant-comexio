@@ -58,6 +58,9 @@
       },
       "entity_id_fix": {
         "name": "Correction des ID d'entité"
+      },
+      "statistics_cleanup": {
+        "name": "Nettoyer les statistiques"
       }
     },
     "sensor": {
@@ -100,6 +103,17 @@
         "step": {
           "entity_id_fix": {
             "title": "Corriger les ID d'entité",
+            "description": "{description}"
+          }
+        }
+      }
+    },
+    "statistics_orphaned": {
+      "title": "Statistiques orphelines ({server_id})",
+      "fix_flow": {
+        "step": {
+          "statistics_cleanup": {
+            "title": "Nettoyer les statistiques",
             "description": "{description}"
           }
         }

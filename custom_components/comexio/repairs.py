@@ -10,6 +10,7 @@ import voluptuous as vol
 from .const import (
     CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_SERVER_ID,
+    CONF_STATISTICS_CLEANUP_IGNORED,
     DOMAIN,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_RECREATE,
@@ -39,7 +40,80 @@ class ComexioRepairFlow(RepairsFlow):
     async def async_step_init(self, user_input=None):
         if "entity_id_mismatch" in self.issue_id:
             return await self.async_step_entity_id_fix()
+        if "statistics_orphaned" in self.issue_id:
+            return await self.async_step_statistics_cleanup()
         return await self.async_step_select_action()
+
+    async def async_step_statistics_cleanup(self, user_input=None):
+        """Handle the orphaned-statistics cleanup repair flow."""
+        entry_id = self.issue_data.get("entry_id")
+
+        if user_input is not None:
+            action = user_input["action"]
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            if not entry:
+                return self.async_abort(reason="entry_not_found")
+
+            if action == "ignore":
+                new_options = dict(entry.options)
+                new_options[CONF_STATISTICS_CLEANUP_IGNORED] = True
+                self.hass.config_entries.async_update_entry(entry, options=new_options)
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                return self.async_create_entry(title="Ignored", data={})
+
+            # action == "fix": clear orphaned statistics via the recorder
+            from homeassistant.components.recorder import get_instance
+
+            coordinator = self.hass.data[DOMAIN].get(entry_id)
+            if not coordinator:
+                return self.async_abort(reason="entry_not_found")
+
+            ids = list(coordinator.orphaned_statistics)
+            if ids and "recorder" in self.hass.config.components:
+                get_instance(self.hass).async_clear_statistics(ids)
+
+            coordinator.orphaned_statistics = []
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            coordinator.async_set_updated_data(coordinator.data)
+
+            is_de = self.hass.config.language == "de"
+            title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} orphaned statistics deleted"
+            return self.async_create_entry(title=title, data={})
+
+        is_de = self.hass.config.language == "de"
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        count = len(coordinator.orphaned_statistics) if coordinator else self.issue_data.get("count", 0)
+
+        if is_de:
+            description = (
+                f"Es wurden **{count} verwaiste Langzeit-Statistiken** gefunden, die zu keiner "
+                "existierenden Entität mehr gehören (Überreste früherer Entity-IDs).\n\n"
+                "Diese können gefahrlos gelöscht werden. **Laufende Sensoren und deren aktuelle "
+                "Historie sind nicht betroffen** — nur die verwaisten Einträge werden entfernt.\n\n"
+                "Möchtest du sie jetzt löschen?"
+            )
+            options = {
+                "fix": f"🧹 Jetzt bereinigen ({count} Statistiken)",
+                "ignore": "🔇 Meldung unterdrücken",
+            }
+        else:
+            description = (
+                f"**{count} orphaned long-term statistics** were found that no longer belong to "
+                "any existing entity (leftovers from previous entity IDs).\n\n"
+                "They can be safely deleted. **Live sensors and their current history are not "
+                "affected** — only the orphaned entries are removed.\n\n"
+                "Would you like to delete them now?"
+            )
+            options = {
+                "fix": f"🧹 Clean up now ({count} statistics)",
+                "ignore": "🔇 Suppress this message",
+            }
+
+        return self.async_show_form(
+            step_id="statistics_cleanup",
+            description_placeholders={"description": description},
+            data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
+        )
 
     async def async_step_entity_id_fix(self, user_input=None):
         """Handle the entity_id migration repair flow."""
