@@ -513,13 +513,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
         all_stats = await instance.async_add_executor_job(list_statistic_ids, self.hass)
 
         ent_reg = er.async_get(self.hass)
-        prefix = f"sensor.comexio_{self.server_id.lower()}_"
+        server_slug = self.server_id.lower()
+        # Match all historical naming patterns for this server_id:
+        # - current:  sensor.comexio_{server_id}_...
+        # - legacy:   sensor.comexio_server_{server_id}_...  (pre-sub-device-grouping naming)
+        prefixes = (
+            f"sensor.comexio_{server_slug}_",
+            f"sensor.comexio_server_{server_slug}_",
+        )
 
         orphans = [
             stat["statistic_id"]
             for stat in all_stats
             if stat.get("source") == "recorder"
-            and stat["statistic_id"].startswith(prefix)
+            and any(stat["statistic_id"].startswith(p) for p in prefixes)
             and ent_reg.async_get(stat["statistic_id"]) is None
         ]
 
