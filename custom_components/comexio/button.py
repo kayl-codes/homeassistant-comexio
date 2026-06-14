@@ -504,22 +504,10 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Migrate entity_ids by removing the duplicate server_id prefix."""
-        from homeassistant.helpers import entity_registry as er, issue_registry as ir
+        from homeassistant.helpers import issue_registry as ir
 
-        ent_reg = er.async_get(self.hass)
-        migrated = 0
-
-        for mismatch in list(self.coordinator.entity_id_mismatches):
-            try:
-                ent_reg.async_update_entity(mismatch["current_id"], new_entity_id=mismatch["corrected_id"])
-                migrated += 1
-            except Exception:
-                _LOGGER.exception("[%s] Failed to migrate entity_id %s", self.server_id, mismatch["current_id"])
-
-        self.coordinator.entity_id_mismatches = []
+        self.coordinator.async_migrate_entity_ids()
         ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
-
-        _LOGGER.info("[%s] Entity ID migration complete: %d IDs updated", self.server_id, migrated)
         self.coordinator.async_set_updated_data(self.coordinator.data)
 
 
@@ -558,7 +546,8 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
 
         ids = list(self.coordinator.orphaned_statistics)
         if ids and "recorder" in self.hass.config.components:
-            get_instance(self.hass).async_clear_statistics(ids)
+            instance = get_instance(self.hass)
+            await instance.async_clear_statistics(ids)
 
         self.coordinator.orphaned_statistics = []
         ir.async_delete_issue(self.hass, DOMAIN, f"statistics_orphaned_{self.server_id}")

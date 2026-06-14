@@ -544,3 +544,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         self.orphaned_statistics = orphans
         return orphans
+
+    def async_migrate_entity_ids(self) -> int:
+        """Migrate entity_ids by removing the duplicate server_id prefix. Returns count of migrated IDs."""
+        from homeassistant.helpers import entity_registry as er
+
+        ent_reg = er.async_get(self.hass)
+        migrated = 0
+        for mismatch in self.entity_id_mismatches:
+            try:
+                ent_reg.async_update_entity(mismatch["current_id"], new_entity_id=mismatch["corrected_id"])
+                migrated += 1
+            except Exception:
+                _LOGGER.exception("[%s] Failed to migrate entity_id %s", self.server_id, mismatch["current_id"])
+        self.entity_id_mismatches = []
+        _LOGGER.info("[%s] Entity ID migration complete: %d IDs updated", self.server_id, migrated)
+        return migrated

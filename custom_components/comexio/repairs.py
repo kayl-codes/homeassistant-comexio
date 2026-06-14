@@ -70,7 +70,8 @@ class ComexioRepairFlow(RepairsFlow):
 
             ids = list(coordinator.orphaned_statistics)
             if ids and "recorder" in self.hass.config.components:
-                get_instance(self.hass).async_clear_statistics(ids)
+                instance = get_instance(self.hass)
+                await instance.async_clear_statistics(ids)
 
             coordinator.orphaned_statistics = []
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
@@ -137,16 +138,7 @@ class ComexioRepairFlow(RepairsFlow):
             if not coordinator:
                 return self.async_abort(reason="entry_not_found")
 
-            ent_reg = er.async_get(self.hass)
-            migrated = 0
-            for mismatch in list(coordinator.entity_id_mismatches):
-                try:
-                    ent_reg.async_update_entity(mismatch["current_id"], new_entity_id=mismatch["corrected_id"])
-                    migrated += 1
-                except Exception:
-                    _LOGGER.exception("Failed to migrate entity_id %s", mismatch["current_id"])
-
-            coordinator.entity_id_mismatches = []
+            migrated = coordinator.async_migrate_entity_ids()
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             coordinator.async_set_updated_data(coordinator.data)
 
