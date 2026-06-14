@@ -1,9 +1,9 @@
 {
   "domain": "comexio",
   "name": "Comexio",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@kayl-codes"],
   "config_flow": true,
-  "after_dependencies": ["recorder"],
   "dependencies": ["webhook"],
   "documentation": "https://github.com/kayl-codes/homeassistant-comexio",
   "integration_type": "hub",
