@@ -493,7 +493,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_detect_orphaned_statistics(self) -> list[str]:
         """Return statistic_ids for this integration that no longer have a matching entity.
 
-        Only recorder-sourced sensor statistics under this server's prefix are considered.
         Statistics of live entities (still in the registry) are never flagged.
         """
         from homeassistant.helpers import entity_registry as er
@@ -506,11 +505,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             from homeassistant.components.recorder import get_instance
             from homeassistant.components.recorder.statistics import list_statistic_ids
         except ImportError:
+            _LOGGER.warning("[%s] Recorder statistics API not available, skipping orphan detection", self.server_id)
             self.orphaned_statistics = []
             return []
 
-        instance = get_instance(self.hass)
-        all_stats = await instance.async_add_executor_job(list_statistic_ids, self.hass)
+        try:
+            instance = get_instance(self.hass)
+            all_stats = await instance.async_add_executor_job(list_statistic_ids, self.hass)
+        except Exception:
+            _LOGGER.exception("[%s] Failed to list statistic IDs", self.server_id)
+            self.orphaned_statistics = []
+            return []
 
         ent_reg = er.async_get(self.hass)
         server_slug = self.server_id.lower()
@@ -522,13 +527,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
             f"sensor.comexio_server_{server_slug}_",
         )
 
+        # Accept any source — the entity-registry check is the authoritative safety gate.
         orphans = [
             stat["statistic_id"]
             for stat in all_stats
-            if stat.get("source") == "recorder"
-            and any(stat["statistic_id"].startswith(p) for p in prefixes)
+            if any(stat["statistic_id"].startswith(p) for p in prefixes)
             and ent_reg.async_get(stat["statistic_id"]) is None
         ]
+
+        _LOGGER.debug(
+            "[%s] Orphaned statistics detected: %d (total recorder stats scanned: %d)",
+            self.server_id,
+            len(orphans),
+            len(all_stats),
+        )
 
         self.orphaned_statistics = orphans
         return orphans
