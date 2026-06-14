@@ -42,6 +42,7 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
         """Initialize the binary sensor."""
         super().__init__(coordinator)
         self._io_id = io["id"]
+        self._ext_name = io["ext_name"]
 
         # Unique ID as the stable anchor in HA
         self._attr_unique_id = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
@@ -58,12 +59,12 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        """Link entity to the parent Comexio server device."""
         return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio {self.coordinator.server_id}",
+            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
+            "name": f"{self.coordinator.server_id} {self._ext_name}",
             "manufacturer": "Comexio",
-            "model": "IO-Server",
+            "model": "Extension Module",
+            "via_device": (DOMAIN, self.coordinator.server_id),
         }
 
     @property

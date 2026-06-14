@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import ast; files=['custom_components/comexio/__init__.py','custom_components/comexio/coordinator.py','custom_components/comexio/button.py']; [ast.parse\\(open\\(f,encoding='utf-8'\\).read\\(\\)\\) for f in files]; print\\('All 3 files parse OK'\\)\")"
-    ]
-  }
-}

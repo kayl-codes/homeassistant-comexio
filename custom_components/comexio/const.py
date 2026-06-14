@@ -21,6 +21,9 @@ DEFAULT_ENABLE_NOTIFICATIONS = True
 CONF_COVER_KEYWORDS = "cover_keywords"
 DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
 
+CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
+CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
+
 DEFAULT_NAME = "Comexio"
 
 SCAN_INTERVAL_MIN = 1

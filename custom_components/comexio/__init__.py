@@ -64,7 +64,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, server_id)},
-        name=f"Comexio {server_id}",
+        name=server_id,
         manufacturer="Comexio",
         model="IO-Server",
     )
@@ -127,6 +127,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_start_btn")
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_cancel_btn")
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_status_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_entity_id_fix_btn")
+    active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
 
     # Delete anything from the registry that is not in active_unique_ids
     _LOGGER.debug("Comexio Cleanup: protecting %d active unique IDs", len(active_unique_ids))

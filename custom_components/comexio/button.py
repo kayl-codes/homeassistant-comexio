@@ -32,7 +32,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     coordinator = hass.data[DOMAIN][entry.entry_id]
     sync_button = ComexioSyncButton(coordinator, coordinator.server_id)
     cancel_button = ComexioCancelSyncButton(coordinator, coordinator.server_id)
-    async_add_entities([sync_button, cancel_button])
+    migration_button = ComexioEntityIdMigrationButton(coordinator, coordinator.server_id)
+    stats_cleanup_button = ComexioStatisticsCleanupButton(coordinator, coordinator.server_id)
+    async_add_entities([sync_button, cancel_button, migration_button, stats_cleanup_button])
 
     # Register the entity service.
     # As a custom integration, the service is registered under
@@ -74,7 +76,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio {self.coordinator.server_id}",
+            "name": self.coordinator.server_id,
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
@@ -455,7 +457,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
     def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": f"Comexio {self.coordinator.server_id}",
+            "name": self.coordinator.server_id,
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
@@ -470,3 +472,85 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         _LOGGER.warning("[%s] Manual cancel requested by user", self.server_id)
         self.coordinator.cancel_sync = True
         self.async_write_ha_state()
+
+
+class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
+    """Button to fix duplicate server_id in entity IDs."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_entity_id_fix_btn"
+        self._attr_translation_key = "entity_id_fix"
+        self._attr_icon = "mdi:identifier"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def available(self) -> bool:
+        """Active only when entity_id mismatches exist."""
+        return len(self.coordinator.entity_id_mismatches) > 0
+
+    async def async_press(self) -> None:
+        """Migrate entity_ids by removing the duplicate server_id prefix."""
+        from homeassistant.helpers import issue_registry as ir
+
+        self.coordinator.async_migrate_entity_ids()
+        ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
+        self.coordinator.async_set_updated_data(self.coordinator.data)
+
+
+class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
+    """Button to delete orphaned long-term statistics left behind by entity renames."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_statistics_cleanup_btn"
+        self._attr_translation_key = "statistics_cleanup"
+        self._attr_icon = "mdi:database-remove"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def available(self) -> bool:
+        """Active only when orphaned statistics exist."""
+        return len(self.coordinator.orphaned_statistics) > 0
+
+    async def async_press(self) -> None:
+        """Delete the orphaned statistic_ids via the recorder."""
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.helpers import issue_registry as ir
+
+        ids = list(self.coordinator.orphaned_statistics)
+        if ids and "recorder" in self.hass.config.components:
+            instance = get_instance(self.hass)
+            await instance.async_clear_statistics(ids)
+
+        self.coordinator.orphaned_statistics = []
+        ir.async_delete_issue(self.hass, DOMAIN, f"statistics_orphaned_{self.server_id}")
+
+        _LOGGER.info("[%s] Cleared %d orphaned statistics", self.server_id, len(ids))
+        self.coordinator.async_set_updated_data(self.coordinator.data)

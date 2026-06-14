@@ -7,7 +7,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 import voluptuous as vol
 
-from .const import CONF_SERVER_ID, DOMAIN, SYNC_DURATION_DELETE, SYNC_DURATION_RECREATE, SYNC_DURATION_WRITE
+from .const import (
+    CONF_ENTITY_ID_MIGRATION_IGNORED,
+    CONF_SERVER_ID,
+    CONF_STATISTICS_CLEANUP_IGNORED,
+    DOMAIN,
+    SYNC_DURATION_DELETE,
+    SYNC_DURATION_RECREATE,
+    SYNC_DURATION_WRITE,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,7 +38,150 @@ class ComexioRepairFlow(RepairsFlow):
         self.issue_data = data or {}
 
     async def async_step_init(self, user_input=None):
+        if "entity_id_mismatch" in self.issue_id:
+            return await self.async_step_entity_id_fix()
+        if "statistics_orphaned" in self.issue_id:
+            return await self.async_step_statistics_cleanup()
         return await self.async_step_select_action()
+
+    async def async_step_statistics_cleanup(self, user_input=None):
+        """Handle the orphaned-statistics cleanup repair flow."""
+        entry_id = self.issue_data.get("entry_id")
+
+        if user_input is not None:
+            action = user_input["action"]
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            if not entry:
+                return self.async_abort(reason="entry_not_found")
+
+            if action == "ignore":
+                new_options = dict(entry.options)
+                new_options[CONF_STATISTICS_CLEANUP_IGNORED] = True
+                self.hass.config_entries.async_update_entry(entry, options=new_options)
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                return self.async_create_entry(title="Ignored", data={})
+
+            # action == "fix": clear orphaned statistics via the recorder
+            from homeassistant.components.recorder import get_instance
+
+            coordinator = self.hass.data[DOMAIN].get(entry_id)
+            if not coordinator:
+                return self.async_abort(reason="entry_not_found")
+
+            ids = list(coordinator.orphaned_statistics)
+            if ids and "recorder" in self.hass.config.components:
+                instance = get_instance(self.hass)
+                await instance.async_clear_statistics(ids)
+
+            coordinator.orphaned_statistics = []
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            coordinator.async_set_updated_data(coordinator.data)
+
+            is_de = self.hass.config.language == "de"
+            title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} orphaned statistics deleted"
+            return self.async_create_entry(title=title, data={})
+
+        is_de = self.hass.config.language == "de"
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        count = len(coordinator.orphaned_statistics) if coordinator else self.issue_data.get("count", 0)
+
+        if is_de:
+            description = (
+                f"Es wurden **{count} verwaiste Langzeit-Statistiken** gefunden, die zu keiner "
+                "existierenden Entität mehr gehören (Überreste früherer Entity-IDs).\n\n"
+                "Diese können gefahrlos gelöscht werden. **Laufende Sensoren und deren aktuelle "
+                "Historie sind nicht betroffen** — nur die verwaisten Einträge werden entfernt.\n\n"
+                "Möchtest du sie jetzt löschen?"
+            )
+            options = {
+                "fix": f"🧹 Jetzt bereinigen ({count} Statistiken)",
+                "ignore": "🔇 Meldung unterdrücken",
+            }
+        else:
+            description = (
+                f"**{count} orphaned long-term statistics** were found that no longer belong to "
+                "any existing entity (leftovers from previous entity IDs).\n\n"
+                "They can be safely deleted. **Live sensors and their current history are not "
+                "affected** — only the orphaned entries are removed.\n\n"
+                "Would you like to delete them now?"
+            )
+            options = {
+                "fix": f"🧹 Clean up now ({count} statistics)",
+                "ignore": "🔇 Suppress this message",
+            }
+
+        return self.async_show_form(
+            step_id="statistics_cleanup",
+            description_placeholders={"description": description},
+            data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
+        )
+
+    async def async_step_entity_id_fix(self, user_input=None):
+        """Handle the entity_id migration repair flow."""
+        entry_id = self.issue_data.get("entry_id")
+
+        if user_input is not None:
+            action = user_input["action"]
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            if not entry:
+                return self.async_abort(reason="entry_not_found")
+
+            if action == "ignore":
+                new_options = dict(entry.options)
+                new_options[CONF_ENTITY_ID_MIGRATION_IGNORED] = True
+                self.hass.config_entries.async_update_entry(entry, options=new_options)
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                return self.async_create_entry(title="Ignored", data={})
+
+            # action == "fix": run migration via coordinator
+            coordinator = self.hass.data[DOMAIN].get(entry_id)
+            if not coordinator:
+                return self.async_abort(reason="entry_not_found")
+
+            migrated = coordinator.async_migrate_entity_ids()
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            coordinator.async_set_updated_data(coordinator.data)
+
+            is_de = self.hass.config.language == "de"
+            return self.async_create_entry(
+                title=f"{migrated} Entity-IDs korrigiert" if is_de else f"{migrated} entity IDs fixed",
+                data={},
+            )
+
+        is_de = self.hass.config.language == "de"
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        count = len(coordinator.entity_id_mismatches) if coordinator else self.issue_data.get("count", 0)
+
+        if is_de:
+            description = (
+                f"Es wurden **{count} Entitäten** mit doppeltem Server-ID-Präfix gefunden.\n\n"
+                "Die Entity-IDs können automatisch korrigiert werden. "
+                "**History und Automationen bleiben erhalten**, sofern sie die Entity-ID direkt referenzieren — "
+                "bitte prüfe Automationen nach der Migration.\n\n"
+                "Möchtest du die IDs jetzt korrigieren?"
+            )
+            options = {
+                "fix": f"✅ Jetzt korrigieren ({count} Entity-IDs)",
+                "ignore": "🔇 Meldung unterdrücken",
+            }
+        else:
+            description = (
+                f"**{count} entities** were found with a duplicate server-ID prefix in their entity_id.\n\n"
+                "The entity IDs can be corrected automatically. "
+                "**History and automations are preserved**, but please review automations "
+                "that reference these entity IDs directly.\n\n"
+                "Would you like to fix the IDs now?"
+            )
+            options = {
+                "fix": f"✅ Fix now ({count} entity IDs)",
+                "ignore": "🔇 Suppress this message",
+            }
+
+        return self.async_show_form(
+            step_id="entity_id_fix",
+            description_placeholders={"description": description},
+            data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
+        )
 
     async def async_step_select_action(self, user_input=None):
         """Handle the action selected by the user."""

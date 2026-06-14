@@ -8,6 +8,10 @@
 
 This custom integration seamlessly and locally connects **Comexio IO-Servers** to Home Assistant. It was designed to build a high-performance, real-time bridge between the Comexio logic world and Home Assistant. The focus is on blazing-fast speed (Local Push) and fully automated, intelligent interface management.
 
+## Support
+If you find this project useful, you can support its development by buying me a coffee:
+[![Buy Me A Coffee](https://shields.io)](https://buymeacoffee.com/kayl74)
+
 ## ✨ Core Features
 
 - ⚡ **Real-Time Status (Local Push):** Uses Home Assistant Webhooks and dynamically generated LUA scripts in Comexio. Status changes of inputs/outputs and markers are pushed to Home Assistant without delay (no polling).
@@ -96,6 +100,10 @@ This project is licensed under the MIT License.
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blueviolet.svg)
 
 Diese Custom Integration bindet **Comexio IO-Server** nahtlos und lokal in Home Assistant ein. Sie wurde entwickelt, um eine performante, echtzeitfähige Brücke zwischen der Comexio-Logikwelt und Home Assistant zu schlagen. Der Fokus liegt auf rasanter Geschwindigkeit (Local Push) und einer vollständig automatisierten, intelligenten Verwaltung der Schnittstelle.
+
+## Support
+Wenn Sie dieses Projekt nützlich finden, können Sie seine Entwicklung unterstützen, indem Sie mir einen Kaffee spendieren:
+[![Buy Me A Coffee](https://shields.io)](https://buymeacoffee.com/kayl74)
 
 ## ✨ Kern-Features
 

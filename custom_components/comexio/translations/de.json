@@ -55,6 +55,12 @@
       },
       "cancel_sync": {
         "name": "WebIO Sync Cancel"
+      },
+      "entity_id_fix": {
+        "name": "Entity-IDs korrigieren"
+      },
+      "statistics_cleanup": {
+        "name": "Statistiken bereinigen"
       }
     },
     "sensor": {
@@ -90,6 +96,28 @@
           "select_action": {
             "title": "Initial Setup",
             "description": "Die erforderliche Web-IO Geräteklasse für den Server wurde in Comexio nicht gefunden.\n\nSoll die Klasse und das Gerät jetzt angelegt werden ?"
+          }
+        }
+      }
+    },
+    "entity_id_mismatch": {
+      "title": "Doppelte Server-ID in Entity-IDs ({server_id})",
+      "fix_flow": {
+        "step": {
+          "entity_id_fix": {
+            "title": "Entity-IDs korrigieren",
+            "description": "{description}"
+          }
+        }
+      }
+    },
+    "statistics_orphaned": {
+      "title": "Verwaiste Statistiken ({server_id})",
+      "fix_flow": {
+        "step": {
+          "statistics_cleanup": {
+            "title": "Statistiken bereinigen",
+            "description": "{description}"
           }
         }
       }
