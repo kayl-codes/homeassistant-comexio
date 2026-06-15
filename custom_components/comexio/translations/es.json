@@ -38,6 +38,7 @@
           "scan_interval": "Intervalo de consulta en segundo plano (min)",
           "enable_notifications": "Mostrar notificaciones emergentes durante la sincronización",
           "audit_ignored": "Ignorar advertencias de clase Web-IO faltante",
+          "include_offline_extensions": "Mostrar entidades de extensiones sin conexión como no disponibles (en lugar de ocultarlas)",
           "cover_keywords": "Palabras clave para detectar persianas"
         },
         "data_description": {
@@ -71,6 +72,9 @@
           "syncing": "Sincronizando...",
           "error": "Error"
         }
+      },
+      "offline_extensions": {
+        "name": "Extensiones sin conexión"
       }
     }
   },

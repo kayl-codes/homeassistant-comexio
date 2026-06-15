@@ -71,7 +71,7 @@ class ComexioRepairFlow(RepairsFlow):
             ids = list(coordinator.orphaned_statistics)
             if ids and "recorder" in self.hass.config.components:
                 instance = get_instance(self.hass)
-                await instance.async_clear_statistics(ids)
+                instance.async_clear_statistics(ids)
 
             coordinator.orphaned_statistics = []
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)

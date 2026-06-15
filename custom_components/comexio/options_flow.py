@@ -9,6 +9,7 @@ from .const import (
     CONF_COVER_KEYWORDS,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_HOST,
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_PASSWORD,
     CONF_SCHEMA_IO,
     CONF_SCHEMA_MARKER,
@@ -72,6 +73,10 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                         default=conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS),
                     ): bool,
                     vol.Required("audit_ignored", default=conf.get("audit_ignored", False)): bool,
+                    vol.Required(
+                        CONF_INCLUDE_OFFLINE_EXTENSIONS,
+                        default=conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False),
+                    ): bool,
                     vol.Optional(
                         CONF_COVER_KEYWORDS, default=conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS)
                     ): str,

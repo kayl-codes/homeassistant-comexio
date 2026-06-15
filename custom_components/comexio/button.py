@@ -547,7 +547,7 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
         ids = list(self.coordinator.orphaned_statistics)
         if ids and "recorder" in self.hass.config.components:
             instance = get_instance(self.hass)
-            await instance.async_clear_statistics(ids)
+            instance.async_clear_statistics(ids)
 
         self.coordinator.orphaned_statistics = []
         ir.async_delete_issue(self.hass, DOMAIN, f"statistics_orphaned_{self.server_id}")

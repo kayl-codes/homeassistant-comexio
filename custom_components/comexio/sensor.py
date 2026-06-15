@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 from .coordinator import ComexioCoordinator
 
 # Mapping Comexio units to HA Device Classes
@@ -39,15 +39,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     entities = []
     if conf.get("import_ios", True):
-        # Only analog values (is_binary=False) are created as sensors
+        include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
         entities.extend(
             ComexioIOSensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
-            if not io.get("is_binary")
+            if not io.get("is_binary") and (not io.get("offline") or include_offline)
         )
 
-    # Add the system sync status sensor
+    # Add system diagnostic sensors
     entities.append(ComexioSyncStatusSensor(coordinator, coordinator.server_id))
+    entities.append(ComexioOfflineExtensionsSensor(coordinator, coordinator.server_id))
 
     async_add_entities(entities)
 
@@ -87,6 +88,17 @@ class ComexioIOSensor(CoordinatorEntity, SensorEntity):
             "model": "Extension Module",
             "via_device": (DOMAIN, self.coordinator.server_id),
         }
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._ext_name not in self.coordinator.offline_extensions
+
+    @property
+    def state_class(self) -> SensorStateClass | None:
+        """Suppress long-term statistics while extension is offline to avoid unit-mismatch warnings."""
+        if self._ext_name in self.coordinator.offline_extensions:
+            return None
+        return self._attr_state_class
 
     @property
     def native_value(self) -> float | str | None:
@@ -130,3 +142,33 @@ class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
         if getattr(self.coordinator, "sync_current_step", None) is not None:
             attrs["current_step"] = self.coordinator.sync_current_step
         return attrs
+
+
+class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor listing extension modules currently offline."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:lan-disconnect"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_offline_extensions_sensor"
+        self._attr_translation_key = "offline_extensions"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.offline_extensions)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"extensions": sorted(self.coordinator.offline_extensions)}

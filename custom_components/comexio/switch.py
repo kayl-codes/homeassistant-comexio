@@ -10,7 +10,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,11 +33,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     # 2. Digital Outputs (Relays)
     if conf.get("import_ios", True):
+        include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
         for io in coordinator.data.get("io", []):
             identifier = io.get("identifier", "")
-            # Filter: Must be binary AND a real output (Identifier starts with Q followed by digits)
-            # This regex specifically excludes "QI" (Power/Current inputs)
-            if io.get("is_binary") and re.match(r"^Q\d+$", identifier):
+            if io.get("is_binary") and (not io.get("offline") or include_offline) and re.match(r"^Q\d+$", identifier):
                 entities.append(ComexioIOSwitch(coordinator, coordinator.server_id, io))
 
     async_add_entities(entities)
@@ -115,6 +114,10 @@ class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
             "model": "Extension Module",
             "via_device": (DOMAIN, self.coordinator.server_id),
         }
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._ext_name not in self.coordinator.offline_extensions
 
     @property
     def is_on(self) -> bool:

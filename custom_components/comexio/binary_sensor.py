@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 from .coordinator import ComexioCoordinator
 
 
@@ -22,12 +22,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     if not conf.get("import_ios", True):
         return
 
+    include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
     entities = [
         ComexioBinarySensor(coordinator, coordinator.server_id, io)
         for io in coordinator.data.get("io", [])
-        # 1. Must be a binary type according to Comexio $ioTypes
-        # 2. Must NOT be an output (Q) to avoid duplication with switch.py
-        if io.get("is_binary") and not io.get("identifier", "").startswith("Q")
+        # Exclude outputs (Q) handled by switch.py; respect offline filter
+        if io.get("is_binary")
+        and (not io.get("offline") or include_offline)
+        and not io.get("identifier", "").startswith("Q")
     ]
 
     async_add_entities(entities)
@@ -66,6 +68,10 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
             "model": "Extension Module",
             "via_device": (DOMAIN, self.coordinator.server_id),
         }
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._ext_name not in self.coordinator.offline_extensions
 
     @property
     def is_on(self) -> bool:

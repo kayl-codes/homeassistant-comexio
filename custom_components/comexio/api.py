@@ -526,6 +526,9 @@ class ComexioAPI:
         for ext_id, ext_content in fub_modules.get("1", {}).items():
             ext_meta = ext_content.get("extension", {})
             ext_name = ext_meta.get("Name", f"Ext{ext_id}")
+            # Online extensions report a serial-number Identifier ("XXXX-XXXX-XXXX").
+            # Offline ones only carry a short model code without dashes.
+            ext_offline = "-" not in ext_meta.get("Identifier", "")
 
             for io_item in ext_content.get("inoutput", {}).values():
                 if not io_item or not io_item.get("Active"):
@@ -537,7 +540,9 @@ class ComexioAPI:
                 ident = io_item.get("Identifier") or str(io_item.get("Id", "unknown"))
                 desc = io_item.get("Description") or ident
 
-                self._add_io_entry(data, io_item, ext_name, ident, desc, type_info, schema_io, server_alias)
+                self._add_io_entry(
+                    data, io_item, ext_name, ident, desc, type_info, schema_io, server_alias, ext_offline
+                )
 
     def _add_io_entry(
         self,
@@ -549,6 +554,7 @@ class ComexioAPI:
         type_info: dict[str, Any],
         schema_io: str,
         server_alias: str,
+        ext_offline: bool = False,
     ) -> None:
         """Add an IO entry to data."""
         is_binary = type_info.get("binary", False)
@@ -587,6 +593,7 @@ class ComexioAPI:
                 "max": v_max,
                 "type_id_raw": type_id_raw,
                 "value": self._clean_value(io_item.get("Value", 0)),
+                "offline": ext_offline,
             }
         )
 
