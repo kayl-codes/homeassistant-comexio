@@ -105,6 +105,16 @@ def _extract_js_object_literal(script_text: str, start_index: int) -> tuple[str 
 _LOGGER = logging.getLogger(__name__)
 
 
+def _is_extension_offline(identifier: str) -> bool:
+    """Return True when identifier indicates an offline extension module.
+
+    Online extensions report a serial number in 'XXXX-XXXX-XXXX' format;
+    offline ones carry only a short model code without dashes (e.g. '5010').
+    An empty string (missing field) is also treated as offline.
+    """
+    return "-" not in identifier
+
+
 class ComexioAPI:
     """
     Detailed interface to communicate with the Comexio API.
@@ -526,9 +536,7 @@ class ComexioAPI:
         for ext_id, ext_content in fub_modules.get("1", {}).items():
             ext_meta = ext_content.get("extension", {})
             ext_name = ext_meta.get("Name", f"Ext{ext_id}")
-            # Online extensions report a serial-number Identifier ("XXXX-XXXX-XXXX").
-            # Offline ones only carry a short model code without dashes.
-            ext_offline = "-" not in ext_meta.get("Identifier", "")
+            ext_offline = _is_extension_offline(ext_meta.get("Identifier", ""))
 
             for io_item in ext_content.get("inoutput", {}).values():
                 if not io_item or not io_item.get("Active"):

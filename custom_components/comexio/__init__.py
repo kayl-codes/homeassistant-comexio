@@ -156,10 +156,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     if not include_offline:
         dev_reg = dr.async_get(hass)
         hub_identifier = (DOMAIN, server_id)
+        # Pre-index device_ids that still have entities to avoid a registry scan per device.
+        devices_with_entities = {
+            e.device_id for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id) if e.device_id
+        }
         for dev_entry in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
             if hub_identifier in dev_entry.identifiers:
                 continue
-            if not er.async_entries_for_device(ent_reg, dev_entry.id, include_disabled_entities=True):
+            if dev_entry.id not in devices_with_entities:
                 _LOGGER.info("Removing empty sub-device: %s", dev_entry.name)
                 dev_reg.async_remove_device(dev_entry.id)
 
