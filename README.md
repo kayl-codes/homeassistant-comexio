@@ -2,15 +2,26 @@
 
 🌍 *[🇩🇪 Auf Deutsch lesen (Read this in German)](#-deutsch)*
 
-![Version](https://img.shields.io/badge/version-0.7.5-blue.svg)
-![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blueviolet.svg)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/kayl-codes/homeassistant-comexio?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/releases)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=plastic)](https://github.com/hacs/integration)
+[![Project Stage](https://img.shields.io/badge/project%20stage-development-yellow.svg?style=plastic)](#)
+[![GitHub all releases](https://img.shields.io/github/downloads/kayl-codes/homeassistant-comexio/total?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/releases)
+
+[![GitHub commits since latest release](https://img.shields.io/github/commits-since/kayl-codes/homeassistant-comexio/latest?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/commits/master)
+[![GitHub commit activity](https://img.shields.io/github/commit-activity/m/kayl-codes/homeassistant-comexio?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/graphs/commit-activity)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/kayl-codes/homeassistant-comexio/ci.yml?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/actions)
 
 This custom integration seamlessly and locally connects **Comexio IO-Servers** to Home Assistant. It was designed to build a high-performance, real-time bridge between the Comexio logic world and Home Assistant. The focus is on blazing-fast speed (Local Push) and fully automated, intelligent interface management.
 
-## Support
-If you find this project useful, you can support its development by buying me a coffee:
-[![Buy Me A Coffee](https://shields.io)](https://buymeacoffee.com/kayl74)
+## ❤️ Support
+This integration is actively maintained and updated in my spare time.
+
+If it has helped you, consider supporting ongoing development, bug fixes, compatibility updates, and future enhancements:
+
+- ❤️ GitHub Sponsors: https://github.com/sponsors/kayl-codes
+- ☕ Buy Me a Coffee: https://buymeacoffee.com/kayl74
+
+Every contribution is greatly appreciated. Thank you for your support!
 
 ## ✨ Core Features
 
@@ -95,15 +106,26 @@ This project is licensed under the MIT License.
 
 # <img src="icon.png" width="40" align="center"> Comexio Integration für Home Assistant
 
-![Version](https://img.shields.io/badge/version-0.7.5-blue.svg)
-![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blueviolet.svg)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/kayl-codes/homeassistant-comexio?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/releases)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=plastic)](https://github.com/hacs/integration)
+[![Project Stage](https://img.shields.io/badge/project%20stage-development-yellow.svg?style=plastic)](#)
+[![GitHub all releases](https://img.shields.io/github/downloads/kayl-codes/homeassistant-comexio/total?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/releases)
+
+[![GitHub commits since latest release](https://img.shields.io/github/commits-since/kayl-codes/homeassistant-comexio/latest?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/commits/master)
+[![GitHub commit activity](https://img.shields.io/github/commit-activity/m/kayl-codes/homeassistant-comexio?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/graphs/commit-activity)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/kayl-codes/homeassistant-comexio/ci.yml?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/actions)
 
 Diese Custom Integration bindet **Comexio IO-Server** nahtlos und lokal in Home Assistant ein. Sie wurde entwickelt, um eine performante, echtzeitfähige Brücke zwischen der Comexio-Logikwelt und Home Assistant zu schlagen. Der Fokus liegt auf rasanter Geschwindigkeit (Local Push) und einer vollständig automatisierten, intelligenten Verwaltung der Schnittstelle.
 
-## Support
-Wenn Sie dieses Projekt nützlich finden, können Sie seine Entwicklung unterstützen, indem Sie mir einen Kaffee spendieren:
-[![Buy Me A Coffee](https://shields.io)](https://buymeacoffee.com/kayl74)
+## ❤️ Support
+Diese Integration wird aktiv in meiner Freizeit gewartet und weiterentwickelt.
+
+Wenn sie dir geholfen hat, freue ich mich über deine Unterstützung für laufende Entwicklung, Bugfixes, Kompatibilitätsupdates und neue Features:
+
+- ❤️ GitHub Sponsors: https://github.com/sponsors/kayl-codes
+- ☕ Buy Me a Coffee: https://buymeacoffee.com/kayl74
+
+Jede Unterstützung wird sehr geschätzt. Danke!
 
 ## ✨ Kern-Features
 
