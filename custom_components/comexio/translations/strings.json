@@ -38,6 +38,7 @@
           "scan_interval": "Background polling interval (min)",
           "enable_notifications": "Show UI pop-up notifications during sync",
           "audit_ignored": "Ignore missing Web-IO warnings",
+          "include_offline_extensions": "Show offline extension entities as unavailable (instead of hiding them)",
           "cover_keywords": "Keywords for cover detection"
         },
         "data_description": {
@@ -71,6 +72,9 @@
           "syncing": "Syncing",
           "error": "Error"
         }
+      },
+      "offline_extensions": {
+        "name": "Offline Extensions"
       }
     }
   },

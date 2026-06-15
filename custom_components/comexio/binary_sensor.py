@@ -8,10 +8,10 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 from .coordinator import ComexioCoordinator
+from .entity import ComexioIOEntity
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -22,33 +22,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     if not conf.get("import_ios", True):
         return
 
+    include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
     entities = [
         ComexioBinarySensor(coordinator, coordinator.server_id, io)
         for io in coordinator.data.get("io", [])
-        # 1. Must be a binary type according to Comexio $ioTypes
-        # 2. Must NOT be an output (Q) to avoid duplication with switch.py
-        if io.get("is_binary") and not io.get("identifier", "").startswith("Q")
+        # Exclude outputs (Q) handled by switch.py; respect offline filter
+        if io.get("is_binary")
+        and (not io.get("offline") or include_offline)
+        and not io.get("identifier", "").startswith("Q")
     ]
 
     async_add_entities(entities)
 
 
-class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
+class ComexioBinarySensor(ComexioIOEntity, BinarySensorEntity):
     """Representation of a Comexio Digital Input."""
 
-    _attr_has_entity_name = True
-
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
-        """Initialize the binary sensor."""
-        super().__init__(coordinator)
-        self._io_id = io["id"]
-        self._ext_name = io["ext_name"]
-
-        # Unique ID as the stable anchor in HA
-        self._attr_unique_id = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
-        self._attr_name = io["ha_name"]
-
-        # Intelligence: Automatic Device Class assignment based on name
+        super().__init__(coordinator, server_id, io)
         name_lower = io["name"].lower()
         if any(x in name_lower for x in ["bewegung", "presence", "präsenz"]):
             self._attr_device_class = BinarySensorDeviceClass.MOTION
@@ -56,16 +47,6 @@ class ComexioBinarySensor(CoordinatorEntity, BinarySensorEntity):
             self._attr_device_class = BinarySensorDeviceClass.WINDOW
         elif any(x in name_lower for x in ["tür", "door"]):
             self._attr_device_class = BinarySensorDeviceClass.DOOR
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            "name": f"{self.coordinator.server_id} {self._ext_name}",
-            "manufacturer": "Comexio",
-            "model": "Extension Module",
-            "via_device": (DOMAIN, self.coordinator.server_id),
-        }
 
     @property
     def is_on(self) -> bool:

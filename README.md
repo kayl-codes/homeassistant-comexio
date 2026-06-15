@@ -2,15 +2,26 @@
 
 🌍 *[🇩🇪 Auf Deutsch lesen (Read this in German)](#-deutsch)*
 
-![Version](https://img.shields.io/badge/version-0.7.5-blue.svg)
-![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blueviolet.svg)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/kayl-codes/homeassistant-comexio?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/releases)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=plastic)](https://github.com/hacs/integration)
+[![Project Stage](https://img.shields.io/badge/project%20stage-development-yellow.svg?style=plastic)](#)
+[![GitHub all releases](https://img.shields.io/github/downloads/kayl-codes/homeassistant-comexio/total?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/releases)
+
+[![GitHub commits since latest release](https://img.shields.io/github/commits-since/kayl-codes/homeassistant-comexio/latest?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/commits/master)
+[![GitHub commit activity](https://img.shields.io/github/commit-activity/m/kayl-codes/homeassistant-comexio?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/graphs/commit-activity)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/kayl-codes/homeassistant-comexio/ci.yml?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/actions)
 
 This custom integration seamlessly and locally connects **Comexio IO-Servers** to Home Assistant. It was designed to build a high-performance, real-time bridge between the Comexio logic world and Home Assistant. The focus is on blazing-fast speed (Local Push) and fully automated, intelligent interface management.
 
-## Support
-If you find this project useful, you can support its development by buying me a coffee:
-[![Buy Me A Coffee](https://shields.io)](https://buymeacoffee.com/kayl74)
+## ❤️ Support
+This integration is actively maintained and updated in my spare time.
+
+If it has helped you, consider supporting ongoing development, bug fixes, compatibility updates, and future enhancements:
+
+- ❤️ GitHub Sponsors: https://github.com/sponsors/kayl-codes
+- ☕ Buy Me a Coffee: https://buymeacoffee.com/kayl74
+
+Every contribution is greatly appreciated. Thank you for your support!
 
 ## ✨ Core Features
 
@@ -18,6 +29,7 @@ If you find this project useful, you can support its development by buying me a 
 - 🤖 **Smart Web-IO Lifecycle Management:** Automatically detects missing webhooks in Comexio and offers to create, repair, or clean them up directly via the HA dashboard.
 - 🔄 **Deep Delta-Sync:** If a name or type changes in Comexio, an intelligent comparison updates *only* the affected commands (delta), without breaking existing logic plans.
 - 🛠️ **Integrated Repair Dialogs (HA Repairs):** In case of inconsistencies between HA and Comexio, the integration creates interactive repair suggestions directly in the HA dashboard.
+- 📴 **Offline Extension Handling:** When a Comexio extension module goes offline, all its entities and its sub-device are automatically removed from the HA device list. A diagnostic sensor on the hub device shows which extensions are currently offline.
 - 🔒 **Secure Authentication:** Full support for the modern RSA login method (v11) for administrative tasks as well as Basic Auth for standard API calls.
 
 ## 📦 Supported Entities
@@ -29,6 +41,7 @@ If you find this project useful, you can support its development by buying me a 
 | `switch` | Digital Outputs (Q) & Markers | Switches physical relays (classified as outlets) and digital markers. |
 | `number` | Analog Markers | Sets setpoints with automatic range checking (e.g., target temperature). |
 | `button` | System Functions | Manual "Smart-Sync" trigger and cancel button directly from the HA device view. |
+| `sensor` (diagnostic) | Integration | `Offline Extensions` — shows how many extension modules are currently offline and lists their names as a state attribute. |
 
 ## 🚀 Installation
 
@@ -76,10 +89,24 @@ If you adjust the logic in Comexio, HA detects this immediately and classifies t
 Instead of blindly overwriting everything (which might break your Comexio logic), HA creates a **Repair Issue**.
 You can then decide via click whether you want to perform a **Full Sync** or a targeted **Delta-Sync** (e.g., "Only delete orphans"). The integration pauses between write operations (`asyncio.sleep`) to avoid overloading the Comexio server.
 
+## 📴 Offline Extension Handling
+
+If a Comexio extension module (e.g. an RC or UD bus device) is offline or not reachable, the integration detects this automatically during the next coordinator poll and takes the following actions:
+
+1. **Entities removed:** All sensors, switches, and binary sensors belonging to the offline extension are removed from the HA entity registry.
+2. **Sub-device removed:** The extension's sub-device is deleted from the HA device list so no stale "Unavailable" card remains.
+3. **Diagnostic sensor updated:** The `Offline Extensions` sensor on the hub device increments its count and lists the offline extension names in its `extensions` attribute.
+
+When the extension comes back online, a full HA restart or integration reload will re-create all its entities and sub-device automatically.
+
+> [!NOTE]
+> Detection works by checking the `Identifier` field returned by the Comexio API. An online extension returns a serial number (e.g. `8505-2057-2326`), while an offline one only returns its model code (e.g. `5010`) without dashes.
+
 ## 🐛 Troubleshooting
 
 - **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a logic plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
 - **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu.
+- **Extension entities don't reappear after coming back online:** Reload the integration via *Settings → Devices & Services → Comexio → ⋮ → Reload*. The coordinator will re-detect the extension as online and restore all its entities.
 
 ## 🤝 Contributing
 Pull Requests are highly welcome! If you find bugs or have feature requests, please create an issue in the GitHub repository.
@@ -95,15 +122,26 @@ This project is licensed under the MIT License.
 
 # <img src="icon.png" width="40" align="center"> Comexio Integration für Home Assistant
 
-![Version](https://img.shields.io/badge/version-0.7.5-blue.svg)
-![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blueviolet.svg)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/kayl-codes/homeassistant-comexio?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/releases)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=plastic)](https://github.com/hacs/integration)
+[![Project Stage](https://img.shields.io/badge/project%20stage-development-yellow.svg?style=plastic)](#)
+[![GitHub all releases](https://img.shields.io/github/downloads/kayl-codes/homeassistant-comexio/total?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/releases)
+
+[![GitHub commits since latest release](https://img.shields.io/github/commits-since/kayl-codes/homeassistant-comexio/latest?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/commits/master)
+[![GitHub commit activity](https://img.shields.io/github/commit-activity/m/kayl-codes/homeassistant-comexio?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/graphs/commit-activity)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/kayl-codes/homeassistant-comexio/ci.yml?style=plastic)](https://github.com/kayl-codes/homeassistant-comexio/actions)
 
 Diese Custom Integration bindet **Comexio IO-Server** nahtlos und lokal in Home Assistant ein. Sie wurde entwickelt, um eine performante, echtzeitfähige Brücke zwischen der Comexio-Logikwelt und Home Assistant zu schlagen. Der Fokus liegt auf rasanter Geschwindigkeit (Local Push) und einer vollständig automatisierten, intelligenten Verwaltung der Schnittstelle.
 
-## Support
-Wenn Sie dieses Projekt nützlich finden, können Sie seine Entwicklung unterstützen, indem Sie mir einen Kaffee spendieren:
-[![Buy Me A Coffee](https://shields.io)](https://buymeacoffee.com/kayl74)
+## ❤️ Support
+Diese Integration wird aktiv in meiner Freizeit gewartet und weiterentwickelt.
+
+Wenn sie dir geholfen hat, freue ich mich über deine Unterstützung für laufende Entwicklung, Bugfixes, Kompatibilitätsupdates und neue Features:
+
+- ❤️ GitHub Sponsors: https://github.com/sponsors/kayl-codes
+- ☕ Buy Me a Coffee: https://buymeacoffee.com/kayl74
+
+Jede Unterstützung wird sehr geschätzt. Danke!
 
 ## ✨ Kern-Features
 
@@ -111,6 +149,7 @@ Wenn Sie dieses Projekt nützlich finden, können Sie seine Entwicklung unterst�
 - 🤖 **Smartes Web-IO Lifecycle Management:** Erkennt fehlende Webhooks in Comexio automatisch und bietet im HA-Dashboard an, diese anzulegen, zu reparieren oder zu bereinigen.
 - 🔄 **Deep Delta-Sync:** Ändert sich ein Name oder Typ in Comexio, aktualisiert ein intelligenter Abgleich *nur* die betroffenen Befehle (Delta), ohne bestehende Logikpläne zu zerstören.
 - 🛠️ **Integrierte Reparatur-Dialoge (HA Repairs):** Bei Unstimmigkeiten zwischen HA und Comexio erstellt die Integration interaktive Reparatur-Vorschläge direkt im HA-Dashboard.
+- 📴 **Offline-Extension-Erkennung:** Geht ein Comexio-Erweiterungsmodul offline, werden alle zugehörigen Entitäten und das Sub-Device automatisch aus der HA-Geräteliste entfernt. Ein Diagnose-Sensor am Hub-Device zeigt, welche Module gerade offline sind.
 - 🔒 **Sichere Authentifizierung:** Volle Unterstützung für das moderne RSA-Login-Verfahren (v11) für administrative Aufgaben sowie Basic Auth für Standard-API-Aufrufe.
 
 ## 📦 Unterstützte Entitäten
@@ -122,6 +161,7 @@ Wenn Sie dieses Projekt nützlich finden, können Sie seine Entwicklung unterst�
 | `switch` | Digitale Ausgänge (Q) & Merker | Schaltet physische Relais (als Steckdose/Outlet klassifiziert) und digitale Merker. |
 | `number` | Analoge Merker | Setzt Sollwerte (Setpoints) mit automatischer Bereichsprüfung (z. B. Temp-Soll). |
 | `button` | System-Funktionen | Manueller "Smart-Sync" Abgleich und Abbruch direkt aus der HA-Geräteansicht. |
+| `sensor` (Diagnose) | Integration | `Offline Extensions` — zeigt, wie viele Erweiterungsmodule gerade offline sind, und listet deren Namen als State-Attribut. |
 
 ## 🚀 Installation
 
@@ -169,10 +209,24 @@ Wenn du in Comexio Logik anpasst, erkennt HA das sofort und klassifiziert den Fe
 Anstatt blind alles zu überschreiben (und dabei womöglich deine Comexio-Logik zu beschädigen), erstellt HA ein **Reparatur-Issue**.
 Du kannst dann per Klick entscheiden, ob du einen **Full Sync** oder einen **gezielten Delta-Sync** (z.B. "Nur Waisen löschen") durchführen möchtest. Die Integration pausiert zwischen den Schreibvorgängen (`asyncio.sleep`), um den Comexio-Server nicht zu überlasten.
 
+## 📴 Offline-Extension-Erkennung
+
+Wenn ein Comexio-Erweiterungsmodul (z. B. ein RC- oder UD-Bus-Gerät) offline oder nicht erreichbar ist, erkennt die Integration das automatisch beim nächsten Coordinator-Poll und handelt wie folgt:
+
+1. **Entitäten entfernt:** Alle Sensoren, Schalter und Binär-Sensoren des Moduls werden aus der HA Entity Registry entfernt.
+2. **Sub-Device entfernt:** Das Sub-Device des Moduls verschwindet aus der HA-Geräteliste — keine veraltete "Nicht verfügbar"-Karte.
+3. **Diagnose-Sensor aktualisiert:** Der `Offline Extensions`-Sensor am Hub-Device erhöht seinen Zähler und listet die Namen der Offline-Module im `extensions`-Attribut.
+
+Kommt das Modul wieder online, stellt ein Reload der Integration (*Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu laden*) alle Entitäten und das Sub-Device automatisch wieder her.
+
+> [!NOTE]
+> Die Erkennung basiert auf dem `Identifier`-Feld der Comexio-API. Ein Online-Modul liefert eine Seriennummer (z. B. `8505-2057-2326`), ein Offline-Modul nur den Geräte-Code ohne Bindestriche (z. B. `5010`).
+
 ## 🐛 Fehlerbehebung (Troubleshooting)
 
 - **"Web-IO Gerät ist blockiert (in use)":** Du versuchst, einen *Full Sync* zu machen, aber das Web-IO Gerät ist in Comexio bereits in einem Logikplan verbunden. Die Integration erkennt das und fällt automatisch und sicher auf den *Delta-Sync* zurück, um nur die Einzelbefehle zu patchen.
 - **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten.
+- **Extension-Entitäten erscheinen nach Wiederherstellung nicht:** Lade die Integration über *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu laden* neu. Der Coordinator erkennt das Modul als online und legt alle Entitäten neu an.
 
 ## 🤝 Mitwirken
 Pull Requests sind herzlich willkommen! Wenn du Fehler findest oder Feature-Wünsche hast, erstelle bitte ein Issue im GitHub Repository.

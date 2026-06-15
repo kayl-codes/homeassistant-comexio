@@ -14,8 +14,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 from .coordinator import ComexioCoordinator
+from .entity import ComexioIOEntity
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -39,58 +40,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     entities = []
     if conf.get("import_ios", True):
-        # Only analog values (is_binary=False) are created as sensors
+        include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
         entities.extend(
             ComexioIOSensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
-            if not io.get("is_binary")
+            if not io.get("is_binary") and (not io.get("offline") or include_offline)
         )
 
-    # Add the system sync status sensor
-    entities.append(ComexioSyncStatusSensor(coordinator, coordinator.server_id))
+    entities.extend(
+        [
+            ComexioSyncStatusSensor(coordinator, coordinator.server_id),
+            ComexioOfflineExtensionsSensor(coordinator, coordinator.server_id),
+        ]
+    )
 
     async_add_entities(entities)
 
 
-class ComexioIOSensor(CoordinatorEntity, SensorEntity):
+class ComexioIOSensor(ComexioIOEntity, SensorEntity):
     """Representation of an analog Comexio Input/Output."""
 
-    _attr_has_entity_name = True
-
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self._io_id = io["id"]
-        self._ext_name = io["ext_name"]
-
-        # Stable Unique ID for the HA database
-        self._attr_unique_id = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
-        self._attr_name = io["ha_name"]
-
-        # State class 'measurement' enables long-term statistics and graphs
+        super().__init__(coordinator, server_id, io)
         self._attr_state_class = SensorStateClass.MEASUREMENT
-
-        # Dynamic unit and device class mapping from Comexio type list
         unit = io.get("unit", "")
         self._attr_native_unit_of_measurement = unit
-
-        # Assign Device Class based on the unit provided by Comexio
         if unit in UNIT_TO_DEVICE_CLASS:
             self._attr_device_class = UNIT_TO_DEVICE_CLASS[unit]
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            "name": f"{self.coordinator.server_id} {self._ext_name}",
-            "manufacturer": "Comexio",
-            "model": "Extension Module",
-            "via_device": (DOMAIN, self.coordinator.server_id),
-        }
+    def state_class(self) -> SensorStateClass | None:
+        """Suppress long-term statistics while extension is offline to avoid unit-mismatch warnings."""
+        if self._ext_name in self.coordinator.offline_extensions:
+            return None
+        return self._attr_state_class
 
     @property
     def native_value(self) -> float | str | None:
-        """Return the current value from coordinator cache."""
         return self.coordinator.io_states.get(self._io_id)
 
 
@@ -130,3 +116,33 @@ class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
         if getattr(self.coordinator, "sync_current_step", None) is not None:
             attrs["current_step"] = self.coordinator.sync_current_step
         return attrs
+
+
+class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor listing extension modules currently offline."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:lan-disconnect"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_offline_extensions_sensor"
+        self._attr_translation_key = "offline_extensions"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.offline_extensions)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"extensions": sorted(self.coordinator.offline_extensions)}

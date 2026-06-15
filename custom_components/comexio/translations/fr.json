@@ -38,6 +38,7 @@
           "scan_interval": "Intervalle d'interrogation en arrière-plan (min)",
           "enable_notifications": "Afficher les notifications contextuelles pendant la synchronisation",
           "audit_ignored": "Ignorer les avertissements de classe Web-IO manquante",
+          "include_offline_extensions": "Afficher les entités d'extensions hors ligne comme indisponibles (au lieu de les masquer)",
           "cover_keywords": "Mots-clés pour la détection des volets"
         },
         "data_description": {
@@ -71,6 +72,9 @@
           "syncing": "Synchronisation...",
           "error": "Erreur"
         }
+      },
+      "offline_extensions": {
+        "name": "Extensions hors ligne"
       }
     }
   },

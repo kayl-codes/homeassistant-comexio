@@ -10,8 +10,9 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 from .coordinator import ComexioCoordinator
+from .entity import ComexioIOEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,11 +34,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     # 2. Digital Outputs (Relays)
     if conf.get("import_ios", True):
+        include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
         for io in coordinator.data.get("io", []):
             identifier = io.get("identifier", "")
-            # Filter: Must be binary AND a real output (Identifier starts with Q followed by digits)
-            # This regex specifically excludes "QI" (Power/Current inputs)
-            if io.get("is_binary") and re.match(r"^Q\d+$", identifier):
+            if io.get("is_binary") and (not io.get("offline") or include_offline) and re.match(r"^Q\d+$", identifier):
                 entities.append(ComexioIOSwitch(coordinator, coordinator.server_id, io))
 
     async_add_entities(entities)
@@ -89,32 +89,13 @@ class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
         self.async_write_ha_state()
 
 
-class ComexioIOSwitch(CoordinatorEntity, SwitchEntity):
+class ComexioIOSwitch(ComexioIOEntity, SwitchEntity):
     """Representation of a Comexio Digital Output (Relay) as a Switch."""
 
-    _attr_has_entity_name = True
-
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
-        """Initialize the relay switch."""
-        super().__init__(coordinator)
-        self._io_id = str(io["id"])
-        self._ext_name = io["ext_name"]
+        super().__init__(coordinator, server_id, io)
         self._identifier = io["identifier"]
-
-        self._attr_unique_id = f"comexio_{server_id}_{self._ext_name}_{self._identifier}".lower()
-        self._attr_name = io["ha_name"]
-        # Real outputs are classified as OUTLET by default
         self._attr_device_class = SwitchDeviceClass.OUTLET
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            "name": f"{self.coordinator.server_id} {self._ext_name}",
-            "manufacturer": "Comexio",
-            "model": "Extension Module",
-            "via_device": (DOMAIN, self.coordinator.server_id),
-        }
 
     @property
     def is_on(self) -> bool:

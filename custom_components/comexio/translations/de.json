@@ -38,6 +38,7 @@
           "scan_interval": "Abfrageintervall (Minuten)",
           "enable_notifications": "Fortschritts-Popups während des Syncs anzeigen",
           "audit_ignored": "Warnung bei fehlender Web-IO Klasse ignorieren",
+          "include_offline_extensions": "Offline-Extensions als 'Nicht verfügbar' anzeigen (statt ausblenden)",
           "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
         },
         "data_description": {
@@ -71,6 +72,9 @@
           "syncing": "Synchronisiert...",
           "error": "Fehler"
         }
+      },
+      "offline_extensions": {
+        "name": "Offline Extensions"
       }
     }
   },

@@ -10,7 +10,16 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .api import ComexioAPI
-from .const import CONF_API_PASSWORD, CONF_API_USERNAME, CONF_HOST, CONF_PASSWORD, CONF_SERVER_ID, CONF_USERNAME, DOMAIN
+from .const import (
+    CONF_API_PASSWORD,
+    CONF_API_USERNAME,
+    CONF_HOST,
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    CONF_PASSWORD,
+    CONF_SERVER_ID,
+    CONF_USERNAME,
+    DOMAIN,
+)
 from .coordinator import ComexioCoordinator
 from .services import async_setup_services
 
@@ -120,8 +129,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     for m in coordinator.data.get("markers", []):
         active_unique_ids.add(f"comexio_{server_id}_m{m['id']}".lower())
 
+    include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
     for io in coordinator.data.get("io", []):
-        active_unique_ids.add(f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower())
+        if not io.get("offline") or include_offline:
+            active_unique_ids.add(f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower())
 
     # Add buttons (these are always active)
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_start_btn")
@@ -129,20 +140,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_status_sensor")
     active_unique_ids.add(f"comexio_{server_id}_entity_id_fix_btn")
     active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
+    active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
 
     # Delete anything from the registry that is not in active_unique_ids
     _LOGGER.debug("Comexio Cleanup: protecting %d active unique IDs", len(active_unique_ids))
     for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
-        # _LOGGER.debug(
-        #     "Comexio Cleanup: checking entity %s (Unique ID: %s)",
-        #     entity_entry.entity_id,
-        #     entity_entry.unique_id
-        # )
         if entity_entry.unique_id not in active_unique_ids:
             _LOGGER.info(
                 "Cleaning up orphaned entity: %s (Unique ID: %s)", entity_entry.entity_id, entity_entry.unique_id
             )
             ent_reg.async_remove(entity_entry.entity_id)
+
+    # Remove sub-devices that have no entities left (e.g. offline extension modules).
+    # Skipped when include_offline_extensions is enabled — devices stay visible as unavailable.
+    if not include_offline:
+        dev_reg = dr.async_get(hass)
+        hub_identifier = (DOMAIN, server_id)
+        # Pre-index device_ids that still have entities to avoid a registry scan per device.
+        devices_with_entities = {
+            e.device_id for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id) if e.device_id
+        }
+        for dev_entry in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+            if hub_identifier in dev_entry.identifiers:
+                continue
+            if dev_entry.id not in devices_with_entities:
+                _LOGGER.info("Removing empty sub-device: %s", dev_entry.name)
+                dev_reg.async_remove_device(dev_entry.id)
+
+    # Re-run orphaned-statistics check after entity cleanup so that entities removed
+    # above (e.g. offline extension IOs) are immediately detected as orphaned statistics,
+    # without waiting for the next scheduled poll.
+    await coordinator.async_check_orphaned_statistics(conf)
 
     return True
 

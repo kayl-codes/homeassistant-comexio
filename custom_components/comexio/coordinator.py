@@ -57,6 +57,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.cancel_sync: bool = False
         self.entity_id_mismatches: list[dict[str, str]] = []
         self.orphaned_statistics: list[str] = []
+        self.offline_extensions: set[str] = set()
         self.cover_keywords: list[str] = []
         # R4: Lock to prevent concurrent sync runs
         self._sync_lock: asyncio.Lock = asyncio.Lock()
@@ -120,6 +121,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Rebuild O(1) lookup index for webhook IO updates
             self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
+
+            # Track offline extensions and log transitions
+            new_offline = {io["ext_name"] for io in final_data["io"] if io.get("offline")}
+            if new_offline != self.offline_extensions:
+                went_offline = new_offline - self.offline_extensions
+                came_online = self.offline_extensions - new_offline
+                if went_offline:
+                    _LOGGER.warning("[%s] Extensions went offline: %s", self.server_id, went_offline)
+                if came_online:
+                    _LOGGER.info("[%s] Extensions came back online: %s", self.server_id, came_online)
+                self.offline_extensions = new_offline
 
             # --- ENTITY-ID MISMATCH DETECTION ---
             # Runs every poll so the migration button reflects the real state.
