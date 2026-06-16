@@ -7,17 +7,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+---
+
+## [0.8.0] — 2026-06-16
+
 ### ✨ New Features
+- **Reconfigure Flow:** Connection credentials (host, username, admin password, API user/pass) are now editable via **⋮ → Reconfigure** without re-adding the integration. Blank password fields preserve the existing stored value; a login test runs before saving.
+- **Polling Interval Dropdown:** The free-range slider (1–1440 min) is replaced by a curated dropdown: 1 / 5 / 10 / 15 / 30 / 45 / 60 / 120 / 300 / 600 / 1440 min.
 - **Offline Extension Detection:** Extension modules that are offline (no dash-separated serial in the `Identifier` field) are now detected automatically on every coordinator poll.
-- **Sub-device Auto-Removal:** When an extension module goes offline, all its entities are excluded from entity creation and removed from the HA entity registry. The corresponding sub-device is then deleted from the HA device registry so it disappears entirely from the device list — no stale "unavailable" entries.
-- **Diagnostic Sensor — Offline Extensions:** A new `Offline Extensions` sensor is added to the hub device. It shows the count of currently offline extensions and exposes the list via `extensions` state attribute.
-- **Orphaned Statistics Repair on Startup:** After entity cleanup, the integration now immediately re-runs orphaned-statistics detection so that a HA Repair issue is raised right away (previously only on the next scheduled poll, up to 15 minutes later).
+- **Sub-device Auto-Removal:** When an extension module goes offline, all its entities are removed from the HA entity registry and the corresponding sub-device disappears from the device list — no stale "unavailable" entries.
+- **Diagnostic Sensor — Offline Extensions:** A new `Offline Extensions` sensor on the hub device shows the count of offline extensions and lists them via the `extensions` state attribute.
+- **Orphaned Statistics Repair on Startup:** After entity cleanup, orphaned-statistics detection now runs immediately so the HA Repair issue appears right away.
 
 ### 🛠️ Core & Stability Improvements
-- `state_class` returns `None` for sensors belonging to an offline extension, preventing recorder unit-mismatch warnings when the extension goes offline with an incomplete `$ioTypes` map.
-- Transition logging: coordinator logs which extensions went offline / came back online on every state change.
-- `manifest.json` now declares `after_dependencies: ["recorder"]` so the recorder is guaranteed to be available before the integration checks for orphaned statistics.
-- `async_migrate_entity_ids()` extracted to coordinator as a shared helper (used by both the repair flow and the migration button), reducing cognitive complexity.
+- **Options flow cleanup:** Credential fields removed from the options form — connection details live exclusively in `config_entry.data` and are managed via the new reconfigure flow.
+- **Coordinator credential source:** `async_config_entry_updated` now reads credentials directly from `entry.data`, preventing stale options values from overriding a reconfigure.
+- `state_class` returns `None` for sensors of offline extensions, preventing recorder unit-mismatch warnings.
+- Transition logging: coordinator logs which extensions went offline / came back online on each state change.
+- `async_migrate_entity_ids()` extracted to coordinator as a shared helper, reducing cognitive complexity.
+
+### 📖 Documentation
+- New `CONFIGURATION.md` — bilingual (EN + DE) guide with all UI screenshots and field descriptions.
+- README updated with reconfigure tip, options note, and link to the new configuration guide.
+
+### ⚠️ Requirements & Notes
+- After updating, a **full HA restart** is required (new translation keys).
+- Existing entries: credentials stored in `config_entry.options` from the old options flow are automatically cleaned up the first time you save via Reconfigure.
 
 ---
 
