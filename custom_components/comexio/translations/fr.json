@@ -22,6 +22,40 @@
           "scan_interval": "Intervalle d'interrogation en arrière-plan (min)",
           "cover_keywords": "Mots-clés pour la détection des volets"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigurer la connexion Comexio",
+        "data": {
+          "host": "Hôte / Adresse IP",
+          "username": "Nom d'utilisateur (Admin)",
+          "password": "Mot de passe (Admin)",
+          "api_username": "Nom d'utilisateur API (Basic Auth)",
+          "api_password": "Mot de passe API (Basic Auth)"
+        },
+        "data_description": {
+          "password": "Laisser vide pour conserver le mot de passe existant.",
+          "api_password": "Laisser vide pour conserver le mot de passe existant."
+        }
+      }
+    },
+    "abort": {
+      "reconfigure_successful": "Paramètres de connexion mis à jour avec succès."
+    }
+  },
+  "selector": {
+    "scan_interval": {
+      "options": {
+        "1": "1 min",
+        "5": "5 min",
+        "10": "10 min",
+        "15": "15 min",
+        "30": "30 min",
+        "45": "45 min",
+        "60": "60 min (1 h)",
+        "120": "120 min (2 h)",
+        "300": "300 min (5 h)",
+        "600": "600 min (10 h)",
+        "1440": "1440 min (24 h)"
       }
     }
   },
@@ -30,9 +64,6 @@
       "init": {
         "title": "Paramètres Comexio",
         "data": {
-          "host": "Hôte / Adresse IP",
-          "password": "Mot de passe Admin",
-          "api_password": "Mot de passe API (Basic Auth)",
           "schema_marker": "Schéma de nommage pour les marqueurs",
           "schema_io": "Schéma de nommage pour les IOs",
           "scan_interval": "Intervalle d'interrogation en arrière-plan (min)",

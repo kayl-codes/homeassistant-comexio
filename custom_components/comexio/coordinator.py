@@ -1,4 +1,4 @@
-# Version: 0.7.5
+# Version: 0.8.0
 import asyncio
 import logging
 import socket
@@ -439,15 +439,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Handle config entry update (e.g. from Options Flow)."""
         _LOGGER.info("[%s] Configuration updated, reloading API settings", self.server_id)
 
-        # Merge data and options
-        conf = {**self.config_entry.data, **self.config_entry.options}
-
-        # Update API instance with potentially new credentials
-        self.api.host = conf.get(CONF_HOST)
-        self.api.username = conf.get(CONF_USERNAME)
-        self.api.password = conf.get(CONF_PASSWORD)
-        self.api.api_user = conf.get(CONF_API_USERNAME)
-        self.api.api_pass = conf.get(CONF_API_PASSWORD)
+        data = self.config_entry.data
+        self.api.host = data.get(CONF_HOST)
+        self.api.username = data.get(CONF_USERNAME)
+        self.api.password = data.get(CONF_PASSWORD)
+        self.api.api_user = data.get(CONF_API_USERNAME)
+        self.api.api_pass = data.get(CONF_API_PASSWORD)
 
         # Re-authenticate with new credentials
         await self.api.login()

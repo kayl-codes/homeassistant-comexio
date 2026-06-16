@@ -1,4 +1,4 @@
-# Version: 0.7.5
+# Version: 0.8.0
 import contextlib
 import logging
 import socket
@@ -6,7 +6,7 @@ import socket
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.selector import NumberSelector, NumberSelectorConfig, NumberSelectorMode
+from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
 import voluptuous as vol
 
 from .api import ComexioAPI
@@ -23,12 +23,16 @@ from .const import (
     DOMAIN,
     KNOWN_DOMAINS,
     SCAN_INTERVAL_DEFAULT,
-    SCAN_INTERVAL_MAX,
-    SCAN_INTERVAL_MIN,
+    SCAN_INTERVAL_OPTIONS,
 )
 from .options_flow import ComexioOptionsFlow
 
 _LOGGER = logging.getLogger(__name__)
+
+
+_CREDENTIAL_KEYS: frozenset[str] = frozenset(
+    {CONF_HOST, CONF_USERNAME, CONF_PASSWORD, CONF_API_USERNAME, CONF_API_PASSWORD}
+)
 
 
 class CannotConnect(HomeAssistantError):
@@ -103,8 +107,9 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # 2. Validation: Test connection with the provided UI credentials
                 await self._test_connection(user_input)
 
-                # Store the cleaned server ID and create the entry
+                # Store the cleaned server ID and coerce scan_interval to int
                 user_input[CONF_SERVER_ID] = chosen_id
+                user_input["scan_interval"] = int(user_input["scan_interval"])
                 _LOGGER.info("Config entry created for server: %s", chosen_id)
 
                 return self.async_create_entry(
@@ -138,13 +143,14 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required("import_markers", default=ui.get("import_markers", True)): bool,
                 vol.Required("import_ios", default=ui.get("import_ios", True)): bool,
                 vol.Required("webio_name", default=ui.get("webio_name", "HomeAssistant")): str,
-                vol.Required("scan_interval", default=ui.get("scan_interval", SCAN_INTERVAL_DEFAULT)): NumberSelector(
-                    NumberSelectorConfig(
-                        min=SCAN_INTERVAL_MIN,
-                        max=SCAN_INTERVAL_MAX,
-                        step=1,
-                        mode=NumberSelectorMode.SLIDER,
-                        unit_of_measurement="min",
+                vol.Required(
+                    "scan_interval",
+                    default=str(ui.get("scan_interval", SCAN_INTERVAL_DEFAULT)),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=SCAN_INTERVAL_OPTIONS,
+                        mode=SelectSelectorMode.DROPDOWN,
+                        translation_key="scan_interval",
                     )
                 ),
                 vol.Optional(CONF_COVER_KEYWORDS, default=ui.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS)): str,
@@ -158,6 +164,51 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry):
         """Get the options flow for this handler."""
         return ComexioOptionsFlow(config_entry)
+
+    async def async_step_reconfigure(self, user_input=None):
+        """Handle reconfiguration of connection credentials."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        errors = {}
+
+        if user_input is not None:
+            merged = {**entry.data, **user_input}
+            if not user_input.get(CONF_PASSWORD):
+                merged[CONF_PASSWORD] = entry.data.get(CONF_PASSWORD, "")
+            if not user_input.get(CONF_API_PASSWORD):
+                merged[CONF_API_PASSWORD] = entry.data.get(CONF_API_PASSWORD, "")
+
+            try:
+                await self._test_connection(merged)
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except Exception:
+                _LOGGER.exception("Unexpected error during reconfigure")
+                errors["base"] = "unknown"
+            else:
+                clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
+                return self.async_update_reload_and_abort(
+                    entry,
+                    title=f"Comexio {entry.data[CONF_SERVER_ID]} ({merged[CONF_HOST]})",
+                    data=merged,
+                    options=clean_options,
+                )
+
+        conf = entry.data
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=conf.get(CONF_HOST, DEFAULT_HOST)): str,
+                    vol.Required(CONF_USERNAME, default=conf.get(CONF_USERNAME, "admin")): str,
+                    vol.Optional(CONF_PASSWORD): str,
+                    vol.Optional(CONF_API_USERNAME, default=conf.get(CONF_API_USERNAME, "")): str,
+                    vol.Optional(CONF_API_PASSWORD): str,
+                }
+            ),
+            errors=errors,
+        )
 
     async def _test_connection(self, user_input):
         """Test if the login works using UI credentials."""
