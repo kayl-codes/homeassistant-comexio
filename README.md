@@ -61,7 +61,7 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 
 1. In Home Assistant, go to **Settings > Devices & Services**.
 2. Click **Add Integration** in the bottom right corner and search for **Comexio**.
-3. Fill in your credentials:
+3. Fill in your connection details:
    - **Host:** IP address of your Comexio server.
    - **Username / Password:** Your credentials for the web interface (Admin).
    - **API User / Pass (Optional):** For faster API calls via Basic Auth.
@@ -69,6 +69,14 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 
 > [!TIP]
 > **Initial Setup:** When the integration starts for the first time, it will propose to automatically create the Web-IO device class in Comexio via the Home Assistant "Repairs" menu. Confirm this to activate full webhook functionality!
+
+> [!TIP]
+> **Changing connection details later:** If your Comexio IP address or passwords change, you do **not** need to re-add the integration. Open *Settings → Devices & Services → Comexio → ⋮ → Reconfigure* and update host, username, and passwords directly. Leave password fields blank to keep the existing password.
+
+> [!NOTE]
+> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, notifications, and cover detection keywords.
+
+📖 **[Full configuration guide with screenshots →](CONFIGURATION.md)**
 
 ## 🧠 Smart Lifecycle Management (How it works)
 
@@ -181,11 +189,19 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 
 1. Gehe in Home Assistant zu **Einstellungen > Geräte & Dienste**.
 2. Klicke unten rechts auf **Integration hinzufügen** und suche nach **Comexio**.
-3. Fülle die Anmeldedaten aus:
+3. Fülle die Verbindungsdaten aus:
    - **Host:** IP-Adresse deines Comexio-Servers.
    - **Benutzername / Passwort:** Deine Zugangsdaten für die Weboberfläche (Admin).
    - **API User / Pass (Optional):** Für schnellere API-Aufrufe via Basic Auth.
 4. Nach dem Setup meldet sich die Integration in Comexio an und lädt die Konfiguration herunter.
+
+> [!TIP]
+> **Verbindungsdaten nachträglich ändern:** Wenn sich IP-Adresse oder Passwörter ändern, musst du die Integration **nicht** neu einrichten. Öffne die Integration unter *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu konfigurieren* und passe Host, Benutzername und Passwörter direkt an. Felder für Passwörter leer lassen bedeutet "bestehendes Passwort beibehalten".
+
+> [!NOTE]
+> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Benachrichtigungen und Rollladen-Schlüsselwörter.
+
+📖 **[Vollständige Konfigurationsanleitung mit Screenshots →](CONFIGURATION.md)**
 
 > [!TIP]
 > **Initial Setup:** Wenn die Integration das erste Mal startet, wird sie im Home Assistant Reparatur-Menü ("Repairs") vorschlagen, die Web-IO Geräteklasse in Comexio automatisch anzulegen. Bestätige dies, um die volle Webhook-Funktionalität zu aktivieren!

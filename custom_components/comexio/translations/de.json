@@ -22,6 +22,40 @@
           "scan_interval": "Abfrageintervall (Minuten)",
           "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
         }
+      },
+      "reconfigure": {
+        "title": "Comexio-Verbindung neu konfigurieren",
+        "data": {
+          "host": "Host / IP-Adresse",
+          "username": "Benutzername (Admin-Oberfläche)",
+          "password": "Passwort (Admin-Oberfläche)",
+          "api_username": "API Benutzername (Basic Auth)",
+          "api_password": "API Passwort (Basic Auth)"
+        },
+        "data_description": {
+          "password": "Leer lassen, um das bestehende Passwort beizubehalten.",
+          "api_password": "Leer lassen, um das bestehende Passwort beizubehalten."
+        }
+      }
+    },
+    "abort": {
+      "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert."
+    }
+  },
+  "selector": {
+    "scan_interval": {
+      "options": {
+        "1": "1 min",
+        "5": "5 min",
+        "10": "10 min",
+        "15": "15 min",
+        "30": "30 min",
+        "45": "45 min",
+        "60": "60 min (1 Std)",
+        "120": "120 min (2 Std)",
+        "300": "300 min (5 Std)",
+        "600": "600 min (10 Std)",
+        "1440": "1440 min (24 Std)"
       }
     }
   },
@@ -30,9 +64,6 @@
       "init": {
         "title": "Comexio Einstellungen",
         "data": {
-          "host": "Host / IP-Adresse",
-          "password": "Passwort Admin-Oberfläche",
-          "api_password": "API Passwort (Basic Auth)",
           "schema_marker": "Namensschema für Merker",
           "schema_io": "Namensschema für IOs",
           "scan_interval": "Abfrageintervall (Minuten)",

@@ -22,6 +22,40 @@
           "scan_interval": "Background polling interval (min)",
           "cover_keywords": "Keywords for cover detection"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Comexio Connection",
+        "data": {
+          "host": "Host / IP Address",
+          "username": "Username (Admin UI)",
+          "password": "Password (Admin UI)",
+          "api_username": "API Username (Basic Auth)",
+          "api_password": "API Password (Basic Auth)"
+        },
+        "data_description": {
+          "password": "Leave blank to keep the existing password.",
+          "api_password": "Leave blank to keep the existing password."
+        }
+      }
+    },
+    "abort": {
+      "reconfigure_successful": "Connection settings updated successfully."
+    }
+  },
+  "selector": {
+    "scan_interval": {
+      "options": {
+        "1": "1 min",
+        "5": "5 min",
+        "10": "10 min",
+        "15": "15 min",
+        "30": "30 min",
+        "45": "45 min",
+        "60": "60 min (1 h)",
+        "120": "120 min (2 h)",
+        "300": "300 min (5 h)",
+        "600": "600 min (10 h)",
+        "1440": "1440 min (24 h)"
       }
     }
   },
@@ -30,9 +64,6 @@
       "init": {
         "title": "Comexio Settings",
         "data": {
-          "host": "Host / IP Address",
-          "password": "Admin UI Password",
-          "api_password": "API Basic Auth Password",
           "schema_marker": "Naming Schema for Markers",
           "schema_io": "Naming Schema for IOs",
           "scan_interval": "Background polling interval (min)",

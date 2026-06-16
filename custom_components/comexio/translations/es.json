@@ -22,6 +22,40 @@
           "scan_interval": "Intervalo de consulta en segundo plano (min)",
           "cover_keywords": "Palabras clave para detectar persianas"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigurar conexión Comexio",
+        "data": {
+          "host": "Host / Dirección IP",
+          "username": "Usuario (Administrador)",
+          "password": "Contraseña (Administrador)",
+          "api_username": "Usuario API (Basic Auth)",
+          "api_password": "Contraseña API (Basic Auth)"
+        },
+        "data_description": {
+          "password": "Dejar en blanco para mantener la contraseña existente.",
+          "api_password": "Dejar en blanco para mantener la contraseña existente."
+        }
+      }
+    },
+    "abort": {
+      "reconfigure_successful": "Configuración de conexión actualizada correctamente."
+    }
+  },
+  "selector": {
+    "scan_interval": {
+      "options": {
+        "1": "1 min",
+        "5": "5 min",
+        "10": "10 min",
+        "15": "15 min",
+        "30": "30 min",
+        "45": "45 min",
+        "60": "60 min (1 h)",
+        "120": "120 min (2 h)",
+        "300": "300 min (5 h)",
+        "600": "600 min (10 h)",
+        "1440": "1440 min (24 h)"
       }
     }
   },
@@ -30,9 +64,6 @@
       "init": {
         "title": "Ajustes de Comexio",
         "data": {
-          "host": "Host / Dirección IP",
-          "password": "Contraseña Administrador",
-          "api_password": "Contraseña API (Basic Auth)",
           "schema_marker": "Esquema de nombres para marcadores",
           "schema_io": "Esquema de nombres para IOs",
           "scan_interval": "Intervalo de consulta en segundo plano (min)",

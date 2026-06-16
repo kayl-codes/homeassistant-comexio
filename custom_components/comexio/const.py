@@ -1,4 +1,4 @@
-# Version: 0.7.5
+# Version: 0.8.0
 DOMAIN = "comexio"
 
 CONF_HOST = "host"
@@ -27,9 +27,8 @@ CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
 
 DEFAULT_NAME = "Comexio"
 
-SCAN_INTERVAL_MIN = 1
-SCAN_INTERVAL_MAX = 1440
 SCAN_INTERVAL_DEFAULT = 15
+SCAN_INTERVAL_OPTIONS = ["1", "5", "10", "15", "30", "45", "60", "120", "300", "600", "1440"]
 
 # Operation durations for progress calculation (seconds)
 SYNC_DURATION_DELETE = 4
