@@ -38,7 +38,10 @@ LOCAL_HOSTNAME_RE = re.compile(
 )
 
 # Module-level compiled patterns for get_raw_config (used on every coordinator refresh).
+# $ioTypes = legacy (pre-v11); $IOTypesBinary = v11+ replacement with identical structure.
 _IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
+_IO_BINARY_TYPES_DECL_RE = re.compile(r"var\s+\$IOTypesBinary\s*=\s*")
+_IO_INPUT_TYPES_DECL_RE = re.compile(r"var\s+\$IOInputTypes\s*=\s*")
 _SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script[^>]*>", re.DOTALL | re.IGNORECASE)
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
@@ -154,8 +157,10 @@ class ComexioAPI:
 
         self.session: aiohttp.ClientSession = async_create_clientsession(hass, **session_kwargs)
 
-        # io_types holds mapping of IO type metadata. Default to {} for safe fallbacks.
+        # io_types: TypeId → {binary, min, max, unit}  (from $ioTypes or $IOTypesBinary)
         self.io_types: dict[str, Any] = {}
+        # io_input_types: TypeId → {input: bool}  (from $IOInputTypes)
+        self.io_input_types: dict[str, Any] = {}
         self._auth_warned: bool = False
         self._login_warned: bool = False
 
@@ -309,28 +314,38 @@ class ComexioAPI:
 
             main_html = await resp.text()
 
-        # Extract $ioTypes for dynamic unit and type mapping
-        if assign_match := _IO_TYPES_DECL_RE.search(main_html):
+        # Try $ioTypes (legacy) then $IOTypesBinary (Comexio v11+) — both have identical structure.
+        self.io_types = {}
+        for decl_re, var_name in (
+            (_IO_TYPES_DECL_RE, "$ioTypes"),
+            (_IO_BINARY_TYPES_DECL_RE, "$IOTypesBinary"),
+        ):
+            if assign_match := decl_re.search(main_html):
+                brace_index = main_html.find("{", assign_match.end())
+                if brace_index != -1:
+                    raw_object, _ = _extract_js_object_literal(main_html, brace_index)
+                    if raw_object:
+                        try:
+                            self.io_types = json.loads(_normalize_js_like_object(raw_object))
+                            _LOGGER.debug("Loaded %d IO types from %s", len(self.io_types), var_name)
+                            break
+                        except json.JSONDecodeError as exc:
+                            _LOGGER.warning("Failed to decode %s: %s", var_name, exc)
+        else:
+            _LOGGER.warning("No IO type data found ($ioTypes / $IOTypesBinary) — using identifier fallback")
+
+        # Extract $IOInputTypes: TypeId → {input: bool}  (input=True means read-only sensor)
+        self.io_input_types = {}
+        if assign_match := _IO_INPUT_TYPES_DECL_RE.search(main_html):
             brace_index = main_html.find("{", assign_match.end())
             if brace_index != -1:
                 raw_object, _ = _extract_js_object_literal(main_html, brace_index)
                 if raw_object:
                     try:
-                        clean_json = _normalize_js_like_object(raw_object)
-                        self.io_types = json.loads(clean_json)
-                        _LOGGER.debug("Successfully loaded %d Comexio IO types", len(self.io_types))
+                        self.io_input_types = json.loads(_normalize_js_like_object(raw_object))
+                        _LOGGER.debug("Loaded %d IO input types", len(self.io_input_types))
                     except json.JSONDecodeError as exc:
-                        _LOGGER.exception("Failed to decode $ioTypes JSON: %s. Falling back to generic IOs.", exc)
-                        self.io_types = {}
-                else:
-                    _LOGGER.warning("Failed to parse $ioTypes object. Falling back to generic IOs.")
-                    self.io_types = {}
-            else:
-                _LOGGER.warning("Failed to locate opening brace for $ioTypes object. Falling back to generic IOs.")
-                self.io_types = {}
-        else:
-            _LOGGER.warning("Global IO types variable $ioTypes not found. Falling back to generic IOs.")
-            self.io_types = {}
+                        _LOGGER.warning("Failed to decode $IOInputTypes: %s", exc)
 
         # 2. Fetch the function module page for the technical device configuration
         url_conf = f"{self._base_url}/admin/function_function_module/home"
@@ -570,9 +585,38 @@ class ComexioAPI:
         v_max = type_info.get("max", 1)
         unit = type_info.get("unit", "")
 
+        try:
+            type_id_raw = int(io_item.get("InOutputTypeId", 1))
+        except (ValueError, TypeError):
+            type_id_raw = 1
+
+        # Fallback classification when $IOTypesBinary unavailable.
+        if not self.io_types:
+            ident_upper = ident.upper()
+            if re.match(r"^QI\d+$", ident_upper):
+                is_binary, v_max = False, 0
+            elif re.match(r"^Q\d+$", ident_upper) or re.match(r"^I\d+$", ident_upper):
+                is_binary, v_max = True, 1
+
+        # is_input=True → read-only sensor/binary_sensor; False → writable switch/number.
+        # Identifier prefix is the reliable source: Q* are relay/dimmer outputs (writable),
+        # I*/AI*/QI* and special names are inputs. $IOInputTypes cannot be used here because
+        # the same TypeId (e.g. 2 = binary 0/1) is shared by both inputs and outputs.
+        ident_upper = ident.upper()
+        if re.match(r"^Q\d+$", ident_upper):
+            is_input = False
+        elif re.match(r"^(?:I|AI|QI)\d+$", ident_upper):
+            is_input = True
+        elif self.io_input_types:
+            is_input = self.io_input_types.get(str(type_id_raw), {}).get("input", True)
+        else:
+            is_input = True
+
         # Cleanup unit strings
-        if unit in ("\\u00b0C", "°C", "C"):
+        if unit in ("\\u00b0C", "°C", "°C", "C"):
             unit = "°C"
+        if unit in ("0/1", "1/0", "?"):
+            unit = ""
 
         if desc and desc.strip() and desc != ident:
             io_name = f"{ext_name} {ident} {desc.strip()}"
@@ -583,11 +627,6 @@ class ComexioAPI:
             SafeDict(ServerAlias=server_alias, ExtName=ext_name, IoId=ident, IoTitle=desc or "")
         )
 
-        try:
-            type_id_raw = int(io_item.get("InOutputTypeId", 1))
-        except (ValueError, TypeError):
-            type_id_raw = 1
-
         data["io"].append(
             {
                 "id": str(io_item.get("Id")),
@@ -596,6 +635,7 @@ class ComexioAPI:
                 "ha_name": " ".join(ha_name.split()),
                 "name": io_name,
                 "is_binary": is_binary,
+                "is_input": is_input,
                 "unit": unit,
                 "min": v_min,
                 "max": v_max,

@@ -44,7 +44,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioIOSensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
-            if not io.get("is_binary") and (not io.get("offline") or include_offline)
+            if not io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
         )
 
     entities.extend(
@@ -76,8 +76,15 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
         return self._attr_state_class
 
     @property
-    def native_value(self) -> float | str | None:
-        return self.coordinator.io_states.get(self._io_id)
+    def native_value(self) -> float | int | str | None:
+        val = self.coordinator.io_states.get(self._io_id)
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            return int(f) if f == int(f) else f
+        except (ValueError, TypeError):
+            return val
 
 
 class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
