@@ -1,6 +1,5 @@
 # Version: 0.7.5
 import logging
-import re
 from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
@@ -32,13 +31,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if marker["type"] == "digital"
         )
 
-    # 2. Digital Outputs (Relays)
+    # 2. Digital Outputs (Relays) — binary and writable (not an input)
     if conf.get("import_ios", True):
         include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
-        for io in coordinator.data.get("io", []):
-            identifier = io.get("identifier", "")
-            if io.get("is_binary") and (not io.get("offline") or include_offline) and re.match(r"^Q\d+$", identifier):
-                entities.append(ComexioIOSwitch(coordinator, coordinator.server_id, io))
+        entities.extend(
+            ComexioIOSwitch(coordinator, coordinator.server_id, io)
+            for io in coordinator.data.get("io", [])
+            if io.get("is_binary") and not io.get("is_input", True) and (not io.get("offline") or include_offline)
+        )
 
     async_add_entities(entities)
 

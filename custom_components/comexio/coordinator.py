@@ -57,6 +57,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.cancel_sync: bool = False
         self.entity_id_mismatches: list[dict[str, str]] = []
         self.orphaned_statistics: list[str] = []
+        self.offline_entity_statistic_ids: set[str] = set()
         self.offline_extensions: set[str] = set()
         self.cover_keywords: list[str] = []
         # R4: Lock to prevent concurrent sync runs
@@ -542,6 +543,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for stat in all_stats
             if any(stat["statistic_id"].startswith(p) for p in prefixes)
             and ent_reg.async_get(stat["statistic_id"]) is None
+            and stat["statistic_id"] not in self.offline_entity_statistic_ids
         ]
 
         _LOGGER.debug(

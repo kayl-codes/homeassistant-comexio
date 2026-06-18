@@ -26,10 +26,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     entities = [
         ComexioBinarySensor(coordinator, coordinator.server_id, io)
         for io in coordinator.data.get("io", [])
-        # Exclude outputs (Q) handled by switch.py; respect offline filter
-        if io.get("is_binary")
-        and (not io.get("offline") or include_offline)
-        and not io.get("identifier", "").startswith("Q")
+        if io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
     ]
 
     async_add_entities(entities)

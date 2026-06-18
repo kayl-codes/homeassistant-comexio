@@ -7,7 +7,7 @@ from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 
 from .api import ComexioAPI
 from .const import (
@@ -84,6 +84,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Set up services
     await async_setup_services(hass)
 
+    # Auto-fix statistics unit mismatches (one-time migration: empty → correct unit)
+    hass.async_create_task(_async_fix_statistics_units(hass, server_id))
+
     # ---------------------------
     # Webhook Setup
     # ---------------------------
@@ -142,12 +145,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
     active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
 
-    # Delete anything from the registry that is not in active_unique_ids
+    # Build expected-platform map so that entities which migrated to a different
+    # HA domain (e.g. sensor → binary_sensor after firmware upgrade) get removed.
+    expected_platform: dict[str, str] = {}
+    for m in coordinator.data.get("markers", []):
+        uid = f"comexio_{server_id}_m{m['id']}".lower()
+        expected_platform[uid] = "switch" if m["type"] == "digital" else "number"
+    for io in coordinator.data.get("io", []):
+        if not io.get("offline") or include_offline:
+            uid = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
+            is_binary = io.get("is_binary", False)
+            is_input = io.get("is_input", True)
+            if is_binary:
+                expected_platform[uid] = "binary_sensor" if is_input else "switch"
+            else:
+                expected_platform[uid] = "sensor" if is_input else "number"
+
+    # Before removing offline IO entities from the registry, snapshot their entity_ids.
+    # async_detect_orphaned_statistics uses this set to exclude "temporarily orphaned"
+    # statistics (extension offline but still known) from the repair issue.
+    offline_unique_ids = {
+        f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
+        for io in coordinator.data.get("io", [])
+        if io.get("offline") and not include_offline
+    }
+    coordinator.offline_entity_statistic_ids = {
+        e.entity_id
+        for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+        if e.unique_id in offline_unique_ids
+    }
+
+    # Delete entities that are no longer active, or that migrated to a different HA domain.
     _LOGGER.debug("Comexio Cleanup: protecting %d active unique IDs", len(active_unique_ids))
     for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
-        if entity_entry.unique_id not in active_unique_ids:
-            _LOGGER.info(
-                "Cleaning up orphaned entity: %s (Unique ID: %s)", entity_entry.entity_id, entity_entry.unique_id
+        uid = entity_entry.unique_id
+        if uid not in active_unique_ids:
+            _LOGGER.debug("Cleaning up orphaned entity: %s (Unique ID: %s)", entity_entry.entity_id, uid)
+            ent_reg.async_remove(entity_entry.entity_id)
+        elif uid in expected_platform and entity_entry.domain != expected_platform[uid]:
+            _LOGGER.debug(
+                "Removing stale-platform entity: %s (was %s, now %s)",
+                entity_entry.entity_id,
+                entity_entry.domain,
+                expected_platform[uid],
             )
             ent_reg.async_remove(entity_entry.entity_id)
 
@@ -173,6 +213,107 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.async_check_orphaned_statistics(conf)
 
     return True
+
+
+def _delete_stale_statistics_issues(hass: HomeAssistant, issue_reg, server_slug: str) -> int:
+    """Remove recorder repair issues for this server's statistics."""
+    deleted = 0
+    for domain, issue_id in issue_reg.issues:
+        if domain == "recorder" and server_slug in issue_id.lower():
+            ir.async_delete_issue(hass, domain, issue_id)
+            deleted += 1
+    return deleted
+
+
+async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> None:
+    """Fix statistics unit mismatches from firmware upgrade (empty label → correct unit).
+
+    Values stored in the recorder are already in the correct unit — only the
+    statistics_meta.unit_of_measurement label was absent before Comexio OS 11.0.2
+    introduced $IOTypesBinary. async_change_statistics_unit is wrong here because it
+    attempts a numeric conversion (fails for "" → "V"). We use
+    async_update_statistics_metadata (label-only update, no value conversion), wait
+    for the recorder to commit, then explicitly delete stale repair issues that
+    validate_statistics may have already created.
+    """
+    import asyncio
+
+    await asyncio.sleep(15)
+
+    if "recorder" not in hass.config.components:
+        return
+    try:
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import (
+            async_update_statistics_metadata,
+            list_statistic_ids,
+        )
+    except ImportError:
+        _LOGGER.debug("[%s] Recorder API unavailable; skipping statistics unit fix", server_id)
+        return
+
+    try:
+        instance = get_instance(hass)
+        all_stats = await instance.async_add_executor_job(list_statistic_ids, hass)
+    except Exception:
+        _LOGGER.debug("[%s] Statistics unit fix skipped: recorder unavailable", server_id)
+        return
+
+    server_slug = server_id.lower()
+    prefixes = (
+        f"sensor.comexio_{server_slug}_",
+        f"sensor.comexio_server_{server_slug}_",
+    )
+
+    mismatches: list[tuple[str, str]] = []
+    for stat in all_stats:
+        stat_id = stat["statistic_id"]
+        if not any(stat_id.startswith(p) for p in prefixes):
+            continue
+        state = hass.states.get(stat_id)
+        if state is None:
+            _LOGGER.debug("[%s] Skipping %s: entity state not available yet", server_id, stat_id)
+            continue
+        current_unit = state.attributes.get("unit_of_measurement") or ""
+        # HA 2024+ returns "statistics_unit_of_measurement"; older versions use "unit_of_measurement"
+        stored_unit = stat.get("statistics_unit_of_measurement") or stat.get("unit_of_measurement") or ""
+        if current_unit and not stored_unit:
+            _LOGGER.debug("[%s] Unit mismatch: %s  stored=%r  entity=%r", server_id, stat_id, stored_unit, current_unit)
+            mismatches.append((stat_id, current_unit))
+
+    if not mismatches:
+        _LOGGER.debug("[%s] Statistics unit check: no mismatches found", server_id)
+        return
+
+    # Schedule label-only metadata updates (no value conversion needed).
+    # new_unit_class=None is always valid; the per-unit mapping would require
+    # knowing which unit_class strings this HA version accepts, and HA raises
+    # HomeAssistantError for unknown values — None is the safe universal fallback.
+    for stat_id, new_unit in mismatches:
+        async_update_statistics_metadata(
+            hass,
+            stat_id,
+            new_unit_of_measurement=new_unit,
+            new_unit_class=None,
+        )
+
+    # Give the recorder queue time to commit — async_block_till_done() can deadlock
+    # when HA is still starting up (new recorder tasks keep arriving), so a short
+    # sleep is the safe alternative.
+    await asyncio.sleep(5)
+
+    # Remove stale repair issues — validate_statistics creates them on every Statistics
+    # page load whenever it detects a stored-vs-entity unit mismatch. Now that the DB
+    # is corrected, future runs will find no mismatch and not recreate them.
+    issue_reg = ir.async_get(hass)
+    deleted = _delete_stale_statistics_issues(hass, issue_reg, server_slug)
+
+    _LOGGER.info(
+        "[%s] Fixed %d statistics unit mismatches; removed %d stale repair issues",
+        server_id,
+        len(mismatches),
+        deleted,
+    )
 
 
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry):

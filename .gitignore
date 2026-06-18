@@ -13,8 +13,8 @@ __pycache__/
 /requirements.txt
 /requirements_tests.txt
 
-# Claude Code (personal/local settings — permission rules etc.)
-.claude/settings.local.json
+# Claude Code (personal/local settings — permission rules, personal paths etc.)
+.claude/
 
 # Editor / OS junk
 .DS_Store
