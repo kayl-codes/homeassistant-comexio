@@ -567,6 +567,13 @@ class ComexioAPI:
                     data, io_item, ext_name, ident, desc, type_info, schema_io, server_alias, ext_offline
                 )
 
+    @staticmethod
+    def _normalize_io_unit(unit: str) -> str:
+        """Normalize Comexio IO unit strings to HA-compatible values."""
+        if unit in ("\\u00b0C", "°C", "°C", "C"):
+            return "°C"
+        return "" if unit in ("0/1", "1/0", "?") else unit
+
     def _add_io_entry(
         self,
         data: dict[str, Any],
@@ -584,6 +591,7 @@ class ComexioAPI:
         v_min = type_info.get("min", 0)
         v_max = type_info.get("max", 1)
         unit = type_info.get("unit", "")
+        ident_upper = ident.upper()
 
         try:
             type_id_raw = int(io_item.get("InOutputTypeId", 1))
@@ -592,7 +600,6 @@ class ComexioAPI:
 
         # Fallback classification when $IOTypesBinary unavailable.
         if not self.io_types:
-            ident_upper = ident.upper()
             if re.match(r"^QI\d+$", ident_upper):
                 is_binary, v_max = False, 0
             elif re.match(r"^Q\d+$", ident_upper) or re.match(r"^I\d+$", ident_upper):
@@ -602,7 +609,6 @@ class ComexioAPI:
         # Identifier prefix is the reliable source: Q* are relay/dimmer outputs (writable),
         # I*/AI*/QI* and special names are inputs. $IOInputTypes cannot be used here because
         # the same TypeId (e.g. 2 = binary 0/1) is shared by both inputs and outputs.
-        ident_upper = ident.upper()
         if re.match(r"^Q\d+$", ident_upper):
             is_input = False
         elif re.match(r"^(?:I|AI|QI)\d+$", ident_upper):
@@ -612,11 +618,7 @@ class ComexioAPI:
         else:
             is_input = True
 
-        # Cleanup unit strings
-        if unit in ("\\u00b0C", "°C", "°C", "C"):
-            unit = "°C"
-        if unit in ("0/1", "1/0", "?"):
-            unit = ""
+        unit = self._normalize_io_unit(unit)
 
         if desc and desc.strip() and desc != ident:
             io_name = f"{ext_name} {ident} {desc.strip()}"

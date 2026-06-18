@@ -121,7 +121,8 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
         self._identifier = io["identifier"]
         self._attr_mode = NumberMode.AUTO
         self._attr_native_min_value = float(io.get("min", 0))
-        self._attr_native_max_value = float(io.get("max", 100)) or 100.0
+        _raw_max = io.get("max")
+        self._attr_native_max_value = float(_raw_max) if _raw_max is not None else 100.0
         self._attr_native_step = 0.1
 
         unit = io.get("unit", "")

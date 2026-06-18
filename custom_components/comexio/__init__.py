@@ -7,7 +7,7 @@ from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 
 from .api import ComexioAPI
 from .const import (
@@ -180,10 +180,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
         uid = entity_entry.unique_id
         if uid not in active_unique_ids:
-            _LOGGER.info("Cleaning up orphaned entity: %s (Unique ID: %s)", entity_entry.entity_id, uid)
+            _LOGGER.debug("Cleaning up orphaned entity: %s (Unique ID: %s)", entity_entry.entity_id, uid)
             ent_reg.async_remove(entity_entry.entity_id)
         elif uid in expected_platform and entity_entry.domain != expected_platform[uid]:
-            _LOGGER.info(
+            _LOGGER.debug(
                 "Removing stale-platform entity: %s (was %s, now %s)",
                 entity_entry.entity_id,
                 entity_entry.domain,
@@ -215,6 +215,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     return True
 
 
+def _delete_stale_statistics_issues(hass: HomeAssistant, issue_reg, server_slug: str) -> int:
+    """Remove recorder repair issues for this server's statistics."""
+    deleted = 0
+    for domain, issue_id in issue_reg.issues:
+        if domain == "recorder" and server_slug in issue_id.lower():
+            ir.async_delete_issue(hass, domain, issue_id)
+            deleted += 1
+    return deleted
+
+
 async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> None:
     """Fix statistics unit mismatches from firmware upgrade (empty label → correct unit).
 
@@ -238,7 +248,6 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> No
             async_update_statistics_metadata,
             list_statistic_ids,
         )
-        from homeassistant.helpers import issue_registry as ir
     except ImportError:
         _LOGGER.debug("[%s] Recorder API unavailable; skipping statistics unit fix", server_id)
         return
@@ -268,7 +277,7 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> No
         current_unit = state.attributes.get("unit_of_measurement") or ""
         # HA 2024+ returns "statistics_unit_of_measurement"; older versions use "unit_of_measurement"
         stored_unit = stat.get("statistics_unit_of_measurement") or stat.get("unit_of_measurement") or ""
-        if current_unit and current_unit != stored_unit:
+        if current_unit and not stored_unit:
             _LOGGER.debug("[%s] Unit mismatch: %s  stored=%r  entity=%r", server_id, stat_id, stored_unit, current_unit)
             mismatches.append((stat_id, current_unit))
 
@@ -297,11 +306,7 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> No
     # page load whenever it detects a stored-vs-entity unit mismatch. Now that the DB
     # is corrected, future runs will find no mismatch and not recreate them.
     issue_reg = ir.async_get(hass)
-    deleted = 0
-    for domain, issue_id in list(issue_reg.issues):
-        if domain == "recorder" and server_slug in issue_id.lower():
-            ir.async_delete_issue(hass, domain, issue_id)
-            deleted += 1
+    deleted = _delete_stale_statistics_issues(hass, issue_reg, server_slug)
 
     _LOGGER.info(
         "[%s] Fixed %d statistics unit mismatches; removed %d stale repair issues",
