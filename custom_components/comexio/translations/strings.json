@@ -153,6 +153,10 @@
           }
         }
       }
+    },
+    "extension_offline": {
+      "title": "Comexio extension module offline ({server_id})",
+      "description": "Extension module(s) **{extensions}** went offline during operation. This may indicate a hardware failure or connection problem. If the module was intentionally decommissioned, you can dismiss this notification."
     }
   }
 }

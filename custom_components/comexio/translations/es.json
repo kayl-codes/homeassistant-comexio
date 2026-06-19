@@ -153,6 +153,10 @@
           }
         }
       }
+    },
+    "extension_offline": {
+      "title": "Módulo de extensión Comexio sin conexión ({server_id})",
+      "description": "El/los módulo(s) de extensión **{extensions}** se desconectaron durante el funcionamiento. Esto puede indicar un fallo de hardware o un problema de conexión. Si el módulo fue retirado intencionalmente, puede descartar esta notificación."
     }
   }
 }

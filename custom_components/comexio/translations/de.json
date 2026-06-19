@@ -156,6 +156,10 @@
           }
         }
       }
+    },
+    "extension_offline": {
+      "title": "Comexio Erweiterungsmodul offline ({server_id})",
+      "description": "Das Erweiterungsmodul **{extensions}** ist während des Betriebs ausgefallen. Dies kann auf einen Hardwareausfall oder ein Verbindungsproblem hinweisen. Falls das Modul absichtlich außer Betrieb genommen wurde, kann diese Meldung ignoriert werden."
     }
   }
 }
