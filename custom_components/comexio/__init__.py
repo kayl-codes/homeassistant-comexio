@@ -1,4 +1,4 @@
-# Version: 0.7.5
+# Version: 0.8.1
 import contextlib
 from datetime import timedelta
 import logging
