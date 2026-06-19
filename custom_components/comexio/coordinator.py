@@ -58,8 +58,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.entity_id_mismatches: list[dict[str, str]] = []
         self.orphaned_statistics: list[str] = []
         self.offline_entity_statistic_ids: set[str] = set()
-        self.offline_extensions: set[str] = set()
-        self._first_poll_done: bool = False
+        self.offline_extensions: set[str] | None = None
+        self._extension_offline_issue_active: bool = False
         self.cover_keywords: list[str] = []
         # R4: Lock to prevent concurrent sync runs
         self._sync_lock: asyncio.Lock = asyncio.Lock()
@@ -126,12 +126,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Track offline extensions and log transitions
             new_offline = {io["ext_name"] for io in final_data["io"] if io.get("offline")}
-            if not self._first_poll_done:
+            if self.offline_extensions is None:
                 # Startup: initialize silently — modules may be intentionally decommissioned.
                 if new_offline:
                     _LOGGER.info("[%s] Extensions already offline at startup: %s", self.server_id, new_offline)
                 self.offline_extensions = new_offline
-                self._first_poll_done = True
             elif new_offline != self.offline_extensions:
                 self._handle_offline_extension_transitions(new_offline)
 
@@ -456,26 +455,30 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _handle_offline_extension_transitions(self, new_offline: set[str]) -> None:
         """Log transitions and manage the extension-offline HA Repair issue."""
-        went_offline = new_offline - self.offline_extensions
-        came_online = self.offline_extensions - new_offline
+        went_offline = new_offline - self.offline_extensions  # type: ignore[operator]
+        came_online = self.offline_extensions - new_offline  # type: ignore[operator]
         if went_offline:
             _LOGGER.warning("[%s] Extensions went offline: %s", self.server_id, went_offline)
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                f"extension_offline_{self.server_id}",
-                is_fixable=False,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="extension_offline",
-                translation_placeholders={
-                    "server_id": self.server_id,
-                    "extensions": ", ".join(sorted(new_offline)),
-                },
-            )
+            self._extension_offline_issue_active = True
         if came_online:
             _LOGGER.info("[%s] Extensions came back online: %s", self.server_id, came_online)
-        if not new_offline:
-            ir.async_delete_issue(self.hass, DOMAIN, f"extension_offline_{self.server_id}")
+        if self._extension_offline_issue_active:
+            if new_offline:
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    f"extension_offline_{self.server_id}",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="extension_offline",
+                    translation_placeholders={
+                        "server_id": self.server_id,
+                        "extensions": ", ".join(sorted(new_offline)),
+                    },
+                )
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, f"extension_offline_{self.server_id}")
+                self._extension_offline_issue_active = False
         self.offline_extensions = new_offline
 
     def detect_entity_id_mismatches(self) -> list[dict[str, str]]:
