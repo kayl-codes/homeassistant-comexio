@@ -153,6 +153,10 @@
           }
         }
       }
+    },
+    "extension_offline": {
+      "title": "Module d'extension Comexio hors ligne ({server_id})",
+      "description": "Le(s) module(s) d'extension **{extensions}** sont passés hors ligne pendant le fonctionnement. Cela peut indiquer une panne matérielle ou un problème de connexion. Si le module a été intentionnellement mis hors service, vous pouvez ignorer cette notification."
     }
   }
 }

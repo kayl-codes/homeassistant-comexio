@@ -9,6 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ---
 
+## [0.8.1] — 2026-06-19
+
+### ✨ New Features
+- **Extension Offline Repair Issue:** When an extension module goes offline *during runtime*, a HA Repair notification is created listing the affected module(s). It auto-resolves when all modules return online. Modules that are already offline at startup are logged at INFO level only — no spurious alert for intentionally decommissioned hardware. (#11)
+
+### 🛠️ Core & Stability Improvements
+- **Statistics unit migration reliability:** Detection now uses the correct `statistics_unit_of_measurement` key (HA 2024+) and the guard condition is tightened to `not stored_unit`, preventing the "Fixed 93 mismatches" message from firing on every restart once the migration has already run. (#9)
+- **Bootstrap deadlock eliminated:** `async_block_till_done()` replaced with `asyncio.sleep()` in the background statistics-fix task — HA startup no longer hangs up to 5 minutes when the recorder queue is active. (#9)
+- **Offline extension orphan guard:** Entity IDs of offline extension IOs are snapshotted before the cleanup loop and excluded from orphaned-statistics detection, preventing false Repair issues from reappearing after every restart. (#9)
+- **aiohttp session warning suppressed:** `ComexioAPI.close()` is now a no-op since `async_create_clientsession` manages the session lifecycle — HA no longer warns about the integration closing a managed session on full restart. (#10)
+
+### 🐛 Bug Fixes & Refactoring
+- **`unit_class` deprecation warning resolved:** `async_update_statistics_metadata` now passes `new_unit_class=None` (universally valid), eliminating the 2026.11 deprecation warning. (#9)
+- **`max=0` silently replaced with `100.0`:** Falsy-check bug in `number.py` caused a valid `max` of `0` on analog IO outputs to be overridden. Fixed by checking `is not None` instead. (#9)
+
+### ⚠️ Requirements & Notes
+- After updating, a full HA restart is recommended (coordinator behaviour change for extension offline handling).
+
+---
+
 ## [0.8.0] — 2026-06-16
 
 ### ✨ New Features
