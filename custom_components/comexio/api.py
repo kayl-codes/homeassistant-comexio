@@ -1029,9 +1029,4 @@ class ComexioAPI:
             return False
 
     async def close(self) -> None:
-        """Clean up session."""
-        if not self.session.closed:
-            try:
-                await self.session.close()
-            except Exception as err:
-                _LOGGER.debug("Error closing Comexio API session: %s", err)
+        """No-op: session lifecycle is managed by async_create_clientsession."""
