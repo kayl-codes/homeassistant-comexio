@@ -135,54 +135,22 @@
       }
     },
     "entity_id_mismatch": {
-      "title": "Duplicate server ID in entity IDs ({server_id})",
-      "fix_flow": {
-        "step": {
-          "entity_id_fix": {
-            "title": "Fix Entity IDs",
-            "description": "{description}"
-          }
-        }
-      }
+      "title": "Duplicate server ID in entity IDs ({server_id})"
     },
     "statistics_orphaned": {
-      "title": "Orphaned statistics ({server_id})",
-      "fix_flow": {
-        "step": {
-          "statistics_cleanup": {
-            "title": "Clean Up Statistics",
-            "description": "{description}"
-          }
-        }
-      }
+      "title": "Orphaned statistics ({server_id})"
     },
     "extension_offline": {
       "title": "Comexio extension module offline ({server_id})",
       "description": "Extension module(s) **{extensions}** went offline during operation. This may indicate a hardware failure or connection problem. If the module was intentionally decommissioned, you can dismiss this notification."
     },
-    "ignored_markers_invalid": {
-      "title": "Invalid ignored markers ({server_id})",
-      "description": "The following marker IDs in the ignored_markers list are invalid or have no description: {ids}. These markers cannot be ignored. Please remove them from the ignored_markers list in the integration options.",
-      "fix_flow": {
-        "step": {
-          "ignored_markers_invalid": {
-            "title": "Invalid Marker IDs",
-            "description": "{description}"
-          }
-        }
-      }
-    },
     "ignored_markers_cleanup": {
       "title": "Cleanup markers marked as ignored ({server_id})",
-      "description": "The following markers are marked as ignored: {ids}. Their Home Assistant entities, webhooks, and Comexio Web-IO connections can now be removed. Click 'Fix' to proceed with cleanup.",
-      "fix_flow": {
-        "step": {
-          "ignored_markers_cleanup": {
-            "title": "Cleanup Ignored Markers",
-            "description": "This will permanently remove entities, webhooks, and Web-IO connections for the following markers: {ids}. This action cannot be undone. Continue?"
-          }
-        }
-      }
+      "description": "The following markers are marked as ignored: {ids}. Their Home Assistant entities, webhooks, and Comexio Web-IO connections can now be removed. Click 'Fix' to proceed with cleanup."
+    },
+    "ignored_markers_invalid": {
+      "title": "Invalid ignored markers ({server_id})",
+      "description": "The following marker IDs in the ignored_markers list are invalid or have no description: {ids}. These markers cannot be ignored. Please remove them from the ignored_markers list in the integration options."
     }
   }
 }
