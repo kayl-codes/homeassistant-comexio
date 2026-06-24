@@ -25,7 +25,7 @@ from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["sensor", "switch", "number", "button", "binary_sensor"]
+PLATFORMS = ["sensor", "switch", "number", "button", "binary_sensor", "select"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -144,6 +144,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_entity_id_fix_btn")
     active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
     active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_logikplan_plan_selector")
 
     # Build expected-platform map so that entities which migrated to a different
     # HA domain (e.g. sensor → binary_sensor after firmware upgrade) get removed.

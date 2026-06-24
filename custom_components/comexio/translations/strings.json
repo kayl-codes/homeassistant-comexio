@@ -70,12 +70,14 @@
           "enable_notifications": "Show UI pop-up notifications during sync",
           "audit_ignored": "Ignore missing Web-IO warnings",
           "include_offline_extensions": "Show offline extension entities as unavailable (instead of hiding them)",
-          "cover_keywords": "Keywords for cover detection"
+          "cover_keywords": "Keywords for cover detection",
+          "ignored_markers": "Marker IDs to exclude from Logikplan connection"
         },
         "data_description": {
           "schema_marker": "Available variables: '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_io": "Available variables: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
-          "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)"
+          "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)",
+          "ignored_markers": "Comma- or semicolon-separated marker IDs with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456; M789'). Only markers with a description can be ignored."
         }
       }
     }
@@ -157,6 +159,30 @@
     "extension_offline": {
       "title": "Comexio extension module offline ({server_id})",
       "description": "Extension module(s) **{extensions}** went offline during operation. This may indicate a hardware failure or connection problem. If the module was intentionally decommissioned, you can dismiss this notification."
+    },
+    "ignored_markers_invalid": {
+      "title": "Invalid ignored markers ({server_id})",
+      "description": "The following marker IDs in the ignored_markers list are invalid or have no description: {ids}. These markers cannot be ignored. Please remove them from the ignored_markers list in the integration options.",
+      "fix_flow": {
+        "step": {
+          "ignored_markers_invalid": {
+            "title": "Invalid Marker IDs",
+            "description": "{description}"
+          }
+        }
+      }
+    },
+    "ignored_markers_cleanup": {
+      "title": "Cleanup markers marked as ignored ({server_id})",
+      "description": "The following markers are marked as ignored: {ids}. Their Home Assistant entities, webhooks, and Comexio Web-IO connections can now be removed. Click 'Fix' to proceed with cleanup.",
+      "fix_flow": {
+        "step": {
+          "ignored_markers_cleanup": {
+            "title": "Cleanup Ignored Markers",
+            "description": "This will permanently remove entities, webhooks, and Web-IO connections for the following markers: {ids}. This action cannot be undone. Continue?"
+          }
+        }
+      }
     }
   }
 }

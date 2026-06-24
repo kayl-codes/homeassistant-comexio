@@ -24,6 +24,7 @@ DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
 CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
 CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
 CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
+CONF_IGNORED_MARKERS = "ignored_markers"
 
 DEFAULT_NAME = "Comexio"
 

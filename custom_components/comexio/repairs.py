@@ -9,6 +9,7 @@ import voluptuous as vol
 
 from .const import (
     CONF_ENTITY_ID_MIGRATION_IGNORED,
+    CONF_IGNORED_MARKERS,
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
     DOMAIN,
@@ -38,10 +39,26 @@ class ComexioRepairFlow(RepairsFlow):
         self.issue_data = data or {}
 
     async def async_step_init(self, user_input=None):
+        _LOGGER.debug("async_step_init called: issue_id=%s, user_input=%s", self.issue_id, user_input)
+
         if "entity_id_mismatch" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_entity_id_fix")
             return await self.async_step_entity_id_fix()
         if "statistics_orphaned" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_statistics_cleanup")
             return await self.async_step_statistics_cleanup()
+        if "ignored_markers_cleanup" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_ignored_markers_cleanup")
+            return await self.async_step_ignored_markers_cleanup()
+        if "ignored_markers_invalid" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_ignored_markers_invalid")
+            try:
+                return await self.async_step_ignored_markers_invalid()
+            except Exception as e:
+                _LOGGER.exception("Error in async_step_ignored_markers_invalid: %s", e)
+                raise
+
+        _LOGGER.debug("Routing to fallback async_step_select_action")
         return await self.async_step_select_action()
 
     async def async_step_statistics_cleanup(self, user_input=None):
@@ -446,4 +463,147 @@ class ComexioRepairFlow(RepairsFlow):
             step_id="select_action",
             description_placeholders=placeholders,
             data_schema=vol.Schema({vol.Required("action", default=default_action): vol.In(options)}),
+        )
+
+    async def async_step_ignored_markers_cleanup(self, user_input=None):
+        """Handle cleanup of entities for ignored markers."""
+        entry_id = self.issue_data.get("entry_id")
+        marker_ids = self.issue_data.get("ignored_marker_ids", [])
+
+        if user_input is not None:
+            action = user_input.get("action", "cancel")
+
+            if action == "cleanup":
+                coordinator = self.hass.data[DOMAIN].get(entry_id)
+                if not coordinator:
+                    return self.async_abort(reason="entry_not_found")
+
+                server_id = coordinator.server_id
+                registry = er.async_get(self.hass)
+                deleted_count = 0
+
+                # Delete entities for each ignored marker
+                for marker_id in marker_ids:
+                    unique_id_prefix = f"{DOMAIN}_{server_id}_m{marker_id}".lower()
+                    for entity in list(registry.entities.values()):
+                        if entity.unique_id and entity.unique_id.startswith(unique_id_prefix):
+                            registry.async_remove_entity(entity.entity_id)
+                            deleted_count += 1
+                            _LOGGER.info(
+                                "[%s] Deleted entity %s for ignored marker M%d",
+                                server_id,
+                                entity.entity_id,
+                                marker_id,
+                            )
+
+                # Delete webhooks for these markers
+                if hasattr(coordinator, "_webhook_manager"):
+                    for marker_id in marker_ids:
+                        webhook_id = f"{DOMAIN}_{server_id}_m{marker_id}"
+                        if webhook_id in coordinator._webhook_manager:
+                            del coordinator._webhook_manager[webhook_id]
+                            _LOGGER.info("[%s] Removed webhook for marker M%d", server_id, marker_id)
+
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                is_de = self.hass.config.language == "de"
+                title = (
+                    f"{deleted_count} Merker-Entitäten und Webhooks entfernt"
+                    if is_de
+                    else f"{deleted_count} marker entities and webhooks removed"
+                )
+                return self.async_create_entry(title=title, data={})
+
+            # action == "cancel"
+            return self.async_abort(reason="user_cancelled")
+
+        # Show confirmation form
+        is_de = self.hass.config.language == "de"
+        ids_str = ", ".join(f"M{mid}" for mid in marker_ids)
+
+        if is_de:
+            description = (
+                f"Dies wird **Entitäten und Webhooks** für die folgenden Merker **PERMANENT** löschen: **{ids_str}**\n\n"
+                "Diese Aktion kann **nicht rückgängig gemacht** werden. Die Merker selbst bleiben in Comexio bestehen, "
+                "aber all ihre Home Assistant Entitäten und Verknüpfungen werden gelöscht.\n\n"
+                "**Fortfahren?**"
+            )
+            options = {
+                "cleanup": "🗑️ Ja, löschen",
+                "cancel": "❌ Abbrechen",
+            }
+        else:
+            description = (
+                f"This will **permanently delete entities and webhooks** for the following markers: **{ids_str}**\n\n"
+                "This action **cannot be undone**. The markers themselves will remain in Comexio, "
+                "but all their Home Assistant entities and connections will be deleted.\n\n"
+                "**Continue?**"
+            )
+            options = {
+                "cleanup": "🗑️ Yes, delete",
+                "cancel": "❌ Cancel",
+            }
+
+        return self.async_show_form(
+            step_id="ignored_markers_cleanup",
+            description_placeholders={"description": description},
+            data_schema=vol.Schema({vol.Required("action", default="cancel"): vol.In(options)}),
+        )
+
+    async def async_step_ignored_markers_invalid(self, user_input=None):
+        """Handle invalid ignored marker IDs — inform user and offer to delete issue."""
+        entry_id = self.issue_data.get("entry_id")
+        invalid_ids = self.issue_data.get("invalid_ids", [])
+
+        if user_input is not None:
+            action = user_input.get("action", "dismiss")
+
+            if action == "dismiss":
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                is_de = self.hass.config.language == "de"
+                return self.async_create_entry(
+                    title="Meldung entfernt" if is_de else "Issue dismissed",
+                    data={},
+                )
+
+            return self.async_abort(reason="user_cancelled")
+
+        # Show info form
+        is_de = self.hass.config.language == "de"
+        ids_str = ", ".join(f"M{mid}" for mid in invalid_ids) if invalid_ids else "Unbekannt"
+
+        if is_de:
+            description = (
+                f"Die folgenden Merker-IDs in der `ignored_markers` Liste sind ungültig oder haben keine Beschreibung: **{ids_str}**\n\n"
+                "**Bitte entfernen Sie diese IDs aus der Comexio-Optionen:**\n"
+                "1. Öffnen Sie **Einstellungen → Geräte und Services → Comexio**\n"
+                "2. Wählen Sie den Eintrag aus\n"
+                "3. Klicken Sie auf **Optionen**\n"
+                "4. Entfernen Sie die ungültigen IDs aus dem Feld `ignored_markers`\n"
+                "5. Speichern Sie die Änderungen\n\n"
+                "Nach dem Speichern wird diese Meldung automatisch verschwinden (beim nächsten Poll oder nach HA-Neustart)."
+            )
+            options = {
+                "dismiss": "✓ Meldung jetzt entfernen",
+                "cancel": "❌ Später",
+            }
+        else:
+            description = (
+                f"The following marker IDs in the `ignored_markers` list are invalid or have no description: **{ids_str}**\n\n"
+                "**Please remove these IDs from the Comexio options:**\n"
+                "1. Open **Settings → Devices & Services → Comexio**\n"
+                "2. Select the entry\n"
+                "3. Click **Options**\n"
+                "4. Remove the invalid IDs from the `ignored_markers` field\n"
+                "5. Save the changes\n\n"
+                "This issue will disappear automatically after you save (on next poll or after HA restart)."
+            )
+            options = {
+                "dismiss": "✓ Dismiss now",
+                "cancel": "❌ Later",
+            }
+
+        return self.async_show_form(
+            step_id="ignored_markers_invalid",
+            description_placeholders={"description": description},
+            data_schema=vol.Schema({vol.Required("action", default="dismiss"): vol.In(options)}),
         )
