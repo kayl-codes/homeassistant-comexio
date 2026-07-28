@@ -228,9 +228,7 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
 
 
-async def _resolve_logikplan_plan(
-    hass: HomeAssistant, call: ServiceCall, error_title: str
-) -> tuple[Any, Any, int] | None:
+def _resolve_logikplan_plan(hass: HomeAssistant, call: ServiceCall, error_title: str) -> tuple[Any, Any, int] | None:
     """Resolve (coordinator, api, fub_id) for a Logikplan service call — without logging in.
 
     Handles config_entry auto-resolution (when only one Comexio instance exists) and fub_id
@@ -278,7 +276,7 @@ async def _resolve_logikplan_context(
     hass: HomeAssistant, call: ServiceCall, error_title: str
 ) -> tuple[Any, Any, int] | None:
     """Resolve (coordinator, api, fub_id) for a Logikplan service call and ensure the admin session is logged in."""
-    ctx = await _resolve_logikplan_plan(hass, call, error_title)
+    ctx = _resolve_logikplan_plan(hass, call, error_title)
     if ctx is None:
         return None
     _coordinator, api, _fub_id = ctx
@@ -378,6 +376,76 @@ async def _load_connect_poc_topology(
     return existing_by_ref, connected_pairs, occupied_slots
 
 
+async def _get_or_create_marker_element(
+    api, fub_id: int, marker_id: int, existing_marker_elem: int | None, x: float, y: float
+) -> tuple[int | None, str | None]:
+    """Reuse an existing canvas marker element, or create a new one. Returns (elem_id, error)."""
+    if existing_marker_elem:
+        _LOGGER.info(
+            "Logikplan POC: M%s — Merker-Element bereits vorhanden: elem_id=%s", marker_id, existing_marker_elem
+        )
+        return existing_marker_elem, None
+
+    _LOGGER.info("Logikplan POC: M%s → add_element (Merker, x=%.1f, y=%.1f)", marker_id, x, y)
+    elem_marker = await api.logikplan_add_element(fub_id=fub_id, ref_id=int(marker_id), element_type=2, x=x, y=y)
+    if elem_marker is None:
+        return None, f"M{marker_id}: add_element (Merker) fehlgeschlagen"
+    _LOGGER.info("Logikplan POC: M%s — Merker-Element angelegt: elem_id=%s", marker_id, elem_marker)
+    return elem_marker, None
+
+
+async def _get_or_create_webio_element(
+    api,
+    fub_id: int,
+    marker_id: int,
+    elem_marker: int,
+    web_ref_id,
+    conn_type: str,
+    existing_webio_elem: int | None,
+    x: float,
+    y: float,
+) -> tuple[int | None, str | None]:
+    """Reuse an existing canvas WebIO element (wiring it up if needed), or create + connect a new one."""
+    if existing_webio_elem:
+        _LOGGER.info("Logikplan POC: M%s — WebIO-Element bereits vorhanden: elem_id=%s", marker_id, existing_webio_elem)
+        # Reused elements aren't connected yet (already_connected would have skipped this
+        # marker otherwise), so the wire has to be drawn explicitly here.
+        conn_id = await api.logikplan_save_connection(fub_id, elem_marker, existing_webio_elem, conn_type)
+        if conn_id is None:
+            return None, f"M{marker_id}: save_connection (elem {elem_marker}→{existing_webio_elem}) fehlgeschlagen"
+        _LOGGER.info(
+            "Logikplan POC: M%s — Verbindung nachgezogen: elem %s→%s (conn_id=%s)",
+            marker_id,
+            elem_marker,
+            existing_webio_elem,
+            conn_id,
+        )
+        return existing_webio_elem, None
+
+    _LOGGER.info("Logikplan POC: M%s → add_element+connect (WebIO, x=%.1f, y=%.1f)", marker_id, x, y)
+    conn_payload = {
+        "0": {
+            "id": "new",
+            "fub_id": fub_id,
+            "type": conn_type,
+            "input": {"element": str(elem_marker), "pos": "0", "inverted": False},
+            "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
+        }
+    }
+    elem_webio = await api.logikplan_add_element(
+        fub_id=fub_id,
+        ref_id=int(web_ref_id),
+        element_type=10,
+        x=x,
+        y=y,
+        connection=conn_payload,
+    )
+    if elem_webio is None:
+        return None, f"M{marker_id}: add_element (WebIO, webIoId={web_ref_id}) fehlgeschlagen"
+    _LOGGER.info("Logikplan POC: M%s — WebIO+Verbindung angelegt: elem_id=%s", marker_id, elem_webio)
+    return elem_webio, None
+
+
 async def _connect_marker_to_webio(
     api,
     fub_id: int,
@@ -444,57 +512,17 @@ async def _connect_marker_to_webio(
     if row_in_col == 0 and col > 0:
         _LOGGER.info("Logikplan POC: Spalte %d beginnt bei x=%.1f", col, x_marker_cur)
 
-    # Marker element: reuse existing or create new
-    if existing_marker_elem:
-        elem_marker = existing_marker_elem
-        _LOGGER.info("Logikplan POC: M%s — Merker-Element bereits vorhanden: elem_id=%s", marker_id, elem_marker)
-    else:
-        _LOGGER.info("Logikplan POC: M%s → add_element (Merker, col=%d, y=%.1f)", marker_id, col, y_new)
-        elem_marker = await api.logikplan_add_element(
-            fub_id=fub_id, ref_id=int(marker_id), element_type=2, x=x_marker_cur, y=y_new
-        )
-        if elem_marker is None:
-            return None, None, f"M{marker_id}: add_element (Merker) fehlgeschlagen"
-        _LOGGER.info("Logikplan POC: M%s — Merker-Element angelegt: elem_id=%s", marker_id, elem_marker)
+    elem_marker, err = await _get_or_create_marker_element(
+        api, fub_id, marker_id, existing_marker_elem, x_marker_cur, y_new
+    )
+    if err:
+        return None, None, err
 
-    # WebIO element: reuse existing or create new (connection embedded in add_element)
-    if existing_webio_elem:
-        elem_webio = existing_webio_elem
-        _LOGGER.info("Logikplan POC: M%s — WebIO-Element bereits vorhanden: elem_id=%s", marker_id, elem_webio)
-        # Reused elements aren't connected yet (already_connected would have skipped this
-        # marker otherwise), so the wire has to be drawn explicitly here.
-        conn_id = await api.logikplan_save_connection(fub_id, elem_marker, elem_webio, conn_type)
-        if conn_id is None:
-            return None, None, f"M{marker_id}: save_connection (elem {elem_marker}→{elem_webio}) fehlgeschlagen"
-        _LOGGER.info(
-            "Logikplan POC: M%s — Verbindung nachgezogen: elem %s→%s (conn_id=%s)",
-            marker_id,
-            elem_marker,
-            elem_webio,
-            conn_id,
-        )
-    else:
-        _LOGGER.info("Logikplan POC: M%s → add_element+connect (WebIO, col=%d, y=%.1f)", marker_id, col, y_new)
-        conn_payload = {
-            "0": {
-                "id": "new",
-                "fub_id": fub_id,
-                "type": conn_type,
-                "input": {"element": str(elem_marker), "pos": "0", "inverted": False},
-                "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
-            }
-        }
-        elem_webio = await api.logikplan_add_element(
-            fub_id=fub_id,
-            ref_id=int(web_ref_id),
-            element_type=10,
-            x=x_webio_cur,
-            y=y_new,
-            connection=conn_payload,
-        )
-        if elem_webio is None:
-            return None, None, f"M{marker_id}: add_element (WebIO, webIoId={web_ref_id}) fehlgeschlagen"
-        _LOGGER.info("Logikplan POC: M%s — WebIO+Verbindung angelegt: elem_id=%s", marker_id, elem_webio)
+    elem_webio, err = await _get_or_create_webio_element(
+        api, fub_id, marker_id, elem_marker, web_ref_id, conn_type, existing_webio_elem, x_webio_cur, y_new
+    )
+    if err:
+        return None, None, err
 
     result = (
         f"M{marker_id} ({marker['name']}) → elem={elem_marker} | "
@@ -628,7 +656,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
 async def handle_logikplan_connect_poc(hass: HomeAssistant, call: ServiceCall) -> None:
     """POC: Connect markers (comma-separated list or all) to their WebIO commands."""
     error_title = "Logikplan POC — Fehler"
-    ctx = await _resolve_logikplan_plan(hass, call, error_title)
+    ctx = _resolve_logikplan_plan(hass, call, error_title)
     if ctx is None:
         return
     coordinator, api, fub_id = ctx
@@ -766,14 +794,14 @@ async def handle_logikplan_sort(hass: HomeAssistant, call: ServiceCall) -> None:
     ctx = await _resolve_logikplan_context(hass, call, error_title)
     if ctx is None:
         return
-    coordinator, api, fub_id = ctx
+    _coordinator, api, fub_id = ctx
 
     t_start = time.monotonic()
     plan_info = api.fub_data.get(str(fub_id), {})
     was_active = bool(plan_info.get("Active", True))
 
     canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
-    canvas_label, x_max, y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
+    canvas_label, _x_max, _y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
 
     plan_data = await api.logikplan_load_elements(fub_id)
     if not plan_data:
@@ -820,7 +848,7 @@ async def handle_logikplan_stop(hass: HomeAssistant, call: ServiceCall) -> None:
     ctx = await _resolve_logikplan_context(hass, call, error_title)
     if ctx is None:
         return
-    coordinator, api, fub_id = ctx
+    _coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     _LOGGER.info("Logikplan Stop: fub_id=%s name='%s'", fub_id, plan_name)
@@ -841,7 +869,7 @@ async def handle_logikplan_activate(hass: HomeAssistant, call: ServiceCall) -> N
     ctx = await _resolve_logikplan_context(hass, call, error_title)
     if ctx is None:
         return
-    coordinator, api, fub_id = ctx
+    _coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     _LOGGER.info("Logikplan Aktivieren: fub_id=%s name='%s'", fub_id, plan_name)
