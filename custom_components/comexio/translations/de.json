@@ -70,12 +70,14 @@
           "enable_notifications": "Fortschritts-Popups während des Syncs anzeigen",
           "audit_ignored": "Warnung bei fehlender Web-IO Klasse ignorieren",
           "include_offline_extensions": "Offline-Extensions als 'Nicht verfügbar' anzeigen (statt ausblenden)",
-          "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
+          "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung",
+          "ignored_markers": "Merker-IDs von der Logikplan-Verbindung ausschließen"
         },
         "data_description": {
           "schema_marker": "Verfügbare Variablen: '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_io": "Verfügbare Variablen: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
-          "cover_keywords": "Kommaseparierte Liste (z.B. rollo, jalousie, blind)"
+          "cover_keywords": "Kommaseparierte Liste (z.B. rollo, jalousie, blind)",
+          "ignored_markers": "Komma- oder Semikolon-getrennte Merker-IDs mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456; M789'). Nur Merker mit Beschreibung können ignoriert werden."
         }
       }
     }
@@ -136,30 +138,22 @@
       }
     },
     "entity_id_mismatch": {
-      "title": "Doppelte Server-ID in Entity-IDs ({server_id})",
-      "fix_flow": {
-        "step": {
-          "entity_id_fix": {
-            "title": "Entity-IDs korrigieren",
-            "description": "{description}"
-          }
-        }
-      }
+      "title": "Doppelte Server-ID in Entity-IDs ({server_id})"
     },
     "statistics_orphaned": {
-      "title": "Verwaiste Statistiken ({server_id})",
-      "fix_flow": {
-        "step": {
-          "statistics_cleanup": {
-            "title": "Statistiken bereinigen",
-            "description": "{description}"
-          }
-        }
-      }
+      "title": "Verwaiste Statistiken ({server_id})"
     },
     "extension_offline": {
       "title": "Comexio Erweiterungsmodul offline ({server_id})",
       "description": "Das Erweiterungsmodul **{extensions}** ist während des Betriebs ausgefallen. Dies kann auf einen Hardwareausfall oder ein Verbindungsproblem hinweisen. Falls das Modul absichtlich außer Betrieb genommen wurde, kann diese Meldung ignoriert werden."
+    },
+    "ignored_markers_cleanup": {
+      "title": "Cleanup für ignorierte Merker ({server_id})",
+      "description": "Die folgenden Merker sind als ignoriert gekennzeichnet: {ids}. Deren Home Assistant Entitäten, Webhooks und Comexio Web-IO-Verknüpfungen können jetzt entfernt werden. Klicken Sie auf 'Reparieren', um mit dem Cleanup fortzufahren."
+    },
+    "ignored_markers_invalid": {
+      "title": "Ungültige ignorierte Merker ({server_id})",
+      "description": "Die folgenden Merker-IDs in der Liste ignorierter Merker sind ungültig oder haben keine Beschreibung: {ids}. Diese Merker können nicht ignoriert werden. Bitte entfernen Sie sie aus der `ignored_markers` Liste in den Integrationsoptionen."
     }
   }
 }

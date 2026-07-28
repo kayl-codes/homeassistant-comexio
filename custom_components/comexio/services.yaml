@@ -1,4 +1,5 @@
-# Version: 0.3.1
+# Version: 0.3.3
+# NOTE: fub_id options are populated at runtime by _update_services_yaml_plans on integration load.
 generate_web_io:
   name: Web-IO Export / Upload
   description: Erzeugt ein JSON für den Comexio-Import oder lädt die Geräteklasse direkt auf den Server hoch.
@@ -16,3 +17,141 @@ generate_web_io:
       default: false
       selector:
         boolean:
+
+logikplan_connect_poc:
+  name: Logikplan Connect POC
+  description: >
+    POC: Verbindet Merker mit ihren WebIO-Befehlen im angegebenen Logikplan-Plan.
+    Aktive Pläne werden automatisch gestoppt, bearbeitet und reaktiviert.
+  fields:
+    config_entry:
+      name: Comexio Instanz
+      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional)
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      required: false
+      selector:
+        select:
+          options: []
+          custom_value: true
+    all_markers:
+      name: Alle Merker
+      description: "Wenn aktiviert, werden alle Merker mit einem passenden WebIO-Befehl verbunden (ignoriert marker_id)."
+      default: false
+      selector:
+        boolean:
+    marker_id:
+      name: Merker-IDs
+      description: "Kommaseparierte Liste von Merker-IDs (z.B. 'M10,M11,42'). M-Präfix optional. '*' = alle."
+      default: "2"
+      selector:
+        text:
+    canvas_format:
+      name: Blattformat (optional)
+      description: "Blattformat des Logikplans. 'Auto' = aus Planeinstellungen ermitteln (empfohlen, Standard)."
+      default: "Auto"
+      selector:
+        select:
+          options:
+            - "Auto"
+            - "A5"
+            - "A4"
+            - "A3"
+
+logikplan_sort:
+  name: Logikplan Sort
+  description: >
+    Sortiert alle Elemente eines Logikplan-Plans nach Merker-ID und richtet sie auf exakte
+    Grid-Positionen aus. Aktive Pläne werden automatisch gestoppt, sortiert und reaktiviert.
+  fields:
+    config_entry:
+      name: Comexio Instanz
+      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional)
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      required: false
+      selector:
+        select:
+          options: []
+          custom_value: true
+    canvas_format:
+      name: Blattformat (optional)
+      description: "Blattformat des Logikplans. 'Auto' = aus Planeinstellungen ermitteln (empfohlen, Standard)."
+      default: "Auto"
+      selector:
+        select:
+          options:
+            - "Auto"
+            - "A5"
+            - "A4"
+            - "A3"
+
+logikplan_stop:
+  name: Logikplan Stop
+  description: Hält einen Logikplan-Plan an (stop_fup). Nützlich zum manuellen Testen des Plan-Lifecycles.
+  fields:
+    config_entry:
+      name: Comexio Instanz
+      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional)
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      required: false
+      selector:
+        select:
+          options: []
+          custom_value: true
+
+logikplan_activate:
+  name: Logikplan Aktivieren
+  description: Speichert und aktiviert einen Logikplan-Plan (run_fup). Entspricht dem manuellen Speichern/Aktivieren im Comexio-UI.
+  fields:
+    config_entry:
+      name: Comexio Instanz
+      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional)
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      required: false
+      selector:
+        select:
+          options: []
+          custom_value: true
+
+logikplan_visualize:
+  name: Logikplan Visualize
+  description: Zeigt den aktuellen Zustand eines Logikplan-Plans (Verbindungen + unbeschaltete Elemente) als Benachrichtigung.
+  fields:
+    config_entry:
+      name: Comexio Instanz
+      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional)
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      required: false
+      selector:
+        select:
+          options: []
+          custom_value: true

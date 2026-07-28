@@ -1,6 +1,7 @@
 # Version: 0.7.5
 import base64
 from contextlib import suppress
+from datetime import UTC, datetime
 import io
 import ipaddress
 import json
@@ -42,10 +43,16 @@ LOCAL_HOSTNAME_RE = re.compile(
 _IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
 _IO_BINARY_TYPES_DECL_RE = re.compile(r"var\s+\$IOTypesBinary\s*=\s*")
 _IO_INPUT_TYPES_DECL_RE = re.compile(r"var\s+\$IOInputTypes\s*=\s*")
-_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script[^>]*>", re.DOTALL | re.IGNORECASE)
+_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script[^>]{0,32}>", re.DOTALL | re.IGNORECASE)
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTENT_TYPE_JSON = "Content-Type: application/json"
+_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
+
+
+def _js_timestamp() -> str:
+    """Return a millisecond-precision UTC timestamp in JS Date.toISOString() format."""
+    return datetime.now(UTC).strftime(_TIMESTAMP_FORMAT)[:-3] + "Z"
 
 
 def _is_local_address(host: str) -> bool:
@@ -161,6 +168,9 @@ class ComexioAPI:
         self.io_types: dict[str, Any] = {}
         # io_input_types: TypeId → {input: bool}  (from $IOInputTypes)
         self.io_input_types: dict[str, Any] = {}
+        # Logikplan plan + paper metadata (populated by parse_config)
+        self._fub_data: dict[str, Any] = {}  # fub_id_str → {Id, Name, Paper, ...}
+        self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
         self._auth_warned: bool = False
         self._login_warned: bool = False
 
@@ -168,6 +178,11 @@ class ComexioAPI:
     def _base_url(self) -> str:
         """Return the base URL for the Comexio IO-Server."""
         return f"http://{self.host}"
+
+    @property
+    def fub_data(self) -> dict[str, Any]:
+        """Return Logikplan plan metadata (fub_id_str → {Id, Name, Paper, ...}), populated by parse_config()."""
+        return self._fub_data
 
     def _clean_value(self, val: Any) -> float:
         """Standardizes values: replaces German comma with dot and converts to numbers."""
@@ -429,6 +444,10 @@ class ComexioAPI:
         data = {"markers": [], "io": [], "webio_commands": {}, "device_id": None, "device_ip": None}
         live_states = live_states or {}
 
+        # Cache Logikplan plan + paper metadata for later use (e.g. auto canvas-format detection)
+        self._fub_data = conf.get("Fubs", {})
+        self._paper_data = conf.get("Paper", {})
+
         # Load configuration
         config_names = self._load_config_names()
         webio_name, schema_marker, schema_io, server_alias = config_names
@@ -470,6 +489,56 @@ class ComexioAPI:
 
         return webio_name, schema_marker, schema_io, server_alias
 
+    # Reference canvas bounds: A4 landscape at 90 DPI (empirically measured on live Comexio)
+    _CANVAS_REF_X: float = 870.0
+    _CANVAS_REF_Y: float = 720.0
+    _CANVAS_REF_MM_LONG: int = 297  # A4 long side (landscape width)
+    _CANVAS_REF_MM_SHORT: int = 210  # A4 short side (landscape height)
+    _CANVAS_REF_RES: int = 90
+    # Paper name → (long side mm, short side mm) for explicit format override
+    _PAPER_MM_BY_NAME: dict[str, tuple[int, int]] = {
+        "A2": (594, 420),
+        "A3": (420, 297),
+        "A4": (297, 210),
+        "A5": (210, 148),
+    }
+
+    def get_fub_paper_format(self, fub_id: int) -> str:
+        """Return the paper format name (e.g. 'A4') for a Logikplan plan, defaulting to 'A4'."""
+        fub = self._fub_data.get(str(fub_id), {})
+        paper_id = str(fub.get("Paper", ""))
+        paper = self._paper_data.get(paper_id, {})
+        return str(paper.get("Name", "A4"))
+
+    def get_fub_canvas_bounds(self, fub_id: int, paper_name: str | None = None) -> tuple[float, float]:
+        """Return estimated (x_max, y_max) canvas bounds for a Logikplan plan.
+
+        Scales proportionally from the A4-landscape-90-DPI reference (870×720).
+        DPI (Resolution) and Orientation are always taken from $Fubs plan data.
+        paper_name overrides the format (A2/A3/A4/A5); None = read from $Fubs/$Paper.
+        Orientation 0 = landscape (long side → X), 1 = portrait (long side → Y).
+        """
+        fub = self._fub_data.get(str(fub_id), {})
+        res = int(fub.get("Resolution", self._CANVAS_REF_RES))
+        orientation = int(fub.get("Orientation", 0))
+
+        if paper_name and paper_name in self._PAPER_MM_BY_NAME:
+            mm_long, mm_short = self._PAPER_MM_BY_NAME[paper_name]
+        else:
+            paper_id = str(fub.get("Paper", ""))
+            paper = self._paper_data.get(paper_id, {})
+            mm_long = paper.get("MMX", self._CANVAS_REF_MM_LONG)
+            mm_short = paper.get("MMY", self._CANVAS_REF_MM_SHORT)
+
+        if orientation == 0:
+            width_mm, height_mm = mm_long, mm_short
+        else:
+            width_mm, height_mm = mm_short, mm_long
+
+        x_max = self._CANVAS_REF_X * (width_mm / self._CANVAS_REF_MM_LONG) * (res / self._CANVAS_REF_RES)
+        y_max = self._CANVAS_REF_Y * (height_mm / self._CANVAS_REF_MM_SHORT) * (res / self._CANVAS_REF_RES)
+        return x_max, y_max
+
     def _process_device_info(
         self,
         conf: dict[str, Any],
@@ -507,6 +576,8 @@ class ComexioAPI:
             "webIoId": w_id,
             "cmdId": w_obj.get("WebCommandId"),
             "typeId": val_type,
+            # null = not wired in Logikplan; non-null = already connected (Logikplan wire ID)
+            "connIoId": w_obj.get("WebCommandIoId"),
         }
 
     def _process_markers(
@@ -971,6 +1042,384 @@ class ComexioAPI:
 
         async with self.session.post(url, data=payload, headers={"X-Requested-With": "XMLHttpRequest"}) as resp:
             return resp.status == 200
+
+    # --- LOGIKPLAN (FUNCTION PLAN) ---
+
+    async def logikplan_add_element(
+        self,
+        fub_id: int,
+        ref_id: int,
+        element_type: int,
+        x: float = 100.0,
+        y: float = 100.0,
+        connection: dict | None = None,
+    ) -> int | None:
+        """Place a Marker (type=2) or WebIO (type=10) block on a Logikplan canvas.
+
+        Pass `connection` to wire the element in the same API call (skips saveconnection).
+        For type=10 (WebIO): connection = {"0": {"id":"new","fub_id":...,"type":"binary|analog",
+          "input":{"element":"<marker_elem_id>","pos":"0","inverted":false},
+          "output":{"0":{"element":"new","pos":"0","inverted":false}}}}
+
+        Returns the fubElementId assigned by the server, or None on failure.
+        """
+        url = f"{self._base_url}/admin/function_function_module/add_element/"
+        timestamp = _js_timestamp()
+        payload = {
+            "fubid": str(fub_id),
+            "name": "",
+            "ref_id": str(ref_id),
+            "type": str(element_type),
+            "id": "undefined",
+            "x": str(x),
+            "y": str(y),
+            "timestamp": timestamp,
+        }
+        if connection is not None:
+            payload["connection"] = json.dumps(connection, separators=(",", ":"))
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.error(
+                    "logikplan_add_element failed (HTTP %s, fub=%s, ref=%s, type=%s)",
+                    resp.status,
+                    fub_id,
+                    ref_id,
+                    element_type,
+                )
+                return None
+            try:
+                result = await resp.json(content_type=None)
+                elem_id = result.get("id")
+                if elem_id is None:
+                    _LOGGER.error(
+                        "logikplan_add_element: no id in response (fub=%s, ref=%s, type=%s): %s",
+                        fub_id,
+                        ref_id,
+                        element_type,
+                        result,
+                    )
+                    return None
+                _LOGGER.debug(
+                    "logikplan_add_element: fub=%s ref=%s type=%s → elem_id=%s",
+                    fub_id,
+                    ref_id,
+                    element_type,
+                    elem_id,
+                )
+                return int(elem_id)
+            except Exception:
+                _LOGGER.exception("logikplan_add_element: failed to parse response")
+                return None
+
+    async def logikplan_save_connection(
+        self,
+        fub_id: int,
+        input_elem_id: int,
+        output_elem_id: int,
+        value_type: str = "binary",
+    ) -> int | None:
+        """Draw a wire from input_elem (Marker/IO source) to output_elem (WebIO destination).
+
+        value_type: "binary" for digital, "analog" for analog.
+        Returns the connection ID assigned by the server, or None on failure.
+        """
+        url = f"{self._base_url}/admin/function_function_module/saveconnection/"
+        timestamp = _js_timestamp()
+        conn_json = json.dumps(
+            {
+                "id": "new",
+                "fub_id": fub_id,
+                "input": {"element": str(input_elem_id), "pos": "0", "inverted": False},
+                "type": value_type,
+                "output": {"0": {"element": str(output_elem_id), "pos": "0", "inverted": False}},
+            },
+            separators=(",", ":"),
+        )
+        payload = {"JSON": conn_json, "timestamp": timestamp}
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.error(
+                    "logikplan_save_connection failed (HTTP %s, fub=%s, %s→%s)",
+                    resp.status,
+                    fub_id,
+                    input_elem_id,
+                    output_elem_id,
+                )
+                return None
+            try:
+                result = await resp.json(content_type=None)
+                conn_id = result.get("id")
+                _LOGGER.debug(
+                    "logikplan_save_connection: fub=%s %s→%s conn_id=%s",
+                    fub_id,
+                    input_elem_id,
+                    output_elem_id,
+                    conn_id,
+                )
+                return int(conn_id) if conn_id is not None else None
+            except Exception:
+                _LOGGER.exception("logikplan_save_connection: failed to parse response")
+                return None
+
+    async def logikplan_save_elements_pos(self, positions: list[tuple[int, float, float]]) -> bool:
+        """Reposition multiple Logikplan elements in one call.
+
+        positions: list of (fubElementId, x, y) tuples.
+        Returns True on success.
+        """
+        url = f"{self._base_url}/admin/function_function_module/saveelementspos/"
+        timestamp = _js_timestamp()
+        pos_dict = {str(i): {"x": x, "y": y, "id": elem_id} for i, (elem_id, x, y) in enumerate(positions)}
+        payload = {
+            "Json": json.dumps(pos_dict, separators=(",", ":")),
+            "timestamp": timestamp,
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        _LOGGER.info("logikplan_save_elements_pos: repositioning %d elements", len(positions))
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.error("logikplan_save_elements_pos failed (HTTP %s)", resp.status)
+                return False
+            try:
+                result = await resp.json(content_type=None)
+                success = result.get("result") == 1
+                _LOGGER.info("logikplan_save_elements_pos: result=%s (raw: %s)", success, result)
+                return success
+            except Exception:
+                _LOGGER.exception("logikplan_save_elements_pos: failed to parse response")
+                return False
+
+    async def logikplan_delete_elements(self, elem_ids: list[int]) -> bool:
+        """Delete elements from a Logikplan plan (removes elements + their connections).
+
+        elem_ids: list of fubElementId integers to delete.
+        Returns True on success.
+        """
+        url = f"{self._base_url}/admin/function_function_module/deleteelements/"
+        timestamp = _js_timestamp()
+        payload = {
+            "Json": json.dumps([str(eid) for eid in elem_ids]),
+            "timestamp": timestamp,
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        _LOGGER.info("logikplan_delete_elements: %d Elemente löschen: %s", len(elem_ids), elem_ids)
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.error("logikplan_delete_elements failed (HTTP %s)", resp.status)
+                return False
+            try:
+                result = await resp.json(content_type=None)
+                success = result.get("delete") is True
+                _LOGGER.info("logikplan_delete_elements: result=%s", success)
+                return success
+            except Exception:
+                _LOGGER.exception("logikplan_delete_elements: failed to parse response")
+                return False
+
+    async def logikplan_load_elements(self, fub_id: int) -> dict | None:
+        """Load elements and connections for a Logikplan plan (GET loadelements).
+
+        Returns dict with 'elements' and 'connections' keys, or None on failure.
+        """
+        url = f"{self._base_url}/admin/function_function_module/loadelements/"
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        try:
+            async with self.session.get(url, params={"fubid": fub_id}, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("logikplan_load_elements failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                    return None
+                data = await resp.json(content_type=None)
+                # Comexio returns [] for empty collections instead of {}
+                if isinstance(data.get("elements"), list):
+                    data["elements"] = {}
+                if isinstance(data.get("connections"), list):
+                    data["connections"] = {}
+                elem_count = len(data.get("elements", {}))
+                conn_count = len(data.get("connections", {}))
+                _LOGGER.info(
+                    "logikplan_load_elements fub=%s: %d Elemente, %d Verbindungen", fub_id, elem_count, conn_count
+                )
+                return data
+        except Exception:
+            _LOGGER.exception("logikplan_load_elements fub_id=%s failed", fub_id)
+            return None
+
+    async def logikplan_stop_fup(self, fub_id: int) -> bool:
+        """Stop/pause a Logikplan plan (stop_fup)."""
+        url = f"{self._base_url}/admin/function_function_module/stop_fup/"
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        try:
+            async with self.session.post(url, data={"id": str(fub_id)}, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("logikplan_stop_fup failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                    return False
+                result = await resp.json(content_type=None)
+                success = result.get("result") is True
+                _LOGGER.info("logikplan_stop_fup: fub=%s result=%s state=%s", fub_id, success, result.get("state"))
+                return success
+        except Exception:
+            _LOGGER.exception("logikplan_stop_fup: fub_id=%s failed", fub_id)
+            return False
+
+    async def create_fup(
+        self,
+        plan_name: str,
+        plan_comment: str = "",
+        paper_format: str = "A4",
+        orientation: str = "landscape",
+        dpi: int = 90,
+    ) -> int | None:
+        """Create a new Logikplan plan. Returns the new fub_id on success, None on failure.
+
+        Args:
+            plan_name: Name of the new plan
+            plan_comment: Optional comment/description
+            paper_format: Paper size (A3, A4, A5; defaults to A4)
+            orientation: 'landscape' or 'portrait' (defaults to landscape)
+            dpi: Resolution in dots per inch, 45-120 (defaults to 90)
+
+        Steps:
+        1. Check uniqueness via /admin/_helper/isunique
+        2. POST to /admin/function_function_module/save_fub
+        3. Verify plan was created by checking the response redirect
+        """
+        # Step 1: Unique check
+        url_check = f"{self._base_url}/admin/_helper/isunique"
+        try:
+            async with self.session.post(url_check, data={"model": "fub", "field": "name", "value": plan_name}) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("create_fup: uniqueness check failed (HTTP %s)", resp.status)
+                    return None
+                result = await resp.json(content_type=None)
+                if not result.get("result"):
+                    _LOGGER.error("create_fup: plan name '%s' already exists", plan_name)
+                    return None
+        except Exception:
+            _LOGGER.exception("create_fup: uniqueness check failed")
+            return None
+
+        # Step 2: Create the plan
+        paper_map = {"A3": "2", "A4": "3", "A5": "4"}
+        paper_id = paper_map.get(paper_format.upper(), "3")
+        orient_id = "1" if orientation.lower() == "portrait" else "0"
+
+        url_create = f"{self._base_url}/admin/function_function_module/save_fub"
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        payload = {
+            "fub_position": "-1",
+            "fub_type": "1",
+            "fub_page_count_x": "1",
+            "fub_page_count_y": "1",
+            "fub_name": plan_name,
+            "fub_comment": plan_comment,
+            "fub_active": "0",
+            "fub_reset_on_close": "0",
+            "fub_paper": paper_id,
+            "fub_orientation": orient_id,
+            "fub_resolution": str(dpi),
+            "fub_create": "Erzeugen",
+        }
+
+        try:
+            async with self.session.post(url_create, data=payload, headers=headers, allow_redirects=False) as resp:
+                if resp.status not in (301, 302, 303):
+                    _LOGGER.error("create_fup: save_fub failed (HTTP %s)", resp.status)
+                    return None
+
+                redirect_location = resp.headers.get("Location", "")
+                if "added=1" not in redirect_location:
+                    _LOGGER.error("create_fup: redirect missing 'added=1' (location: %s)", redirect_location)
+                    return None
+
+                _LOGGER.info("create_fup: plan '%s' created successfully (redirect: %s)", plan_name, redirect_location)
+        except Exception:
+            _LOGGER.exception("create_fup: save_fub request failed")
+            return None
+
+        # Step 3: Verify plan was created by reloading config and checking $Fubs
+        # (same key parse_config() uses for _fub_data — "FubModules" holds
+        # markers/IOs, not plans, and would never see the new entry here)
+        try:
+            raw_config = await self.get_raw_config()
+            fub_data = raw_config.get("Fubs", {})
+            for fub_id_str, fub_info in fub_data.items():
+                if fub_info.get("Name") == plan_name:
+                    new_fub_id = int(fub_id_str)
+                    _LOGGER.info("create_fup: verification successful, new fub_id=%s", new_fub_id)
+                    # Update internal _fub_data
+                    if not hasattr(self, "_fub_data"):
+                        self._fub_data = {}
+                    self._fub_data[fub_id_str] = fub_info
+                    return new_fub_id
+            _LOGGER.error("create_fup: verification failed — plan '%s' not found in $Fubs after creation", plan_name)
+            return None
+        except Exception:
+            _LOGGER.exception("create_fup: verification (config reload) failed")
+            return None
+
+    async def logikplan_run_fup(self, fub_id: int) -> bool:
+        """Save and activate a Logikplan plan (run_fup).
+
+        Loads the current plan state and posts it back to save + activate.
+        The output field in connections is converted from list (loadelements)
+        to indexed dict (run_fup expectation).
+        """
+        plan_data = await self.logikplan_load_elements(fub_id)
+        if plan_data is None:
+            _LOGGER.error("logikplan_run_fup: could not load plan %s", fub_id)
+            return False
+
+        connections_transformed = {
+            conn_id: {
+                **conn,
+                "output": {str(i): item for i, item in enumerate(conn.get("output", []))},
+            }
+            for conn_id, conn in plan_data.get("connections", {}).items()
+        }
+        data_payload = {"elements": plan_data.get("elements", {}), "connections": connections_transformed}
+
+        url = f"{self._base_url}/admin/function_function_module/run_fup/"
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        try:
+            async with self.session.post(
+                url, data={"id": str(fub_id), "data": json.dumps(data_payload)}, headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("logikplan_run_fup failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                    return False
+                result = await resp.json(content_type=None)
+                success = result.get("result") is True
+                _LOGGER.info("logikplan_run_fup: fub=%s result=%s state=%s", fub_id, success, result.get("state"))
+                return success
+        except Exception:
+            _LOGGER.exception("logikplan_run_fup: fub_id=%s failed", fub_id)
+            return False
 
     async def set_value(
         self,

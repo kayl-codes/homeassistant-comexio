@@ -16,6 +16,7 @@ from .const import (
     CONF_COVER_KEYWORDS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_HOST,
+    CONF_IGNORED_MARKERS,
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
@@ -154,6 +155,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # --- ORPHANED STATISTICS DETECTION ---
             await self.async_check_orphaned_statistics(conf)
+
+            # --- IGNORED MARKERS AUDIT ---
+            await self.async_check_ignored_markers(conf, final_data)
 
             # --- SMART AUDIT LOGIC ---
             com_commands = final_data["webio_commands"]
@@ -527,6 +531,66 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         else:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+
+    async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
+        """Detect invalid/valid ignored marker IDs and manage repair issues."""
+        ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()
+        invalid_ids: list[int] = []
+        valid_ids: list[int] = []
+
+        if not ignored_raw:
+            ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_invalid_{self.server_id}")
+            ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_cleanup_{self.server_id}")
+            return
+
+        markers_by_id = {int(m["id"]): m for m in final_data.get("markers", [])}
+
+        for token in ignored_raw.replace(";", ",").split(","):
+            stripped = token.strip()
+            if not stripped:
+                continue
+            try:
+                marker_id = int(stripped)
+                if marker_id in markers_by_id:
+                    valid_ids.append(marker_id)
+                else:
+                    invalid_ids.append(marker_id)
+            except ValueError:
+                _LOGGER.warning("[%s] ignored_markers contains non-integer token: '%s'", self.server_id, stripped)
+
+        # Issue 1: Invalid marker IDs
+        invalid_issue_id = f"ignored_markers_invalid_{self.server_id}"
+        if invalid_ids:
+            invalid_ids_str = ", ".join(f"M{mid}" for mid in invalid_ids)
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                invalid_issue_id,
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="ignored_markers_invalid",
+                translation_placeholders={"server_id": self.server_id, "ids": invalid_ids_str},
+                data={"entry_id": self.config_entry.entry_id, "invalid_ids": invalid_ids},
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, invalid_issue_id)
+
+        # Issue 2: Valid marker IDs ready for cleanup
+        cleanup_issue_id = f"ignored_markers_cleanup_{self.server_id}"
+        if valid_ids:
+            valid_ids_str = ", ".join(f"M{mid}" for mid in valid_ids)
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                cleanup_issue_id,
+                is_fixable=True,
+                severity=ir.IssueSeverity.INFO,
+                translation_key="ignored_markers_cleanup",
+                translation_placeholders={"server_id": self.server_id, "ids": valid_ids_str},
+                data={"entry_id": self.config_entry.entry_id, "ignored_marker_ids": valid_ids},
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, cleanup_issue_id)
 
     async def async_detect_orphaned_statistics(self) -> list[str]:
         """Return statistic_ids for this integration that no longer have a matching entity.

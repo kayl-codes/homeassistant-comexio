@@ -1,6 +1,7 @@
 # Version: 0.7.5
 import asyncio
 import logging
+import re
 
 from homeassistant.components.repairs import RepairsFlow
 from homeassistant.core import HomeAssistant
@@ -18,6 +19,7 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_MARKER_ID_SUFFIX_RE = re.compile(r"(\d+)")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry):
@@ -38,10 +40,26 @@ class ComexioRepairFlow(RepairsFlow):
         self.issue_data = data or {}
 
     async def async_step_init(self, user_input=None):
+        _LOGGER.debug("async_step_init called: issue_id=%s, user_input=%s", self.issue_id, user_input)
+
         if "entity_id_mismatch" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_entity_id_fix")
             return await self.async_step_entity_id_fix()
         if "statistics_orphaned" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_statistics_cleanup")
             return await self.async_step_statistics_cleanup()
+        if "ignored_markers_cleanup" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_ignored_markers_cleanup")
+            return await self.async_step_ignored_markers_cleanup()
+        if "ignored_markers_invalid" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_ignored_markers_invalid")
+            try:
+                return await self.async_step_ignored_markers_invalid()
+            except Exception as e:
+                _LOGGER.exception("Error in async_step_ignored_markers_invalid: %s", e)
+                raise
+
+        _LOGGER.debug("Routing to fallback async_step_select_action")
         return await self.async_step_select_action()
 
     async def async_step_statistics_cleanup(self, user_input=None):
@@ -49,41 +67,54 @@ class ComexioRepairFlow(RepairsFlow):
         entry_id = self.issue_data.get("entry_id")
 
         if user_input is not None:
-            action = user_input["action"]
-            entry = self.hass.config_entries.async_get_entry(entry_id)
-            if not entry:
-                return self.async_abort(reason="entry_not_found")
+            return await self._async_process_statistics_cleanup(entry_id, user_input["action"])
 
-            if action == "ignore":
-                new_options = dict(entry.options)
-                new_options[CONF_STATISTICS_CLEANUP_IGNORED] = True
-                self.hass.config_entries.async_update_entry(entry, options=new_options)
-                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-                return self.async_create_entry(title="Ignored", data={})
+        return self._show_statistics_cleanup_form(entry_id)
 
-            # action == "fix": clear orphaned statistics via the recorder
-            from homeassistant.components.recorder import get_instance
+    async def _async_process_statistics_cleanup(self, entry_id: str, action: str):
+        """Handle the user's choice (ignore/fix) once the statistics-cleanup form was submitted."""
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if not entry:
+            return self.async_abort(reason="entry_not_found")
 
-            coordinator = self.hass.data[DOMAIN].get(entry_id)
-            if not coordinator:
-                return self.async_abort(reason="entry_not_found")
-
-            ids = list(coordinator.orphaned_statistics)
-            if ids and "recorder" in self.hass.config.components:
-                instance = get_instance(self.hass)
-                instance.async_clear_statistics(ids)
-
-            coordinator.orphaned_statistics = []
+        if action == "ignore":
+            new_options = dict(entry.options)
+            new_options[CONF_STATISTICS_CLEANUP_IGNORED] = True
+            self.hass.config_entries.async_update_entry(entry, options=new_options)
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-            coordinator.async_set_updated_data(coordinator.data)
+            return self.async_create_entry(title="Ignored", data={})
 
-            is_de = self.hass.config.language == "de"
-            title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} orphaned statistics deleted"
-            return self.async_create_entry(title=title, data={})
+        return await self._async_clear_orphaned_statistics(entry_id)
+
+    async def _async_clear_orphaned_statistics(self, entry_id: str):
+        """Clear orphaned long-term statistics via the recorder and close the issue."""
+        from homeassistant.components.recorder import get_instance
+
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        if not coordinator:
+            return self.async_abort(reason="entry_not_found")
+
+        ids = list(coordinator.orphaned_statistics)
+        if ids and "recorder" in self.hass.config.components:
+            instance = get_instance(self.hass)
+            instance.async_clear_statistics(ids)
+
+        coordinator.orphaned_statistics = []
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        coordinator.async_set_updated_data(coordinator.data)
 
         is_de = self.hass.config.language == "de"
+        title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} statistics cleaned up"
+        return self.async_create_entry(
+            title=title,
+            data={},
+        )
+
+    def _show_statistics_cleanup_form(self, entry_id: str):
+        """Render the confirmation form describing how many orphaned statistics were found."""
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.orphaned_statistics) if coordinator else self.issue_data.get("count", 0)
+        is_de = self.hass.config.language == "de"
 
         if is_de:
             description = (
@@ -93,26 +124,23 @@ class ComexioRepairFlow(RepairsFlow):
                 "Historie sind nicht betroffen** — nur die verwaisten Einträge werden entfernt.\n\n"
                 "Möchtest du sie jetzt löschen?"
             )
-            options = {
-                "fix": f"🧹 Jetzt bereinigen ({count} Statistiken)",
-                "ignore": "🔇 Meldung unterdrücken",
-            }
         else:
             description = (
                 f"**{count} orphaned long-term statistics** were found that no longer belong to "
                 "any existing entity (leftovers from previous entity IDs).\n\n"
-                "They can be safely deleted. **Live sensors and their current history are not "
-                "affected** — only the orphaned entries are removed.\n\n"
+                "They can be safely deleted. **Live sensors and their current history are not affected** "
+                "— only the orphaned entries are removed.\n\n"
                 "Would you like to delete them now?"
             )
-            options = {
-                "fix": f"🧹 Clean up now ({count} statistics)",
-                "ignore": "🔇 Suppress this message",
-            }
+
+        options = {
+            "fix": f"🧹 {'Jetzt bereinigen' if is_de else 'Clean up now'} ({count})",
+            "ignore": f"🔇 {'Diese Nachricht ignorieren' if is_de else 'Suppress this message'}",
+        }
 
         return self.async_show_form(
             step_id="statistics_cleanup",
-            description_placeholders={"description": description},
+            description=description,
             data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
         )
 
@@ -143,43 +171,40 @@ class ComexioRepairFlow(RepairsFlow):
             coordinator.async_set_updated_data(coordinator.data)
 
             is_de = self.hass.config.language == "de"
+            title = f"Entitäts-IDs für {migrated} Einträge korrigiert" if is_de else f"{migrated} entity IDs fixed"
             return self.async_create_entry(
-                title=f"{migrated} Entity-IDs korrigiert" if is_de else f"{migrated} entity IDs fixed",
+                title=title,
                 data={},
             )
 
-        is_de = self.hass.config.language == "de"
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.entity_id_mismatches) if coordinator else self.issue_data.get("count", 0)
+        is_de = self.hass.config.language == "de"
 
         if is_de:
             description = (
                 f"Es wurden **{count} Entitäten** mit doppeltem Server-ID-Präfix gefunden.\n\n"
-                "Die Entity-IDs können automatisch korrigiert werden. "
-                "**History und Automationen bleiben erhalten**, sofern sie die Entity-ID direkt referenzieren — "
+                "Die Entity-IDs können automatisch korrigiert werden. **History und Automationen "
+                "bleiben erhalten**, sofern sie die Entity-ID direkt referenzieren — "
                 "bitte prüfe Automationen nach der Migration.\n\n"
                 "Möchtest du die IDs jetzt korrigieren?"
             )
-            options = {
-                "fix": f"✅ Jetzt korrigieren ({count} Entity-IDs)",
-                "ignore": "🔇 Meldung unterdrücken",
-            }
         else:
             description = (
                 f"**{count} entities** were found with a duplicate server-ID prefix in their entity_id.\n\n"
-                "The entity IDs can be corrected automatically. "
-                "**History and automations are preserved**, but please review automations "
-                "that reference these entity IDs directly.\n\n"
+                "The entity IDs can be corrected automatically. **History and automations are preserved**, "
+                "but please review automations that reference these entity IDs directly.\n\n"
                 "Would you like to fix the IDs now?"
             )
-            options = {
-                "fix": f"✅ Fix now ({count} entity IDs)",
-                "ignore": "🔇 Suppress this message",
-            }
+
+        options = {
+            "fix": f"✅ {'Jetzt korrigieren' if is_de else 'Fix now'} ({count})",
+            "ignore": f"🔇 {'Diese Nachricht ignorieren' if is_de else 'Suppress this message'}",
+        }
 
         return self.async_show_form(
             step_id="entity_id_fix",
-            description_placeholders={"description": description},
+            description=description,
             data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
         )
 
@@ -446,4 +471,154 @@ class ComexioRepairFlow(RepairsFlow):
             step_id="select_action",
             description_placeholders=placeholders,
             data_schema=vol.Schema({vol.Required("action", default=default_action): vol.In(options)}),
+        )
+
+    async def async_step_ignored_markers_cleanup(self, user_input=None):
+        """Handle cleanup of entities for ignored markers."""
+        entry_id = self.issue_data.get("entry_id")
+        marker_ids = self.issue_data.get("ignored_marker_ids", [])
+
+        if user_input is not None:
+            return await self._async_process_ignored_markers_cleanup(entry_id, marker_ids, user_input)
+
+        return self._show_ignored_markers_cleanup_form(marker_ids)
+
+    async def _async_process_ignored_markers_cleanup(self, entry_id: str, marker_ids: list[int], user_input: dict):
+        """Handle the user's choice (cleanup/cancel) once the confirmation form was submitted."""
+        if user_input.get("action", "cancel") != "cleanup":
+            return self.async_abort(reason="user_cancelled")
+
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        if not coordinator:
+            return self.async_abort(reason="entry_not_found")
+
+        deleted_count = self._delete_ignored_marker_entities(coordinator, marker_ids)
+
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        return self.async_create_entry(
+            title=f"{deleted_count} marker entities removed",
+            data={},
+        )
+
+    def _delete_ignored_marker_entities(self, coordinator, marker_ids: list[int]) -> int:
+        """Remove HA entities for the given ignored marker IDs; return the deleted-entity count.
+
+        Comexio webhooks are registered once per config entry (not per marker), so ignoring a
+        marker never needs to touch webhook registration — only its HA entity is removed here.
+        """
+        server_id = coordinator.server_id
+        registry = er.async_get(self.hass)
+        marker_id_set = set(marker_ids)
+        prefix_base = f"{DOMAIN}_{server_id}_m".lower()
+        deleted_count = 0
+
+        # Single pass over the registry, matching the marker ID out of the unique_id suffix, instead of
+        # one full registry scan per marker. list() snapshots the values so async_remove_entity() below
+        # (which mutates registry.entities) doesn't invalidate the iterator mid-loop.
+        for entity in list(registry.entities.values()):
+            uid = (entity.unique_id or "").lower()
+            if not uid.startswith(prefix_base):
+                continue
+            match = _MARKER_ID_SUFFIX_RE.match(uid[len(prefix_base) :])
+            if not match or int(match.group(1)) not in marker_id_set:
+                continue
+            registry.async_remove(entity.entity_id)
+            deleted_count += 1
+            _LOGGER.info(
+                "[%s] Deleted entity %s for ignored marker M%s",
+                server_id,
+                entity.entity_id,
+                match.group(1),
+            )
+
+        return deleted_count
+
+    def _show_ignored_markers_cleanup_form(self, marker_ids: list[int]):
+        """Render the confirmation form listing the markers whose entities will be deleted."""
+        ids_str = ", ".join(f"M{mid}" for mid in marker_ids)
+        is_de = self.hass.config.language == "de"
+
+        if is_de:
+            description = (
+                f"Dies wird **Entitäten** für die folgenden Merker **PERMANENT** löschen: "
+                f"**{ids_str}**\n\n"
+                "Diese Aktion kann **nicht rückgängig gemacht** werden. Die Merker selbst bleiben in "
+                "Comexio bestehen, aber all ihre Home Assistant Entitäten und Verknüpfungen werden gelöscht.\n\n"
+                "**Fortfahren?**"
+            )
+        else:
+            description = (
+                f"This will **permanently delete entities** for the following markers: "
+                f"**{ids_str}**\n\n"
+                "This action **cannot be undone**. The markers themselves will remain in Comexio, but all "
+                "their Home Assistant entities and connections will be deleted.\n\n"
+                "**Continue?**"
+            )
+
+        options = {
+            "cleanup": f"🗑️ {'Ja, löschen' if is_de else 'Yes, delete'}",
+            "cancel": f"❌ {'Abbrechen' if is_de else 'Cancel'}",
+        }
+
+        return self.async_show_form(
+            step_id="ignored_markers_cleanup",
+            description=description,
+            data_schema=vol.Schema({vol.Required("action", default="cancel"): vol.In(options)}),
+        )
+
+    async def async_step_ignored_markers_invalid(self, user_input=None):
+        """Handle invalid ignored marker IDs — inform user and offer to delete issue."""
+        invalid_ids = self.issue_data.get("invalid_ids", [])
+
+        if user_input is not None:
+            action = user_input.get("action", "dismiss")
+
+            if action == "dismiss":
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                return self.async_create_entry(
+                    title="Issue dismissed",
+                    data={},
+                )
+
+            return self.async_abort(reason="user_cancelled")
+
+        # Show info form
+        ids_str = ", ".join(f"M{mid}" for mid in invalid_ids) if invalid_ids else "Unknown"
+        is_de = self.hass.config.language == "de"
+
+        if is_de:
+            description = (
+                f"Die folgenden Merker-IDs in der `ignored_markers` Liste sind ungültig oder haben keine "
+                f"Beschreibung: **{ids_str}**\n\n"
+                "**Bitte entfernen Sie diese IDs aus der Comexio-Optionen:**\n"
+                "1. Öffnen Sie **Einstellungen → Geräte und Services → Comexio**\n"
+                "2. Wählen Sie den Eintrag aus\n"
+                "3. Klicken Sie auf **Optionen**\n"
+                "4. Entfernen Sie die ungültigen IDs aus dem Feld `ignored_markers`\n"
+                "5. Speichern Sie die Änderungen\n\n"
+                "Nach dem Speichern wird diese Meldung automatisch verschwinden (beim nächsten Poll oder "
+                "nach HA-Neustart)."
+            )
+        else:
+            description = (
+                f"The following marker IDs in the `ignored_markers` list are invalid or have no description: "  # nosec B608
+                f"**{ids_str}**\n\n"
+                "**Please remove these IDs from the Comexio options:**\n"
+                "1. Open **Settings → Devices & Services → Comexio**\n"
+                "2. Select the entry\n"
+                "3. Click **Options**\n"
+                "4. Remove the invalid IDs from the `ignored_markers` field\n"
+                "5. Save the changes\n\n"
+                "This issue will disappear automatically after you save (on next poll or after HA restart)."
+            )
+
+        options = {
+            "dismiss": f"✓ {'Jetzt ausblenden' if is_de else 'Dismiss now'}",
+            "cancel": f"❌ {'Später' if is_de else 'Later'}",
+        }
+
+        return self.async_show_form(
+            step_id="ignored_markers_invalid",
+            description=description,
+            data_schema=vol.Schema({vol.Required("action", default="dismiss"): vol.In(options)}),
         )
