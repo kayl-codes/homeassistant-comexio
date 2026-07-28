@@ -77,13 +77,19 @@ def _build_sorted_pairs(
     seen: set[tuple[int, int]] = set()
     pairs: list[tuple[int, int, int]] = []  # (marker_ref_id, marker_elem_id, webio_elem_id)
     for conn in connections.values():
-        inp_eid = conn.get("input", {}).get("FubElementId")
-        if inp_eid is None or elem_ref.get(inp_eid, {}).get("type") != 2:
+        inp_eid_raw = conn.get("input", {}).get("FubElementId")
+        if inp_eid_raw is None:
+            continue
+        inp_eid = int(inp_eid_raw)
+        if elem_ref.get(inp_eid, {}).get("type") != 2:
             continue
         marker_ref_id = int(elem_ref[inp_eid].get("ref_id", 0))
         for out in conn.get("output", []):
-            out_eid = out.get("FubElementId")
-            if out_eid is not None and (inp_eid, out_eid) not in seen:
+            out_eid_raw = out.get("FubElementId")
+            if out_eid_raw is None:
+                continue
+            out_eid = int(out_eid_raw)
+            if (inp_eid, out_eid) not in seen:
                 seen.add((inp_eid, out_eid))
                 pairs.append((marker_ref_id, inp_eid, out_eid))
     pairs.sort(key=lambda p: p[0])
@@ -358,11 +364,15 @@ async def _load_connect_poc_topology(
 
     for elem_id_str, elem in plan_data.get("elements", {}).items():
         ref = elem.get("reference", {})
-        existing_by_ref[(ref.get("type"), ref.get("ref_id"))] = int(elem_id_str)
+        ref_type, ref_id = ref.get("type"), ref.get("ref_id")
+        if ref_type is not None and ref_id is not None:
+            existing_by_ref[(int(ref_type), int(ref_id))] = int(elem_id_str)
     for conn in plan_data.get("connections", {}).values():
         inp = conn.get("input", {})
         for out in conn.get("output", []):
-            connected_pairs.add((inp.get("FubElementId"), out.get("FubElementId")))
+            inp_id, out_id = inp.get("FubElementId"), out.get("FubElementId")
+            if inp_id is not None and out_id is not None:
+                connected_pairs.add((int(inp_id), int(out_id)))
     occupied_slots = _get_occupied_grid_slots(plan_data.get("elements", {}), rows_per_col, max_cols)
     _LOGGER.info("Logikplan POC: Plan fub=%s — %d belegte Grid-Slots gefunden", fub_id, len(occupied_slots))
     return existing_by_ref, connected_pairs, occupied_slots
