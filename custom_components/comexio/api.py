@@ -1110,7 +1110,7 @@ class ComexioAPI:
                     element_type,
                     elem_id,
                 )
-                return elem_id
+                return int(elem_id)
             except Exception:
                 _LOGGER.exception("logikplan_add_element: failed to parse response")
                 return None
@@ -1164,7 +1164,7 @@ class ComexioAPI:
                     output_elem_id,
                     conn_id,
                 )
-                return conn_id
+                return int(conn_id) if conn_id is not None else None
             except Exception:
                 _LOGGER.exception("logikplan_save_connection: failed to parse response")
                 return None
