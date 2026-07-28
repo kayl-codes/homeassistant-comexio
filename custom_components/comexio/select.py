@@ -50,7 +50,7 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
     def options(self) -> list[str]:
         # Plan names aren't unique in Comexio (only fub_id is) — the ID suffix keeps
         # options unambiguous and lets _resolve_fub_id() parse it back out directly.
-        fub_data = getattr(self.coordinator.api, "_fub_data", {})
+        fub_data = self.coordinator.api.fub_data
         return sorted(
             (format_plan_label(fub.get("Name") or f"Plan {fid}", fid) for fid, fub in fub_data.items()),
             key=str.lower,

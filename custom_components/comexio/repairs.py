@@ -67,41 +67,51 @@ class ComexioRepairFlow(RepairsFlow):
         entry_id = self.issue_data.get("entry_id")
 
         if user_input is not None:
-            action = user_input["action"]
-            entry = self.hass.config_entries.async_get_entry(entry_id)
-            if not entry:
-                return self.async_abort(reason="entry_not_found")
+            return await self._async_process_statistics_cleanup(entry_id, user_input["action"])
 
-            if action == "ignore":
-                new_options = dict(entry.options)
-                new_options[CONF_STATISTICS_CLEANUP_IGNORED] = True
-                self.hass.config_entries.async_update_entry(entry, options=new_options)
-                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-                return self.async_create_entry(title="Ignored", data={})
+        return self._show_statistics_cleanup_form(entry_id)
 
-            # action == "fix": clear orphaned statistics via the recorder
-            from homeassistant.components.recorder import get_instance
+    async def _async_process_statistics_cleanup(self, entry_id: str, action: str):
+        """Handle the user's choice (ignore/fix) once the statistics-cleanup form was submitted."""
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if not entry:
+            return self.async_abort(reason="entry_not_found")
 
-            coordinator = self.hass.data[DOMAIN].get(entry_id)
-            if not coordinator:
-                return self.async_abort(reason="entry_not_found")
-
-            ids = list(coordinator.orphaned_statistics)
-            if ids and "recorder" in self.hass.config.components:
-                instance = get_instance(self.hass)
-                instance.async_clear_statistics(ids)
-
-            coordinator.orphaned_statistics = []
+        if action == "ignore":
+            new_options = dict(entry.options)
+            new_options[CONF_STATISTICS_CLEANUP_IGNORED] = True
+            self.hass.config_entries.async_update_entry(entry, options=new_options)
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-            coordinator.async_set_updated_data(coordinator.data)
+            return self.async_create_entry(title="Ignored", data={})
 
-            is_de = self.hass.config.language == "de"
-            title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} statistics cleaned up"
-            return self.async_create_entry(
-                title=title,
-                data={},
-            )
+        return await self._async_clear_orphaned_statistics(entry_id)
 
+    async def _async_clear_orphaned_statistics(self, entry_id: str):
+        """Clear orphaned long-term statistics via the recorder and close the issue."""
+        from homeassistant.components.recorder import get_instance
+
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        if not coordinator:
+            return self.async_abort(reason="entry_not_found")
+
+        ids = list(coordinator.orphaned_statistics)
+        if ids and "recorder" in self.hass.config.components:
+            instance = get_instance(self.hass)
+            instance.async_clear_statistics(ids)
+
+        coordinator.orphaned_statistics = []
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        coordinator.async_set_updated_data(coordinator.data)
+
+        is_de = self.hass.config.language == "de"
+        title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} statistics cleaned up"
+        return self.async_create_entry(
+            title=title,
+            data={},
+        )
+
+    def _show_statistics_cleanup_form(self, entry_id: str):
+        """Render the confirmation form describing how many orphaned statistics were found."""
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.orphaned_statistics) if coordinator else self.issue_data.get("count", 0)
         is_de = self.hass.config.language == "de"
@@ -469,61 +479,68 @@ class ComexioRepairFlow(RepairsFlow):
         marker_ids = self.issue_data.get("ignored_marker_ids", [])
 
         if user_input is not None:
-            action = user_input.get("action", "cancel")
+            return await self._async_process_ignored_markers_cleanup(entry_id, marker_ids, user_input)
 
-            if action == "cleanup":
-                coordinator = self.hass.data[DOMAIN].get(entry_id)
-                if not coordinator:
-                    return self.async_abort(reason="entry_not_found")
+        return self._show_ignored_markers_cleanup_form(marker_ids)
 
-                server_id = coordinator.server_id
-                registry = er.async_get(self.hass)
-                marker_id_set = set(marker_ids)
-                prefix_base = f"{DOMAIN}_{server_id}_m".lower()
-                deleted_count = 0
-
-                # Single pass over the registry, matching the marker ID out of the
-                # unique_id suffix, instead of one full registry scan per marker.
-                for entity in list(registry.entities.values()):
-                    uid = (entity.unique_id or "").lower()
-                    if not uid.startswith(prefix_base):
-                        continue
-                    match = _MARKER_ID_SUFFIX_RE.match(uid[len(prefix_base) :])
-                    if not match or int(match.group(1)) not in marker_id_set:
-                        continue
-                    registry.async_remove_entity(entity.entity_id)
-                    deleted_count += 1
-                    _LOGGER.info(
-                        "[%s] Deleted entity %s for ignored marker M%s",
-                        server_id,
-                        entity.entity_id,
-                        match.group(1),
-                    )
-
-                # Delete webhooks for these markers
-                if hasattr(coordinator, "_webhook_manager"):
-                    for marker_id in marker_ids:
-                        webhook_id = f"{DOMAIN}_{server_id}_m{marker_id}"
-                        if webhook_id in coordinator._webhook_manager:
-                            del coordinator._webhook_manager[webhook_id]
-                            _LOGGER.info("[%s] Removed webhook for marker M%d", server_id, marker_id)
-
-                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-                return self.async_create_entry(
-                    title=f"{deleted_count} marker entities and webhooks removed",
-                    data={},
-                )
-
-            # action == "cancel"
+    async def _async_process_ignored_markers_cleanup(self, entry_id: str, marker_ids: list[int], user_input: dict):
+        """Handle the user's choice (cleanup/cancel) once the confirmation form was submitted."""
+        if user_input.get("action", "cancel") != "cleanup":
             return self.async_abort(reason="user_cancelled")
 
-        # Show confirmation form
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        if not coordinator:
+            return self.async_abort(reason="entry_not_found")
+
+        deleted_count = self._delete_ignored_marker_entities(coordinator, marker_ids)
+
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        return self.async_create_entry(
+            title=f"{deleted_count} marker entities removed",
+            data={},
+        )
+
+    def _delete_ignored_marker_entities(self, coordinator, marker_ids: list[int]) -> int:
+        """Remove HA entities for the given ignored marker IDs; return the deleted-entity count.
+
+        Comexio webhooks are registered once per config entry (not per marker), so ignoring a
+        marker never needs to touch webhook registration — only its HA entity is removed here.
+        """
+        server_id = coordinator.server_id
+        registry = er.async_get(self.hass)
+        marker_id_set = set(marker_ids)
+        prefix_base = f"{DOMAIN}_{server_id}_m".lower()
+        deleted_count = 0
+
+        # Single pass over the registry, matching the marker ID out of the unique_id suffix, instead of
+        # one full registry scan per marker. list() snapshots the values so async_remove_entity() below
+        # (which mutates registry.entities) doesn't invalidate the iterator mid-loop.
+        for entity in list(registry.entities.values()):
+            uid = (entity.unique_id or "").lower()
+            if not uid.startswith(prefix_base):
+                continue
+            match = _MARKER_ID_SUFFIX_RE.match(uid[len(prefix_base) :])
+            if not match or int(match.group(1)) not in marker_id_set:
+                continue
+            registry.async_remove_entity(entity.entity_id)
+            deleted_count += 1
+            _LOGGER.info(
+                "[%s] Deleted entity %s for ignored marker M%s",
+                server_id,
+                entity.entity_id,
+                match.group(1),
+            )
+
+        return deleted_count
+
+    def _show_ignored_markers_cleanup_form(self, marker_ids: list[int]):
+        """Render the confirmation form listing the markers whose entities will be deleted."""
         ids_str = ", ".join(f"M{mid}" for mid in marker_ids)
         is_de = self.hass.config.language == "de"
 
         if is_de:
             description = (
-                f"Dies wird **Entitäten und Webhooks** für die folgenden Merker **PERMANENT** löschen: "
+                f"Dies wird **Entitäten** für die folgenden Merker **PERMANENT** löschen: "
                 f"**{ids_str}**\n\n"
                 "Diese Aktion kann **nicht rückgängig gemacht** werden. Die Merker selbst bleiben in "
                 "Comexio bestehen, aber all ihre Home Assistant Entitäten und Verknüpfungen werden gelöscht.\n\n"
@@ -531,7 +548,7 @@ class ComexioRepairFlow(RepairsFlow):
             )
         else:
             description = (
-                f"This will **permanently delete entities and webhooks** for the following markers: "
+                f"This will **permanently delete entities** for the following markers: "
                 f"**{ids_str}**\n\n"
                 "This action **cannot be undone**. The markers themselves will remain in Comexio, but all "
                 "their Home Assistant entities and connections will be deleted.\n\n"

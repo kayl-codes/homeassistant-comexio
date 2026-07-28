@@ -1,15 +1,17 @@
 # Version: 0.7.6
 import contextlib
+import functools
 import logging
 import pathlib
 import re
 import time
+from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 import yaml
 
-from .const import DOMAIN
+from .const import CONF_IGNORED_MARKERS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,7 +54,7 @@ def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:
 
 
 def _available_plans_str(fub_data: dict) -> str:
-    """Return human-readable list of available plans from _fub_data."""
+    """Return human-readable list of available plans from fub_data."""
     if not fub_data:
         return "keine Pläne geladen — Integration neu laden"
     return ", ".join(
@@ -169,7 +171,14 @@ _SERVICES_YAML_PATH = pathlib.Path(__file__).parent / "services.yaml"
 
 
 def _rewrite_services_yaml_plans(plan_options: list[str]) -> None:
-    """Blocking read/modify/write of services.yaml; run via executor job only."""
+    """Blocking read/modify/write of services.yaml; run via executor job only.
+
+    services.yaml is rewritten (rather than deriving fub_id options purely at runtime) because HA's
+    service-call schema is static: the Developer Tools "Call Service" UI resolves a field's selector
+    from the YAML at service-registration time, and selectors don't support a per-call dynamic option
+    list bound to live coordinator data. The select entity (select.py) is the live source of truth;
+    this rewrite just keeps the YAML-declared dropdown in sync with it whenever the plan set changes.
+    """
     try:
         content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
@@ -196,7 +205,7 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
     plan_labels: set[str] = set()
     for coordinator in hass.data.get(DOMAIN, {}).values():
         if isinstance(coordinator, ComexioCoordinator):
-            for fub_id, fub in getattr(coordinator.api, "_fub_data", {}).items():
+            for fub_id, fub in coordinator.api.fub_data.items():
                 name = fub.get("Name", "")
                 if name:
                     plan_labels.add(format_plan_label(name, fub_id))
@@ -213,648 +222,645 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
 
 
-async def async_setup_services(hass: HomeAssistant) -> None:
-    """Register additional services for the Comexio integration."""
+async def _resolve_logikplan_plan(
+    hass: HomeAssistant, call: ServiceCall, error_title: str
+) -> tuple[Any, Any, int] | None:
+    """Resolve (coordinator, api, fub_id) for a Logikplan service call — without logging in.
 
-    async def handle_generate_web_io(call: ServiceCall):
-        """Service to preview or upload the Web-IO configuration."""
-        entry_id = call.data.get("config_entry")
-
-        if entry_id not in hass.data[DOMAIN]:
-            _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
-            return
-
-        coordinator = hass.data[DOMAIN][entry_id]
-        api = coordinator.api
-        server_id = coordinator.server_id
-        do_upload = call.data.get("upload", False)
-
-        try:
-            conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
-            webio_name = conf.get("webio_name", "HomeAssistant")
-
-            web_io_json = api.generate_webio_json(server_id, webio_name, coordinator.data)
-
-            if not do_upload:
-                persistent_notification.async_create(
-                    hass, f"```json\n{web_io_json}\n```", title=f"Comexio Preview ({server_id})"
-                )
-                return
-
-            base_info = await api.get_webio_base_info(webio_name)
-            if base_info:
-                base_id, deletable = base_info
-                if deletable:
-                    _LOGGER.info("Base class is deletable, performing clean reinstall.")
-                    await api.delete_webio_base(base_id)
-                else:
-                    persistent_notification.async_create(
-                        hass,
-                        f"Class '{webio_name}' is in use by Comexio logic and cannot be deleted. "
-                        "Please use the Smart-Sync button for individual updates.",
-                        title="Bulk-Sync blocked",
-                    )
-                    return
-
-            success, result_val = await api.upload_web_io(server_id, webio_name, web_io_json)
-            msg = f"Sync successful! Base-ID: {result_val}" if success else f"Upload failed: {result_val}"
-            persistent_notification.async_create(hass, msg, title=f"Comexio Sync ({server_id})")
-
-        except Exception as e:
-            _LOGGER.exception("Error in Comexio service: %s", e)
-
-    async def handle_logikplan_connect_poc(call: ServiceCall):
-        """POC: Connect markers (comma-separated list or all) to their WebIO commands."""
-        from .const import CONF_IGNORED_MARKERS
-
-        entry_id = call.data.get("config_entry")
-        domain_data = hass.data.get(DOMAIN, {})
-        if not entry_id:
-            entries = list(domain_data.keys())
-            if len(entries) != 1:
-                _LOGGER.error("config_entry required when multiple Comexio instances exist: %s", entries)
-                persistent_notification.async_create(
-                    hass,
-                    "Mehrere Comexio-Instanzen — bitte `config_entry` angeben.",
-                    title="Logikplan POC — Fehler",
-                )
-                return
-            entry_id = entries[0]
-        if entry_id not in domain_data:
-            _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
-            return
-
-        coordinator = domain_data[entry_id]
-        api = coordinator.api
-        fub_id_raw = call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
-        fub_id = _resolve_fub_id(str(fub_id_raw), api._fub_data, hass)
-        if fub_id is None:
+    Handles config_entry auto-resolution (when only one Comexio instance exists) and fub_id
+    resolution via `_resolve_fub_id`, notifying the user and returning None on any failure.
+    """
+    domain_data = hass.data.get(DOMAIN, {})
+    entry_id = call.data.get("config_entry")
+    if not entry_id:
+        entries = list(domain_data.keys())
+        if len(entries) != 1:
+            _LOGGER.error("config_entry required when multiple Comexio instances exist: %s", entries)
             persistent_notification.async_create(
-                hass,
-                f"Plan '{fub_id_raw}' nicht gefunden.\nVerfügbar: {_available_plans_str(api._fub_data)}",
-                title="Logikplan POC — Fehler",
+                hass, "Mehrere Comexio-Instanzen — bitte `config_entry` angeben.", title=error_title
             )
-            return
-        all_markers = call.data.get("all_markers", False)
-        raw_input = str(call.data.get("marker_id", "2")).strip()
+            return None
+        entry_id = entries[0]
+    if entry_id not in domain_data:
+        _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
+        return None
 
-        markers_by_id = {m["id"]: m for m in coordinator.data.get("markers", [])}
-        webio_commands = coordinator.data.get("webio_commands", {})
-
-        # Load ignored_markers from config/options
-        conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
-        ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()
-        ignored_ids: set[int] = set()
-        if ignored_raw:
-            for token in ignored_raw.replace(";", ",").split(","):
-                stripped = token.strip()
-                if stripped:
-                    with contextlib.suppress(ValueError):
-                        ignored_ids.add(int(stripped))
-
-        if all_markers or raw_input == "*":
-            marker_ids = [mid for mid in markers_by_id if mid not in ignored_ids]
-        else:
-            # Parse comma-separated list; strip optional "M"/"m" prefix
-            raw_ids = [tok.strip().lstrip("Mm") for tok in raw_input.split(",") if tok.strip()]
-            marker_ids = []
-            invalid_tokens = []
-            for raw_id in raw_ids:
-                try:
-                    mid = int(raw_id)
-                except ValueError:
-                    invalid_tokens.append(raw_id)
-                    continue
-                if mid not in ignored_ids:
-                    marker_ids.append(mid)
-            if invalid_tokens:
-                persistent_notification.async_create(
-                    hass,
-                    f"Ungültige Merker-IDs (keine Ganzzahlen): {', '.join(invalid_tokens)}.",
-                    title="Logikplan POC — Fehler",
-                )
-                return
-
-        if not marker_ids:
-            persistent_notification.async_create(
-                hass, "Keine gültigen Merker-IDs angegeben.", title="Logikplan POC — Fehler"
-            )
-            return
-
-        if not await api.login():
-            persistent_notification.async_create(
-                hass, "Comexio Admin-Login fehlgeschlagen.", title="Logikplan POC — Fehler"
-            )
-            return
-
-        plan_info = api._fub_data.get(str(fub_id), {})
-        was_active = bool(plan_info.get("Active", True))
-        if was_active:
-            await api.logikplan_stop_fup(fub_id)
-
-        # Canvas-Grenzen und Spalten-Layout — DPI+Ausrichtung immer aus Plan-Daten
-        canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
-        if canvas_format_raw and canvas_format_raw != "AUTO":
-            canvas_format = canvas_format_raw
-            x_max, y_max = api.get_fub_canvas_bounds(fub_id, paper_name=canvas_format)
-        else:
-            canvas_format = api.get_fub_paper_format(fub_id).upper()
-            x_max, y_max = api.get_fub_canvas_bounds(fub_id)
-        _LOGGER.info(
-            "Logikplan POC: Canvas %s %.0f×%.0f (Plan fub_id=%s)",
-            canvas_format,
-            x_max,
-            y_max,
-            fub_id,
+    coordinator = domain_data[entry_id]
+    api = coordinator.api
+    fub_id_raw = call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
+    fub_id = _resolve_fub_id(str(fub_id_raw), api.fub_data, hass)
+    if fub_id is None:
+        persistent_notification.async_create(
+            hass,
+            f"Plan '{fub_id_raw}' nicht gefunden.\nVerfügbar: {_available_plans_str(api.fub_data)}",
+            title=error_title,
         )
-        rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / _LAYOUT_Y_STEP))
-        max_cols = max(1, round((x_max - _LAYOUT_X_MARKER) / _LAYOUT_COLUMN_WIDTH))
+        return None
+
+    return coordinator, api, fub_id
+
+
+async def _ensure_comexio_login(hass: HomeAssistant, api, error_title: str) -> bool:
+    """Log in to the Comexio admin session, notifying the user on failure."""
+    if await api.login():
+        return True
+    persistent_notification.async_create(hass, "Comexio Admin-Login fehlgeschlagen.", title=error_title)
+    return False
+
+
+async def _resolve_logikplan_context(
+    hass: HomeAssistant, call: ServiceCall, error_title: str
+) -> tuple[Any, Any, int] | None:
+    """Resolve (coordinator, api, fub_id) for a Logikplan service call and ensure the admin session is logged in."""
+    ctx = await _resolve_logikplan_plan(hass, call, error_title)
+    if ctx is None:
+        return None
+    _coordinator, api, _fub_id = ctx
+    if not await _ensure_comexio_login(hass, api, error_title):
+        return None
+    return ctx
+
+
+def _plan_activation_note(was_active: bool, activated: bool, has_changes: bool, fub_id: int) -> str:
+    """Build the German status note describing what happened to plan activation after a sync/sort action."""
+    if not was_active:
+        if has_changes:
+            return "Plan war inaktiv — Änderungen gespeichert, Plan bleibt inaktiv."
+        return f"Plan fub_id={fub_id} — keine neuen Verbindungen, Plan unverändert."
+    if activated:
+        return "Plan gespeichert und aktiviert." if has_changes else "Plan unverändert, weiterhin aktiv."
+    return "Plan-Aktivierung fehlgeschlagen — bitte manuell im Comexio-UI speichern."
+
+
+def _get_canvas_grid_dims(api, fub_id: int, canvas_format_raw: str) -> tuple[str, float, float, int, int]:
+    """Resolve canvas paper format + pixel bounds, then derive the (rows_per_col, max_cols) layout grid."""
+    if canvas_format_raw and canvas_format_raw != "AUTO":
+        canvas_label = canvas_format_raw
+        x_max, y_max = api.get_fub_canvas_bounds(fub_id, paper_name=canvas_format_raw)
+    else:
+        canvas_label = api.get_fub_paper_format(fub_id).upper()
+        x_max, y_max = api.get_fub_canvas_bounds(fub_id)
+
+    rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / _LAYOUT_Y_STEP))
+    max_cols = max(1, round((x_max - _LAYOUT_X_MARKER) / _LAYOUT_COLUMN_WIDTH))
+    return canvas_label, x_max, y_max, rows_per_col, max_cols
+
+
+def _parse_ignored_marker_ids(conf: dict) -> set[int]:
+    """Parse the ignored_markers option string into a set of marker IDs (invalid tokens are skipped)."""
+    ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()
+    ignored_ids: set[int] = set()
+    if ignored_raw:
+        for token in ignored_raw.replace(";", ",").split(","):
+            stripped = token.strip()
+            if stripped:
+                with contextlib.suppress(ValueError):
+                    ignored_ids.add(int(stripped))
+    return ignored_ids
+
+
+def _resolve_requested_marker_ids(
+    raw_input: str, all_markers: bool, markers_by_id: dict, ignored_ids: set[int]
+) -> tuple[list[int], list[str]]:
+    """Resolve the requested marker IDs from the service call's `marker_id`/`all_markers` input.
+
+    Returns (marker_ids, invalid_tokens); invalid_tokens is only ever non-empty for the explicit-list path.
+    """
+    if all_markers or raw_input == "*":
+        return [mid for mid in markers_by_id if mid not in ignored_ids], []
+
+    raw_ids = [tok.strip().lstrip("Mm") for tok in raw_input.split(",") if tok.strip()]
+    marker_ids: list[int] = []
+    invalid_tokens: list[str] = []
+    for raw_id in raw_ids:
+        try:
+            mid = int(raw_id)
+        except ValueError:
+            invalid_tokens.append(raw_id)
+            continue
+        if mid not in ignored_ids:
+            marker_ids.append(mid)
+    return marker_ids, invalid_tokens
+
+
+async def _load_connect_poc_topology(
+    api, fub_id: int, rows_per_col: int, max_cols: int
+) -> tuple[dict[tuple[int, int], int], set[tuple[int, int]], set[tuple[int, int]]]:
+    """Load current plan elements/connections and derive existing-element refs, wired pairs, occupied grid slots."""
+    plan_data = await api.logikplan_load_elements(fub_id)
+    existing_by_ref: dict[tuple[int, int], int] = {}
+    connected_pairs: set[tuple[int, int]] = set()
+    occupied_slots: set[tuple[int, int]] = set()
+
+    if not plan_data:
+        _LOGGER.warning("Logikplan POC: loadelements fehlgeschlagen, fahre ohne Plan-Zustand fort")
+        return existing_by_ref, connected_pairs, occupied_slots
+
+    for elem_id_str, elem in plan_data.get("elements", {}).items():
+        ref = elem.get("reference", {})
+        existing_by_ref[(ref.get("type"), ref.get("ref_id"))] = int(elem_id_str)
+    for conn in plan_data.get("connections", {}).values():
+        inp = conn.get("input", {})
+        for out in conn.get("output", []):
+            connected_pairs.add((inp.get("FubElementId"), out.get("FubElementId")))
+    occupied_slots = _get_occupied_grid_slots(plan_data.get("elements", {}), rows_per_col, max_cols)
+    _LOGGER.info("Logikplan POC: Plan fub=%s — %d belegte Grid-Slots gefunden", fub_id, len(occupied_slots))
+    return existing_by_ref, connected_pairs, occupied_slots
+
+
+async def _connect_marker_to_webio(
+    api,
+    fub_id: int,
+    marker_id: int,
+    marker: dict | None,
+    webio_commands: dict,
+    existing_by_ref: dict[tuple[int, int], int],
+    connected_pairs: set[tuple[int, int]],
+    occupied_slots: set[tuple[int, int]],
+    rows_per_col: int,
+    max_cols: int,
+    canvas_format: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Connect a single marker to its WebIO command on the canvas.
+
+    Returns (result, skip, error) — exactly one is set, the other two are None.
+    Mutates `occupied_slots` in place when a new grid slot is claimed.
+    """
+    if not marker:
+        _LOGGER.warning("Logikplan POC: M%s nicht gefunden", marker_id)
+        return None, None, f"M{marker_id}: nicht in Koordinator-Daten"
+
+    expected_cmd_name = f"HA {marker['name']}"
+    webio_cmd = webio_commands.get(expected_cmd_name)
+    if not webio_cmd:
+        _LOGGER.warning("Logikplan POC: M%s — WebIO '%s' nicht gefunden", marker_id, expected_cmd_name)
+        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' nicht gefunden"
+
+    # ref_id for type=10 (WebIO) is the local FubModules dict-key (webIoId), not cmdId
+    web_ref_id = webio_cmd.get("webIoId")
+    if web_ref_id is None:
+        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' hat keine webIoId"
+
+    conn_type = "binary" if marker["type"] == "digital" else "analog"
+
+    # Reuse existing elements on canvas (avoid duplicates)
+    existing_marker_elem = existing_by_ref.get((2, int(marker_id)))
+    existing_webio_elem = existing_by_ref.get((10, int(web_ref_id)))
+
+    # Skip if already connected in this specific plan
+    already_connected = (
+        existing_marker_elem and existing_webio_elem and (existing_marker_elem, existing_webio_elem) in connected_pairs
+    )
+    if already_connected:
+        _LOGGER.info("Logikplan POC: M%s — bereits in Plan verbunden, übersprungen", marker_id)
+        return (
+            None,
+            f"M{marker_id} ({marker['name']}): bereits in Plan {fub_id} verbunden"
+            f" (elem {existing_marker_elem}→{existing_webio_elem})",
+            None,
+        )
+
+    # Find first free grid slot, update occupied_slots
+    free_pos = _find_first_free_grid_position(occupied_slots, rows_per_col, max_cols)
+    if free_pos is None:
+        _LOGGER.warning("Logikplan POC: Canvas %s voll bei M%s", canvas_format, marker_id)
+        return None, None, f"M{marker_id}: Canvas {canvas_format} voll ({max_cols} Spalten × {rows_per_col} Zeilen)"
+
+    col, row_in_col = free_pos
+    occupied_slots.add((col, row_in_col))
+    y_new = _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP
+    x_marker_cur = _LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH
+    x_webio_cur = _LAYOUT_X_WEBIO + col * _LAYOUT_COLUMN_WIDTH
+    if row_in_col == 0 and col > 0:
+        _LOGGER.info("Logikplan POC: Spalte %d beginnt bei x=%.1f", col, x_marker_cur)
+
+    # Marker element: reuse existing or create new
+    if existing_marker_elem:
+        elem_marker = existing_marker_elem
+        _LOGGER.info("Logikplan POC: M%s — Merker-Element bereits vorhanden: elem_id=%s", marker_id, elem_marker)
+    else:
+        _LOGGER.info("Logikplan POC: M%s → add_element (Merker, col=%d, y=%.1f)", marker_id, col, y_new)
+        elem_marker = await api.logikplan_add_element(
+            fub_id=fub_id, ref_id=int(marker_id), element_type=2, x=x_marker_cur, y=y_new
+        )
+        if elem_marker is None:
+            return None, None, f"M{marker_id}: add_element (Merker) fehlgeschlagen"
+        _LOGGER.info("Logikplan POC: M%s — Merker-Element angelegt: elem_id=%s", marker_id, elem_marker)
+
+    # WebIO element: reuse existing or create new (connection embedded in add_element)
+    if existing_webio_elem:
+        elem_webio = existing_webio_elem
+        _LOGGER.info("Logikplan POC: M%s — WebIO-Element bereits vorhanden: elem_id=%s", marker_id, elem_webio)
+        # Reused elements aren't connected yet (already_connected would have skipped this
+        # marker otherwise), so the wire has to be drawn explicitly here.
+        conn_id = await api.logikplan_save_connection(fub_id, elem_marker, elem_webio, conn_type)
+        if conn_id is None:
+            return None, None, f"M{marker_id}: save_connection (elem {elem_marker}→{elem_webio}) fehlgeschlagen"
         _LOGGER.info(
-            "Logikplan POC: Canvas %s (%.0f×%.0f) → %d Zeilen/Spalte, %d Spalten",
-            canvas_format,
-            x_max,
-            y_max,
+            "Logikplan POC: M%s — Verbindung nachgezogen: elem %s→%s (conn_id=%s)",
+            marker_id,
+            elem_marker,
+            elem_webio,
+            conn_id,
+        )
+    else:
+        _LOGGER.info("Logikplan POC: M%s → add_element+connect (WebIO, col=%d, y=%.1f)", marker_id, col, y_new)
+        conn_payload = {
+            "0": {
+                "id": "new",
+                "fub_id": fub_id,
+                "type": conn_type,
+                "input": {"element": str(elem_marker), "pos": "0", "inverted": False},
+                "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
+            }
+        }
+        elem_webio = await api.logikplan_add_element(
+            fub_id=fub_id,
+            ref_id=int(web_ref_id),
+            element_type=10,
+            x=x_webio_cur,
+            y=y_new,
+            connection=conn_payload,
+        )
+        if elem_webio is None:
+            return None, None, f"M{marker_id}: add_element (WebIO, webIoId={web_ref_id}) fehlgeschlagen"
+        _LOGGER.info("Logikplan POC: M%s — WebIO+Verbindung angelegt: elem_id=%s", marker_id, elem_webio)
+
+    result = (
+        f"M{marker_id} ({marker['name']}) → elem={elem_marker} | "
+        f"WebIO webIoId={web_ref_id} → elem={elem_webio} ({conn_type})"
+    )
+    return result, None, None
+
+
+def _build_connect_poc_summary(
+    fub_id: int,
+    results: list[str],
+    skipped: list[str],
+    errors: list[str],
+    duration: float,
+    was_active: bool,
+    activated: bool,
+) -> tuple[str, str]:
+    """Build the final notification message + title for a logikplan_connect_poc run."""
+    lines: list[str] = []
+    if results:
+        lines += [f"**{len(results)} verbunden:**"] + [f"- {r}" for r in results]
+    if skipped:
+        lines += [f"\n**{len(skipped)} bereits verbunden (übersprungen):**"] + [f"- {s}" for s in skipped]
+    if errors:
+        lines += [f"\n**{len(errors)} Fehler:**"] + [f"- {e}" for e in errors]
+
+    act_note = _plan_activation_note(was_active, activated, has_changes=bool(results), fub_id=fub_id)
+    lines.append(f"\n{act_note}")
+    lines.append(f"Dauer: {duration:.1f}s")
+
+    title = f"Logikplan POC — {len(results)} OK / {len(skipped)} Skip / {len(errors)} Fehler"
+    return "\n".join(lines), title
+
+
+def _element_label(elem_id: str | int, elements: dict, markers_by_id: dict, webio_by_id: dict) -> str:
+    """Human-readable label for a Logikplan element (marker name, WebIO command name, or type/ref fallback)."""
+    ref = elements.get(str(elem_id), {}).get("reference", {})
+    etype = ref.get("type")
+    ref_id = str(ref.get("ref_id", "?"))
+    if etype == 2:
+        marker = markers_by_id.get(ref_id)
+        return f"M{ref_id} {marker['name']}" if marker else f"M{ref_id} (unbekannt)"
+    if etype == 10:
+        return webio_by_id.get(ref_id, f"WebIO ref={ref_id}")
+    return f"Typ{etype} ref={ref_id}"
+
+
+def _build_visualize_lines(
+    elements: dict, connections: dict, markers_by_id: dict, webio_by_id: dict
+) -> tuple[list[str], list[str]]:
+    """Build the connection lines and orphan-element lines for the Logikplan visualize text diagram."""
+    connected_elem_ids: set[str] = set()
+    conn_lines: list[str] = []
+    for conn in sorted(connections.values(), key=lambda c: c.get("input", {}).get("FubElementId", 0)):
+        inp = conn.get("input", {})
+        inp_id = str(inp.get("FubElementId", "?"))
+        inv_in = " ¬" if inp.get("Inverted") else ""
+        conn_type = conn.get("type", "?")
+        connected_elem_ids.add(inp_id)
+        out_parts: list[str] = []
+        for out in conn.get("output", []):
+            out_id = str(out.get("FubElementId", "?"))
+            inv_out = " ¬" if out.get("Inverted") else ""
+            out_parts.append(f"{_element_label(out_id, elements, markers_by_id, webio_by_id)}{inv_out}")
+            connected_elem_ids.add(out_id)
+        conn_lines.append(
+            f"  {_element_label(inp_id, elements, markers_by_id, webio_by_id)}{inv_in} "
+            f"→[{conn_type}]→ {', '.join(out_parts)}"
+        )
+
+    orphan_lines: list[str] = []
+    for elem_id, elem in sorted(
+        elements.items(), key=lambda kv: (kv[1].get("position_x", 0), kv[1].get("position_y", 0))
+    ):
+        if elem_id not in connected_elem_ids:
+            x, y = elem.get("position_x", 0), elem.get("position_y", 0)
+            label = _element_label(elem_id, elements, markers_by_id, webio_by_id)
+            orphan_lines.append(f"  {label} (@ {x:.0f},{y:.0f})")
+
+    return conn_lines, orphan_lines
+
+
+async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Service to preview or upload the Web-IO configuration."""
+    entry_id = call.data.get("config_entry")
+
+    if entry_id not in hass.data[DOMAIN]:
+        _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
+        return
+
+    coordinator = hass.data[DOMAIN][entry_id]
+    api = coordinator.api
+    server_id = coordinator.server_id
+    do_upload = call.data.get("upload", False)
+
+    try:
+        conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
+        webio_name = conf.get("webio_name", "HomeAssistant")
+
+        web_io_json = api.generate_webio_json(server_id, webio_name, coordinator.data)
+
+        if not do_upload:
+            persistent_notification.async_create(
+                hass, f"```json\n{web_io_json}\n```", title=f"Comexio Preview ({server_id})"
+            )
+            return
+
+        base_info = await api.get_webio_base_info(webio_name)
+        if base_info:
+            base_id, deletable = base_info
+            if deletable:
+                _LOGGER.info("Base class is deletable, performing clean reinstall.")
+                await api.delete_webio_base(base_id)
+            else:
+                persistent_notification.async_create(
+                    hass,
+                    f"Class '{webio_name}' is in use by Comexio logic and cannot be deleted. "
+                    "Please use the Smart-Sync button for individual updates.",
+                    title="Bulk-Sync blocked",
+                )
+                return
+
+        success, result_val = await api.upload_web_io(server_id, webio_name, web_io_json)
+        msg = f"Sync successful! Base-ID: {result_val}" if success else f"Upload failed: {result_val}"
+        persistent_notification.async_create(hass, msg, title=f"Comexio Sync ({server_id})")
+
+    except Exception as e:
+        _LOGGER.exception("Error in Comexio service: %s", e)
+
+
+async def handle_logikplan_connect_poc(hass: HomeAssistant, call: ServiceCall) -> None:
+    """POC: Connect markers (comma-separated list or all) to their WebIO commands."""
+    error_title = "Logikplan POC — Fehler"
+    ctx = await _resolve_logikplan_plan(hass, call, error_title)
+    if ctx is None:
+        return
+    coordinator, api, fub_id = ctx
+
+    all_markers = call.data.get("all_markers", False)
+    raw_input = str(call.data.get("marker_id", "2")).strip()
+    markers_by_id = {m["id"]: m for m in coordinator.data.get("markers", [])}
+    webio_commands = coordinator.data.get("webio_commands", {})
+
+    conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
+    ignored_ids = _parse_ignored_marker_ids(conf)
+    marker_ids, invalid_tokens = _resolve_requested_marker_ids(raw_input, all_markers, markers_by_id, ignored_ids)
+    if invalid_tokens:
+        persistent_notification.async_create(
+            hass, f"Ungültige Merker-IDs (keine Ganzzahlen): {', '.join(invalid_tokens)}.", title=error_title
+        )
+        return
+    if not marker_ids:
+        persistent_notification.async_create(hass, "Keine gültigen Merker-IDs angegeben.", title=error_title)
+        return
+
+    if not await _ensure_comexio_login(hass, api, error_title):
+        return
+
+    plan_info = api.fub_data.get(str(fub_id), {})
+    was_active = bool(plan_info.get("Active", True))
+    if was_active:
+        await api.logikplan_stop_fup(fub_id)
+
+    # Canvas-Grenzen und Spalten-Layout — DPI+Ausrichtung immer aus Plan-Daten
+    canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
+    canvas_format, x_max, y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
+    _LOGGER.info(
+        "Logikplan POC: Canvas %s %.0f×%.0f (Plan fub_id=%s)",
+        canvas_format,
+        x_max,
+        y_max,
+        fub_id,
+    )
+    _LOGGER.info(
+        "Logikplan POC: Canvas %s (%.0f×%.0f) → %d Zeilen/Spalte, %d Spalten",
+        canvas_format,
+        x_max,
+        y_max,
+        rows_per_col,
+        max_cols,
+    )
+
+    # Load current plan state: existing elements + connections
+    existing_by_ref, connected_pairs, occupied_slots = await _load_connect_poc_topology(
+        api, fub_id, rows_per_col, max_cols
+    )
+
+    _LOGGER.info("Logikplan POC: fub_id=%s, %d Merker zu verarbeiten: %s", fub_id, len(marker_ids), marker_ids)
+    t_start = time.monotonic()
+    results: list[str] = []
+    errors: list[str] = []
+    skipped: list[str] = []
+
+    for marker_id in marker_ids:
+        marker = markers_by_id.get(marker_id)
+        result, skip, error = await _connect_marker_to_webio(
+            api,
+            fub_id,
+            marker_id,
+            marker,
+            webio_commands,
+            existing_by_ref,
+            connected_pairs,
+            occupied_slots,
             rows_per_col,
             max_cols,
+            canvas_format,
         )
+        if result:
+            results.append(result)
+        if skip:
+            skipped.append(skip)
+        if error:
+            errors.append(error)
 
-        # Load current plan state: existing elements + connections
-        plan_data = await api.logikplan_load_elements(fub_id)
-        existing_by_ref: dict[tuple[int, int], int] = {}  # (type, ref_id) → elem_id
-        connected_pairs: set[tuple[int, int]] = set()  # (input_elem_id, output_elem_id)
-        occupied_slots: set[tuple[int, int]] = set()
+    duration = time.monotonic() - t_start
+    # Plan was stopped above whenever it was active, so it must always be resumed
+    # here regardless of `results` — otherwise a no-op run (e.g. all markers
+    # already connected) leaves a previously active plan stopped permanently.
+    activated = await api.logikplan_run_fup(fub_id) if was_active else False
+    msg, title = _build_connect_poc_summary(fub_id, results, skipped, errors, duration, was_active, activated)
+    persistent_notification.async_create(hass, msg, title=title)
 
-        if plan_data:
-            for elem_id_str, elem in plan_data.get("elements", {}).items():
-                ref = elem.get("reference", {})
-                existing_by_ref[(ref.get("type"), ref.get("ref_id"))] = int(elem_id_str)
-            for conn in plan_data.get("connections", {}).values():
-                inp = conn.get("input", {})
-                for out in conn.get("output", []):
-                    connected_pairs.add((inp.get("FubElementId"), out.get("FubElementId")))
-            occupied_slots = _get_occupied_grid_slots(plan_data.get("elements", {}), rows_per_col, max_cols)
-            _LOGGER.info("Logikplan POC: Plan fub=%s — %d belegte Grid-Slots gefunden", fub_id, len(occupied_slots))
-        else:
-            _LOGGER.warning("Logikplan POC: loadelements fehlgeschlagen, fahre ohne Plan-Zustand fort")
 
-        _LOGGER.info("Logikplan POC: fub_id=%s, %d Merker zu verarbeiten: %s", fub_id, len(marker_ids), marker_ids)
-        t_start = time.monotonic()
-        results: list[str] = []
-        errors: list[str] = []
-        skipped: list[str] = []
+async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Service to visualize current state of a Logikplan plan as a text diagram."""
+    error_title = "Logikplan Visualize — Fehler"
+    ctx = await _resolve_logikplan_context(hass, call, error_title)
+    if ctx is None:
+        return
+    coordinator, api, fub_id = ctx
 
-        for marker_id in marker_ids:
-            marker = markers_by_id.get(marker_id)
-            if not marker:
-                errors.append(f"M{marker_id}: nicht in Koordinator-Daten")
-                _LOGGER.warning("Logikplan POC: M%s nicht gefunden", marker_id)
-                continue
+    plan_data = await api.logikplan_load_elements(fub_id)
+    if not plan_data:
+        persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
+        return
 
-            expected_cmd_name = f"HA {marker['name']}"
-            webio_cmd = webio_commands.get(expected_cmd_name)
-            if not webio_cmd:
-                errors.append(f"M{marker_id}: WebIO '{expected_cmd_name}' nicht gefunden")
-                _LOGGER.warning("Logikplan POC: M%s — WebIO '%s' nicht gefunden", marker_id, expected_cmd_name)
-                continue
+    markers_by_id = {str(m["id"]): m for m in coordinator.data.get("markers", [])}
+    webio_commands = coordinator.data.get("webio_commands", {})
+    webio_by_id = {
+        str(cmd.get("webIoId")): name for name, cmd in webio_commands.items() if cmd.get("webIoId") is not None
+    }
+    elements = plan_data.get("elements", {})
+    connections = plan_data.get("connections", {})
 
-            # ref_id for type=10 (WebIO) is the local FubModules dict-key (webIoId), not cmdId
-            web_ref_id = webio_cmd.get("webIoId")
-            if web_ref_id is None:
-                errors.append(f"M{marker_id}: WebIO '{expected_cmd_name}' hat keine webIoId")
-                continue
+    conn_lines, orphan_lines = _build_visualize_lines(elements, connections, markers_by_id, webio_by_id)
 
-            conn_type = "binary" if marker["type"] == "digital" else "analog"
+    paper_fmt = api.get_fub_paper_format(fub_id)
+    x_max, y_max = api.get_fub_canvas_bounds(fub_id)
+    lines = [
+        f"**Plan {fub_id}** — {paper_fmt}, Canvas {x_max:.0f}×{y_max:.0f}",
+        f"{len(elements)} Elemente, {len(connections)} Verbindungen",
+        "",
+        f"**Verbindungen ({len(connections)}):**",
+    ]
+    lines += conn_lines or ["  (keine)"]
+    if orphan_lines:
+        lines += ["", f"**Nicht verbundene Elemente ({len(orphan_lines)}):**"]
+        lines += orphan_lines
 
-            # Reuse existing elements on canvas (avoid duplicates)
-            existing_marker_elem = existing_by_ref.get((2, int(marker_id)))
-            existing_webio_elem = existing_by_ref.get((10, int(web_ref_id)))
+    persistent_notification.async_create(
+        hass, "\n".join(lines), title=f"Logikplan Plan {fub_id} — {len(connections)} Verbindungen"
+    )
 
-            # Skip if already connected in this specific plan
-            already_connected = (
-                existing_marker_elem
-                and existing_webio_elem
-                and (existing_marker_elem, existing_webio_elem) in connected_pairs
-            )
-            if already_connected:
-                skipped.append(
-                    f"M{marker_id} ({marker['name']}): bereits in Plan {fub_id} verbunden"
-                    f" (elem {existing_marker_elem}→{existing_webio_elem})"
-                )
-                _LOGGER.info("Logikplan POC: M%s — bereits in Plan verbunden, übersprungen", marker_id)
-                continue
 
-            # Find first free grid slot, update occupied_slots
-            free_pos = _find_first_free_grid_position(occupied_slots, rows_per_col, max_cols)
-            if free_pos is None:
-                errors.append(f"M{marker_id}: Canvas {canvas_format} voll ({max_cols} Spalten × {rows_per_col} Zeilen)")
-                _LOGGER.warning("Logikplan POC: Canvas %s voll bei M%s", canvas_format, marker_id)
-                continue
+async def handle_logikplan_sort(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Sort all Logikplan elements by marker ID, snapping every element to exact grid."""
+    error_title = "Logikplan Sort — Fehler"
+    ctx = await _resolve_logikplan_context(hass, call, error_title)
+    if ctx is None:
+        return
+    coordinator, api, fub_id = ctx
 
-            col, row_in_col = free_pos
-            occupied_slots.add((col, row_in_col))
-            y_new = _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP
-            x_marker_cur = _LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH
-            x_webio_cur = _LAYOUT_X_WEBIO + col * _LAYOUT_COLUMN_WIDTH
-            if row_in_col == 0 and col > 0:
-                _LOGGER.info("Logikplan POC: Spalte %d beginnt bei x=%.1f", col, x_marker_cur)
+    t_start = time.monotonic()
+    plan_info = api.fub_data.get(str(fub_id), {})
+    was_active = bool(plan_info.get("Active", True))
 
-            # Marker element: reuse existing or create new
-            if existing_marker_elem:
-                elem_marker = existing_marker_elem
-                _LOGGER.info(
-                    "Logikplan POC: M%s — Merker-Element bereits vorhanden: elem_id=%s", marker_id, elem_marker
-                )
-            else:
-                _LOGGER.info("Logikplan POC: M%s → add_element (Merker, col=%d, y=%.1f)", marker_id, col, y_new)
-                elem_marker = await api.logikplan_add_element(
-                    fub_id=fub_id, ref_id=int(marker_id), element_type=2, x=x_marker_cur, y=y_new
-                )
-                if elem_marker is None:
-                    errors.append(f"M{marker_id}: add_element (Merker) fehlgeschlagen")
-                    continue
-                _LOGGER.info("Logikplan POC: M%s — Merker-Element angelegt: elem_id=%s", marker_id, elem_marker)
+    canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
+    canvas_label, x_max, y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
 
-            # WebIO element: reuse existing or create new (connection embedded in add_element)
-            if existing_webio_elem:
-                elem_webio = existing_webio_elem
-                _LOGGER.info("Logikplan POC: M%s — WebIO-Element bereits vorhanden: elem_id=%s", marker_id, elem_webio)
-                # Reused elements aren't connected yet (already_connected would have skipped this
-                # marker otherwise), so the wire has to be drawn explicitly here.
-                conn_id = await api.logikplan_save_connection(fub_id, elem_marker, elem_webio, conn_type)
-                if conn_id is None:
-                    errors.append(f"M{marker_id}: save_connection (elem {elem_marker}→{elem_webio}) fehlgeschlagen")
-                    continue
-                _LOGGER.info(
-                    "Logikplan POC: M%s — Verbindung nachgezogen: elem %s→%s (conn_id=%s)",
-                    marker_id,
-                    elem_marker,
-                    elem_webio,
-                    conn_id,
-                )
-            else:
-                _LOGGER.info("Logikplan POC: M%s → add_element+connect (WebIO, col=%d, y=%.1f)", marker_id, col, y_new)
-                conn_payload = {
-                    "0": {
-                        "id": "new",
-                        "fub_id": fub_id,
-                        "type": conn_type,
-                        "input": {"element": str(elem_marker), "pos": "0", "inverted": False},
-                        "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
-                    }
-                }
-                elem_webio = await api.logikplan_add_element(
-                    fub_id=fub_id,
-                    ref_id=int(web_ref_id),
-                    element_type=10,
-                    x=x_webio_cur,
-                    y=y_new,
-                    connection=conn_payload,
-                )
-                if elem_webio is None:
-                    errors.append(f"M{marker_id}: add_element (WebIO, webIoId={web_ref_id}) fehlgeschlagen")
-                    continue
-                _LOGGER.info("Logikplan POC: M%s — WebIO+Verbindung angelegt: elem_id=%s", marker_id, elem_webio)
+    plan_data = await api.logikplan_load_elements(fub_id)
+    if not plan_data:
+        persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
+        return
 
-            results.append(
-                f"M{marker_id} ({marker['name']}) → elem={elem_marker} | "
-                f"WebIO webIoId={web_ref_id} → elem={elem_webio} ({conn_type})"
-            )
+    pairs, orphans = _build_sorted_pairs(plan_data.get("elements", {}), plan_data.get("connections", {}))
+    new_positions = _assign_grid_positions(pairs, orphans, rows_per_col, max_cols)
 
-        duration = time.monotonic() - t_start
-        lines = []
-        if results:
-            lines += [f"**{len(results)} verbunden:**"] + [f"- {r}" for r in results]
-        if skipped:
-            lines += [f"\n**{len(skipped)} bereits verbunden (übersprungen):**"] + [f"- {s}" for s in skipped]
-        if errors:
-            lines += [f"\n**{len(errors)} Fehler:**"] + [f"- {e}" for e in errors]
-        # Plan was stopped above whenever it was active, so it must always be resumed
-        # here regardless of `results` — otherwise a no-op run (e.g. all markers
-        # already connected) leaves a previously active plan stopped permanently.
-        activated = await api.logikplan_run_fup(fub_id) if was_active else False
-        if not was_active:
-            act_note = (
-                "Plan war inaktiv — Änderungen gespeichert, Plan bleibt inaktiv."
-                if results
-                else f"Plan fub_id={fub_id} — keine neuen Verbindungen, Plan unverändert."
-            )
-        elif activated:
-            act_note = "Plan gespeichert und aktiviert." if results else "Plan unverändert, weiterhin aktiv."
-        else:
-            act_note = "Plan-Aktivierung fehlgeschlagen — bitte manuell im Comexio-UI speichern."
-        lines.append(f"\n{act_note}")
-        lines.append(f"Dauer: {duration:.1f}s")
+    if not new_positions:
+        persistent_notification.async_create(hass, "Keine Elemente im Plan.", title=f"Logikplan Sort Plan {fub_id}")
+        return
 
-        title = f"Logikplan POC — {len(results)} OK / {len(skipped)} Skip / {len(errors)} Fehler"
-        persistent_notification.async_create(hass, "\n".join(lines), title=title)
+    _LOGGER.info(
+        "Logikplan Sort: Plan %s — %d Paare, %d Waisen, %d Positionen (aktiv=%s)",
+        fub_id,
+        len(pairs),
+        len(orphans),
+        len(new_positions),
+        was_active,
+    )
+    if was_active:
+        await api.logikplan_stop_fup(fub_id)
+    success = await api.logikplan_save_elements_pos(new_positions)
+    activated = await api.logikplan_run_fup(fub_id) if (success and was_active) else False
+    duration = time.monotonic() - t_start
+    status = "erfolgreich" if success else "fehlgeschlagen"
+    act_note = _plan_activation_note(was_active, activated, has_changes=True, fub_id=fub_id)
+    msg = (
+        f"Sortierung {status}: {len(pairs)} Paare nach Merker-ID geordnet"
+        f" + {len(orphans)} Einzelelemente.\n"
+        f"Canvas {canvas_label}: {max_cols} Spalten × {rows_per_col} Zeilen.\n"
+        f"{act_note}\n"
+        f"Dauer: {duration:.1f}s"
+    )
+    persistent_notification.async_create(
+        hass, msg, title=f"Logikplan Sort Plan {fub_id} — {'OK' if success else 'Fehler'}"
+    )
 
-    async def handle_logikplan_visualize(call: ServiceCall):
-        """Service to visualize current state of a Logikplan plan as a text diagram."""
-        entry_id = call.data.get("config_entry")
-        domain_data = hass.data.get(DOMAIN, {})
-        if not entry_id:
-            entries = list(domain_data.keys())
-            if len(entries) != 1:
-                persistent_notification.async_create(
-                    hass,
-                    "Mehrere Comexio-Instanzen — bitte `config_entry` angeben.",
-                    title="Logikplan Visualize — Fehler",
-                )
-                return
-            entry_id = entries[0]
-        if entry_id not in domain_data:
-            _LOGGER.error("Comexio instance %s not found", entry_id)
-            return
 
-        coordinator = domain_data[entry_id]
-        api = coordinator.api
-        fub_id_raw = call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
-        fub_id = _resolve_fub_id(str(fub_id_raw), api._fub_data, hass)
-        if fub_id is None:
-            persistent_notification.async_create(
-                hass,
-                f"Plan '{fub_id_raw}' nicht gefunden.\nVerfügbar: {_available_plans_str(api._fub_data)}",
-                title="Logikplan Visualize — Fehler",
-            )
-            return
+async def handle_logikplan_stop(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Stop/pause a Logikplan plan."""
+    error_title = "Logikplan Stop — Fehler"
+    ctx = await _resolve_logikplan_context(hass, call, error_title)
+    if ctx is None:
+        return
+    coordinator, api, fub_id = ctx
 
-        if not await api.login():
-            persistent_notification.async_create(
-                hass, "Comexio Admin-Login fehlgeschlagen.", title="Logikplan Visualize — Fehler"
-            )
-            return
+    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    _LOGGER.info("Logikplan Stop: fub_id=%s name='%s'", fub_id, plan_name)
+    t_start = time.monotonic()
+    success = await api.logikplan_stop_fup(fub_id)
+    duration = time.monotonic() - t_start
+    msg = (
+        f"Plan '{plan_name}' (ID {fub_id}) gestoppt.\nDauer: {duration:.1f}s"
+        if success
+        else f"Stop fehlgeschlagen (Plan '{plan_name}', ID {fub_id}).\nDauer: {duration:.1f}s"
+    )
+    persistent_notification.async_create(hass, msg, title=f"Logikplan Stop — {'OK' if success else 'Fehler'}")
 
-        plan_data = await api.logikplan_load_elements(fub_id)
-        if not plan_data:
-            persistent_notification.async_create(
-                hass, f"Plan {fub_id} konnte nicht geladen werden.", title="Logikplan Visualize — Fehler"
-            )
-            return
 
-        markers_by_id = {str(m["id"]): m for m in coordinator.data.get("markers", [])}
-        webio_commands = coordinator.data.get("webio_commands", {})
-        webio_by_id = {
-            str(cmd.get("webIoId")): name for name, cmd in webio_commands.items() if cmd.get("webIoId") is not None
-        }
-        elements = plan_data.get("elements", {})
-        connections = plan_data.get("connections", {})
+async def handle_logikplan_activate(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Save and activate a Logikplan plan (run_fup)."""
+    error_title = "Logikplan Aktivieren — Fehler"
+    ctx = await _resolve_logikplan_context(hass, call, error_title)
+    if ctx is None:
+        return
+    coordinator, api, fub_id = ctx
 
-        def elem_label(elem_id: str | int) -> str:
-            ref = elements.get(str(elem_id), {}).get("reference", {})
-            etype = ref.get("type")
-            ref_id = str(ref.get("ref_id", "?"))
-            if etype == 2:
-                marker = markers_by_id.get(ref_id)
-                return f"M{ref_id} {marker['name']}" if marker else f"M{ref_id} (unbekannt)"
-            if etype == 10:
-                return webio_by_id.get(ref_id, f"WebIO ref={ref_id}")
-            return f"Typ{etype} ref={ref_id}"
+    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    _LOGGER.info("Logikplan Aktivieren: fub_id=%s name='%s'", fub_id, plan_name)
+    t_start = time.monotonic()
+    success = await api.logikplan_run_fup(fub_id)
+    duration = time.monotonic() - t_start
+    msg = (
+        f"Plan '{plan_name}' (ID {fub_id}) gespeichert und aktiviert.\nDauer: {duration:.1f}s"
+        if success
+        else f"Aktivierung fehlgeschlagen (Plan '{plan_name}', ID {fub_id}).\nDauer: {duration:.1f}s"
+    )
+    persistent_notification.async_create(hass, msg, title=f"Logikplan Aktivieren — {'OK' if success else 'Fehler'}")
 
-        connected_elem_ids: set[str] = set()
-        conn_lines: list[str] = []
-        for conn in sorted(connections.values(), key=lambda c: c.get("input", {}).get("FubElementId", 0)):
-            inp = conn.get("input", {})
-            inp_id = str(inp.get("FubElementId", "?"))
-            inv_in = " ¬" if inp.get("Inverted") else ""
-            conn_type = conn.get("type", "?")
-            connected_elem_ids.add(inp_id)
-            out_parts: list[str] = []
-            for out in conn.get("output", []):
-                out_id = str(out.get("FubElementId", "?"))
-                inv_out = " ¬" if out.get("Inverted") else ""
-                out_parts.append(f"{elem_label(out_id)}{inv_out}")
-                connected_elem_ids.add(out_id)
-            conn_lines.append(f"  {elem_label(inp_id)}{inv_in} →[{conn_type}]→ {', '.join(out_parts)}")
 
-        def _pos_key(kv: tuple) -> tuple:
-            return (kv[1].get("position_x", 0), kv[1].get("position_y", 0))
-
-        orphan_lines: list[str] = []
-        for elem_id, elem in sorted(elements.items(), key=_pos_key):
-            if elem_id not in connected_elem_ids:
-                x, y = elem.get("position_x", 0), elem.get("position_y", 0)
-                orphan_lines.append(f"  {elem_label(elem_id)} (@ {x:.0f},{y:.0f})")
-
-        paper_fmt = api.get_fub_paper_format(fub_id)
-        x_max, y_max = api.get_fub_canvas_bounds(fub_id)
-        lines = [
-            f"**Plan {fub_id}** — {paper_fmt}, Canvas {x_max:.0f}×{y_max:.0f}",
-            f"{len(elements)} Elemente, {len(connections)} Verbindungen",
-            "",
-            f"**Verbindungen ({len(connections)}):**",
-        ]
-        lines += conn_lines or ["  (keine)"]
-        if orphan_lines:
-            lines += ["", f"**Nicht verbundene Elemente ({len(orphan_lines)}):**"]
-            lines += orphan_lines
-
-        persistent_notification.async_create(
-            hass, "\n".join(lines), title=f"Logikplan Plan {fub_id} — {len(connections)} Verbindungen"
-        )
-
-    async def handle_logikplan_sort(call: ServiceCall):
-        """Sort all Logikplan elements by marker ID, snapping every element to exact grid."""
-        domain_data = hass.data.get(DOMAIN, {})
-        entry_id = call.data.get("config_entry")
-        if not entry_id:
-            entries = list(domain_data.keys())
-            if len(entries) != 1:
-                persistent_notification.async_create(
-                    hass,
-                    "Mehrere Comexio-Instanzen — bitte `config_entry` angeben.",
-                    title="Logikplan Sort — Fehler",
-                )
-                return
-            entry_id = entries[0]
-        if entry_id not in domain_data:
-            _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
-            return
-
-        coordinator = domain_data[entry_id]
-        api = coordinator.api
-        fub_id_raw = call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
-        fub_id = _resolve_fub_id(str(fub_id_raw), api._fub_data, hass)
-        if fub_id is None:
-            persistent_notification.async_create(
-                hass,
-                f"Plan '{fub_id_raw}' nicht gefunden.\nVerfügbar: {_available_plans_str(api._fub_data)}",
-                title="Logikplan Sort — Fehler",
-            )
-            return
-
-        if not await api.login():
-            persistent_notification.async_create(
-                hass, "Comexio Admin-Login fehlgeschlagen.", title="Logikplan Sort — Fehler"
-            )
-            return
-
-        t_start = time.monotonic()
-        plan_info = api._fub_data.get(str(fub_id), {})
-        was_active = bool(plan_info.get("Active", True))
-
-        canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
-        if canvas_format_raw and canvas_format_raw != "AUTO":
-            canvas_label = canvas_format_raw
-            x_max, y_max = api.get_fub_canvas_bounds(fub_id, paper_name=canvas_format_raw)
-        else:
-            canvas_label = api.get_fub_paper_format(fub_id).upper()
-            x_max, y_max = api.get_fub_canvas_bounds(fub_id)
-
-        rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / _LAYOUT_Y_STEP))
-        max_cols = max(1, round((x_max - _LAYOUT_X_MARKER) / _LAYOUT_COLUMN_WIDTH))
-
-        plan_data = await api.logikplan_load_elements(fub_id)
-        if not plan_data:
-            persistent_notification.async_create(
-                hass, f"Plan {fub_id} konnte nicht geladen werden.", title="Logikplan Sort — Fehler"
-            )
-            return
-
-        pairs, orphans = _build_sorted_pairs(plan_data.get("elements", {}), plan_data.get("connections", {}))
-        new_positions = _assign_grid_positions(pairs, orphans, rows_per_col, max_cols)
-
-        if not new_positions:
-            persistent_notification.async_create(hass, "Keine Elemente im Plan.", title=f"Logikplan Sort Plan {fub_id}")
-            return
-
-        _LOGGER.info(
-            "Logikplan Sort: Plan %s — %d Paare, %d Waisen, %d Positionen (aktiv=%s)",
-            fub_id,
-            len(pairs),
-            len(orphans),
-            len(new_positions),
-            was_active,
-        )
-        if was_active:
-            await api.logikplan_stop_fup(fub_id)
-        success = await api.logikplan_save_elements_pos(new_positions)
-        activated = await api.logikplan_run_fup(fub_id) if (success and was_active) else False
-        duration = time.monotonic() - t_start
-        status = "erfolgreich" if success else "fehlgeschlagen"
-        if not was_active:
-            act_note = "Plan war inaktiv — Änderungen gespeichert, Plan bleibt inaktiv."
-        elif activated:
-            act_note = "Plan gespeichert und aktiviert."
-        else:
-            act_note = "Plan-Aktivierung fehlgeschlagen — bitte manuell im Comexio-UI speichern."
-        msg = (
-            f"Sortierung {status}: {len(pairs)} Paare nach Merker-ID geordnet"
-            f" + {len(orphans)} Einzelelemente.\n"
-            f"Canvas {canvas_label}: {max_cols} Spalten × {rows_per_col} Zeilen.\n"
-            f"{act_note}\n"
-            f"Dauer: {duration:.1f}s"
-        )
-        persistent_notification.async_create(
-            hass, msg, title=f"Logikplan Sort Plan {fub_id} — {'OK' if success else 'Fehler'}"
-        )
-
-    async def handle_logikplan_stop(call: ServiceCall):
-        """Stop/pause a Logikplan plan."""
-        domain_data = hass.data.get(DOMAIN, {})
-        entry_id = call.data.get("config_entry")
-        if not entry_id:
-            entries = list(domain_data.keys())
-            if len(entries) != 1:
-                persistent_notification.async_create(
-                    hass,
-                    "Mehrere Comexio-Instanzen — bitte `config_entry` angeben.",
-                    title="Logikplan Stop — Fehler",
-                )
-                return
-            entry_id = entries[0]
-        if entry_id not in domain_data:
-            _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
-            return
-
-        coordinator = domain_data[entry_id]
-        api = coordinator.api
-        fub_id_raw = call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
-        fub_id = _resolve_fub_id(str(fub_id_raw), api._fub_data, hass)
-        if fub_id is None:
-            persistent_notification.async_create(
-                hass,
-                f"Plan '{fub_id_raw}' nicht gefunden.\nVerfügbar: {_available_plans_str(api._fub_data)}",
-                title="Logikplan Stop — Fehler",
-            )
-            return
-
-        if not await api.login():
-            persistent_notification.async_create(
-                hass, "Comexio Admin-Login fehlgeschlagen.", title="Logikplan Stop — Fehler"
-            )
-            return
-
-        plan_name = api._fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-        _LOGGER.info("Logikplan Stop: fub_id=%s name='%s'", fub_id, plan_name)
-        t_start = time.monotonic()
-        success = await api.logikplan_stop_fup(fub_id)
-        duration = time.monotonic() - t_start
-        msg = (
-            f"Plan '{plan_name}' (ID {fub_id}) gestoppt.\nDauer: {duration:.1f}s"
-            if success
-            else f"Stop fehlgeschlagen (Plan '{plan_name}', ID {fub_id}).\nDauer: {duration:.1f}s"
-        )
-        persistent_notification.async_create(hass, msg, title=f"Logikplan Stop — {'OK' if success else 'Fehler'}")
-
-    async def handle_logikplan_activate(call: ServiceCall):
-        """Save and activate a Logikplan plan (run_fup)."""
-        domain_data = hass.data.get(DOMAIN, {})
-        entry_id = call.data.get("config_entry")
-        if not entry_id:
-            entries = list(domain_data.keys())
-            if len(entries) != 1:
-                persistent_notification.async_create(
-                    hass,
-                    "Mehrere Comexio-Instanzen — bitte `config_entry` angeben.",
-                    title="Logikplan Aktivieren — Fehler",
-                )
-                return
-            entry_id = entries[0]
-        if entry_id not in domain_data:
-            _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
-            return
-
-        coordinator = domain_data[entry_id]
-        api = coordinator.api
-        fub_id_raw = call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
-        fub_id = _resolve_fub_id(str(fub_id_raw), api._fub_data, hass)
-        if fub_id is None:
-            persistent_notification.async_create(
-                hass,
-                f"Plan '{fub_id_raw}' nicht gefunden.\nVerfügbar: {_available_plans_str(api._fub_data)}",
-                title="Logikplan Aktivieren — Fehler",
-            )
-            return
-
-        if not await api.login():
-            persistent_notification.async_create(
-                hass, "Comexio Admin-Login fehlgeschlagen.", title="Logikplan Aktivieren — Fehler"
-            )
-            return
-
-        plan_name = api._fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-        _LOGGER.info("Logikplan Aktivieren: fub_id=%s name='%s'", fub_id, plan_name)
-        t_start = time.monotonic()
-        success = await api.logikplan_run_fup(fub_id)
-        duration = time.monotonic() - t_start
-        msg = (
-            f"Plan '{plan_name}' (ID {fub_id}) gespeichert und aktiviert.\nDauer: {duration:.1f}s"
-            if success
-            else f"Aktivierung fehlgeschlagen (Plan '{plan_name}', ID {fub_id}).\nDauer: {duration:.1f}s"
-        )
-        persistent_notification.async_create(hass, msg, title=f"Logikplan Aktivieren — {'OK' if success else 'Fehler'}")
-
+async def async_setup_services(hass: HomeAssistant) -> None:
+    """Register additional services for the Comexio integration."""
     if not hass.services.has_service(DOMAIN, "generate_web_io"):
-        hass.services.async_register(DOMAIN, "generate_web_io", handle_generate_web_io)
+        hass.services.async_register(DOMAIN, "generate_web_io", functools.partial(handle_generate_web_io, hass))
     if not hass.services.has_service(DOMAIN, "logikplan_connect_poc"):
-        hass.services.async_register(DOMAIN, "logikplan_connect_poc", handle_logikplan_connect_poc)
+        hass.services.async_register(
+            DOMAIN, "logikplan_connect_poc", functools.partial(handle_logikplan_connect_poc, hass)
+        )
     if not hass.services.has_service(DOMAIN, "logikplan_visualize"):
-        hass.services.async_register(DOMAIN, "logikplan_visualize", handle_logikplan_visualize)
+        hass.services.async_register(DOMAIN, "logikplan_visualize", functools.partial(handle_logikplan_visualize, hass))
     if not hass.services.has_service(DOMAIN, "logikplan_sort"):
-        hass.services.async_register(DOMAIN, "logikplan_sort", handle_logikplan_sort)
+        hass.services.async_register(DOMAIN, "logikplan_sort", functools.partial(handle_logikplan_sort, hass))
     if not hass.services.has_service(DOMAIN, "logikplan_stop"):
-        hass.services.async_register(DOMAIN, "logikplan_stop", handle_logikplan_stop)
+        hass.services.async_register(DOMAIN, "logikplan_stop", functools.partial(handle_logikplan_stop, hass))
     if not hass.services.has_service(DOMAIN, "logikplan_activate"):
-        hass.services.async_register(DOMAIN, "logikplan_activate", handle_logikplan_activate)
+        hass.services.async_register(DOMAIN, "logikplan_activate", functools.partial(handle_logikplan_activate, hass))
 
     await _update_services_yaml_plans(hass)

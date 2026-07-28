@@ -43,10 +43,16 @@ LOCAL_HOSTNAME_RE = re.compile(
 _IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
 _IO_BINARY_TYPES_DECL_RE = re.compile(r"var\s+\$IOTypesBinary\s*=\s*")
 _IO_INPUT_TYPES_DECL_RE = re.compile(r"var\s+\$IOInputTypes\s*=\s*")
-_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script[^>]*>", re.DOTALL | re.IGNORECASE)
+_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script\s*>", re.DOTALL | re.IGNORECASE)
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTENT_TYPE_JSON = "Content-Type: application/json"
+_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
+
+
+def _js_timestamp() -> str:
+    """Return a millisecond-precision UTC timestamp in JS Date.toISOString() format."""
+    return datetime.now(UTC).strftime(_TIMESTAMP_FORMAT)[:-3] + "Z"
 
 
 def _is_local_address(host: str) -> bool:
@@ -172,6 +178,11 @@ class ComexioAPI:
     def _base_url(self) -> str:
         """Return the base URL for the Comexio IO-Server."""
         return f"http://{self.host}"
+
+    @property
+    def fub_data(self) -> dict[str, Any]:
+        """Return Logikplan plan metadata (fub_id_str → {Id, Name, Paper, ...}), populated by parse_config()."""
+        return self._fub_data
 
     def _clean_value(self, val: Any) -> float:
         """Standardizes values: replaces German comma with dot and converts to numbers."""
@@ -1053,7 +1064,7 @@ class ComexioAPI:
         Returns the fubElementId assigned by the server, or None on failure.
         """
         url = f"{self._base_url}/admin/function_function_module/add_element/"
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        timestamp = _js_timestamp()
         payload = {
             "fubid": str(fub_id),
             "name": "",
@@ -1117,7 +1128,7 @@ class ComexioAPI:
         Returns the connection ID assigned by the server, or None on failure.
         """
         url = f"{self._base_url}/admin/function_function_module/saveconnection/"
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        timestamp = _js_timestamp()
         conn_json = json.dumps(
             {
                 "id": "new",
@@ -1165,7 +1176,7 @@ class ComexioAPI:
         Returns True on success.
         """
         url = f"{self._base_url}/admin/function_function_module/saveelementspos/"
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        timestamp = _js_timestamp()
         pos_dict = {str(i): {"x": x, "y": y, "id": elem_id} for i, (elem_id, x, y) in enumerate(positions)}
         payload = {
             "Json": json.dumps(pos_dict, separators=(",", ":")),
@@ -1196,7 +1207,7 @@ class ComexioAPI:
         Returns True on success.
         """
         url = f"{self._base_url}/admin/function_function_module/deleteelements/"
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        timestamp = _js_timestamp()
         payload = {
             "Json": json.dumps([str(eid) for eid in elem_ids]),
             "timestamp": timestamp,
