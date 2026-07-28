@@ -24,6 +24,11 @@ _LAYOUT_COLUMN_WIDTH = 450.0  # x-Abstand zwischen Spaltengruppen
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
 
+def format_plan_label(name: str, fub_id) -> str:
+    """Format a plan's select-option label as "<name> (ID <fub_id>)", parseable by _resolve_fub_id()."""
+    return f"{name} (ID {fub_id})"
+
+
 def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:
     """Resolve fub_id from a numeric string, plan name, "<name> (ID <n>)" select label, or select entity_id."""
     stripped = str(fub_id_input).strip()
@@ -177,27 +182,31 @@ def _rewrite_services_yaml_plans(plan_options: list[str]) -> None:
 
 
 async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
-    """Rewrite fub_id select options in services.yaml with current plan names from all active coordinators."""
+    """Rewrite fub_id select options in services.yaml with current plan labels from all active coordinators.
+
+    Labels use the same "<name> (ID <fid>)" format as the select entity, so duplicate
+    plan names across coordinators still resolve unambiguously via _resolve_fub_id().
+    """
     from .coordinator import ComexioCoordinator
 
-    all_plans: set[str] = set()
+    plan_labels: set[str] = set()
     for coordinator in hass.data.get(DOMAIN, {}).values():
         if isinstance(coordinator, ComexioCoordinator):
-            for fub in getattr(coordinator.api, "_fub_data", {}).values():
+            for fub_id, fub in getattr(coordinator.api, "_fub_data", {}).items():
                 name = fub.get("Name", "")
                 if name:
-                    all_plans.add(name)
+                    plan_labels.add(format_plan_label(name, fub_id))
 
-    if not all_plans:
+    if not plan_labels:
         _LOGGER.debug("_update_services_yaml_plans: no plans available, skipping")
         return
 
-    plan_options = sorted(all_plans, key=str.lower)
+    plan_options = sorted(plan_labels, key=str.lower)
     try:
         await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options)
-        _LOGGER.debug("Updated services.yaml: %d Logikplan plan options written", len(plan_options))
+        _LOGGER.debug("Updated services.yaml: %d Logikplan plan options (labels) written", len(plan_options))
     except Exception as exc:  # noqa: BLE001
-        _LOGGER.warning("Could not update services.yaml with plan names: %s", exc)
+        _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:

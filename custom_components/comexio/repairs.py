@@ -93,8 +93,10 @@ class ComexioRepairFlow(RepairsFlow):
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             coordinator.async_set_updated_data(coordinator.data)
 
+            is_de = self.hass.config.language == "de"
+            title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} statistics cleaned up"
             return self.async_create_entry(
-                title=f"{len(ids)} statistics cleaned up",
+                title=title,
                 data={},
             )
 
@@ -156,8 +158,10 @@ class ComexioRepairFlow(RepairsFlow):
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             coordinator.async_set_updated_data(coordinator.data)
 
+            is_de = self.hass.config.language == "de"
+            title = f"Entitäts-IDs für {migrated} Einträge korrigiert" if is_de else f"{migrated} entity IDs fixed"
             return self.async_create_entry(
-                title=f"{migrated} entity IDs fixed",
+                title=title,
                 data={},
             )
 

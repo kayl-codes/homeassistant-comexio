@@ -12,6 +12,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ComexioCoordinator
+from .services import format_plan_label
 
 
 async def async_setup_entry(
@@ -51,7 +52,7 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         # options unambiguous and lets _resolve_fub_id() parse it back out directly.
         fub_data = getattr(self.coordinator.api, "_fub_data", {})
         return sorted(
-            (f"{fub.get('Name') or f'Plan {fid}'} (ID {fid})" for fid, fub in fub_data.items()),
+            (format_plan_label(fub.get("Name") or f"Plan {fid}", fid) for fid, fub in fub_data.items()),
             key=str.lower,
         )
 
