@@ -572,7 +572,7 @@ class ComexioRepairFlow(RepairsFlow):
             )
         else:
             description = (
-                f"The following marker IDs in the `ignored_markers` list are invalid or have no description: "
+                f"The following marker IDs in the `ignored_markers` list are invalid or have no description: "  # nosec B608
                 f"**{ids_str}**\n\n"
                 "**Please remove these IDs from the Comexio options:**\n"
                 "1. Open **Settings → Devices & Services → Comexio**\n"

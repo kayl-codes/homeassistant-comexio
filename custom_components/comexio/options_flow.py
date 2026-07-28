@@ -66,33 +66,39 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         """Initialize options flow."""
         self._config_entry = config_entry
 
+    def _process_ignored_markers(self, user_input: dict, conf: dict, errors: dict) -> None:
+        """Validate and normalize CONF_IGNORED_MARKERS in-place on user_input; populate errors on failure."""
+        # If field not in user_input, voluptuous didn't receive changes; preserve old value
+        if CONF_IGNORED_MARKERS not in user_input:
+            user_input[CONF_IGNORED_MARKERS] = conf.get(CONF_IGNORED_MARKERS, "")
+
+        ignored_raw = user_input.get(CONF_IGNORED_MARKERS, "").strip()
+        if not ignored_raw:
+            user_input[CONF_IGNORED_MARKERS] = ""
+            return
+
+        try:
+            ignored_ids = _parse_ignored_markers(ignored_raw)
+            if coordinator := self.hass.data.get("comexio", {}).get(self._config_entry.entry_id):
+                _validate_ignored_markers_against_coordinator(coordinator, ignored_ids)
+            # Persist normalized plain-integer IDs (no "M" prefix) so downstream
+            # parsers (e.g. coordinator.async_check_ignored_markers) that expect
+            # plain ints stay in sync with what the user entered here.
+            user_input[CONF_IGNORED_MARKERS] = ",".join(str(mid) for mid in ignored_ids)
+        except vol.Invalid as e:
+            errors[CONF_IGNORED_MARKERS] = str(e)
+        except Exception as e:
+            _LOGGER.exception("Error validating ignored_markers: %s", e)
+            errors[CONF_IGNORED_MARKERS] = f"Fehler bei Validierung: {e}"
+
     async def async_step_init(self, user_input=None):
         """Manage the options."""
         conf = {**self._config_entry.data, **self._config_entry.options}
         errors = {}
 
         if user_input is not None:
-            try:
-                user_input["scan_interval"] = int(user_input["scan_interval"])
-
-                # If field not in user_input, voluptuous didn't receive changes; preserve old value
-                if CONF_IGNORED_MARKERS not in user_input:
-                    user_input[CONF_IGNORED_MARKERS] = conf.get(CONF_IGNORED_MARKERS, "")
-
-                ignored_raw = user_input.get(CONF_IGNORED_MARKERS, "").strip()
-
-                if ignored_raw:
-                    ignored_ids = _parse_ignored_markers(ignored_raw)
-                    if coordinator := self.hass.data.get("comexio", {}).get(self._config_entry.entry_id):
-                        _validate_ignored_markers_against_coordinator(coordinator, ignored_ids)
-                    user_input[CONF_IGNORED_MARKERS] = ignored_raw
-                else:
-                    user_input[CONF_IGNORED_MARKERS] = ""
-            except vol.Invalid as e:
-                errors[CONF_IGNORED_MARKERS] = str(e)
-            except Exception as e:
-                _LOGGER.exception("Error validating ignored_markers: %s", e)
-                errors[CONF_IGNORED_MARKERS] = f"Fehler bei Validierung: {e}"
+            user_input["scan_interval"] = int(user_input["scan_interval"])
+            self._process_ignored_markers(user_input, conf, errors)
 
             if not errors:
                 # Merge new options with existing to preserve any fields not shown (e.g., passwords)

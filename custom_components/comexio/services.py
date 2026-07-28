@@ -131,6 +131,14 @@ def _assign_grid_positions(
     for i, eid in enumerate(orphans):
         row_idx = pairs_placed + i
         col = row_idx // rows_per_col
+        if col >= max_cols:
+            _LOGGER.warning(
+                "Grid layout full (%d cols × %d rows): %d orphan element(s) left unsorted",
+                max_cols,
+                rows_per_col,
+                len(orphans) - i,
+            )
+            break
         row_in_col = row_idx % rows_per_col
         y = _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP
         positions[eid] = (_LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH, y)
@@ -147,7 +155,20 @@ _LOGIKPLAN_SERVICES = (
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent / "services.yaml"
 
 
-def _update_services_yaml_plans(hass: HomeAssistant) -> None:
+def _rewrite_services_yaml_plans(plan_options: list[str]) -> None:
+    """Blocking read/modify/write of services.yaml; run via executor job only."""
+    content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
+    for svc in _LOGIKPLAN_SERVICES:
+        fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
+        if fub_field:
+            fub_field["selector"] = {"select": {"options": plan_options, "custom_value": True}}
+    _SERVICES_YAML_PATH.write_text(
+        yaml.dump(content, allow_unicode=True, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+
+
+async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
     """Rewrite fub_id select options in services.yaml with current plan names from all active coordinators."""
     from .coordinator import ComexioCoordinator
 
@@ -165,15 +186,7 @@ def _update_services_yaml_plans(hass: HomeAssistant) -> None:
 
     plan_options = sorted(all_plans, key=str.lower)
     try:
-        content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
-        for svc in _LOGIKPLAN_SERVICES:
-            fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
-            if fub_field:
-                fub_field["selector"] = {"select": {"options": plan_options, "custom_value": True}}
-        _SERVICES_YAML_PATH.write_text(
-            yaml.dump(content, allow_unicode=True, sort_keys=False, default_flow_style=False),
-            encoding="utf-8",
-        )
+        await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options)
         _LOGGER.debug("Updated services.yaml: %d Logikplan plan options written", len(plan_options))
     except Exception as exc:  # noqa: BLE001
         _LOGGER.warning("Could not update services.yaml with plan names: %s", exc)
@@ -283,7 +296,23 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         else:
             # Parse comma-separated list; strip optional "M"/"m" prefix
             raw_ids = [tok.strip().lstrip("Mm") for tok in raw_input.split(",") if tok.strip()]
-            marker_ids = [int(mid) for mid in raw_ids if int(mid) not in ignored_ids]
+            marker_ids = []
+            invalid_tokens = []
+            for raw_id in raw_ids:
+                try:
+                    mid = int(raw_id)
+                except ValueError:
+                    invalid_tokens.append(raw_id)
+                    continue
+                if mid not in ignored_ids:
+                    marker_ids.append(mid)
+            if invalid_tokens:
+                persistent_notification.async_create(
+                    hass,
+                    f"Ungültige Merker-IDs (keine Ganzzahlen): {', '.join(invalid_tokens)}.",
+                    title="Logikplan POC — Fehler",
+                )
+                return
 
         if not marker_ids:
             persistent_notification.async_create(
@@ -789,4 +818,4 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     if not hass.services.has_service(DOMAIN, "logikplan_activate"):
         hass.services.async_register(DOMAIN, "logikplan_activate", handle_logikplan_activate)
 
-    _update_services_yaml_plans(hass)
+    await _update_services_yaml_plans(hass)
