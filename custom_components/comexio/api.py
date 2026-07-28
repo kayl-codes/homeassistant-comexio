@@ -1349,9 +1349,11 @@ class ComexioAPI:
             return None
 
         # Step 3: Verify plan was created by reloading config and checking $Fubs
+        # (same key parse_config() uses for _fub_data — "FubModules" holds
+        # markers/IOs, not plans, and would never see the new entry here)
         try:
             raw_config = await self.get_raw_config()
-            fub_data = raw_config.get("FubModules", {})
+            fub_data = raw_config.get("Fubs", {})
             for fub_id_str, fub_info in fub_data.items():
                 if fub_info.get("Name") == plan_name:
                     new_fub_id = int(fub_id_str)

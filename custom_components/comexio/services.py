@@ -457,6 +457,19 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             if existing_webio_elem:
                 elem_webio = existing_webio_elem
                 _LOGGER.info("Logikplan POC: M%s — WebIO-Element bereits vorhanden: elem_id=%s", marker_id, elem_webio)
+                # Reused elements aren't connected yet (already_connected would have skipped this
+                # marker otherwise), so the wire has to be drawn explicitly here.
+                conn_id = await api.logikplan_save_connection(fub_id, elem_marker, elem_webio, conn_type)
+                if conn_id is None:
+                    errors.append(f"M{marker_id}: save_connection (elem {elem_marker}→{elem_webio}) fehlgeschlagen")
+                    continue
+                _LOGGER.info(
+                    "Logikplan POC: M%s — Verbindung nachgezogen: elem %s→%s (conn_id=%s)",
+                    marker_id,
+                    elem_marker,
+                    elem_webio,
+                    conn_id,
+                )
             else:
                 _LOGGER.info("Logikplan POC: M%s → add_element+connect (WebIO, col=%d, y=%.1f)", marker_id, col, y_new)
                 conn_payload = {
