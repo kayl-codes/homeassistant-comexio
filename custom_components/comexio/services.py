@@ -2,6 +2,7 @@
 import contextlib
 import logging
 import pathlib
+import re
 import time
 
 from homeassistant.components import persistent_notification
@@ -20,14 +21,21 @@ _LAYOUT_Y_STEP = 22.5
 _LAYOUT_COLUMN_WIDTH = 450.0  # x-Abstand zwischen Spaltengruppen
 
 
+_PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
+
+
 def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:
-    """Resolve fub_id from a numeric string, plan name, or select entity_id."""
+    """Resolve fub_id from a numeric string, plan name, "<name> (ID <n>)" select label, or select entity_id."""
     stripped = str(fub_id_input).strip()
     # If it looks like an entity_id, read the select entity's current state
     if hass and "." in stripped:
         state = hass.states.get(stripped)
         if state and state.state not in ("unknown", "unavailable", ""):
             stripped = state.state
+    # Select options carry "(ID <n>)" — parse it directly so duplicate plan names
+    # (Comexio only guarantees fub_id is unique) can't resolve to the wrong plan.
+    if match := _PLAN_LABEL_ID_RE.search(stripped):
+        return int(match.group(1))
     try:
         return int(stripped)
     except ValueError:
@@ -507,15 +515,20 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             lines += [f"\n**{len(skipped)} bereits verbunden (übersprungen):**"] + [f"- {s}" for s in skipped]
         if errors:
             lines += [f"\n**{len(errors)} Fehler:**"] + [f"- {e}" for e in errors]
-        activated = await api.logikplan_run_fup(fub_id) if (results and was_active) else False
-        if results and not was_active:
-            act_note = "Plan war inaktiv — Änderungen gespeichert, Plan bleibt inaktiv."
+        # Plan was stopped above whenever it was active, so it must always be resumed
+        # here regardless of `results` — otherwise a no-op run (e.g. all markers
+        # already connected) leaves a previously active plan stopped permanently.
+        activated = await api.logikplan_run_fup(fub_id) if was_active else False
+        if not was_active:
+            act_note = (
+                "Plan war inaktiv — Änderungen gespeichert, Plan bleibt inaktiv."
+                if results
+                else f"Plan fub_id={fub_id} — keine neuen Verbindungen, Plan unverändert."
+            )
         elif activated:
-            act_note = "Plan gespeichert und aktiviert."
-        elif results:
-            act_note = "Plan-Aktivierung fehlgeschlagen — bitte manuell im Comexio-UI speichern."
+            act_note = "Plan gespeichert und aktiviert." if results else "Plan unverändert, weiterhin aktiv."
         else:
-            act_note = f"Plan fub_id={fub_id} — keine neuen Verbindungen, Plan unverändert."
+            act_note = "Plan-Aktivierung fehlgeschlagen — bitte manuell im Comexio-UI speichern."
         lines.append(f"\n{act_note}")
         lines.append(f"Dauer: {duration:.1f}s")
 

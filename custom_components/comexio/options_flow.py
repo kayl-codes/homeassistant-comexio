@@ -16,6 +16,7 @@ from .const import (
     DEFAULT_ENABLE_NOTIFICATIONS,
     DEFAULT_SCHEMA_IO,
     DEFAULT_SCHEMA_MARKER,
+    DOMAIN,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
 )
@@ -79,7 +80,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 
         try:
             ignored_ids = _parse_ignored_markers(ignored_raw)
-            if coordinator := self.hass.data.get("comexio", {}).get(self._config_entry.entry_id):
+            if coordinator := self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id):
                 _validate_ignored_markers_against_coordinator(coordinator, ignored_ids)
             # Persist normalized plain-integer IDs (no "M" prefix) so downstream
             # parsers (e.g. coordinator.async_check_ignored_markers) that expect
