@@ -522,7 +522,7 @@ class ComexioRepairFlow(RepairsFlow):
             match = _MARKER_ID_SUFFIX_RE.match(uid[len(prefix_base) :])
             if not match or int(match.group(1)) not in marker_id_set:
                 continue
-            registry.async_remove_entity(entity.entity_id)
+            registry.async_remove(entity.entity_id)
             deleted_count += 1
             _LOGGER.info(
                 "[%s] Deleted entity %s for ignored marker M%s",

@@ -625,7 +625,7 @@ async def handle_logikplan_connect_poc(hass: HomeAssistant, call: ServiceCall) -
 
     all_markers = call.data.get("all_markers", False)
     raw_input = str(call.data.get("marker_id", "2")).strip()
-    markers_by_id = {m["id"]: m for m in coordinator.data.get("markers", [])}
+    markers_by_id = {int(m["id"]): m for m in coordinator.data.get("markers", [])}
     webio_commands = coordinator.data.get("webio_commands", {})
 
     conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}

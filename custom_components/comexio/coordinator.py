@@ -543,7 +543,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_cleanup_{self.server_id}")
             return
 
-        markers_by_id = {m["id"]: m for m in final_data.get("markers", [])}
+        markers_by_id = {int(m["id"]): m for m in final_data.get("markers", [])}
 
         for token in ignored_raw.replace(";", ",").split(","):
             stripped = token.strip()
@@ -551,11 +551,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 continue
             try:
                 marker_id = int(stripped)
-                marker = markers_by_id.get(marker_id)
-                if not marker or not marker.get("desc", "").strip():
-                    invalid_ids.append(marker_id)
-                else:
+                if marker_id in markers_by_id:
                     valid_ids.append(marker_id)
+                else:
+                    invalid_ids.append(marker_id)
             except ValueError:
                 _LOGGER.warning("[%s] ignored_markers contains non-integer token: '%s'", self.server_id, stripped)
 
