@@ -71,40 +71,25 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         conf = {**self._config_entry.data, **self._config_entry.options}
         errors = {}
 
-        _LOGGER.info(f"=== OPTIONS FLOW STEP INIT ===")
-        _LOGGER.info(f"Current conf[{CONF_IGNORED_MARKERS}] = {conf.get(CONF_IGNORED_MARKERS, 'NICHT_VORHANDEN')}")
-
         if user_input is not None:
-            _LOGGER.info(f">>> USER_INPUT ERHALTEN <<<")
-            _LOGGER.info(f"user_input.keys() = {list(user_input.keys())}")
-            _LOGGER.info(f"user_input[{CONF_IGNORED_MARKERS}] = {user_input.get(CONF_IGNORED_MARKERS, 'NICHT_IN_DICT')}")
-
             try:
                 user_input["scan_interval"] = int(user_input["scan_interval"])
 
                 # If field not in user_input, voluptuous didn't receive changes; preserve old value
                 if CONF_IGNORED_MARKERS not in user_input:
-                    _LOGGER.warning(f"!!! {CONF_IGNORED_MARKERS} NICHT IN USER_INPUT - restoring from conf")
                     user_input[CONF_IGNORED_MARKERS] = conf.get(CONF_IGNORED_MARKERS, "")
-                    _LOGGER.info(f"Restored value: {user_input[CONF_IGNORED_MARKERS]}")
-                else:
-                    _LOGGER.info(f"✓ {CONF_IGNORED_MARKERS} ist in user_input")
 
                 ignored_raw = user_input.get(CONF_IGNORED_MARKERS, "").strip()
-                _LOGGER.info(f"After strip: '{ignored_raw}' (empty={not ignored_raw})")
 
                 if ignored_raw:
                     ignored_ids = _parse_ignored_markers(ignored_raw)
                     if coordinator := self.hass.data.get("comexio", {}).get(self._config_entry.entry_id):
                         _validate_ignored_markers_against_coordinator(coordinator, ignored_ids)
                     user_input[CONF_IGNORED_MARKERS] = ignored_raw
-                    _LOGGER.info(f"✓ Speichere ignored_markers: {ignored_raw}")
                 else:
                     user_input[CONF_IGNORED_MARKERS] = ""
-                    _LOGGER.info(f"✓ Speichere ignored_markers: (leer)")
             except vol.Invalid as e:
                 errors[CONF_IGNORED_MARKERS] = str(e)
-                _LOGGER.error(f"Validierungsfehler: {e}")
             except Exception as e:
                 _LOGGER.exception("Error validating ignored_markers: %s", e)
                 errors[CONF_IGNORED_MARKERS] = f"Fehler bei Validierung: {e}"
@@ -112,20 +97,13 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             if not errors:
                 # Merge new options with existing to preserve any fields not shown (e.g., passwords)
                 merged_options = dict(self._config_entry.options)
-                _LOGGER.info(f"Before update: merged_options[{CONF_IGNORED_MARKERS}] = {merged_options.get(CONF_IGNORED_MARKERS, 'NICHT_VORHANDEN')}")
-
                 merged_options.update(user_input)
-                _LOGGER.info(f"After update: merged_options[{CONF_IGNORED_MARKERS}] = {merged_options.get(CONF_IGNORED_MARKERS, 'NICHT_VORHANDEN')}")
 
                 # Explicitly remove ignored_markers if empty (HA won't auto-delete it)
                 if not merged_options.get(CONF_IGNORED_MARKERS, "").strip():
                     merged_options.pop(CONF_IGNORED_MARKERS, None)
-                    _LOGGER.info(f"Removed empty {CONF_IGNORED_MARKERS}")
 
-                _LOGGER.info(f">>> SPEICHERE ENTRY mit async_create_entry <<<")
                 return self.async_create_entry(title="", data=merged_options)
-            else:
-                _LOGGER.error(f"Fehler vorhanden: {errors}")
 
         return self.async_show_form(
             step_id="init",
