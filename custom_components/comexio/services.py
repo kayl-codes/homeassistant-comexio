@@ -170,7 +170,11 @@ _SERVICES_YAML_PATH = pathlib.Path(__file__).parent / "services.yaml"
 
 def _rewrite_services_yaml_plans(plan_options: list[str]) -> None:
     """Blocking read/modify/write of services.yaml; run via executor job only."""
-    content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
+    try:
+        content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        _LOGGER.warning("services.yaml missing or invalid, skipping plan option rewrite: %s", exc)
+        return
     for svc in _LOGIKPLAN_SERVICES:
         fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
         if fub_field:

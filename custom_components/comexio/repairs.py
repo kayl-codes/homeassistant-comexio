@@ -1,6 +1,7 @@
 # Version: 0.7.5
 import asyncio
 import logging
+import re
 
 from homeassistant.components.repairs import RepairsFlow
 from homeassistant.core import HomeAssistant
@@ -18,6 +19,7 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_MARKER_ID_SUFFIX_RE = re.compile(r"(\d+)")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry):
@@ -476,21 +478,27 @@ class ComexioRepairFlow(RepairsFlow):
 
                 server_id = coordinator.server_id
                 registry = er.async_get(self.hass)
+                marker_id_set = set(marker_ids)
+                prefix_base = f"{DOMAIN}_{server_id}_m".lower()
                 deleted_count = 0
 
-                # Delete entities for each ignored marker
-                for marker_id in marker_ids:
-                    unique_id_prefix = f"{DOMAIN}_{server_id}_m{marker_id}".lower()
-                    for entity in list(registry.entities.values()):
-                        if entity.unique_id and entity.unique_id.startswith(unique_id_prefix):
-                            registry.async_remove_entity(entity.entity_id)
-                            deleted_count += 1
-                            _LOGGER.info(
-                                "[%s] Deleted entity %s for ignored marker M%d",
-                                server_id,
-                                entity.entity_id,
-                                marker_id,
-                            )
+                # Single pass over the registry, matching the marker ID out of the
+                # unique_id suffix, instead of one full registry scan per marker.
+                for entity in list(registry.entities.values()):
+                    uid = (entity.unique_id or "").lower()
+                    if not uid.startswith(prefix_base):
+                        continue
+                    match = _MARKER_ID_SUFFIX_RE.match(uid[len(prefix_base) :])
+                    if not match or int(match.group(1)) not in marker_id_set:
+                        continue
+                    registry.async_remove_entity(entity.entity_id)
+                    deleted_count += 1
+                    _LOGGER.info(
+                        "[%s] Deleted entity %s for ignored marker M%s",
+                        server_id,
+                        entity.entity_id,
+                        match.group(1),
+                    )
 
                 # Delete webhooks for these markers
                 if hasattr(coordinator, "_webhook_manager"):
