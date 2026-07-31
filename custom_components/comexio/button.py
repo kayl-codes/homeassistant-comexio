@@ -2,6 +2,7 @@
 import asyncio
 import datetime
 import logging
+import time
 from typing import Any
 
 from homeassistant.components import persistent_notification
@@ -34,7 +35,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     cancel_button = ComexioCancelSyncButton(coordinator, coordinator.server_id)
     migration_button = ComexioEntityIdMigrationButton(coordinator, coordinator.server_id)
     stats_cleanup_button = ComexioStatisticsCleanupButton(coordinator, coordinator.server_id)
-    async_add_entities([sync_button, cancel_button, migration_button, stats_cleanup_button])
+    fw_check_button = ComexioFirmwareCheckButton(coordinator, coordinator.server_id)
+    async_add_entities([sync_button, cancel_button, migration_button, stats_cleanup_button, fw_check_button])
 
     # Register the entity service.
     # As a custom integration, the service is registered under
@@ -472,6 +474,56 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         _LOGGER.warning("[%s] Manual cancel requested by user", self.server_id)
         self.coordinator.cancel_sync = True
         self.async_write_ha_state()
+
+
+class ComexioFirmwareCheckButton(CoordinatorEntity, ButtonEntity):
+    """Button to force-run the extension firmware check outside its nightly window.
+
+    Comexio warns this call can briefly interrupt extension outputs — pressing it
+    deliberately accepts that risk (e.g. to test the update.* entities without waiting
+    for both the 04:00 window and a comexio_version change; see async_force_firmware_check).
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_fw_check_btn"
+        self._attr_translation_key = "fw_check"
+        self._attr_icon = "mdi:chip"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    async def async_press(self) -> None:
+        """Force-run the firmware check, bypassing the comexio_version gate."""
+        _LOGGER.warning("[%s] Manual extension firmware check requested by user", self.server_id)
+        start = time.monotonic()
+        ran = await self.coordinator.async_force_firmware_check()
+        duration = time.monotonic() - start
+
+        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
+        if conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS):
+            if ran:
+                names = ", ".join(sorted(self.coordinator.extension_firmware))
+                msg = f"✅ Firmware check finished in {duration:.1f}s.\n\nChecked modules: {names}"
+            else:
+                msg = f"⚠️ Firmware check returned no data ({duration:.1f}s) — see log for details."
+            persistent_notification.async_create(
+                self.hass,
+                msg,
+                title=f"Comexio Firmware Check ({self.server_id})",
+                notification_id=f"comexio_fw_check_{self.server_id}",
+            )
 
 
 class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):

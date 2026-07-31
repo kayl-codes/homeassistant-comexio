@@ -88,6 +88,9 @@
       "cancel_sync": {
         "name": "Annuler la synchronisation WebIO"
       },
+      "fw_check": {
+        "name": "Vérifier le firmware maintenant"
+      },
       "entity_id_fix": {
         "name": "Correction des ID d'entité"
       },

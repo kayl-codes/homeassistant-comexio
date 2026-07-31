@@ -90,6 +90,9 @@
       "cancel_sync": {
         "name": "WebIO Sync Cancel"
       },
+      "fw_check": {
+        "name": "Firmware jetzt prüfen"
+      },
       "entity_id_fix": {
         "name": "Entity-IDs korrigieren"
       },

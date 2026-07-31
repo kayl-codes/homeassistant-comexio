@@ -44,6 +44,14 @@ _IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
 _IO_BINARY_TYPES_DECL_RE = re.compile(r"var\s+\$IOTypesBinary\s*=\s*")
 _IO_INPUT_TYPES_DECL_RE = re.compile(r"var\s+\$IOInputTypes\s*=\s*")
 _SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script[^>]{0,32}>", re.DOTALL | re.IGNORECASE)
+# Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
+# (cache-busting), e.g. src="/11.0.2/js/cmb_admin.js" — cmb_admin.js is the generic
+# admin-wide script, cmb_function_function_module.js is specific to the page we fetch;
+# matching either is redundancy against a future filename change.
+_COMEXIO_VERSION_RE = re.compile(
+    r'src="/(\d+\.\d+\.\d+)/(?:js/cmb_admin\.js|'
+    r'module/admin/function_function_module/js/cmb_function_function_module\.js)"'
+)
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTENT_TYPE_JSON = "Content-Type: application/json"
@@ -164,6 +172,8 @@ class ComexioAPI:
 
         self.session: aiohttp.ClientSession = async_create_clientsession(hass, **session_kwargs)
 
+        # Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
+        self.comexio_version: str | None = None
         # io_types: TypeId → {binary, min, max, unit}  (from $ioTypes or $IOTypesBinary)
         self.io_types: dict[str, Any] = {}
         # io_input_types: TypeId → {input: bool}  (from $IOInputTypes)
@@ -369,6 +379,9 @@ class ComexioAPI:
                 _LOGGER.error("Failed to fetch function module page (HTTP %s)", resp.status)
                 return {}
             html = await resp.text()
+
+        if version_match := _COMEXIO_VERSION_RE.search(html):
+            self.comexio_version = version_match.group(1)
 
         # Restrict search to script tags to avoid scanning entire HTML with a single DOTALL regex
         script_blocks = _SCRIPT_BLOCK_RE.findall(html)
@@ -1476,6 +1489,33 @@ class ComexioAPI:
                 {k: v for k, v in params.items() if k != "value"},
             )
             return False
+
+    async def check_extension_firmware(self) -> list[dict[str, Any]]:
+        """Query the local extension bus for available firmware updates (BASE + all extensions).
+
+        Comexio documents that this can briefly interrupt extension outputs while it runs, so
+        it must only be called rarely — see the coordinator's version-gated nightly check, not
+        a regular poll. Logged at warning level (not debug) since failures here are infrequent
+        enough to matter, unlike the fast bus-workload poll.
+        """
+        url = f"{self._base_url}/admin/extension/checkextension_fwupdate/"
+        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/"}
+        try:
+            async with self.session.post(url, data={"pos": "local"}, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("Extension firmware check failed with HTTP status: %s", resp.status)
+                    return []
+                payload = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("HTTP request error checking extension firmware: %s", err)
+            return []
+        except Exception as e:
+            _LOGGER.exception("Unexpected error checking extension firmware: %s", e)
+            return []
+        if payload.get("ok") != "ok":
+            _LOGGER.warning("Extension firmware check returned an error payload: %s", payload)
+            return []
+        return payload.get("data", [])
 
     async def close(self) -> None:
         """No-op: session lifecycle is managed by async_create_clientsession."""

@@ -41,6 +41,20 @@ MARKER_INTERVAL_MAX_VALUE = 86400
 
 DEFAULT_HOST = "192.168.1.100"
 
+# Extension firmware check: Comexio warns this call can briefly interrupt extension outputs
+# while it runs, so it must not be polled like the other data. Gated instead on a change of
+# api.comexio_version (already tracked for the catalog cache) — a base firmware update makes
+# a matching extension update likely, so the check is deferred to the next nightly window
+# and skipped entirely when the version hasn't moved since the last check.
+FIRMWARE_CHECK_HOUR = 4
+FIRMWARE_CHECK_MINUTE = 0
+
+
+def fw_update_signal(server_id: str) -> str:
+    """Dispatcher signal fired when a fresh extension firmware check result arrives."""
+    return f"{DOMAIN}_{server_id}_fw_update"
+
+
 # need for ha ip dns validation, to avoid false positives
 KNOWN_DOMAINS = [
     "fritz.box",
