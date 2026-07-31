@@ -26,6 +26,23 @@ CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
 CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
 CONF_IGNORED_MARKERS = "ignored_markers"
 
+# Web-IO class split: HA maintains two separate Web-IO device classes on the Comexio
+# server — one for Markers, one for physical IOs — derived from the single webio_name
+# field in the config/options flow by appending a suffix. The webIoId (the per-command
+# key inside $FubModules["10"]) is a global counter across ALL Web-IO devices on a
+# Comexio server, never reused per-device (verified live 2026-07-27), so commands from
+# both classes can share one flat webio_commands lookup without ambiguity.
+WEBIO_CLASS_MARKER = "marker"
+WEBIO_CLASS_IO = "io"
+WEBIO_CLASSES = (WEBIO_CLASS_MARKER, WEBIO_CLASS_IO)
+_WEBIO_CLASS_SUFFIXES = {WEBIO_CLASS_MARKER: " [M]", WEBIO_CLASS_IO: " [IO]"}
+
+
+def webio_class_name(webio_name: str, webio_class: str) -> str:
+    """Comexio Web-IO class name for one of the two HA-managed classes (marker/io)."""
+    return f"{webio_name}{_WEBIO_CLASS_SUFFIXES[webio_class]}"
+
+
 DEFAULT_NAME = "Comexio"
 
 SCAN_INTERVAL_DEFAULT = 15

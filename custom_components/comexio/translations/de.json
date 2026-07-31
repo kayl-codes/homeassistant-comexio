@@ -135,7 +135,7 @@
         "step": {
           "select_action": {
             "title": "Initial Setup",
-            "description": "Die erforderliche Web-IO Geräteklasse für den Server wurde in Comexio nicht gefunden.\n\nSoll die Klasse und das Gerät jetzt angelegt werden ?"
+            "description": "Die erforderliche(n) Web-IO Geräteklasse(n) fehlen auf dem Comexio-Server: **{missing_classes}**.\n\nSollen sie jetzt angelegt werden?"
           }
         }
       }

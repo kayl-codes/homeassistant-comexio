@@ -303,15 +303,15 @@ class ComexioRepairFlow(RepairsFlow):
         is_missing_class = issue.translation_key == "missing_webio_class" if issue else False
 
         if is_missing_class:
-            # Minimal options if the device class is completely absent
+            # Minimal options if one or both device classes are completely absent
             if is_de:
                 options = {
-                    "full_sync": "🚀 Initial Setup (Klasse & Gerät anlegen)",
+                    "full_sync": "🚀 Initial Setup (fehlende Klasse(n) & Gerät(e) anlegen)",
                     "ignore": "🔇 Nachricht ignorieren (Web-IO nicht nutzen)",
                 }
             else:
                 options = {
-                    "full_sync": "🚀 Initial Setup (Create class & device)",
+                    "full_sync": "🚀 Initial Setup (Create missing class(es) & device(s))",
                     "ignore": "🔇 Ignore message (Do not use Web-IO)",
                 }
             default_action = "full_sync"

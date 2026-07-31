@@ -21,7 +21,7 @@ from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from multidict import MultiDict
 
 # Mandatory DOMAIN import for Audit logic
-from .const import KNOWN_DOMAINS
+from .const import KNOWN_DOMAINS, WEBIO_CLASS_IO, WEBIO_CLASS_MARKER, WEBIO_CLASSES, webio_class_name
 
 
 class SafeDict(dict):
@@ -454,7 +454,13 @@ class ComexioAPI:
         Processes the raw configuration and performs a technical audit.
         Uses dynamic IO type mapping to determine binary vs analog states and units.
         """
-        data = {"markers": [], "io": [], "webio_commands": {}, "device_id": None, "device_ip": None}
+        data = {
+            "markers": [],
+            "io": [],
+            "webio_commands": {},
+            # Two separate Web-IO device classes on the Comexio server — see const.webio_class_name.
+            "webio_devices": {cls: {"device_id": None, "device_ip": None, "base_id": None} for cls in WEBIO_CLASSES},
+        }
         live_states = live_states or {}
 
         # Cache Logikplan plan + paper metadata for later use (e.g. auto canvas-format detection)
@@ -559,25 +565,42 @@ class ComexioAPI:
         webio_name: str,
         fub_modules: dict[str, Any],
     ) -> None:
-        """Process device info and webhooks."""
+        """Process device info and webhooks for both Web-IO classes (marker/io)."""
         web_devices = conf.get("WebDevices", {})
         fub_10 = fub_modules.get("10", {})
-        target_dev_id = None
 
+        for webio_class in WEBIO_CLASSES:
+            target_dev_id = self._assign_webio_device_id(web_devices, data, webio_name, webio_class)
+            if target_dev_id and target_dev_id in fub_10:
+                for w_id, w_obj in fub_10[target_dev_id].items():
+                    self._add_webhook_command(data, w_id, w_obj, webio_class)
+
+    def _assign_webio_device_id(
+        self,
+        web_devices: dict[str, Any],
+        data: dict[str, Any],
+        webio_name: str,
+        webio_class: str,
+    ) -> str | None:
+        """Find the WebDevices entry for one Web-IO class, populate its device_info, return its id."""
+        class_name = webio_class_name(webio_name, webio_class)
         for d_id, d_data in web_devices.items():
-            if d_data.get("Name") == webio_name:
-                target_dev_id = str(d_id)
-                data["device_id"] = target_dev_id
-                data["device_ip"] = d_data.get("Ip")
-                raw_base_id = d_data.get("BaseId")
-                data["base_id"] = str(raw_base_id) if raw_base_id is not None else None
-                break
+            if d_data.get("Name") != class_name:
+                continue
+            target_dev_id = str(d_id)
+            dev_info = data["webio_devices"][webio_class]
+            dev_info["device_id"] = target_dev_id
+            # Comexio has been observed to scrape a leading space into the Ip field, which
+            # broke the IP-mismatch audit (mismatch reported against an otherwise-identical
+            # address) — stripped here, at the single point the value enters HA.
+            raw_ip = d_data.get("Ip")
+            dev_info["device_ip"] = raw_ip.strip() if isinstance(raw_ip, str) else raw_ip
+            raw_base_id = d_data.get("BaseId")
+            dev_info["base_id"] = str(raw_base_id) if raw_base_id is not None else None
+            return target_dev_id
+        return None
 
-        if target_dev_id and target_dev_id in fub_10:
-            for w_id, w_obj in fub_10[target_dev_id].items():
-                self._add_webhook_command(data, w_id, w_obj)
-
-    def _add_webhook_command(self, data: dict[str, Any], w_id: str, w_obj: dict[str, Any]) -> None:
+    def _add_webhook_command(self, data: dict[str, Any], w_id: str, w_obj: dict[str, Any], webio_class: str) -> None:
         """Add a webhook command to data."""
         raw_type = w_obj.get("TypeId")
         try:
@@ -585,12 +608,13 @@ class ComexioAPI:
         except (ValueError, TypeError):
             val_type = 1
 
+        # webIoId (w_id) is a global counter across ALL Web-IO devices on the server (verified
+        # live) — safe to key this single flat dict by command name regardless of webio_class.
         data["webio_commands"][w_obj.get("Name")] = {
             "webIoId": w_id,
             "cmdId": w_obj.get("WebCommandId"),
             "typeId": val_type,
-            # null = not wired in Logikplan; non-null = already connected (Logikplan wire ID)
-            "connIoId": w_obj.get("WebCommandIoId"),
+            "webioClass": webio_class,
         }
 
     def _process_markers(
@@ -793,18 +817,17 @@ class ComexioAPI:
                 _LOGGER.error("Failed to delete Web-IO base %s (HTTP %s)", base_id, resp.status)
             return resp.status == 200
 
-    async def update_webio_device_ip(self, device_id: str | int, ha_address: str) -> bool:
+    async def update_webio_device_ip(self, device_id: str | int, ha_address: str, webio_name: str) -> bool:
         """
         Updates the server address (IP:Port) of an existing device.
         Uses the specific POST format required by Comexio's main save handler.
+
+        webio_name must be the class-specific name (see const.webio_class_name) matching
+        the device_id being updated — the caller resolves it, since a single config entry
+        now maps to two Web-IO devices (marker/io).
         """
         _LOGGER.info("Updating Web-IO device %s address to %s", device_id, ha_address)
         url = f"{self._base_url}/admin/web_io/save"
-
-        webio_name = "HomeAssistant"
-        if self.config_entry:
-            conf_data = {**self.config_entry.data, **self.config_entry.options}
-            webio_name = conf_data.get("webio_name", "HomeAssistant")
 
         # Construct the payload based on user observations.
         device_data = {
@@ -916,16 +939,21 @@ class ComexioAPI:
             # _LOGGER.debug("save_single_command response [%s]: %s", resp.status, resp_text)
             return resp.status == 200
 
-    def build_webio_commands(self, server_id: str, parsed_data: dict[str, Any]) -> list[dict[str, Any]]:
+    def build_webio_commands(
+        self, server_id: str, parsed_data: dict[str, Any], webio_class: str | None = None
+    ) -> list[dict[str, Any]]:
         """Build the list of Web-IO command dicts for the given parsed configuration.
 
+        webio_class restricts the result to one Web-IO class ("marker"/"io"), for the bulk
+        class-upload path (generate_webio_json); None returns both (delta-sync payload lookup,
+        where the destination device is chosen separately per command).
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
         """
         webhook_path = f"/api/webhook/comexio_{server_id}"
         commands: list[dict[str, Any]] = []
 
         # 1. Create Web-IO for markers
-        for m in parsed_data.get("markers", []):
+        for m in [] if webio_class == WEBIO_CLASS_IO else parsed_data.get("markers", []):
             is_ana = m["type"] == "analog"
             safe_id = str(m["id"]).replace('"', '\\"')
             lua = (
@@ -962,7 +990,7 @@ class ComexioAPI:
             )
 
         # 2. Create Web-IO for IOs
-        for io_item in parsed_data.get("io", []):
+        for io_item in [] if webio_class == WEBIO_CLASS_MARKER else parsed_data.get("io", []):
             # check data type
             is_ana = not io_item.get("is_binary", False)
 
@@ -1009,14 +1037,20 @@ class ComexioAPI:
 
         return commands
 
-    def generate_webio_json(self, server_id: str, webio_name: str, parsed_data: dict[str, Any]) -> str:
-        """Generate the upload-ready JSON string for the Comexio Web-IO importer."""
+    def generate_webio_json(
+        self, server_id: str, webio_name: str, parsed_data: dict[str, Any], webio_class: str | None = None
+    ) -> str:
+        """Generate the upload-ready JSON string for the Comexio Web-IO importer.
+
+        webio_name here is already the class-specific name (see const.webio_class_name) —
+        callers append the ' [M]'/' [IO]' suffix before calling this.
+        """
         return json.dumps(
             {
                 "data": "web_io",
                 "format": 1,
                 "base": {"Identifier": webio_name, "UseCookies": 0, "Login": 2, "BaseId": 0},
-                "commands": self.build_webio_commands(server_id, parsed_data),
+                "commands": self.build_webio_commands(server_id, parsed_data, webio_class),
             }
         )
 
