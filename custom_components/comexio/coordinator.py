@@ -520,7 +520,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return await self._async_firmware_check_tick(force=True)
 
     def async_start_bus_load_poll(self):
-        """Start the independent fast bus-workload poll; returns the cancel callback."""
+        """Start the independent fast bus-workload poll; returns the cancel callback.
+
+        Also fires one immediate tick so the diagnostics aren't stuck at "Unknown" for up
+        to BUS_LOAD_POLL_INTERVAL_SEC after setup/reload (async_track_time_interval only
+        fires after the first interval elapses).
+        """
+        self.hass.async_create_task(self._async_bus_load_tick(), name=f"comexio_{self.server_id}_bus_load_initial_tick")
         return async_track_time_interval(
             self.hass, self._async_bus_load_tick, timedelta(seconds=BUS_LOAD_POLL_INTERVAL_SEC)
         )
@@ -531,12 +537,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Deliberately does NOT call async_set_updated_data — at a 10s cadence that would
         notify every coordinator entity for no benefit. Only
         the dedicated bus-load sensors listen for this dispatcher signal.
+
+        Values are type-checked (not just presence-checked) since they come straight from
+        an external HTTP endpoint — an unexpected type falls back to None (HA renders that
+        as "unknown") rather than exposing a wrongly-typed state.
         """
         result = await self.api.get_bus_workload()
         if not result:
             return
-        self.bus_workload = result.get("workload")
-        self.bus_sd_card = result.get("sd_card")
+        workload = result.get("workload")
+        self.bus_workload = workload if isinstance(workload, int) and not isinstance(workload, bool) else None
+        sd_card = result.get("sd_card")
+        self.bus_sd_card = sd_card if isinstance(sd_card, bool) else None
         async_dispatcher_send(self.hass, bus_load_signal(self.server_id))
 
     async def async_config_entry_updated(self) -> None:

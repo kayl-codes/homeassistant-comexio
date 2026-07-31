@@ -1508,8 +1508,8 @@ class ComexioAPI:
         except aiohttp.ClientError as err:
             _LOGGER.debug("HTTP request error fetching bus workload: %s", err)
             return {}
-        except Exception as e:
-            _LOGGER.exception("Unexpected error fetching bus workload: %s", e)
+        except Exception as err:
+            _LOGGER.debug("Unexpected error fetching bus workload: %s", err)
             return {}
 
     async def check_extension_firmware(self) -> list[dict[str, Any]]:
