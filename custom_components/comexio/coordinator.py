@@ -1,6 +1,6 @@
 # Version: 0.8.0
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import socket
 from typing import Any
@@ -9,12 +9,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import ComexioAPI
 from .const import (
+    BUS_LOAD_POLL_INTERVAL_SEC,
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
     CONF_COVER_KEYWORDS,
@@ -29,6 +30,7 @@ from .const import (
     DOMAIN,
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
+    bus_load_signal,
     fw_update_signal,
 )
 
@@ -85,6 +87,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.extension_firmware: dict[str, dict[str, Any]] = {}
         self._last_checked_fw_version: str | None = None
         self._firmware_store: Store = Store(hass, 1, f"{DOMAIN}_extension_firmware_{self.server_id}")
+        # Bus workload monitoring: latest reading from the independent fast poll
+        # (see async_start_bus_load_poll / _async_bus_load_tick). None until the first tick.
+        self.bus_workload: int | None = None
+        self.bus_sd_card: bool | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
@@ -512,6 +518,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
         warns it can briefly interrupt extension outputs. Returns whether the API call ran.
         """
         return await self._async_firmware_check_tick(force=True)
+
+    def async_start_bus_load_poll(self):
+        """Start the independent fast bus-workload poll; returns the cancel callback."""
+        return async_track_time_interval(
+            self.hass, self._async_bus_load_tick, timedelta(seconds=BUS_LOAD_POLL_INTERVAL_SEC)
+        )
+
+    async def _async_bus_load_tick(self, _now: datetime | None = None) -> None:
+        """Poll internal bus workload (%) + SD-card presence on a fast, independent cadence.
+
+        Deliberately does NOT call async_set_updated_data — at a 10s cadence that would
+        notify every coordinator entity for no benefit. Only
+        the dedicated bus-load sensors listen for this dispatcher signal.
+        """
+        result = await self.api.get_bus_workload()
+        if not result:
+            return
+        self.bus_workload = result.get("workload")
+        self.bus_sd_card = result.get("sd_card")
+        async_dispatcher_send(self.hass, bus_load_signal(self.server_id))
 
     async def async_config_entry_updated(self) -> None:
         """Handle config entry update (e.g. from Options Flow)."""
