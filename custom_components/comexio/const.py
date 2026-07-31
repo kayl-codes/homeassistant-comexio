@@ -62,6 +62,10 @@ def fw_update_signal(server_id: str) -> str:
 # already covers debounce/hysteresis correctly instead of reimplementing it in Python.
 BUS_LOAD_POLL_INTERVAL_SEC = 10
 
+# Consecutive failed ticks before the diagnostics fall back to "unknown" instead of
+# silently keeping the last successful reading forever.
+BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
+
 
 def bus_load_signal(server_id: str) -> str:
     """Dispatcher signal fired when a fresh Comexio bus workload reading arrives."""

@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import ComexioAPI
 from .const import (
+    BUS_LOAD_FAIL_STREAK_THRESHOLD,
     BUS_LOAD_POLL_INTERVAL_SEC,
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
@@ -91,6 +92,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # (see async_start_bus_load_poll / _async_bus_load_tick). None until the first tick.
         self.bus_workload: int | None = None
         self.bus_sd_card: bool | None = None
+        self._bus_load_fail_streak = 0
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
@@ -540,13 +542,34 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Values are type-checked (not just presence-checked) since they come straight from
         an external HTTP endpoint — an unexpected type falls back to None (HA renders that
-        as "unknown") rather than exposing a wrongly-typed state.
+        as "unknown") rather than exposing a wrongly-typed state. `workload` accepts int or
+        float (Comexio's JSON serializer isn't guaranteed to always emit whole numbers) but
+        never bool, since bool is a native int subclass and would otherwise slip through as
+        0/1.
+
+        After BUS_LOAD_FAIL_STREAK_THRESHOLD consecutive failed ticks, the readings are
+        reset to None instead of silently keeping the last successful value forever — a
+        persistent fetch failure should surface as "unknown", not a stale-but-plausible
+        percentage.
         """
         result = await self.api.get_bus_workload()
         if not result:
+            self._bus_load_fail_streak += 1
+            if self._bus_load_fail_streak == BUS_LOAD_FAIL_STREAK_THRESHOLD:
+                _LOGGER.warning(
+                    "Bus workload poll failed %s times in a row; diagnostics reset to unknown",
+                    self._bus_load_fail_streak,
+                )
+                self.bus_workload = None
+                self.bus_sd_card = None
+                async_dispatcher_send(self.hass, bus_load_signal(self.server_id))
             return
+        self._bus_load_fail_streak = 0
         workload = result.get("workload")
-        self.bus_workload = workload if isinstance(workload, int) and not isinstance(workload, bool) else None
+        if isinstance(workload, bool) or not isinstance(workload, (int, float)):
+            self.bus_workload = None
+        else:
+            self.bus_workload = int(workload)
         sd_card = result.get("sd_card")
         self.bus_sd_card = sd_card if isinstance(sd_card, bool) else None
         async_dispatcher_send(self.hass, bus_load_signal(self.server_id))
