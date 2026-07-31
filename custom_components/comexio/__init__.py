@@ -25,7 +25,7 @@ from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["sensor", "switch", "number", "button", "binary_sensor", "select"]
+PLATFORMS = ["sensor", "switch", "number", "button", "binary_sensor", "select", "update"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -65,6 +65,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
+    # Restore the last checked extension-firmware snapshot before entities are created,
+    # so update.* entities (update.py) don't start at Unknown after every restart.
+    await coordinator.async_load_extension_firmware()
+
     # ---------------------------
     # Explicit Device Registration
     # ---------------------------
@@ -80,6 +84,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Extension firmware check: nightly window, version-gated (see
+    # coordinator.async_start_firmware_update_check). Cancelled automatically on unload/reload.
+    entry.async_on_unload(coordinator.async_start_firmware_update_check())
 
     # Set up services
     await async_setup_services(hass)
@@ -142,9 +150,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_cancel_btn")
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_status_sensor")
     active_unique_ids.add(f"comexio_{server_id}_entity_id_fix_btn")
+    active_unique_ids.add(f"comexio_{server_id}_fw_check_btn")
     active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
     active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
     active_unique_ids.add(f"comexio_{server_id}_logikplan_plan_selector")
+
+    # Extension firmware updates (update.py): one entity per known extension + BASE. Built the
+    # same way as the IO entities above, since extension existence is independent of the
+    # firmware check ever having run — entities just stay "unknown" until the first check.
+    active_unique_ids.add(f"comexio_{server_id}_base_firmware_update")
+    for ext_name in {io["ext_name"] for io in coordinator.data.get("io", [])}:
+        active_unique_ids.add(f"comexio_{server_id}_{ext_name}_firmware_update".lower())
 
     # Build expected-platform map so that entities which migrated to a different
     # HA domain (e.g. sensor → binary_sensor after firmware upgrade) get removed.

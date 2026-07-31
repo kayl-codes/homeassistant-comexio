@@ -1,5 +1,6 @@
 # Version: 0.8.0
 import asyncio
+from datetime import datetime
 import logging
 import socket
 from typing import Any
@@ -7,6 +8,9 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import ComexioAPI
@@ -23,6 +27,9 @@ from .const import (
     CONF_USERNAME,
     DEFAULT_COVER_KEYWORDS,
     DOMAIN,
+    FIRMWARE_CHECK_HOUR,
+    FIRMWARE_CHECK_MINUTE,
+    fw_update_signal,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -69,6 +76,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # R1: Track which markers/IOs received a webhook update during the last API fetch
         self._webhook_updated_markers: set[str] = set()
         self._webhook_updated_io_ids: set[str] = set()
+        # Extension firmware check: {name -> raw entry} from the last successful
+        # checkextension_fwupdate call (see async_start_firmware_update_check). Empty until
+        # the first check actually runs, which only happens once per comexio_version change.
+        # Persisted (see async_load_extension_firmware) so a restart doesn't reset update.*
+        # entities to Unknown and doesn't re-arm the version gate for no reason — the check
+        # itself is too risky to repeat just because the process restarted.
+        self.extension_firmware: dict[str, dict[str, Any]] = {}
+        self._last_checked_fw_version: str | None = None
+        self._firmware_store: Store = Store(hass, 1, f"{DOMAIN}_extension_firmware_{self.server_id}")
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
@@ -439,6 +455,63 @@ class ComexioCoordinator(DataUpdateCoordinator):
             io["value"] = value
             self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
         self.async_set_updated_data(self.data)
+
+    async def async_load_extension_firmware(self) -> None:
+        """Restore the last checked firmware snapshot from disk (called once at setup).
+
+        Without this, every HA restart would reset extension_firmware to {} and
+        _last_checked_fw_version to None — the update.* entities would flip back to
+        Unknown, and the version gate would spuriously re-arm (a restart is not a real
+        version change), triggering an unnecessary extra run of the risky check at the
+        next nightly window.
+        """
+        stored = await self._firmware_store.async_load()
+        if not stored:
+            return
+        self.extension_firmware = stored.get("extension_firmware", {})
+        self._last_checked_fw_version = stored.get("last_checked_fw_version")
+
+    def async_start_firmware_update_check(self):
+        """Start the nightly firmware-check gate; returns the cancel callback.
+
+        Fires once a day at FIRMWARE_CHECK_HOUR:FIRMWARE_CHECK_MINUTE, but the actual
+        (output-interrupting) API call only runs when api.comexio_version has changed since
+        the last successful check — see _async_firmware_check_tick.
+        """
+        return async_track_time_change(
+            self.hass, self._async_firmware_check_tick, hour=FIRMWARE_CHECK_HOUR, minute=FIRMWARE_CHECK_MINUTE, second=0
+        )
+
+    async def _async_firmware_check_tick(self, _now: datetime | None = None, force: bool = False) -> bool:
+        """Run the extension firmware check, but only if the IO-Server version moved on.
+
+        A base firmware update makes a matching extension firmware update likely, so this
+        piggybacks on api.comexio_version (already tracked for the catalog cache) instead of
+        polling the risky checkextension_fwupdate endpoint on every nightly window. `force`
+        bypasses the version gate (manual button press) — the endpoint's physical risk itself
+        is unchanged either way. Returns whether the API call actually ran.
+        """
+        current_version = self.api.comexio_version
+        if not force and (current_version is None or current_version == self._last_checked_fw_version):
+            return False
+        data = await self.api.check_extension_firmware()
+        if not data:
+            return False
+        self.extension_firmware = {item["name"]: item for item in data if "name" in item}
+        self._last_checked_fw_version = current_version
+        await self._firmware_store.async_save(
+            {"extension_firmware": self.extension_firmware, "last_checked_fw_version": self._last_checked_fw_version}
+        )
+        async_dispatcher_send(self.hass, fw_update_signal(self.server_id))
+        return True
+
+    async def async_force_firmware_check(self) -> bool:
+        """Force-run the extension firmware check outside its nightly window (manual button).
+
+        Bypasses the comexio_version gate but not the endpoint's physical risk — Comexio
+        warns it can briefly interrupt extension outputs. Returns whether the API call ran.
+        """
+        return await self._async_firmware_check_tick(force=True)
 
     async def async_config_entry_updated(self) -> None:
         """Handle config entry update (e.g. from Options Flow)."""
