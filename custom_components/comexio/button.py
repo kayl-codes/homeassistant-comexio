@@ -475,6 +475,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 _LOGGER.debug("[%s] %s: resolved fallback Base ID: %s", self.server_id, label, base_id)
 
         tasks_to_do = self._build_delta_tasks(cls_effective_action, cls_renamed, cls_orphans, cls_missing, cls_types)
+        if not base_id and any(t["type"] == "create" for t in tasks_to_do):
+            raise RuntimeError(
+                f"{label}: cannot create Web-IO commands — no base class found "
+                f"(device={class_dev_id}). Run a Full Sync to recreate the class first."
+            )
         total_tasks = max(1, len(tasks_to_do))
         on_progress = partial(
             self._report_delta_progress, ctx, tasks_to_do, total_tasks, label, cls_effective_action, pct_start, pct_end

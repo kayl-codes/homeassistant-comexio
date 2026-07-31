@@ -41,11 +41,15 @@ _WEBIO_CLASS_LABELS = {WEBIO_CLASS_MARKER: "Marker", WEBIO_CLASS_IO: "IO"}
 
 def webio_class_name(webio_name: str, webio_class: str) -> str:
     """Comexio Web-IO class name for one of the two HA-managed classes (marker/io)."""
+    if webio_class not in _WEBIO_CLASS_SUFFIXES:
+        raise ValueError(f"Unknown Web-IO class {webio_class!r}, expected one of {WEBIO_CLASSES}")
     return f"{webio_name}{_WEBIO_CLASS_SUFFIXES[webio_class]}"
 
 
 def webio_class_label(webio_class: str) -> str:
     """Short display label ('Marker'/'IO') for a Web-IO class, used in sync/audit messages."""
+    if webio_class not in _WEBIO_CLASS_LABELS:
+        raise ValueError(f"Unknown Web-IO class {webio_class!r}, expected one of {WEBIO_CLASSES}")
     return _WEBIO_CLASS_LABELS[webio_class]
 
 

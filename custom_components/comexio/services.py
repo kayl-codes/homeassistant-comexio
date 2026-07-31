@@ -651,6 +651,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
                         "Please use the Smart-Sync button for individual updates.",
                         title="Bulk-Sync blocked",
                     )
+                    results.append(f"{class_name}: skipped (in use, not deletable)")
                     continue
 
             success, result_val = await api.upload_web_io(server_id, class_name, web_io_json)
