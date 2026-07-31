@@ -1,6 +1,9 @@
 # Version: 0.7.5
 import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
 import datetime
+from functools import partial
 import logging
 import time
 from typing import Any
@@ -22,14 +25,40 @@ from .const import (
     SYNC_DURATION_DELETE,
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
-    WEBIO_CLASS_IO,
-    WEBIO_CLASS_MARKER,
+    SYNC_PROGRESS_END_PCT,
+    SYNC_PROGRESS_START_PCT,
     WEBIO_CLASSES,
+    webio_class_label,
     webio_class_name,
 )
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
+    """Filter an audit-result list (missing/renamed/type/orphan) down to one Web-IO class."""
+    return [i for i in seq if i.get("webio_class") == cls]
+
+
+@dataclass
+class _SyncContext:
+    """Per-press state shared by the ComexioSyncButton class-based sync helpers.
+
+    Built once in async_handle_press and threaded through instead of relying on
+    closures, so the per-class helper methods are assessed for cognitive complexity
+    independently of async_handle_press (SonarQube S3776 folds nested closures'
+    complexity into their enclosing function, which is what made the previous
+    single-nested-function version score 99 against the project's limit of 15).
+    """
+
+    api: Any
+    action: str
+    ha_address: str
+    webio_devices_audit: dict[str, dict[str, Any]]
+    start_time: datetime.datetime
+    class_names: dict[str, str]
+    update_status: Callable[..., None]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -123,30 +152,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
         notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
         notif_id = f"comexio_sync_{self.server_id}"
+        update_status = partial(self._update_sync_status, notify_enabled, notif_id)
 
-        def _update_status(
-            msg: str, is_error: bool = False, pct: int | None = None, step_info: str | None = None
-        ) -> None:
-            """Helper to update sensor state and optionally show a UI notification."""
-            self.coordinator.sync_progress_text = msg
-            if pct is not None:
-                self.coordinator.sync_progress_pct = pct
-            if step_info is not None:
-                self.coordinator.sync_current_step = step_info
-            self.coordinator.async_set_updated_data(self.coordinator.data)
-            if notify_enabled:
-                title = "Comexio Sync Failed" if is_error else f"Comexio Sync ({self.server_id})"
-                persistent_notification.async_create(self.hass, msg, title=title, notification_id=notif_id)
-
-        msg = ""
-        _update_status("Initializing sync process...", pct=0, step_info="Initializing")
+        update_status("Initializing sync process...", pct=0, step_info="Initializing")
         start_time = datetime.datetime.now()
         api = self.coordinator.api
         webio_name = self.coordinator.config_entry.data.get("webio_name", "HomeAssistant")
         class_names = {cls: webio_class_name(webio_name, cls) for cls in WEBIO_CLASSES}
 
         try:
-            _update_status("Analyzing Comexio configuration...", pct=5, step_info="Analyzing configuration")
+            update_status("Analyzing Comexio configuration...", pct=5, step_info="Analyzing configuration")
 
             # Check if the Web-IO device instances are already present (one per class)
             dev_ids = {cls: await api.get_webio_device_info(class_names[cls]) for cls in WEBIO_CLASSES}
@@ -156,314 +171,476 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
             # Retrieve audit results stored in the coordinator
             audit_data = getattr(self.coordinator, "last_audit_results", {})
-            missing_items = audit_data.get("missing", [])
-            renamed_items = audit_data.get("rename", [])
-            type_mismatches = audit_data.get("type", [])
-            orphans = audit_data.get("orphan", [])
             webio_devices_audit = audit_data.get("webio_devices", {})
 
-            def _items_of(seq: list[dict], cls: str) -> list[dict]:
-                return [i for i in seq if i.get("webio_class") == cls]
+            ctx = _SyncContext(
+                api=api,
+                action=action,
+                ha_address=ha_address,
+                webio_devices_audit=webio_devices_audit,
+                start_time=start_time,
+                class_names=class_names,
+                update_status=update_status,
+            )
 
-            async def _sync_class(
-                cls: str,
-                class_dev_id: str | None,
-                cls_missing: list[dict],
-                cls_renamed: list[dict],
-                cls_types: list[dict],
-                cls_orphans: list[dict],
-                dev_ip_mismatch: bool,
-                pct_start: int,
-                pct_end: int,
-            ) -> dict[str, Any]:
-                """Recreate-or-Delta-Sync one Web-IO class (marker/io).
-
-                Run independently per class so the two devices' Fast-Track eligibility (and
-                any resulting device deletion) never interfere with each other.
-                """
-                class_name = class_names[cls]
-                label = "Marker" if cls == WEBIO_CLASS_MARKER else "IO"
-                result: dict[str, Any] = {
-                    "added": 0,
-                    "removed": 0,
-                    "updated": 0,
-                    "renamed": 0,
-                    "updated_ip": False,
-                    "recreated": False,
-                }
-
-                cls_action_eta = 0
-                cls_task_count = 0
-                if action in {"full_sync", "update_renames"}:
-                    cls_action_eta += len(cls_renamed) * SYNC_DURATION_WRITE
-                    cls_task_count += len(cls_renamed)
-                if action in {"full_sync", "delete_orphans"}:
-                    cls_action_eta += len(cls_orphans) * SYNC_DURATION_DELETE
-                    cls_task_count += len(cls_orphans)
-                if action in {"full_sync", "create_missing"}:
-                    cls_action_eta += len(cls_missing) * SYNC_DURATION_WRITE
-                    cls_task_count += len(cls_missing)
-                if action in {"full_sync", "update_types"}:
-                    cls_action_eta += len(cls_types) * SYNC_DURATION_WRITE
-                    cls_task_count += len(cls_types)
-                if action in {"full_sync", "update_ip"} and dev_ip_mismatch:
-                    cls_action_eta += SYNC_DURATION_WRITE
-                if cls_task_count > 1:
-                    cls_action_eta += int(1.5 * (cls_task_count - 1))
-
-                if not class_dev_id:
-                    _LOGGER.info("[%s] %s: no device instance found. Forcing recreate.", self.server_id, label)
-                    cls_effective_action = "recreate"
-                elif action == "update_ip":
-                    _LOGGER.info(
-                        "[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label
-                    )
-                    cls_effective_action = "update_ip"
-                elif cls_action_eta > SYNC_DURATION_RECREATE:
-                    _LOGGER.info(
-                        "[%s] %s ETA (%ds) > Fast-Track (%ds). Attempting Fast-Track.",
-                        self.server_id,
-                        label,
-                        cls_action_eta,
-                        SYNC_DURATION_RECREATE,
-                    )
-                    if await api.delete_webio_device(class_dev_id):
-                        cls_effective_action = "recreate"
-                        _LOGGER.info("[%s] %s Fast-Track enabled: device has been deleted.", self.server_id, label)
-                    else:
-                        cls_effective_action = action
-                        _LOGGER.info("[%s] %s device is in use. Falling back to Delta-Sync.", self.server_id, label)
-                else:
-                    cls_effective_action = action
-                    _LOGGER.info(
-                        "[%s] %s ETA (%ds) is faster than Fast-Track. Proceeding exactly as requested.",
-                        self.server_id,
-                        label,
-                        cls_action_eta,
-                    )
-
-                if cls_effective_action == "recreate":
-                    status_msg = (
-                        f"🛠️ **Initial Setup ({label})**\nCreating Web-IO class..."
-                        if action == "full_sync" and not class_dev_id
-                        else f"🚀 **Fast-Track active ({label})**\nHigh-speed recreation in progress..."
-                    )
-                    _update_status(status_msg, pct=pct_start, step_info=f"Creating Web-IO class ({label})")
-
-                    base_info = await api.get_webio_base_info(class_name)
-                    if base_info:
-                        base_id, base_deletable = base_info
-                        if base_deletable:
-                            _update_status(
-                                f"{status_msg}\n\n🗑️ Deleting old class...",
-                                pct=pct_start + 2,
-                                step_info="Deleting old class",
-                            )
-                            await api.delete_webio_base(base_id)
-                            await asyncio.sleep(0.5)
-                        else:
-                            _LOGGER.warning(
-                                "[%s] %s base %s still blocked by other logic. Reusing base structure.",
-                                self.server_id,
-                                label,
-                                base_id,
-                            )
-
-                    _update_status(
-                        f"{status_msg}\n\n📤 Uploading configuration...",
-                        pct=(pct_start + pct_end) // 2,
-                        step_info="Uploading configuration",
-                    )
-                    web_io_json = api.generate_webio_json(
-                        self.server_id, class_name, self.coordinator.data, webio_class=cls
-                    )
-                    success, res_id = await api.upload_web_io(self.server_id, class_name, web_io_json)
-                    if not success:
-                        raise RuntimeError(f"Upload failed ({label}): {res_id}")
-                    if not await api.create_webio_device(class_name, res_id, ha_address):
-                        raise RuntimeError(f"Device creation failed ({label}, class created, device instance not)")
-                    result["recreated"] = True
-                    return result
-
-                # --- Delta-Sync: targeted updates for individual commands ---
-                _LOGGER.info(
-                    "[%s] %s: performing targeted Delta Sync for mode: %s", self.server_id, label, cls_effective_action
-                )
-
-                base_id = webio_devices_audit.get(cls, {}).get("base_id")
-                if not base_id or str(base_id) in {"0", "None"}:
-                    b_info = await api.get_webio_base_info(class_name)
-                    if b_info:
-                        base_id = b_info[0]
-                        _LOGGER.debug("[%s] %s: resolved fallback Base ID: %s", self.server_id, label, base_id)
-
-                tasks_to_do = []
-                if cls_effective_action in {"full_sync", "update_renames"}:
-                    tasks_to_do.extend([{"item": i, "type": "rename"} for i in cls_renamed])
-                if cls_effective_action in {"full_sync", "delete_orphans"}:
-                    tasks_to_do.extend([{"item": i, "type": "delete"} for i in cls_orphans])
-                if cls_effective_action in {"full_sync", "create_missing"}:
-                    tasks_to_do.extend([{"item": i, "type": "create"} for i in cls_missing])
-                if cls_effective_action in {"full_sync", "update_types"}:
-                    tasks_to_do.extend([{"item": i, "type": "type"} for i in cls_types])
-
-                total_tasks = max(1, len(tasks_to_do))
-
-                def _cls_progress(current: int, task_name: str, task_type: str) -> None:
-                    rem_tasks = tasks_to_do[current:]
-                    eta_s = sum(
-                        SYNC_DURATION_DELETE if t["type"] == "delete" else SYNC_DURATION_WRITE for t in rem_tasks
-                    )
-                    if len(rem_tasks) > 1:
-                        eta_s += int(1.5 * (len(rem_tasks) - 1))
-                    elaps = datetime.datetime.now() - start_time
-                    elaps_str = f"{elaps.seconds // 60:02}:{elaps.seconds % 60:02d}"
-                    rem_str = f"{eta_s // 60:02}:{eta_s % 60:02d}"
-                    eta_t = (datetime.datetime.now() + datetime.timedelta(seconds=eta_s)).strftime("%H:%M:%S")
-                    labels = {"rename": "✏️ Rename", "delete": "🗑️ Remove", "create": "➕ Add", "type": "🔧 Type-Fix"}
-                    t_label = labels.get(task_type, task_type)
-                    prog_msg = (
-                        f"**Class:** {label}\n**Mode:** `{cls_effective_action}`\n"
-                        f"**Progress:** Step {current + 1} of {total_tasks}\n"
-                        f"**Current:** {t_label}: `{task_name}`\n\n---\n"
-                        f"🕒 **Start:** {start_time.strftime('%H:%M:%S')} (Runtime: {elaps_str})\n"
-                        f"🏁 **Done:** ~{eta_t} (Remaining: {rem_str})"
-                    )
-                    pct_val = pct_start + int((pct_end - pct_start) * (current / total_tasks))
-                    _update_status(
-                        prog_msg,
-                        pct=pct_val,
-                        step_info=f"{label} {current + 1}/{total_tasks} | {t_label}: '{task_name}' | Rem: {rem_str}",
-                    )
-
-                for idx, task in enumerate(tasks_to_do):
-                    if getattr(self.coordinator, "cancel_sync", False):
-                        break
-                    item, t_type = task["item"], task["type"]
-                    _cls_progress(idx, item["name"], t_type)
-                    if t_type == "rename":
-                        await api.save_single_command(
-                            base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"]
-                        )
-                        result["renamed"] += 1
-                    elif t_type == "delete":
-                        await api.delete_single_command(item["id"], class_dev_id)
-                        result["removed"] += 1
-                    elif t_type == "type":
-                        # Clean up entity from registry if type changed
-                        dev_reg = dr.async_get(self.hass)
-                        device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{self.server_id}_{item['id']}")})
-                        if device:
-                            dev_reg.async_remove_device(device.id)
-                        await api.save_single_command(
-                            base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"]
-                        )
-                        result["updated"] += 1
-                    elif t_type == "create":
-                        await api.save_single_command(base_id, class_dev_id, item["payload"])
-                        result["added"] += 1
-
-                # Final step: Update Server Address (IP) — save_single_command does not
-                # update device-level settings, so this is always a separate explicit call.
-                if cls_effective_action in {"full_sync", "update_ip"} and dev_ip_mismatch and class_dev_id:
-                    _update_status(
-                        f"🌐 **Repair in progress ({label}):** Updating HA IP address...",
-                        pct=pct_end - 2,
-                        step_info="Updating HA IP address",
-                    )
-                    result["updated_ip"] = await api.update_webio_device_ip(class_dev_id, ha_address, class_name)
-
-                return result
-
-            added, removed, updated, renamed = 0, 0, 0, 0
-            updated_ip = False
-            recreated_classes: list[str] = []
-            class_pct_ranges = {WEBIO_CLASS_MARKER: (5, 50), WEBIO_CLASS_IO: (50, 95)}
-
-            for cls in WEBIO_CLASSES:
-                pct_start, pct_end = class_pct_ranges[cls]
-                cls_result = await _sync_class(
-                    cls,
-                    dev_ids[cls],
-                    _items_of(missing_items, cls),
-                    _items_of(renamed_items, cls),
-                    _items_of(type_mismatches, cls),
-                    _items_of(orphans, cls),
-                    webio_devices_audit.get(cls, {}).get("ip_mismatch", False),
-                    pct_start,
-                    pct_end,
-                )
-                added += cls_result["added"]
-                removed += cls_result["removed"]
-                updated += cls_result["updated"]
-                renamed += cls_result["renamed"]
-                updated_ip = updated_ip or cls_result["updated_ip"]
-                if cls_result["recreated"]:
-                    recreated_classes.append(cls)
-
-            recreate_note = ""
-            if recreated_classes:
-                recreated_str = ", ".join("Marker" if c == WEBIO_CLASS_MARKER else "IO" for c in recreated_classes)
-                recreate_note = f"🚀 Recreated: {recreated_str}\n\n"
+            added, removed, updated, renamed, updated_ip, recreated_classes = await self._sync_all_classes(
+                ctx, audit_data, dev_ids
+            )
 
             duration = datetime.datetime.now() - start_time
             duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
-
-            if added + updated + renamed + removed == 0 and not recreated_classes and updated_ip:
-                msg = (
-                    "✅ **Comexio Server Address updated**\n\n"
-                    f"The IP address has been successfully updated in the Web-IO device(s).\n"
-                    f"⏱ Duration: {duration_str}"
-                )
-            elif added + updated + renamed + removed == 0 and recreated_classes and not updated_ip:
-                msg = f"✅ **Comexio Recreation Finished**\n\n{recreate_note}⏱ Duration: {duration_str}"
-            else:
-                msg = (
-                    f"✅ **Comexio Sync Finished**\n\n{recreate_note}"
-                    f"Results: +{added}, {updated} updated, {renamed} renamed, -{removed} removed"
-                    + (", IP-Address updated" if updated_ip else "")
-                    + f".\n⏱ Duration: {duration_str}"
-                )
+            msg = self._build_sync_result_message(
+                added, updated, renamed, removed, recreated_classes, updated_ip, duration_str
+            )
 
             self.coordinator.last_audit_failed = False
-            _update_status(msg, pct=100, step_info="Done")
+            update_status(msg, pct=100, step_info="Done")
 
         except Exception as e:
             self.coordinator.in_sync = False
             self.coordinator.sync_error = True
             _LOGGER.exception("[%s] Sync failed", self.server_id)
-            _update_status(f"Error: {e}", is_error=True)
+            update_status(f"Error: {e}", is_error=True)
 
         finally:
-            # 1. Flag reset
-            self.coordinator.in_sync = False
-            self.coordinator.cancel_sync = False
-            if not getattr(self.coordinator, "sync_error", False):
-                self.coordinator.sync_progress_text = "Idle"
-            self.coordinator.sync_progress_pct = None
-            self.coordinator.sync_current_step = None
-            self.coordinator.async_set_updated_data(self.coordinator.data)
+            await self._finalize_sync()
 
-            # 2. Reset audit_ignored. Set the skip flag first so the update_listener
-            #    suppresses its reload — the explicit reload below is the single reload (R2).
-            new_options = dict(self.coordinator.config_entry.options)
-            new_options["audit_ignored"] = False
-            self.coordinator._skip_next_listener_reload = True
-            self.hass.config_entries.async_update_entry(self.coordinator.config_entry, options=new_options)
+    def _update_sync_status(
+        self,
+        notify_enabled: bool,
+        notif_id: str,
+        msg: str,
+        is_error: bool = False,
+        pct: int | None = None,
+        step_info: str | None = None,
+    ) -> None:
+        """Update coordinator sync-progress state and optionally show a UI notification."""
+        self.coordinator.sync_progress_text = msg
+        if pct is not None:
+            self.coordinator.sync_progress_pct = pct
+        if step_info is not None:
+            self.coordinator.sync_current_step = step_info
+        self.coordinator.async_set_updated_data(self.coordinator.data)
+        if notify_enabled:
+            title = "Comexio Sync Failed" if is_error else f"Comexio Sync ({self.server_id})"
+            persistent_notification.async_create(self.hass, msg, title=title, notification_id=notif_id)
 
-            # 3. Release sync lock before reload (old coordinator is replaced by reload anyway)
-            self.coordinator._sync_lock.release()
+    async def _sync_all_classes(
+        self, ctx: _SyncContext, audit_data: dict[str, Any], dev_ids: dict[str, str | None]
+    ) -> tuple[int, int, int, int, bool, list[str]]:
+        """Run `_sync_class` for every Web-IO class and aggregate the results."""
+        missing_items = audit_data.get("missing", [])
+        renamed_items = audit_data.get("rename", [])
+        type_mismatches = audit_data.get("type", [])
+        orphans = audit_data.get("orphan", [])
 
-            # 4. Give the Comexio server a moment to finish the write operation;
-            #    the update_listener task runs here, sees the skip flag, and returns. (R2)
-            await asyncio.sleep(0.5)
+        added, removed, updated, renamed = 0, 0, 0, 0
+        updated_ip = False
+        recreated_classes: list[str] = []
+        # Split the shared progress span evenly across however many classes exist,
+        # so the UI bar advances smoothly regardless of len(WEBIO_CLASSES).
+        pct_span = (SYNC_PROGRESS_END_PCT - SYNC_PROGRESS_START_PCT) / len(WEBIO_CLASSES)
+        class_pct_ranges = {
+            cls: (
+                round(SYNC_PROGRESS_START_PCT + idx * pct_span),
+                round(SYNC_PROGRESS_START_PCT + (idx + 1) * pct_span),
+            )
+            for idx, cls in enumerate(WEBIO_CLASSES)
+        }
 
-            # 5. Reset UI button
-            self.async_write_ha_state()
+        for cls in WEBIO_CLASSES:
+            pct_start, pct_end = class_pct_ranges[cls]
+            cls_result = await self._sync_class(
+                ctx,
+                cls,
+                dev_ids[cls],
+                _items_of_class(missing_items, cls),
+                _items_of_class(renamed_items, cls),
+                _items_of_class(type_mismatches, cls),
+                _items_of_class(orphans, cls),
+                ctx.webio_devices_audit.get(cls, {}).get("ip_mismatch", False),
+                pct_start,
+                pct_end,
+            )
+            added += cls_result["added"]
+            removed += cls_result["removed"]
+            updated += cls_result["updated"]
+            renamed += cls_result["renamed"]
+            updated_ip = updated_ip or cls_result["updated_ip"]
+            if cls_result["recreated"]:
+                recreated_classes.append(cls)
 
-            # 6. Restart integration (necessary!)
-            _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
-            await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
+        return added, removed, updated, renamed, updated_ip, recreated_classes
+
+    def _build_sync_result_message(
+        self,
+        added: int,
+        updated: int,
+        renamed: int,
+        removed: int,
+        recreated_classes: list[str],
+        updated_ip: bool,
+        duration_str: str,
+    ) -> str:
+        """Compose the final sync-result notification text."""
+        recreate_note = ""
+        if recreated_classes:
+            recreated_str = ", ".join(webio_class_label(c) for c in recreated_classes)
+            recreate_note = f"🚀 Recreated: {recreated_str}\n\n"
+
+        changed = added + updated + renamed + removed
+        if changed == 0 and not recreated_classes and updated_ip:
+            return (
+                "✅ **Comexio Server Address updated**\n\n"
+                f"The IP address has been successfully updated in the Web-IO device(s).\n"
+                f"⏱ Duration: {duration_str}"
+            )
+        if changed == 0 and recreated_classes and not updated_ip:
+            return f"✅ **Comexio Recreation Finished**\n\n{recreate_note}⏱ Duration: {duration_str}"
+        return (
+            f"✅ **Comexio Sync Finished**\n\n{recreate_note}"
+            f"Results: +{added}, {updated} updated, {renamed} renamed, -{removed} removed"
+            + (", IP-Address updated" if updated_ip else "")
+            + f".\n⏱ Duration: {duration_str}"
+        )
+
+    async def _finalize_sync(self) -> None:
+        """Reset sync flags/UI state and force a full integration reload after a press."""
+        # 1. Flag reset
+        self.coordinator.in_sync = False
+        self.coordinator.cancel_sync = False
+        if not getattr(self.coordinator, "sync_error", False):
+            self.coordinator.sync_progress_text = "Idle"
+        self.coordinator.sync_progress_pct = None
+        self.coordinator.sync_current_step = None
+        self.coordinator.async_set_updated_data(self.coordinator.data)
+
+        # 2. Reset audit_ignored. Set the skip flag first so the update_listener
+        #    suppresses its reload — the explicit reload below is the single reload (R2).
+        new_options = dict(self.coordinator.config_entry.options)
+        new_options["audit_ignored"] = False
+        self.coordinator._skip_next_listener_reload = True
+        self.hass.config_entries.async_update_entry(self.coordinator.config_entry, options=new_options)
+
+        # 3. Release sync lock before reload (old coordinator is replaced by reload anyway)
+        self.coordinator._sync_lock.release()
+
+        # 4. Give the Comexio server a moment to finish the write operation;
+        #    the update_listener task runs here, sees the skip flag, and returns. (R2)
+        await asyncio.sleep(0.5)
+
+        # 5. Reset UI button
+        self.async_write_ha_state()
+
+        # 6. Restart integration (necessary!)
+        _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
+        await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
+
+    async def _decide_effective_action(
+        self,
+        ctx: _SyncContext,
+        label: str,
+        class_dev_id: str | None,
+        cls_missing: list[dict],
+        cls_renamed: list[dict],
+        cls_types: list[dict],
+        cls_orphans: list[dict],
+        dev_ip_mismatch: bool,
+    ) -> str:
+        """Pick recreate vs. delta-sync for one class, based on ETA vs. the Fast-Track threshold."""
+        action = ctx.action
+        cls_action_eta = 0
+        cls_task_count = 0
+        if action in {"full_sync", "update_renames"}:
+            cls_action_eta += len(cls_renamed) * SYNC_DURATION_WRITE
+            cls_task_count += len(cls_renamed)
+        if action in {"full_sync", "delete_orphans"}:
+            cls_action_eta += len(cls_orphans) * SYNC_DURATION_DELETE
+            cls_task_count += len(cls_orphans)
+        if action in {"full_sync", "create_missing"}:
+            cls_action_eta += len(cls_missing) * SYNC_DURATION_WRITE
+            cls_task_count += len(cls_missing)
+        if action in {"full_sync", "update_types"}:
+            cls_action_eta += len(cls_types) * SYNC_DURATION_WRITE
+            cls_task_count += len(cls_types)
+        if action in {"full_sync", "update_ip"} and dev_ip_mismatch:
+            cls_action_eta += SYNC_DURATION_WRITE
+        if cls_task_count > 1:
+            cls_action_eta += int(1.5 * (cls_task_count - 1))
+
+        if not class_dev_id:
+            _LOGGER.info("[%s] %s: no device instance found. Forcing recreate.", self.server_id, label)
+            return "recreate"
+        if action == "update_ip":
+            _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
+            return "update_ip"
+        if cls_action_eta > SYNC_DURATION_RECREATE:
+            _LOGGER.info(
+                "[%s] %s ETA (%ds) > Fast-Track (%ds). Attempting Fast-Track.",
+                self.server_id,
+                label,
+                cls_action_eta,
+                SYNC_DURATION_RECREATE,
+            )
+            if await ctx.api.delete_webio_device(class_dev_id):
+                _LOGGER.info("[%s] %s Fast-Track enabled: device has been deleted.", self.server_id, label)
+                return "recreate"
+            _LOGGER.info("[%s] %s device is in use. Falling back to Delta-Sync.", self.server_id, label)
+            return action
+        _LOGGER.info(
+            "[%s] %s ETA (%ds) is faster than Fast-Track. Proceeding exactly as requested.",
+            self.server_id,
+            label,
+            cls_action_eta,
+        )
+        return action
+
+    async def _recreate_class(
+        self,
+        ctx: _SyncContext,
+        cls: str,
+        class_name: str,
+        label: str,
+        class_dev_id: str | None,
+        pct_start: int,
+        pct_end: int,
+    ) -> None:
+        """Delete-and-recreate a Web-IO class from scratch (Fast-Track / Initial Setup)."""
+        api = ctx.api
+        status_msg = (
+            f"🛠️ **Initial Setup ({label})**\nCreating Web-IO class..."
+            if ctx.action == "full_sync" and not class_dev_id
+            else f"🚀 **Fast-Track active ({label})**\nHigh-speed recreation in progress..."
+        )
+        ctx.update_status(status_msg, pct=pct_start, step_info=f"Creating Web-IO class ({label})")
+
+        base_info = await api.get_webio_base_info(class_name)
+        if base_info:
+            base_id, base_deletable = base_info
+            if base_deletable:
+                ctx.update_status(
+                    f"{status_msg}\n\n🗑️ Deleting old class...",
+                    pct=pct_start + 2,
+                    step_info="Deleting old class",
+                )
+                await api.delete_webio_base(base_id)
+                await asyncio.sleep(0.5)
+            else:
+                _LOGGER.warning(
+                    "[%s] %s base %s still blocked by other logic. Reusing base structure.",
+                    self.server_id,
+                    label,
+                    base_id,
+                )
+
+        ctx.update_status(
+            f"{status_msg}\n\n📤 Uploading configuration...",
+            pct=(pct_start + pct_end) // 2,
+            step_info="Uploading configuration",
+        )
+        web_io_json = api.generate_webio_json(self.server_id, class_name, self.coordinator.data, webio_class=cls)
+        success, res_id = await api.upload_web_io(self.server_id, class_name, web_io_json)
+        if not success:
+            raise RuntimeError(f"Upload failed ({label}): {res_id}")
+        if not await api.create_webio_device(class_name, res_id, ctx.ha_address):
+            raise RuntimeError(f"Device creation failed ({label}, class created, device instance not)")
+
+    async def _delta_sync_class(
+        self,
+        ctx: _SyncContext,
+        cls: str,
+        class_name: str,
+        label: str,
+        class_dev_id: str | None,
+        cls_effective_action: str,
+        cls_missing: list[dict],
+        cls_renamed: list[dict],
+        cls_types: list[dict],
+        cls_orphans: list[dict],
+        dev_ip_mismatch: bool,
+        pct_start: int,
+        pct_end: int,
+    ) -> dict[str, Any]:
+        """Targeted create/rename/delete/type-fix of individual Web-IO commands for one class."""
+        api = ctx.api
+        _LOGGER.info(
+            "[%s] %s: performing targeted Delta Sync for mode: %s", self.server_id, label, cls_effective_action
+        )
+
+        base_id = ctx.webio_devices_audit.get(cls, {}).get("base_id")
+        if not base_id or str(base_id) in {"0", "None"}:
+            b_info = await api.get_webio_base_info(class_name)
+            if b_info:
+                base_id = b_info[0]
+                _LOGGER.debug("[%s] %s: resolved fallback Base ID: %s", self.server_id, label, base_id)
+
+        tasks_to_do = self._build_delta_tasks(cls_effective_action, cls_renamed, cls_orphans, cls_missing, cls_types)
+        total_tasks = max(1, len(tasks_to_do))
+        on_progress = partial(
+            self._report_delta_progress, ctx, tasks_to_do, total_tasks, label, cls_effective_action, pct_start, pct_end
+        )
+
+        result = await self._execute_delta_tasks(ctx, class_dev_id, base_id, tasks_to_do, on_progress)
+        result["updated_ip"] = False
+
+        # Final step: Update Server Address (IP) — save_single_command does not
+        # update device-level settings, so this is always a separate explicit call.
+        if cls_effective_action in {"full_sync", "update_ip"} and dev_ip_mismatch and class_dev_id:
+            ctx.update_status(
+                f"🌐 **Repair in progress ({label}):** Updating HA IP address...",
+                pct=pct_end - 2,
+                step_info="Updating HA IP address",
+            )
+            result["updated_ip"] = await api.update_webio_device_ip(class_dev_id, ctx.ha_address, class_name)
+
+        return result
+
+    def _report_delta_progress(
+        self,
+        ctx: _SyncContext,
+        tasks_to_do: list[dict],
+        total_tasks: int,
+        label: str,
+        cls_effective_action: str,
+        pct_start: int,
+        pct_end: int,
+        current: int,
+        task_name: str,
+        task_type: str,
+    ) -> None:
+        """Push a progress update for one delta-sync task (bound as the on_progress callback)."""
+        rem_tasks = tasks_to_do[current:]
+        eta_s = sum(SYNC_DURATION_DELETE if t["type"] == "delete" else SYNC_DURATION_WRITE for t in rem_tasks)
+        if len(rem_tasks) > 1:
+            eta_s += int(1.5 * (len(rem_tasks) - 1))
+        elaps = datetime.datetime.now() - ctx.start_time
+        elaps_str = f"{elaps.seconds // 60:02}:{elaps.seconds % 60:02d}"
+        rem_str = f"{eta_s // 60:02}:{eta_s % 60:02d}"
+        eta_t = (datetime.datetime.now() + datetime.timedelta(seconds=eta_s)).strftime("%H:%M:%S")
+        labels = {"rename": "✏️ Rename", "delete": "🗑️ Remove", "create": "➕ Add", "type": "🔧 Type-Fix"}
+        t_label = labels.get(task_type, task_type)
+        prog_msg = (
+            f"**Class:** {label}\n**Mode:** `{cls_effective_action}`\n"
+            f"**Progress:** Step {current + 1} of {total_tasks}\n"
+            f"**Current:** {t_label}: `{task_name}`\n\n---\n"
+            f"🕒 **Start:** {ctx.start_time.strftime('%H:%M:%S')} (Runtime: {elaps_str})\n"
+            f"🏁 **Done:** ~{eta_t} (Remaining: {rem_str})"
+        )
+        pct_val = pct_start + int((pct_end - pct_start) * (current / total_tasks))
+        ctx.update_status(
+            prog_msg,
+            pct=pct_val,
+            step_info=f"{label} {current + 1}/{total_tasks} | {t_label}: '{task_name}' | Rem: {rem_str}",
+        )
+
+    def _build_delta_tasks(
+        self,
+        cls_effective_action: str,
+        cls_renamed: list[dict],
+        cls_orphans: list[dict],
+        cls_missing: list[dict],
+        cls_types: list[dict],
+    ) -> list[dict]:
+        """Collect the individual create/rename/delete/type-fix tasks for one delta-sync run."""
+        tasks_to_do = []
+        if cls_effective_action in {"full_sync", "update_renames"}:
+            tasks_to_do.extend([{"item": i, "type": "rename"} for i in cls_renamed])
+        if cls_effective_action in {"full_sync", "delete_orphans"}:
+            tasks_to_do.extend([{"item": i, "type": "delete"} for i in cls_orphans])
+        if cls_effective_action in {"full_sync", "create_missing"}:
+            tasks_to_do.extend([{"item": i, "type": "create"} for i in cls_missing])
+        if cls_effective_action in {"full_sync", "update_types"}:
+            tasks_to_do.extend([{"item": i, "type": "type"} for i in cls_types])
+        return tasks_to_do
+
+    async def _execute_delta_tasks(
+        self,
+        ctx: _SyncContext,
+        class_dev_id: str | None,
+        base_id: str | None,
+        tasks_to_do: list[dict],
+        on_progress: Callable[[int, str, str], None],
+    ) -> dict[str, int]:
+        """Run the collected delta-sync tasks against the Comexio API, in order."""
+        api = ctx.api
+        result = {"added": 0, "removed": 0, "updated": 0, "renamed": 0}
+        for idx, task in enumerate(tasks_to_do):
+            if getattr(self.coordinator, "cancel_sync", False):
+                break
+            item, t_type = task["item"], task["type"]
+            on_progress(idx, item["name"], t_type)
+            if t_type == "rename":
+                await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
+                result["renamed"] += 1
+            elif t_type == "delete":
+                await api.delete_single_command(item["id"], class_dev_id)
+                result["removed"] += 1
+            elif t_type == "type":
+                # Clean up entity from registry if type changed
+                dev_reg = dr.async_get(self.hass)
+                device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{self.server_id}_{item['id']}")})
+                if device:
+                    dev_reg.async_remove_device(device.id)
+                await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
+                result["updated"] += 1
+            elif t_type == "create":
+                await api.save_single_command(base_id, class_dev_id, item["payload"])
+                result["added"] += 1
+        return result
+
+    async def _sync_class(
+        self,
+        ctx: _SyncContext,
+        cls: str,
+        class_dev_id: str | None,
+        cls_missing: list[dict],
+        cls_renamed: list[dict],
+        cls_types: list[dict],
+        cls_orphans: list[dict],
+        dev_ip_mismatch: bool,
+        pct_start: int,
+        pct_end: int,
+    ) -> dict[str, Any]:
+        """Recreate-or-Delta-Sync one Web-IO class (marker/io).
+
+        Run independently per class so the two devices' Fast-Track eligibility (and
+        any resulting device deletion) never interfere with each other.
+        """
+        class_name = ctx.class_names[cls]
+        label = webio_class_label(cls)
+
+        cls_effective_action = await self._decide_effective_action(
+            ctx, label, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch
+        )
+
+        if cls_effective_action == "recreate":
+            await self._recreate_class(ctx, cls, class_name, label, class_dev_id, pct_start, pct_end)
+            return {
+                "added": 0,
+                "removed": 0,
+                "updated": 0,
+                "renamed": 0,
+                "updated_ip": False,
+                "recreated": True,
+            }
+
+        result = await self._delta_sync_class(
+            ctx,
+            cls,
+            class_name,
+            label,
+            class_dev_id,
+            cls_effective_action,
+            cls_missing,
+            cls_renamed,
+            cls_types,
+            cls_orphans,
+            dev_ip_mismatch,
+            pct_start,
+            pct_end,
+        )
+        result["recreated"] = False
+        return result
 
 
 class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):

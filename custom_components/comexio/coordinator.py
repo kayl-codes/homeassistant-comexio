@@ -36,6 +36,7 @@ from .const import (
     WEBIO_CLASSES,
     bus_load_signal,
     fw_update_signal,
+    webio_class_label,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -256,9 +257,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         translation_key="missing_webio_class",
                         translation_placeholders={
                             "server_id": self.server_id,
-                            "missing_classes": ", ".join(
-                                "Marker" if c == WEBIO_CLASS_MARKER else "IO" for c in missing_classes
-                            ),
+                            "missing_classes": ", ".join(webio_class_label(c) for c in missing_classes),
                         },
                         data={
                             "entry_id": self.config_entry.entry_id,

@@ -36,11 +36,24 @@ WEBIO_CLASS_MARKER = "marker"
 WEBIO_CLASS_IO = "io"
 WEBIO_CLASSES = (WEBIO_CLASS_MARKER, WEBIO_CLASS_IO)
 _WEBIO_CLASS_SUFFIXES = {WEBIO_CLASS_MARKER: " [M]", WEBIO_CLASS_IO: " [IO]"}
+_WEBIO_CLASS_LABELS = {WEBIO_CLASS_MARKER: "Marker", WEBIO_CLASS_IO: "IO"}
 
 
 def webio_class_name(webio_name: str, webio_class: str) -> str:
     """Comexio Web-IO class name for one of the two HA-managed classes (marker/io)."""
     return f"{webio_name}{_WEBIO_CLASS_SUFFIXES[webio_class]}"
+
+
+def webio_class_label(webio_class: str) -> str:
+    """Short display label ('Marker'/'IO') for a Web-IO class, used in sync/audit messages."""
+    return _WEBIO_CLASS_LABELS[webio_class]
+
+
+# Sync-progress percentage span shared by all Web-IO classes, subdivided evenly per class
+# in button.py's `_class_pct_ranges` so the UI progress bar advances smoothly regardless
+# of how many classes exist (currently 2, but not hard-coded to that number).
+SYNC_PROGRESS_START_PCT = 5
+SYNC_PROGRESS_END_PCT = 95
 
 
 DEFAULT_NAME = "Comexio"
