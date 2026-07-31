@@ -1490,6 +1490,28 @@ class ComexioAPI:
             )
             return False
 
+    async def get_bus_workload(self) -> dict[str, Any]:
+        """Fetch the internal bus workload (%) and SD-card presence from the admin interface.
+
+        Called on a fast, independent poll cadence (see coordinator's bus-load loop) —
+        much more frequent than the main config audit, so failures are logged at debug
+        level only to avoid log spam.
+        """
+        url = f"{self._base_url}/admin/in_output/inoutputinfo"
+        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/in_output/home"}
+        try:
+            async with self.session.post(url, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.debug("Bus workload fetch failed with HTTP status: %s", resp.status)
+                    return {}
+                return await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            _LOGGER.debug("HTTP request error fetching bus workload: %s", err)
+            return {}
+        except Exception as err:
+            _LOGGER.debug("Unexpected error fetching bus workload: %s", err)
+            return {}
+
     async def check_extension_firmware(self) -> list[dict[str, Any]]:
         """Query the local extension bus for available firmware updates (BASE + all extensions).
 

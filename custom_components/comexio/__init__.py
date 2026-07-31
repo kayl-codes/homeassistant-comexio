@@ -89,6 +89,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # coordinator.async_start_firmware_update_check). Cancelled automatically on unload/reload.
     entry.async_on_unload(coordinator.async_start_firmware_update_check())
 
+    # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
+    # cancelled automatically on unload/reload.
+    entry.async_on_unload(coordinator.async_start_bus_load_poll())
+
     # Set up services
     await async_setup_services(hass)
 
@@ -154,6 +158,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
     active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
     active_unique_ids.add(f"comexio_{server_id}_logikplan_plan_selector")
+    active_unique_ids.add(f"comexio_{server_id}_bus_load_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_sd_card_sensor")
 
     # Extension firmware updates (update.py): one entity per known extension + BASE. Built the
     # same way as the IO entities above, since extension existence is independent of the

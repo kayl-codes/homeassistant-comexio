@@ -1,6 +1,6 @@
 # Version: 0.8.0
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import socket
 from typing import Any
@@ -9,12 +9,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import ComexioAPI
 from .const import (
+    BUS_LOAD_FAIL_STREAK_THRESHOLD,
+    BUS_LOAD_POLL_INTERVAL_SEC,
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
     CONF_COVER_KEYWORDS,
@@ -29,6 +31,7 @@ from .const import (
     DOMAIN,
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
+    bus_load_signal,
     fw_update_signal,
 )
 
@@ -85,6 +88,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.extension_firmware: dict[str, dict[str, Any]] = {}
         self._last_checked_fw_version: str | None = None
         self._firmware_store: Store = Store(hass, 1, f"{DOMAIN}_extension_firmware_{self.server_id}")
+        # Bus workload monitoring: latest reading from the independent fast poll
+        # (see async_start_bus_load_poll / _async_bus_load_tick). None until the first tick.
+        self.bus_workload: int | None = None
+        self.bus_sd_card: bool | None = None
+        self._bus_load_fail_streak = 0
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
@@ -512,6 +520,59 @@ class ComexioCoordinator(DataUpdateCoordinator):
         warns it can briefly interrupt extension outputs. Returns whether the API call ran.
         """
         return await self._async_firmware_check_tick(force=True)
+
+    def async_start_bus_load_poll(self):
+        """Start the independent fast bus-workload poll; returns the cancel callback.
+
+        Also fires one immediate tick so the diagnostics aren't stuck at "Unknown" for up
+        to BUS_LOAD_POLL_INTERVAL_SEC after setup/reload (async_track_time_interval only
+        fires after the first interval elapses).
+        """
+        self.hass.async_create_task(self._async_bus_load_tick(), name=f"comexio_{self.server_id}_bus_load_initial_tick")
+        return async_track_time_interval(
+            self.hass, self._async_bus_load_tick, timedelta(seconds=BUS_LOAD_POLL_INTERVAL_SEC)
+        )
+
+    async def _async_bus_load_tick(self, _now: datetime | None = None) -> None:
+        """Poll internal bus workload (%) + SD-card presence on a fast, independent cadence.
+
+        Deliberately does NOT call async_set_updated_data — at a 10s cadence that would
+        notify every coordinator entity for no benefit. Only
+        the dedicated bus-load sensors listen for this dispatcher signal.
+
+        Values are type-checked (not just presence-checked) since they come straight from
+        an external HTTP endpoint — an unexpected type falls back to None (HA renders that
+        as "unknown") rather than exposing a wrongly-typed state. `workload` accepts int or
+        float (Comexio's JSON serializer isn't guaranteed to always emit whole numbers) but
+        never bool, since bool is a native int subclass and would otherwise slip through as
+        0/1.
+
+        After BUS_LOAD_FAIL_STREAK_THRESHOLD consecutive failed ticks, the readings are
+        reset to None instead of silently keeping the last successful value forever — a
+        persistent fetch failure should surface as "unknown", not a stale-but-plausible
+        percentage.
+        """
+        result = await self.api.get_bus_workload()
+        if not result:
+            self._bus_load_fail_streak += 1
+            if self._bus_load_fail_streak == BUS_LOAD_FAIL_STREAK_THRESHOLD:
+                _LOGGER.warning(
+                    "Bus workload poll failed %s times in a row; diagnostics reset to unknown",
+                    self._bus_load_fail_streak,
+                )
+                self.bus_workload = None
+                self.bus_sd_card = None
+                async_dispatcher_send(self.hass, bus_load_signal(self.server_id))
+            return
+        self._bus_load_fail_streak = 0
+        workload = result.get("workload")
+        if isinstance(workload, bool) or not isinstance(workload, (int, float)):
+            self.bus_workload = None
+        else:
+            self.bus_workload = int(workload)
+        sd_card = result.get("sd_card")
+        self.bus_sd_card = sd_card if isinstance(sd_card, bool) else None
+        async_dispatcher_send(self.hass, bus_load_signal(self.server_id))
 
     async def async_config_entry_updated(self) -> None:
         """Handle config entry update (e.g. from Options Flow)."""

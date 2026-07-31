@@ -55,6 +55,23 @@ def fw_update_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_fw_update"
 
 
+# Bus workload monitoring: independent fast poll of the Comexio internal bus/CPU load,
+# separate from the main config-audit coordinator (which runs every few minutes). Only
+# the raw reading is exposed here — sustained-overload detection (e.g. "80% for 60s") is
+# left to a native HA automation (numeric_state trigger with a `for:` duration), which
+# already covers debounce/hysteresis correctly instead of reimplementing it in Python.
+BUS_LOAD_POLL_INTERVAL_SEC = 10
+
+# Consecutive failed ticks before the diagnostics fall back to "unknown" instead of
+# silently keeping the last successful reading forever.
+BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
+
+
+def bus_load_signal(server_id: str) -> str:
+    """Dispatcher signal fired when a fresh Comexio bus workload reading arrives."""
+    return f"{DOMAIN}_{server_id}_bus_load_update"
+
+
 # need for ha ip dns validation, to avoid false positives
 KNOWN_DOMAINS = [
     "fritz.box",

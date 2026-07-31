@@ -8,13 +8,15 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    PERCENTAGE,
     EntityCategory,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, bus_load_signal
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity
 
@@ -51,6 +53,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         [
             ComexioSyncStatusSensor(coordinator, coordinator.server_id),
             ComexioOfflineExtensionsSensor(coordinator, coordinator.server_id),
+            ComexioBusLoadSensor(coordinator, coordinator.server_id),
         ]
     )
 
@@ -153,3 +156,51 @@ class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"extensions": sorted(self.coordinator.offline_extensions)}
+
+
+class ComexioBusLoadSensor(SensorEntity):
+    """Comexio internal bus/CPU workload (%), polled on its own fast cadence.
+
+    Deliberately NOT a CoordinatorEntity: the reading changes every ~10s (see
+    const.BUS_LOAD_POLL_INTERVAL_SEC) via a dedicated dispatcher signal — routing it
+    through the main coordinator would notify every other entity on each tick for no
+    benefit.
+
+    Only the raw value is exposed — sustained-overload alerting (e.g. "80% for 60s") is
+    left to a native HA automation (numeric_state trigger with a `for:` duration).
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_icon = "mdi:chip"
+    _attr_name = "Bus Workload"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_bus_load_sensor"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.bus_workload
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, bus_load_signal(self.server_id), self._handle_bus_load_update)
+        )
+
+    @callback
+    def _handle_bus_load_update(self) -> None:
+        self.async_write_ha_state()
