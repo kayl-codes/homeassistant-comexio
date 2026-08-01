@@ -183,14 +183,20 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 update_status=update_status,
             )
 
-            added, removed, updated, renamed, updated_ip, recreated_classes = await self._sync_all_classes(
-                ctx, audit_data, dev_ids
-            )
+            (
+                added,
+                removed,
+                updated,
+                renamed,
+                updated_ip,
+                recreated_classes,
+                skipped_creates,
+            ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
 
             duration = datetime.datetime.now() - start_time
             duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
             msg = self._build_sync_result_message(
-                added, updated, renamed, removed, recreated_classes, updated_ip, duration_str
+                added, updated, renamed, removed, recreated_classes, updated_ip, duration_str, skipped_creates
             )
 
             self.coordinator.last_audit_failed = False
@@ -227,7 +233,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def _sync_all_classes(
         self, ctx: _SyncContext, audit_data: dict[str, Any], dev_ids: dict[str, str | None]
-    ) -> tuple[int, int, int, int, bool, list[str]]:
+    ) -> tuple[int, int, int, int, bool, list[str], int]:
         """Run `_sync_class` for every Web-IO class and aggregate the results."""
         missing_items = audit_data.get("missing", [])
         renamed_items = audit_data.get("rename", [])
@@ -237,6 +243,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         added, removed, updated, renamed = 0, 0, 0, 0
         updated_ip = False
         recreated_classes: list[str] = []
+        skipped_creates = 0
         # Split the shared progress span evenly across however many classes exist,
         # so the UI bar advances smoothly regardless of len(WEBIO_CLASSES).
         pct_span = (SYNC_PROGRESS_END_PCT - SYNC_PROGRESS_START_PCT) / len(WEBIO_CLASSES)
@@ -267,10 +274,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             updated += cls_result["updated"]
             renamed += cls_result["renamed"]
             updated_ip = updated_ip or cls_result["updated_ip"]
+            skipped_creates += cls_result["skipped_creates"]
             if cls_result["recreated"]:
                 recreated_classes.append(cls)
 
-        return added, removed, updated, renamed, updated_ip, recreated_classes
+        return added, removed, updated, renamed, updated_ip, recreated_classes, skipped_creates
 
     def _build_sync_result_message(
         self,
@@ -281,6 +289,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         recreated_classes: list[str],
         updated_ip: bool,
         duration_str: str,
+        skipped_creates: int = 0,
     ) -> str:
         """Compose the final sync-result notification text."""
         recreate_note = ""
@@ -288,17 +297,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             recreated_str = ", ".join(webio_class_label(c) for c in recreated_classes)
             recreate_note = f"🚀 Recreated: {recreated_str}\n\n"
 
+        skip_note = ""
+        if skipped_creates:
+            skip_note = (
+                f"⚠️ Skipped {skipped_creates} creation(s) — Web-IO base class missing. "
+                "Run a Full Sync to recreate it.\n\n"
+            )
+
         changed = added + updated + renamed + removed
-        if changed == 0 and not recreated_classes and updated_ip:
+        if changed == 0 and not recreated_classes and updated_ip and not skipped_creates:
             return (
                 "✅ **Comexio Server Address updated**\n\n"
                 f"The IP address has been successfully updated in the Web-IO device(s).\n"
                 f"⏱ Duration: {duration_str}"
             )
-        if changed == 0 and recreated_classes and not updated_ip:
+        if changed == 0 and recreated_classes and not updated_ip and not skipped_creates:
             return f"✅ **Comexio Recreation Finished**\n\n{recreate_note}⏱ Duration: {duration_str}"
         return (
-            f"✅ **Comexio Sync Finished**\n\n{recreate_note}"
+            f"✅ **Comexio Sync Finished**\n\n{recreate_note}{skip_note}"
             f"Results: +{added}, {updated} updated, {renamed} renamed, -{removed} removed"
             + (", IP-Address updated" if updated_ip else "")
             + f".\n⏱ Duration: {duration_str}"
@@ -475,11 +491,22 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 _LOGGER.debug("[%s] %s: resolved fallback Base ID: %s", self.server_id, label, base_id)
 
         tasks_to_do = self._build_delta_tasks(cls_effective_action, cls_renamed, cls_orphans, cls_missing, cls_types)
-        if not base_id and any(t["type"] == "create" for t in tasks_to_do):
-            raise RuntimeError(
-                f"{label}: cannot create Web-IO commands — no base class found "
-                f"(device={class_dev_id}). Run a Full Sync to recreate the class first."
-            )
+        skipped_creates = 0
+        if not base_id:
+            skipped_creates = sum(1 for t in tasks_to_do if t["type"] == "create")
+            if skipped_creates:
+                # base_id is only read by save_single_command for brand-new commands
+                # (deviceBaseId); rename/type-fix pass existing_cmd_id and don't need it,
+                # so only the create tasks are unsafe to run here — skip those, keep going.
+                _LOGGER.warning(
+                    "[%s] %s: no Web-IO base class found (device=%s) — skipping %d create task(s). "
+                    "Run a Full Sync to recreate the class first.",
+                    self.server_id,
+                    label,
+                    class_dev_id,
+                    skipped_creates,
+                )
+                tasks_to_do = [t for t in tasks_to_do if t["type"] != "create"]
         total_tasks = max(1, len(tasks_to_do))
         on_progress = partial(
             self._report_delta_progress, ctx, tasks_to_do, total_tasks, label, cls_effective_action, pct_start, pct_end
@@ -487,6 +514,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         result = await self._execute_delta_tasks(ctx, class_dev_id, base_id, tasks_to_do, on_progress)
         result["updated_ip"] = False
+        result["skipped_creates"] = skipped_creates
 
         # Final step: Update Server Address (IP) — save_single_command does not
         # update device-level settings, so this is always a separate explicit call.
@@ -627,6 +655,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 "renamed": 0,
                 "updated_ip": False,
                 "recreated": True,
+                "skipped_creates": 0,
             }
 
         result = await self._delta_sync_class(
