@@ -53,6 +53,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         [
             ComexioSyncStatusSensor(coordinator, coordinator.server_id),
             ComexioOfflineExtensionsSensor(coordinator, coordinator.server_id),
+            ComexioVersionSensor(coordinator, coordinator.server_id),
             ComexioBusLoadSensor(coordinator, coordinator.server_id),
         ]
     )
@@ -156,6 +157,37 @@ class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"extensions": sorted(self.coordinator.offline_extensions)}
+
+
+class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor exposing Comexio's own firmware/frontend version (e.g. "11.0.2").
+
+    Also stamped onto the hub device's sw_version so it shows on the device info page —
+    HA merges device_info fields from every entity that shares the device identifier.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:chip"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_version_sensor"
+        self._attr_translation_key = "comexio_version"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+            "sw_version": self.coordinator.api.comexio_version,
+        }
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.api.comexio_version
 
 
 class ComexioBusLoadSensor(SensorEntity):

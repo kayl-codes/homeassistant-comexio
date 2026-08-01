@@ -121,6 +121,9 @@
       },
       "offline_extensions": {
         "name": "Extensions hors ligne"
+      },
+      "comexio_version": {
+        "name": "Version Comexio"
       }
     }
   },
