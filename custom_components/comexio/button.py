@@ -568,6 +568,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     ) -> dict[str, int]:
         """Run the collected delta-sync tasks against the Comexio API, in order."""
         api = ctx.api
+        dev_reg = dr.async_get(self.hass)
         result = {"added": 0, "removed": 0, "updated": 0, "renamed": 0}
         for idx, task in enumerate(tasks_to_do):
             if getattr(self.coordinator, "cancel_sync", False):
@@ -582,7 +583,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 result["removed"] += 1
             elif t_type == "type":
                 # Clean up entity from registry if type changed
-                dev_reg = dr.async_get(self.hass)
                 device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{self.server_id}_{item['id']}")})
                 if device:
                     dev_reg.async_remove_device(device.id)

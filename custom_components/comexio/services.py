@@ -645,13 +645,9 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
                     _LOGGER.info("Base class '%s' is deletable, performing clean reinstall.", class_name)
                     await api.delete_webio_base(base_id)
                 else:
-                    persistent_notification.async_create(
-                        hass,
-                        f"Class '{class_name}' is in use by Comexio logic and cannot be deleted. "
-                        "Please use the Smart-Sync button for individual updates.",
-                        title="Bulk-Sync blocked",
+                    results.append(
+                        f"{class_name}: skipped — in use by Comexio logic, use the Smart-Sync button instead"
                     )
-                    results.append(f"{class_name}: skipped (in use, not deletable)")
                     continue
 
             success, result_val = await api.upload_web_io(server_id, class_name, web_io_json)

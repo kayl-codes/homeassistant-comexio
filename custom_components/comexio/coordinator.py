@@ -36,6 +36,8 @@ from .const import (
     WEBIO_CLASSES,
     bus_load_signal,
     fw_update_signal,
+    io_audit_key,
+    is_io_audit_key,
     webio_class_label,
 )
 
@@ -200,7 +202,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 }
             # 2. HA Map: IOs
             for io in final_data["io"]:
-                key = f"IO_{io['ext_name']}_{io['identifier']}"
+                key = io_audit_key(io["ext_name"], io["identifier"])
 
                 # Since api.py now provides 'is_binary', derive
                 # the audit type ('digital'/'analog') here:
@@ -224,7 +226,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         key = parts[1]
                     elif parts[1] == "IO" and len(parts) >= 4:
                         # IO identification via "HA IO <Ext> <Ident>"
-                        key = f"IO_{parts[2]}_{parts[3]}"
+                        key = io_audit_key(parts[2], parts[3])
 
                 if key not in com_map:
                     com_map[key] = []
@@ -325,7 +327,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Check for missing, renamed or type-mismatched items
             for key, ha in ha_map.items():
-                key_class = WEBIO_CLASS_IO if key.startswith("IO_") else WEBIO_CLASS_MARKER
+                key_class = WEBIO_CLASS_IO if is_io_audit_key(key) else WEBIO_CLASS_MARKER
                 if key not in com_map:
                     missing_items.append(
                         {"name": ha["name"], "payload": payload_map.get(ha["name"]), "webio_class": key_class}

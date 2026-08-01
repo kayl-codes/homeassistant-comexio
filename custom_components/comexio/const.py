@@ -53,6 +53,22 @@ def webio_class_label(webio_class: str) -> str:
     return _WEBIO_CLASS_LABELS[webio_class]
 
 
+# Internal audit-map key convention (coordinator._async_update_data): IO entries are keyed
+# as "IO_{ext_name}_{identifier}", markers as bare "M{id}" — centralized here so the build
+# and classify sides can't drift apart.
+_IO_AUDIT_KEY_PREFIX = "IO_"
+
+
+def io_audit_key(ext_name: str, identifier: str) -> str:
+    """Build the internal audit-map key identifying an IO (as opposed to a Marker)."""
+    return f"{_IO_AUDIT_KEY_PREFIX}{ext_name}_{identifier}"
+
+
+def is_io_audit_key(key: str) -> bool:
+    """Whether an internal audit-map key identifies an IO (vs. a Marker)."""
+    return key.startswith(_IO_AUDIT_KEY_PREFIX)
+
+
 # Sync-progress percentage span shared by all Web-IO classes, subdivided evenly per class
 # in button.py's `_class_pct_ranges` so the UI progress bar advances smoothly regardless
 # of how many classes exist (currently 2, but not hard-coded to that number).
