@@ -103,8 +103,10 @@ class ComexioRepairFlow(RepairsFlow):
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
         coordinator.async_set_updated_data(coordinator.data)
 
+        is_de = self.hass.config.language == "de"
+        title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} statistics cleaned up"
         return self.async_create_entry(
-            title=f"{len(ids)} statistics cleaned up",
+            title=title,
             data={},
         )
 
@@ -112,15 +114,33 @@ class ComexioRepairFlow(RepairsFlow):
         """Render the confirmation form describing how many orphaned statistics were found."""
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.orphaned_statistics) if coordinator else self.issue_data.get("count", 0)
+        is_de = self.hass.config.language == "de"
+
+        if is_de:
+            description = (
+                f"Es wurden **{count} verwaiste Langzeit-Statistiken** gefunden, die zu keiner "
+                "existierenden Entität mehr gehören (Überreste früherer Entity-IDs).\n\n"
+                "Diese können gefahrlos gelöscht werden. **Laufende Sensoren und deren aktuelle "
+                "Historie sind nicht betroffen** — nur die verwaisten Einträge werden entfernt.\n\n"
+                "Möchtest du sie jetzt löschen?"
+            )
+        else:
+            description = (
+                f"**{count} orphaned long-term statistics** were found that no longer belong to "
+                "any existing entity (leftovers from previous entity IDs).\n\n"
+                "They can be safely deleted. **Live sensors and their current history are not affected** "
+                "— only the orphaned entries are removed.\n\n"
+                "Would you like to delete them now?"
+            )
 
         options = {
-            "fix": f"🧹 Clean up now ({count})",
-            "ignore": "🔇 Suppress this message",
+            "fix": f"🧹 {'Jetzt bereinigen' if is_de else 'Clean up now'} ({count})",
+            "ignore": f"🔇 {'Diese Nachricht ignorieren' if is_de else 'Suppress this message'}",
         }
 
         return self.async_show_form(
             step_id="statistics_cleanup",
-            description_placeholders={"count": count},
+            description=description,
             data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
         )
 
@@ -150,22 +170,41 @@ class ComexioRepairFlow(RepairsFlow):
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             coordinator.async_set_updated_data(coordinator.data)
 
+            is_de = self.hass.config.language == "de"
+            title = f"Entitäts-IDs für {migrated} Einträge korrigiert" if is_de else f"{migrated} entity IDs fixed"
             return self.async_create_entry(
-                title=f"{migrated} entity IDs fixed",
+                title=title,
                 data={},
             )
 
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.entity_id_mismatches) if coordinator else self.issue_data.get("count", 0)
+        is_de = self.hass.config.language == "de"
+
+        if is_de:
+            description = (
+                f"Es wurden **{count} Entitäten** mit doppeltem Server-ID-Präfix gefunden.\n\n"
+                "Die Entity-IDs können automatisch korrigiert werden. **History und Automationen "
+                "bleiben erhalten**, sofern sie die Entity-ID direkt referenzieren — "
+                "bitte prüfe Automationen nach der Migration.\n\n"
+                "Möchtest du die IDs jetzt korrigieren?"
+            )
+        else:
+            description = (
+                f"**{count} entities** were found with a duplicate server-ID prefix in their entity_id.\n\n"
+                "The entity IDs can be corrected automatically. **History and automations are preserved**, "
+                "but please review automations that reference these entity IDs directly.\n\n"
+                "Would you like to fix the IDs now?"
+            )
 
         options = {
-            "fix": f"✅ Fix now ({count})",
-            "ignore": "🔇 Suppress this message",
+            "fix": f"✅ {'Jetzt korrigieren' if is_de else 'Fix now'} ({count})",
+            "ignore": f"🔇 {'Diese Nachricht ignorieren' if is_de else 'Suppress this message'}",
         }
 
         return self.async_show_form(
             step_id="entity_id_fix",
-            description_placeholders={"count": count},
+            description=description,
             data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
         )
 

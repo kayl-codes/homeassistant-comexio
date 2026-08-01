@@ -107,14 +107,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.cover_keywords: list[str] = []
         # R4: Lock to prevent concurrent sync runs
         self._sync_lock: asyncio.Lock = asyncio.Lock()
-        # R2: Suppress update_listener reload when an internal write (sync, ignored-marker
-        # cleanup, plan_map persist, ...) triggers a reload of its own. Stores the exact
-        # options snapshot just written rather than a bare bool, so a listener run only skips
-        # if entry.options still matches what this coordinator wrote — an unrelated write
-        # (e.g. a concurrent user options-flow save) landing in between is detected and
-        # reloads anyway instead of being silently swallowed. See
-        # request_options_update_without_reload().
-        self._skip_next_listener_reload_options: dict[str, Any] | None = None
+        # R2: Suppress update_listener reload when sync triggers the options write
+        self._skip_next_listener_reload: bool = False
         # R1: Track which markers/IOs received a webhook update during the last API fetch
         self._webhook_updated_markers: set[str] = set()
         self._webhook_updated_io_ids: set[str] = set()
@@ -727,17 +721,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         else:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
-
-    def request_options_update_without_reload(self, new_options: dict[str, Any]) -> None:
-        """Persist new_options to the config entry, marking the listener-triggered reload
-        it schedules as redundant (see R2) — used when the caller either doesn't need a
-        reload at all, or is about to trigger its own explicit one. update_listener only
-        honors the skip if entry.options still equals new_options when it runs; if another
-        write landed in between (e.g. a concurrent user options-flow save), it reloads
-        anyway instead of silently dropping that write.
-        """
-        self._skip_next_listener_reload_options = new_options.copy()
-        self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
 
     async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
         """Detect invalid/valid ignored marker IDs and manage repair issues."""
