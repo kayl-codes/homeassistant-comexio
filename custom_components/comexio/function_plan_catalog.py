@@ -167,11 +167,25 @@ class FunctionPlanCatalogManager:
         # Storage key keeps the legacy "logikplan" spelling — renaming it would discard
         # the catalog already persisted under .storage/.
         self._store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_logikplan_catalog_{server_id}")
-        self._data: dict[str, Any] | None = None
+        # Always a dict — persistence failures fall back to an empty in-memory catalog
+        # instead of raising, per this class's "never raises" contract.
+        self._data: dict[str, Any] = {}
+        self._loaded = False
 
     async def _async_ensure_loaded(self) -> None:
-        if self._data is None:
-            self._data = await self._store.async_load() or {}
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            loaded = await self._store.async_load()
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Function Plan catalog: failed to load persisted catalog — starting empty",
+                self._server_id,
+            )
+            return
+        if isinstance(loaded, dict):
+            self._data = loaded
 
     async def async_update_from_raw_config(self, raw_config: dict[str, Any], comexio_version: str | None) -> None:
         """Extract, validate and persist the catalog if it changed and isn't corrupt.
@@ -202,18 +216,20 @@ class FunctionPlanCatalogManager:
         calendar_functions = _extract_calendar_functions(fub_modules)
 
         await self._async_ensure_loaded()
-        assert self._data is not None
         old_types: dict[str, Any] = self._data.get("fub_types", {})
         old_base: dict[str, Any] = self._data.get("fub_base", {})
         old_time_modules: dict[str, Any] = self._data.get("time_modules", {})
         old_calendar_functions: dict[str, Any] = self._data.get("calendar_functions", {})
         old_version = self._data.get("comexio_version")
 
-        # Shrink guard for fub_types/fub_base only: a firmware catalog only grows across
-        # updates, so a drop in count more likely means a partial/logged-out page scrape
-        # than a genuine removal. time_modules is user configuration (like Markers) and
+        # Shrink guard for fub_types/fub_base only: within the same firmware, a catalog
+        # only grows, so a drop in count more likely means a partial/logged-out page
+        # scrape than a genuine removal — UNLESS the version stamp itself changed, which
+        # means a real firmware update was detected and may legitimately have removed or
+        # consolidated block types. time_modules is user configuration (like Markers) and
         # legitimately shrinks when the user deletes a timer — no guard for it.
-        if old_types and len(fub_types) < len(old_types):
+        version_changed = bool(comexio_version) and bool(old_version) and comexio_version != old_version
+        if old_types and len(fub_types) < len(old_types) and not version_changed:
             _LOGGER.warning(
                 "[%s] Function Plan catalog: new FubTypes count (%d) < cached (%d) — keeping previous catalog",
                 self._server_id,
@@ -221,7 +237,7 @@ class FunctionPlanCatalogManager:
                 len(old_types),
             )
             return
-        if old_base and len(fub_base) < len(old_base):
+        if old_base and len(fub_base) < len(old_base) and not version_changed:
             _LOGGER.warning(
                 "[%s] Function Plan catalog: new fubBase count (%d) < cached (%d) — keeping previous catalog",
                 self._server_id,
@@ -247,7 +263,13 @@ class FunctionPlanCatalogManager:
             "time_modules": time_modules,
             "calendar_functions": calendar_functions,
         }
-        await self._store.async_save(self._data)
+        try:
+            await self._store.async_save(self._data)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Function Plan catalog: failed to persist catalog — keeping in-memory only",
+                self._server_id,
+            )
         _LOGGER.info(
             "[%s] Function Plan catalog updated (Comexio %s): %d element types, %d fubBase blocks, "
             "%d time modules, %d calendar functions",
@@ -262,5 +284,4 @@ class FunctionPlanCatalogManager:
     async def async_get_catalog(self) -> dict[str, Any]:
         """Return the cached catalog (for future consumers: analyses, rebuild)."""
         await self._async_ensure_loaded()
-        assert self._data is not None
         return self._data
