@@ -103,8 +103,10 @@ class ComexioRepairFlow(RepairsFlow):
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
         coordinator.async_set_updated_data(coordinator.data)
 
+        is_de = self.hass.config.language == "de"
+        title = f"{len(ids)} verwaiste Statistiken gelöscht" if is_de else f"{len(ids)} statistics cleaned up"
         return self.async_create_entry(
-            title=f"{len(ids)} statistics cleaned up",
+            title=title,
             data={},
         )
 
@@ -112,10 +114,11 @@ class ComexioRepairFlow(RepairsFlow):
         """Render the confirmation form describing how many orphaned statistics were found."""
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.orphaned_statistics) if coordinator else self.issue_data.get("count", 0)
+        is_de = self.hass.config.language == "de"
 
         options = {
-            "fix": f"🧹 Clean up now ({count})",
-            "ignore": "🔇 Suppress this message",
+            "fix": f"🧹 {'Jetzt bereinigen' if is_de else 'Clean up now'} ({count})",
+            "ignore": f"🔇 {'Diese Nachricht ignorieren' if is_de else 'Suppress this message'}",
         }
 
         return self.async_show_form(
@@ -150,17 +153,20 @@ class ComexioRepairFlow(RepairsFlow):
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             coordinator.async_set_updated_data(coordinator.data)
 
+            is_de = self.hass.config.language == "de"
+            title = f"Entitäts-IDs für {migrated} Einträge korrigiert" if is_de else f"{migrated} entity IDs fixed"
             return self.async_create_entry(
-                title=f"{migrated} entity IDs fixed",
+                title=title,
                 data={},
             )
 
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.entity_id_mismatches) if coordinator else self.issue_data.get("count", 0)
+        is_de = self.hass.config.language == "de"
 
         options = {
-            "fix": f"✅ Fix now ({count})",
-            "ignore": "🔇 Suppress this message",
+            "fix": f"✅ {'Jetzt korrigieren' if is_de else 'Fix now'} ({count})",
+            "ignore": f"🔇 {'Diese Nachricht ignorieren' if is_de else 'Suppress this message'}",
         }
 
         return self.async_show_form(
