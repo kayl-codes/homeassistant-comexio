@@ -22,6 +22,9 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 _MARKER_ID_SUFFIX_RE = re.compile(r"(\d+)")
 
+ACTION_FIX = "fix"
+ACTION_IGNORE = "ignore"
+
 
 async def async_setup_entry(hass: HomeAssistant, entry):
     """Set up the repairs platform."""
@@ -78,7 +81,7 @@ class ComexioRepairFlow(RepairsFlow):
         if not entry:
             return self.async_abort(reason="entry_not_found")
 
-        if action == "ignore":
+        if action == ACTION_IGNORE:
             new_options = dict(entry.options)
             new_options[CONF_STATISTICS_CLEANUP_IGNORED] = True
             self.hass.config_entries.async_update_entry(entry, options=new_options)
@@ -121,9 +124,9 @@ class ComexioRepairFlow(RepairsFlow):
             description_placeholders={"count": count},
             data_schema=vol.Schema(
                 {
-                    vol.Required("action", default="fix"): SelectSelector(
+                    vol.Required("action", default=ACTION_FIX): SelectSelector(
                         SelectSelectorConfig(
-                            options=["fix", "ignore"],
+                            options=[ACTION_FIX, ACTION_IGNORE],
                             mode=SelectSelectorMode.LIST,
                             translation_key="statistics_cleanup_action",
                         )
@@ -142,7 +145,7 @@ class ComexioRepairFlow(RepairsFlow):
             if not entry:
                 return self.async_abort(reason="entry_not_found")
 
-            if action == "ignore":
+            if action == ACTION_IGNORE:
                 new_options = dict(entry.options)
                 new_options[CONF_ENTITY_ID_MIGRATION_IGNORED] = True
                 self.hass.config_entries.async_update_entry(entry, options=new_options)
@@ -173,9 +176,9 @@ class ComexioRepairFlow(RepairsFlow):
             description_placeholders={"count": count},
             data_schema=vol.Schema(
                 {
-                    vol.Required("action", default="fix"): SelectSelector(
+                    vol.Required("action", default=ACTION_FIX): SelectSelector(
                         SelectSelectorConfig(
-                            options=["fix", "ignore"],
+                            options=[ACTION_FIX, ACTION_IGNORE],
                             mode=SelectSelectorMode.LIST,
                             translation_key="entity_id_fix_action",
                         )
