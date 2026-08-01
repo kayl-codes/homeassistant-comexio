@@ -57,6 +57,18 @@
         "600": "600 min (10 Std)",
         "1440": "1440 min (24 Std)"
       }
+    },
+    "statistics_cleanup_action": {
+      "options": {
+        "fix": "🧹 Jetzt bereinigen",
+        "ignore": "🔇 Diese Nachricht ignorieren"
+      }
+    },
+    "entity_id_fix_action": {
+      "options": {
+        "fix": "✅ Jetzt korrigieren",
+        "ignore": "🔇 Diese Nachricht ignorieren"
+      }
     }
   },
   "options": {

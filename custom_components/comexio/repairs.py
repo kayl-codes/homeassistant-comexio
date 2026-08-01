@@ -6,6 +6,7 @@ import re
 from homeassistant.components.repairs import RepairsFlow
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
+from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
 import voluptuous as vol
 
 from .const import (
@@ -114,17 +115,21 @@ class ComexioRepairFlow(RepairsFlow):
         """Render the confirmation form describing how many orphaned statistics were found."""
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.orphaned_statistics) if coordinator else self.issue_data.get("count", 0)
-        is_de = self.hass.config.language == "de"
-
-        options = {
-            "fix": f"🧹 {'Jetzt bereinigen' if is_de else 'Clean up now'} ({count})",
-            "ignore": f"🔇 {'Diese Nachricht ignorieren' if is_de else 'Suppress this message'}",
-        }
 
         return self.async_show_form(
             step_id="statistics_cleanup",
             description_placeholders={"count": count},
-            data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action", default="fix"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=["fix", "ignore"],
+                            mode=SelectSelectorMode.LIST,
+                            translation_key="statistics_cleanup_action",
+                        )
+                    )
+                }
+            ),
         )
 
     async def async_step_entity_id_fix(self, user_input=None):
@@ -162,17 +167,21 @@ class ComexioRepairFlow(RepairsFlow):
 
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.entity_id_mismatches) if coordinator else self.issue_data.get("count", 0)
-        is_de = self.hass.config.language == "de"
-
-        options = {
-            "fix": f"✅ {'Jetzt korrigieren' if is_de else 'Fix now'} ({count})",
-            "ignore": f"🔇 {'Diese Nachricht ignorieren' if is_de else 'Suppress this message'}",
-        }
 
         return self.async_show_form(
             step_id="entity_id_fix",
             description_placeholders={"count": count},
-            data_schema=vol.Schema({vol.Required("action", default="fix"): vol.In(options)}),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action", default="fix"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=["fix", "ignore"],
+                            mode=SelectSelectorMode.LIST,
+                            translation_key="entity_id_fix_action",
+                        )
+                    )
+                }
+            ),
         )
 
     async def async_step_select_action(self, user_input=None):
