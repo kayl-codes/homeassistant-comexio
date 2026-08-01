@@ -291,7 +291,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         data={
                             "entry_id": self.config_entry.entry_id,
                             "missing_classes": missing_classes,
-                            "counts": {"type": 0, "missing": len(ha_map), "rename": 0, "orphan": 0, "all": len(ha_map)},
                         },
                     )
                 return final_data
