@@ -739,6 +739,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._skip_next_listener_reload_options = new_options.copy()
         self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
 
+    def take_pending_reload_skip_options(self) -> dict[str, Any] | None:
+        """Return and clear the options snapshot recorded by
+        request_options_update_without_reload(), if any (see R2). One-shot: the snapshot is
+        consumed on read so a stale value can't leak into a later, unrelated listener run.
+        """
+        options = self._skip_next_listener_reload_options
+        self._skip_next_listener_reload_options = None
+        return options
+
     async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
         """Detect invalid/valid ignored marker IDs and manage repair issues."""
         ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()

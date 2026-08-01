@@ -348,10 +348,9 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     # in between, entry.options has moved on and this reload must go through, or that write
     # would be silently lost.
     coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    expected_options = getattr(coordinator, "_skip_next_listener_reload_options", None) if coordinator else None
+    expected_options = coordinator.take_pending_reload_skip_options() if coordinator else None
     if expected_options is not None:
-        coordinator._skip_next_listener_reload_options = None
-        if dict(entry.options) == expected_options:
+        if entry.options == expected_options:
             _LOGGER.debug(
                 "[%s] update_listener: skipping reload (explicit reload pending, or none needed)",
                 coordinator.server_id,
