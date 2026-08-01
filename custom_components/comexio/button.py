@@ -191,12 +191,21 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 updated_ip,
                 recreated_classes,
                 skipped_creates,
+                per_class,
             ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
 
             duration = datetime.datetime.now() - start_time
             duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
             msg = self._build_sync_result_message(
-                added, updated, renamed, removed, recreated_classes, updated_ip, duration_str, skipped_creates
+                added,
+                updated,
+                renamed,
+                removed,
+                recreated_classes,
+                updated_ip,
+                duration_str,
+                skipped_creates,
+                per_class,
             )
 
             self.coordinator.last_audit_failed = False
@@ -233,7 +242,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def _sync_all_classes(
         self, ctx: _SyncContext, audit_data: dict[str, Any], dev_ids: dict[str, str | None]
-    ) -> tuple[int, int, int, int, bool, list[str], int]:
+    ) -> tuple[int, int, int, int, bool, list[str], int, dict[str, dict[str, int]]]:
         """Run `_sync_class` for every Web-IO class and aggregate the results."""
         missing_items = audit_data.get("missing", [])
         renamed_items = audit_data.get("rename", [])
@@ -244,6 +253,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         updated_ip = False
         recreated_classes: list[str] = []
         skipped_creates = 0
+        per_class: dict[str, dict[str, int]] = {}
         # Split the shared progress span evenly across however many classes exist,
         # so the UI bar advances smoothly regardless of len(WEBIO_CLASSES).
         pct_span = (SYNC_PROGRESS_END_PCT - SYNC_PROGRESS_START_PCT) / len(WEBIO_CLASSES)
@@ -277,8 +287,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             skipped_creates += cls_result["skipped_creates"]
             if cls_result["recreated"]:
                 recreated_classes.append(cls)
+            else:
+                # Recreated classes are already called out separately in the result
+                # message (recreate_note); only delta-synced classes need a breakdown.
+                per_class[cls] = {
+                    "added": cls_result["added"],
+                    "removed": cls_result["removed"],
+                    "updated": cls_result["updated"],
+                    "renamed": cls_result["renamed"],
+                }
 
-        return added, removed, updated, renamed, updated_ip, recreated_classes, skipped_creates
+        return added, removed, updated, renamed, updated_ip, recreated_classes, skipped_creates, per_class
 
     def _build_sync_result_message(
         self,
@@ -290,6 +309,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         updated_ip: bool,
         duration_str: str,
         skipped_creates: int = 0,
+        per_class: dict[str, dict[str, int]] | None = None,
     ) -> str:
         """Compose the final sync-result notification text."""
         recreate_note = ""
@@ -317,8 +337,23 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             f"✅ **Comexio Sync Finished**\n\n{recreate_note}{skip_note}"
             f"Results: +{added}, {updated} updated, {renamed} renamed, -{removed} removed"
             + (", IP-Address updated" if updated_ip else "")
-            + f".\n⏱ Duration: {duration_str}"
+            + f".\n{self._build_per_class_note(per_class)}⏱ Duration: {duration_str}"
         )
+
+    @staticmethod
+    def _build_per_class_note(per_class: dict[str, dict[str, int]] | None) -> str:
+        """Format a per-class delta breakdown line, only when >1 class actually changed."""
+        if not per_class:
+            return ""
+        changed_classes = {cls: counts for cls, counts in per_class.items() if any(counts.values())}
+        if len(changed_classes) < 2:
+            return ""
+        lines = [
+            f"  • {webio_class_label(cls)}: +{c['added']}, {c['updated']} updated, "
+            f"{c['renamed']} renamed, -{c['removed']} removed"
+            for cls, c in changed_classes.items()
+        ]
+        return "\n".join(lines) + "\n"
 
     async def _finalize_sync(self) -> None:
         """Reset sync flags/UI state and force a full integration reload after a press."""
