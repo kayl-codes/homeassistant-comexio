@@ -569,11 +569,30 @@ class ComexioAPI:
         web_devices = conf.get("WebDevices", {})
         fub_10 = fub_modules.get("10", {})
 
+        missing_classes = []
         for webio_class in WEBIO_CLASSES:
             target_dev_id = self._assign_webio_device_id(web_devices, data, webio_name, webio_class)
             if target_dev_id and target_dev_id in fub_10:
                 for w_id, w_obj in fub_10[target_dev_id].items():
                     self._add_webhook_command(data, w_id, w_obj, webio_class)
+            elif not target_dev_id:
+                missing_classes.append(webio_class)
+
+        if missing_classes and any(d.get("Name") == webio_name for d in web_devices.values()):
+            # Pre-split installs have a single Web-IO device named exactly `webio_name`; it
+            # won't match the new "<name> [M]"/"<name> [IO]" class names, so both classes look
+            # missing right after upgrading. No automatic migration on purpose (see CLAUDE.md:
+            # no backwards-compat shims) — a Full Sync creates the new class(es); the old device
+            # is left untouched and can be removed manually once no longer needed.
+            _LOGGER.warning(
+                "Found a legacy Web-IO device named '%s' without a Marker/IO class suffix. "
+                "This version splits Web-IO into separate classes ('%s' / '%s'); run a Full Sync "
+                "to create the missing class(es): %s. The old device is left in place.",
+                webio_name,
+                webio_class_name(webio_name, WEBIO_CLASS_MARKER),
+                webio_class_name(webio_name, WEBIO_CLASS_IO),
+                ", ".join(missing_classes),
+            )
 
     def _assign_webio_device_id(
         self,
@@ -953,7 +972,8 @@ class ComexioAPI:
         commands: list[dict[str, Any]] = []
 
         # 1. Create Web-IO for markers
-        for m in [] if webio_class == WEBIO_CLASS_IO else parsed_data.get("markers", []):
+        markers = parsed_data.get("markers", []) if webio_class != WEBIO_CLASS_IO else []
+        for m in markers:
             is_ana = m["type"] == "analog"
             safe_id = str(m["id"]).replace('"', '\\"')
             lua = (
@@ -990,7 +1010,8 @@ class ComexioAPI:
             )
 
         # 2. Create Web-IO for IOs
-        for io_item in [] if webio_class == WEBIO_CLASS_MARKER else parsed_data.get("io", []):
+        io_entries = parsed_data.get("io", []) if webio_class != WEBIO_CLASS_MARKER else []
+        for io_item in io_entries:
             # check data type
             is_ana = not io_item.get("is_binary", False)
 
