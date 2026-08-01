@@ -370,8 +370,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         #    suppresses its reload — the explicit reload below is the single reload (R2).
         new_options = dict(self.coordinator.config_entry.options)
         new_options["audit_ignored"] = False
-        self.coordinator._skip_next_listener_reload = True
-        self.hass.config_entries.async_update_entry(self.coordinator.config_entry, options=new_options)
+        self.coordinator.request_options_update_without_reload(new_options)
 
         # 3. Release sync lock before reload (old coordinator is replaced by reload anyway)
         self.coordinator._sync_lock.release()
