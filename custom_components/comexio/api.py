@@ -21,7 +21,14 @@ from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from multidict import MultiDict
 
 # Mandatory DOMAIN import for Audit logic
-from .const import KNOWN_DOMAINS, WEBIO_CLASS_IO, WEBIO_CLASS_MARKER, WEBIO_CLASSES, webio_class_name
+from .const import (
+    KNOWN_DOMAINS,
+    WEBIO_CLASS_IO,
+    WEBIO_CLASS_MARKER,
+    WEBIO_CLASSES,
+    webio_class_label,
+    webio_class_name,
+)
 
 
 class SafeDict(dict):
@@ -591,7 +598,7 @@ class ComexioAPI:
                 webio_name,
                 webio_class_name(webio_name, WEBIO_CLASS_MARKER),
                 webio_class_name(webio_name, WEBIO_CLASS_IO),
-                ", ".join(missing_classes),
+                ", ".join(webio_class_label(c) for c in missing_classes),
             )
 
     def _assign_webio_device_id(
