@@ -130,7 +130,7 @@
         "step": {
           "select_action": {
             "title": "Configuración Inicial",
-            "description": "No se encontró la clase de dispositivo Web-IO requerida en su servidor Comexio.\n\n¿Desea crear la clase y el dispositivo ahora?"
+            "description": "Faltan la(s) clase(s) de dispositivo Web-IO requerida(s) en su servidor Comexio: **{missing_classes}**.\n\n¿Desea crearlas ahora?"
           }
         }
       }

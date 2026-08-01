@@ -1,3 +1,5 @@
+from enum import StrEnum
+
 # Version: 0.8.0
 DOMAIN = "comexio"
 
@@ -25,6 +27,69 @@ CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
 CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
 CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
 CONF_IGNORED_MARKERS = "ignored_markers"
+
+
+# Web-IO class split: HA maintains two separate Web-IO device classes on the Comexio
+# server — one for Markers, one for physical IOs — derived from the single webio_name
+# field in the config/options flow by appending a suffix. The webIoId (the per-command
+# key inside $FubModules["10"]) is a global counter across ALL Web-IO devices on a
+# Comexio server, never reused per-device (verified live 2026-07-27), so commands from
+# both classes can share one flat webio_commands lookup without ambiguity.
+class WebioClass(StrEnum):
+    """The two Web-IO device classes HA manages on the Comexio server.
+
+    A StrEnum so every existing string-based usage (dict keys, equality checks,
+    f-string interpolation, JSON payloads sent to/scraped back from Comexio)
+    keeps working unchanged, while call sites gain typo-safety via the members.
+    """
+
+    MARKER = "marker"
+    IO = "io"
+
+
+WEBIO_CLASS_MARKER = WebioClass.MARKER
+WEBIO_CLASS_IO = WebioClass.IO
+WEBIO_CLASSES = tuple(WebioClass)
+_WEBIO_CLASS_SUFFIXES = {WebioClass.MARKER: " [M]", WebioClass.IO: " [IO]"}
+_WEBIO_CLASS_LABELS = {WebioClass.MARKER: "Marker", WebioClass.IO: "IO"}
+
+
+def webio_class_name(webio_name: str, webio_class: str) -> str:
+    """Comexio Web-IO class name for one of the two HA-managed classes (marker/io)."""
+    if webio_class not in _WEBIO_CLASS_SUFFIXES:
+        raise ValueError(f"Unknown Web-IO class {webio_class!r}, expected one of {WEBIO_CLASSES}")
+    return f"{webio_name}{_WEBIO_CLASS_SUFFIXES[webio_class]}"
+
+
+def webio_class_label(webio_class: str) -> str:
+    """Short display label ('Marker'/'IO') for a Web-IO class, used in sync/audit messages."""
+    if webio_class not in _WEBIO_CLASS_LABELS:
+        raise ValueError(f"Unknown Web-IO class {webio_class!r}, expected one of {WEBIO_CLASSES}")
+    return _WEBIO_CLASS_LABELS[webio_class]
+
+
+# Internal audit-map key convention (coordinator._async_update_data): IO entries are keyed
+# as "IO_{ext_name}_{identifier}", markers as bare "M{id}" — centralized here so the build
+# and classify sides can't drift apart.
+_IO_AUDIT_KEY_PREFIX = "IO_"
+
+
+def io_audit_key(ext_name: str, identifier: str) -> str:
+    """Build the internal audit-map key identifying an IO (as opposed to a Marker)."""
+    return f"{_IO_AUDIT_KEY_PREFIX}{ext_name}_{identifier}"
+
+
+def is_io_audit_key(key: str) -> bool:
+    """Whether an internal audit-map key identifies an IO (vs. a Marker)."""
+    return key.startswith(_IO_AUDIT_KEY_PREFIX)
+
+
+# Sync-progress percentage span shared by all Web-IO classes, subdivided evenly per class
+# in button.py's `_class_pct_ranges` so the UI progress bar advances smoothly regardless
+# of how many classes exist (currently 2, but not hard-coded to that number).
+SYNC_PROGRESS_START_PCT = 5
+SYNC_PROGRESS_END_PCT = 95
+
 
 DEFAULT_NAME = "Comexio"
 

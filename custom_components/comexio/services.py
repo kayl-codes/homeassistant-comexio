@@ -11,7 +11,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 import yaml
 
-from .const import CONF_IGNORED_MARKERS, DOMAIN
+from .const import CONF_IGNORED_MARKERS, DOMAIN, WEBIO_CLASSES, webio_class_name
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -622,32 +622,42 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
         conf = {**coordinator.config_entry.data, **coordinator.config_entry.options}
         webio_name = conf.get("webio_name", "HomeAssistant")
 
-        web_io_json = api.generate_webio_json(server_id, webio_name, coordinator.data)
-
         if not do_upload:
+            preview_parts = []
+            for cls in WEBIO_CLASSES:
+                class_name = webio_class_name(webio_name, cls)
+                web_io_json = api.generate_webio_json(server_id, class_name, coordinator.data, webio_class=cls)
+                preview_parts.append(f"**{class_name}**\n```json\n{web_io_json}\n```")
             persistent_notification.async_create(
-                hass, f"```json\n{web_io_json}\n```", title=f"Comexio Preview ({server_id})"
+                hass, "\n\n".join(preview_parts), title=f"Comexio Preview ({server_id})"
             )
             return
 
-        base_info = await api.get_webio_base_info(webio_name)
-        if base_info:
-            base_id, deletable = base_info
-            if deletable:
-                _LOGGER.info("Base class is deletable, performing clean reinstall.")
-                await api.delete_webio_base(base_id)
-            else:
-                persistent_notification.async_create(
-                    hass,
-                    f"Class '{webio_name}' is in use by Comexio logic and cannot be deleted. "
-                    "Please use the Smart-Sync button for individual updates.",
-                    title="Bulk-Sync blocked",
-                )
-                return
+        results: list[str] = []
+        for cls in WEBIO_CLASSES:
+            class_name = webio_class_name(webio_name, cls)
+            web_io_json = api.generate_webio_json(server_id, class_name, coordinator.data, webio_class=cls)
 
-        success, result_val = await api.upload_web_io(server_id, webio_name, web_io_json)
-        msg = f"Sync successful! Base-ID: {result_val}" if success else f"Upload failed: {result_val}"
-        persistent_notification.async_create(hass, msg, title=f"Comexio Sync ({server_id})")
+            base_info = await api.get_webio_base_info(class_name)
+            if base_info:
+                base_id, deletable = base_info
+                if deletable:
+                    _LOGGER.info("Base class '%s' is deletable, performing clean reinstall.", class_name)
+                    await api.delete_webio_base(base_id)
+                else:
+                    results.append(
+                        f"{class_name}: skipped — in use by Comexio logic, use the Smart-Sync button instead"
+                    )
+                    continue
+
+            success, result_val = await api.upload_web_io(server_id, class_name, web_io_json)
+            results.append(
+                f"{class_name}: Base-ID {result_val}" if success else f"{class_name}: Upload failed: {result_val}"
+            )
+
+        persistent_notification.async_create(
+            hass, "\n".join(results) or "Nothing to do.", title=f"Comexio Sync ({server_id})"
+        )
 
     except Exception as e:
         _LOGGER.exception("Error in Comexio service: %s", e)

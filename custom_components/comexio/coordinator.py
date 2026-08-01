@@ -31,11 +31,44 @@ from .const import (
     DOMAIN,
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
+    WEBIO_CLASS_IO,
+    WEBIO_CLASS_MARKER,
+    WEBIO_CLASSES,
     bus_load_signal,
     fw_update_signal,
+    io_audit_key,
+    is_io_audit_key,
+    webio_class_label,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
+    """Whether a Web-IO device's recorded IP/port has drifted from this HA instance's current address."""
+    if not (com_dev_id and com_ip and com_ip != ha_address):
+        return False
+    try:
+        ha_host, ha_port = ha_address.rsplit(":", 1)
+        com_host, com_port = com_ip.rsplit(":", 1)
+
+        if ha_port != com_port:
+            # Textual deviation detected, check DNS resolution
+            return True
+
+        # Ports are identical, compare resolved IPs
+        def resolve(name: str) -> str:
+            try:
+                return socket.gethostbyname(name)
+            except OSError:
+                return name
+
+        ha_ip = await hass.async_add_executor_job(resolve, ha_host)
+        com_resolved_ip = await hass.async_add_executor_job(resolve, com_host)
+        return ha_ip != com_resolved_ip
+    except ValueError:
+        # Fallback on unexpected format
+        return True
 
 
 class ComexioCoordinator(DataUpdateCoordinator):
@@ -129,6 +162,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "markers": parsed_data["markers"] if import_markers else [],
                 "io": parsed_data["io"] if import_ios else [],
                 "webio_commands": parsed_data.get("webio_commands", {}),
+                "webio_devices": parsed_data.get("webio_devices", {}),
             }
 
             # R1: Merge API snapshot with any webhook values that arrived during the fetch.
@@ -195,7 +229,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 }
             # 2. HA Map: IOs
             for io in final_data["io"]:
-                key = f"IO_{io['ext_name']}_{io['identifier']}"
+                key = io_audit_key(io["ext_name"], io["identifier"])
 
                 # Since api.py now provides 'is_binary', derive
                 # the audit type ('digital'/'analog') here:
@@ -219,14 +253,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         key = parts[1]
                     elif parts[1] == "IO" and len(parts) >= 4:
                         # IO identification via "HA IO <Ext> <Ident>"
-                        key = f"IO_{parts[2]}_{parts[3]}"
+                        key = io_audit_key(parts[2], parts[3])
 
                 if key not in com_map:
                     com_map[key] = []
-                com_map[key].append({"name": full_name, "type": mapped_type, "id": cmd_id})
+                com_map[key].append(
+                    {
+                        "name": full_name,
+                        "type": mapped_type,
+                        "id": cmd_id,
+                        "webio_class": info.get("webioClass"),
+                    }
+                )
 
-            # Create a repair issue if the Web-IO class is entirely missing on the server
-            if not com_map:
+            # Create a repair issue if either Web-IO class is entirely missing on the server.
+            # Checked directly against the resolved device_id (not "com_map empty") so a
+            # half-missing setup (e.g. only the Marker class deleted) is still caught — the
+            # normal sync_mismatch flow below would otherwise try to save_single_command
+            # against a dev_id of None for that class.
+            webio_devices = parsed_data.get("webio_devices", {})
+            missing_classes = [cls for cls in WEBIO_CLASSES if not webio_devices.get(cls, {}).get("device_id")]
+            if missing_classes:
                 is_ignored = conf.get("audit_ignored", False)
                 self.last_audit_results = {}
                 if not is_ignored and not self.in_sync:
@@ -237,10 +284,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         is_fixable=True,
                         severity=ir.IssueSeverity.ERROR,
                         translation_key="missing_webio_class",
-                        translation_placeholders={"server_id": self.server_id},
+                        translation_placeholders={
+                            "server_id": self.server_id,
+                            "missing_classes": ", ".join(webio_class_label(c) for c in missing_classes),
+                        },
                         data={
                             "entry_id": self.config_entry.entry_id,
-                            "counts": {"type": 0, "missing": len(ha_map), "rename": 0, "orphan": 0, "all": len(ha_map)},
+                            "missing_classes": missing_classes,
                         },
                     )
                 return final_data
@@ -251,35 +301,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Prepare payload map for future delta updates via button/repairs
             payload_map = {cmd["Name"]: cmd for cmd in self.api.build_webio_commands(self.server_id, final_data)}
 
-            # --- IP/Port Audit ---
+            # --- IP/Port Audit --- (checked independently per Web-IO class — marker and IO
+            # devices can in theory drift out of sync with each other)
             ha_address = await self.api.get_ha_address()
-            com_device_ip = parsed_data.get("device_ip")
-            com_device_id = parsed_data.get("device_id")
 
-            ip_mismatch = False
-            if com_device_id and com_device_ip and com_device_ip != ha_address:
-                try:
-                    ha_host, ha_port = ha_address.rsplit(":", 1)
-                    com_host, com_port = com_device_ip.rsplit(":", 1)
-
-                    if ha_port != com_port:
-                        # Textual deviation detected, check DNS resolution
-                        ip_mismatch = True
-                    else:
-                        # Ports are identical, compare resolved IPs
-                        def resolve(name: str) -> str:
-                            try:
-                                return socket.gethostbyname(name)
-                            except OSError:
-                                return name
-
-                        ha_ip = await self.hass.async_add_executor_job(resolve, ha_host)
-                        com_ip = await self.hass.async_add_executor_job(resolve, com_host)
-                        if ha_ip != com_ip:
-                            ip_mismatch = True
-                except ValueError:
-                    # Fallback on unexpected format
-                    ip_mismatch = True
+            webio_device_audit: dict[str, dict[str, Any]] = {}
+            for cls in WEBIO_CLASSES:
+                dev = webio_devices.get(cls, {})
+                webio_device_audit[cls] = {
+                    "device_id": dev.get("device_id"),
+                    "base_id": dev.get("base_id"),
+                    "device_ip": dev.get("device_ip"),
+                    "ip_mismatch": await _device_ip_mismatch(
+                        self.hass, ha_address, dev.get("device_ip"), dev.get("device_id")
+                    ),
+                }
+            ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
 
             # Compare HA entities with Comexio commands to find inconsistencies
             type_mismatches: list[dict[str, Any]] = []
@@ -293,8 +330,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Check for missing, renamed or type-mismatched items
             for key, ha in ha_map.items():
+                key_class = WEBIO_CLASS_IO if is_io_audit_key(key) else WEBIO_CLASS_MARKER
                 if key not in com_map:
-                    missing_items.append({"name": ha["name"], "payload": payload_map.get(ha["name"])})
+                    missing_items.append(
+                        {"name": ha["name"], "payload": payload_map.get(ha["name"]), "webio_class": key_class}
+                    )
                     mismatches.add(f"missing_{key}")
                 else:
                     com_list = com_map[key]
@@ -311,32 +351,45 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         best_match = com_list[0]
 
                     is_renamed = False
+                    match_class = best_match.get("webio_class") or key_class
 
                     # Name comparison
                     if ha["name"] != best_match["name"]:
                         renamed_items.append(
-                            {"id": best_match["id"], "name": ha["name"], "payload": payload_map.get(ha["name"])}
+                            {
+                                "id": best_match["id"],
+                                "name": ha["name"],
+                                "payload": payload_map.get(ha["name"]),
+                                "webio_class": match_class,
+                            }
                         )
                         mismatches.add(f"rename_{key}")
                         is_renamed = True
 
                     if not is_renamed and ha["type"] != best_match.get("type"):
                         type_mismatches.append(
-                            {"id": best_match["id"], "name": ha["name"], "payload": payload_map.get(ha["name"])}
+                            {
+                                "id": best_match["id"],
+                                "name": ha["name"],
+                                "payload": payload_map.get(ha["name"]),
+                                "webio_class": match_class,
+                            }
                         )
                         mismatches.add(f"type_{key}")
 
                     # All other commands pointing to this key are duplicates -> Orphans
                     for com in com_list:
                         if com != best_match:
-                            orphans.append({"id": com["id"], "name": com["name"]})
+                            orphans.append(
+                                {"id": com["id"], "name": com["name"], "webio_class": com.get("webio_class")}
+                            )
                             mismatches.add(f"orphan_{com['id']}")
 
             # Find items in Comexio that no longer exist in HA
             for key, com_list in com_map.items():
                 if key not in ha_map:
                     for com in com_list:
-                        orphans.append({"id": com["id"], "name": com["name"]})
+                        orphans.append({"id": com["id"], "name": com["name"], "webio_class": com.get("webio_class")})
                         mismatches.add(f"orphan_{com['id']}")
 
             self.last_audit_results = {
@@ -346,8 +399,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "orphan": orphans,
                 "ip_mismatch": ip_mismatch,
                 "ha_address": ha_address,
-                "com_device_id": com_device_id,
-                "com_base_id": parsed_data.get("base_id"),
+                "webio_devices": webio_device_audit,
             }
 
             # 📈 --- AUDIT SUMMARY LOGGING ---
@@ -374,8 +426,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         1 if ip_mismatch else 0,
                     )
                     if ip_mismatch:
+                        mismatched = {cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]}
                         _LOGGER.warning(
-                            "[%s] Server address mismatch: HA=%s, Comexio=%s", self.server_id, ha_address, com_device_ip
+                            "[%s] Server address mismatch: HA=%s, Comexio=%s", self.server_id, ha_address, mismatched
                         )
 
                     # Consolidated audit summary with details for each category
@@ -397,8 +450,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         _LOGGER.info("   -> %s", item["name"])
 
                     if ip_mismatch:
+                        mismatched_ips = {
+                            cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]
+                        }
                         _LOGGER.info(
-                            "🌐 IP/Port Mismatch: Comexio expects %s, but HA is at %s", com_device_ip, ha_address
+                            "🌐 IP/Port Mismatch: Comexio expects %s, but HA is at %s", mismatched_ips, ha_address
                         )
 
                     _LOGGER.info("========================================")

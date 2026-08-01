@@ -130,7 +130,7 @@
         "step": {
           "select_action": {
             "title": "Configuration initiale",
-            "description": "La classe d'appareil Web-IO requise est introuvable sur votre serveur Comexio.\n\nVoulez-vous créer la classe et l'appareil maintenant ?"
+            "description": "La/les classe(s) d'appareil Web-IO requise(s) sont introuvables sur votre serveur Comexio : **{missing_classes}**.\n\nVoulez-vous les créer maintenant ?"
           }
         }
       }
