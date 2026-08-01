@@ -736,7 +736,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         write landed in between (e.g. a concurrent user options-flow save), it reloads
         anyway instead of silently dropping that write.
         """
-        self._skip_next_listener_reload_options = new_options
+        self._skip_next_listener_reload_options = new_options.copy()
         self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
 
     async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
