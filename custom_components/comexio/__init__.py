@@ -341,16 +341,25 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> No
 
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     """Handle options update."""
-    # R2: The sync button sets this flag before writing audit_ignored to options,
-    # so we skip the listener-triggered reload and let the explicit reload in
-    # async_handle_press be the single reload after a sync.
+    # R2: internal option writes (sync, ignored-marker cleanup, plan_map persist, ...) mark
+    # the reload they trigger as redundant via request_options_update_without_reload(), which
+    # records the exact options snapshot it wrote. Only skip if entry.options still matches
+    # that snapshot — if a different write (e.g. a concurrent user options-flow save) landed
+    # in between, entry.options has moved on and this reload must go through, or that write
+    # would be silently lost.
     coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if coordinator is not None and getattr(coordinator, "_skip_next_listener_reload", False):
-        coordinator._skip_next_listener_reload = False
+    expected_options = coordinator.take_pending_reload_skip_options() if coordinator else None
+    if expected_options is not None:
+        if entry.options == expected_options:
+            _LOGGER.debug(
+                "[%s] update_listener: skipping reload (explicit reload pending, or none needed)",
+                coordinator.server_id,
+            )
+            return
         _LOGGER.debug(
-            "[%s] update_listener: skipping reload (explicit reload pending after sync)", coordinator.server_id
+            "[%s] update_listener: options changed since the internal write this skip was meant for — reloading anyway",
+            coordinator.server_id,
         )
-        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
