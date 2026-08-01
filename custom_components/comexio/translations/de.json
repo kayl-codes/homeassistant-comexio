@@ -57,6 +57,18 @@
         "600": "600 min (10 Std)",
         "1440": "1440 min (24 Std)"
       }
+    },
+    "statistics_cleanup_action": {
+      "options": {
+        "fix": "🧹 Jetzt bereinigen",
+        "ignore": "🔇 Diese Nachricht ignorieren"
+      }
+    },
+    "entity_id_fix_action": {
+      "options": {
+        "fix": "✅ Jetzt korrigieren",
+        "ignore": "🔇 Diese Nachricht ignorieren"
+      }
     }
   },
   "options": {
@@ -141,10 +153,26 @@
       }
     },
     "entity_id_mismatch": {
-      "title": "Doppelte Server-ID in Entity-IDs ({server_id})"
+      "title": "Doppelte Server-ID in Entity-IDs ({server_id})",
+      "fix_flow": {
+        "step": {
+          "entity_id_fix": {
+            "title": "Entity-IDs korrigieren",
+            "description": "Es wurden **{count} Entitäten** mit doppeltem Server-ID-Präfix gefunden.\n\nDie Entity-IDs können automatisch korrigiert werden. **History und Automationen bleiben erhalten**, sofern sie die Entity-ID direkt referenzieren — bitte prüfe Automationen nach der Migration.\n\nMöchtest du die IDs jetzt korrigieren?"
+          }
+        }
+      }
     },
     "statistics_orphaned": {
-      "title": "Verwaiste Statistiken ({server_id})"
+      "title": "Verwaiste Statistiken ({server_id})",
+      "fix_flow": {
+        "step": {
+          "statistics_cleanup": {
+            "title": "Statistiken bereinigen",
+            "description": "Es wurden **{count} verwaiste Langzeit-Statistiken** gefunden, die zu keiner existierenden Entität mehr gehören (Überreste früherer Entity-IDs).\n\nDiese können gefahrlos gelöscht werden. **Laufende Sensoren und deren aktuelle Historie sind nicht betroffen** — nur die verwaisten Einträge werden entfernt.\n\nMöchtest du sie jetzt löschen?"
+          }
+        }
+      }
     },
     "extension_offline": {
       "title": "Comexio Erweiterungsmodul offline ({server_id})",
