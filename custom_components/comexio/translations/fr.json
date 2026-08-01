@@ -141,7 +141,7 @@
         "step": {
           "entity_id_fix": {
             "title": "Corriger les ID d'entité",
-            "description": "{description}"
+            "description": "**{count} entities** were found with a duplicate server-ID prefix in their entity_id.\n\nThe entity IDs can be corrected automatically. **History and automations are preserved**, but please review automations that reference these entity IDs directly.\n\nWould you like to fix the IDs now?"
           }
         }
       }
@@ -152,7 +152,7 @@
         "step": {
           "statistics_cleanup": {
             "title": "Nettoyer les statistiques",
-            "description": "{description}"
+            "description": "**{count} orphaned long-term statistics** were found that no longer belong to any existing entity (leftovers from previous entity IDs).\n\nThey can be safely deleted. **Live sensors and their current history are not affected** — only the orphaned entries are removed.\n\nWould you like to delete them now?"
           }
         }
       }
