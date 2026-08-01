@@ -1,3 +1,5 @@
+from enum import StrEnum
+
 # Version: 0.8.0
 DOMAIN = "comexio"
 
@@ -26,17 +28,30 @@ CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
 CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
 CONF_IGNORED_MARKERS = "ignored_markers"
 
+
 # Web-IO class split: HA maintains two separate Web-IO device classes on the Comexio
 # server — one for Markers, one for physical IOs — derived from the single webio_name
 # field in the config/options flow by appending a suffix. The webIoId (the per-command
 # key inside $FubModules["10"]) is a global counter across ALL Web-IO devices on a
 # Comexio server, never reused per-device (verified live 2026-07-27), so commands from
 # both classes can share one flat webio_commands lookup without ambiguity.
-WEBIO_CLASS_MARKER = "marker"
-WEBIO_CLASS_IO = "io"
-WEBIO_CLASSES = (WEBIO_CLASS_MARKER, WEBIO_CLASS_IO)
-_WEBIO_CLASS_SUFFIXES = {WEBIO_CLASS_MARKER: " [M]", WEBIO_CLASS_IO: " [IO]"}
-_WEBIO_CLASS_LABELS = {WEBIO_CLASS_MARKER: "Marker", WEBIO_CLASS_IO: "IO"}
+class WebioClass(StrEnum):
+    """The two Web-IO device classes HA manages on the Comexio server.
+
+    A StrEnum so every existing string-based usage (dict keys, equality checks,
+    f-string interpolation, JSON payloads sent to/scraped back from Comexio)
+    keeps working unchanged, while call sites gain typo-safety via the members.
+    """
+
+    MARKER = "marker"
+    IO = "io"
+
+
+WEBIO_CLASS_MARKER = WebioClass.MARKER
+WEBIO_CLASS_IO = WebioClass.IO
+WEBIO_CLASSES = tuple(WebioClass)
+_WEBIO_CLASS_SUFFIXES = {WebioClass.MARKER: " [M]", WebioClass.IO: " [IO]"}
+_WEBIO_CLASS_LABELS = {WebioClass.MARKER: "Marker", WebioClass.IO: "IO"}
 
 
 def webio_class_name(webio_name: str, webio_class: str) -> str:
