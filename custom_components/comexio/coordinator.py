@@ -44,6 +44,33 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
+    """Whether a Web-IO device's recorded IP/port has drifted from this HA instance's current address."""
+    if not (com_dev_id and com_ip and com_ip != ha_address):
+        return False
+    try:
+        ha_host, ha_port = ha_address.rsplit(":", 1)
+        com_host, com_port = com_ip.rsplit(":", 1)
+
+        if ha_port != com_port:
+            # Textual deviation detected, check DNS resolution
+            return True
+
+        # Ports are identical, compare resolved IPs
+        def resolve(name: str) -> str:
+            try:
+                return socket.gethostbyname(name)
+            except OSError:
+                return name
+
+        ha_ip = await hass.async_add_executor_job(resolve, ha_host)
+        com_resolved_ip = await hass.async_add_executor_job(resolve, com_host)
+        return ha_ip != com_resolved_ip
+    except ValueError:
+        # Fallback on unexpected format
+        return True
+
+
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
@@ -279,31 +306,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # devices can in theory drift out of sync with each other)
             ha_address = await self.api.get_ha_address()
 
-            async def _device_ip_mismatch(com_ip: str | None, com_dev_id: str | None) -> bool:
-                if not (com_dev_id and com_ip and com_ip != ha_address):
-                    return False
-                try:
-                    ha_host, ha_port = ha_address.rsplit(":", 1)
-                    com_host, com_port = com_ip.rsplit(":", 1)
-
-                    if ha_port != com_port:
-                        # Textual deviation detected, check DNS resolution
-                        return True
-
-                    # Ports are identical, compare resolved IPs
-                    def resolve(name: str) -> str:
-                        try:
-                            return socket.gethostbyname(name)
-                        except OSError:
-                            return name
-
-                    ha_ip = await self.hass.async_add_executor_job(resolve, ha_host)
-                    com_resolved_ip = await self.hass.async_add_executor_job(resolve, com_host)
-                    return ha_ip != com_resolved_ip
-                except ValueError:
-                    # Fallback on unexpected format
-                    return True
-
             webio_device_audit: dict[str, dict[str, Any]] = {}
             for cls in WEBIO_CLASSES:
                 dev = webio_devices.get(cls, {})
@@ -311,7 +313,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "device_id": dev.get("device_id"),
                     "base_id": dev.get("base_id"),
                     "device_ip": dev.get("device_ip"),
-                    "ip_mismatch": await _device_ip_mismatch(dev.get("device_ip"), dev.get("device_id")),
+                    "ip_mismatch": await _device_ip_mismatch(
+                        self.hass, ha_address, dev.get("device_ip"), dev.get("device_id")
+                    ),
                 }
             ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
 
