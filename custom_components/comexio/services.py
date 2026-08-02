@@ -435,7 +435,7 @@ async def _resolve_backup_identity(
         return None, f"No stored backups for plan {fub_id}."
     names = ", ".join(f"'{name}'" for name, _ in identities)
     return None, (
-        f"fub_id {fub_id} is ambiguous — {len(identities)} different plan identities share this reused ID in "
+        f"fub_id {fub_id} is ambiguous — {len(identities)} different plan identities share this reused ID in "  # nosec B608
         f"the backup store ({names}). Please reselect from the Plan/Snapshot dropdown."
     )
 
@@ -1848,7 +1848,7 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
     raw_config = await api.get_raw_config()
     live_fub = raw_config.get("Fubs", {}).get(str(fub_id))
     if live_fub is not None:
-        api._fub_data[str(fub_id)] = live_fub  # keep the cache fresh for _restore_plan_in_place's reads
+        api.update_fub_cache_entry(fub_id, live_fub)  # keep the cache fresh for _restore_plan_in_place's reads
     snapshot_name = snapshot.get("plan_name", str(fub_id))
     live_name = live_fub.get("Name") if live_fub else None
     conflict = live_fub is None or live_name != snapshot_name

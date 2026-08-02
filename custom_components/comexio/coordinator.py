@@ -521,12 +521,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Function Plan backup: load all plan wirings + rotate auto backups in the background.
             # Entry-scoped task (cancelled on unload/reload) so neither startup nor the poll
-            # cycle is blocked by the ~0.5s/plan bulk load.
-            self.config_entry.async_create_background_task(
-                self.hass,
-                self._async_function_plan_backup_cycle(),
-                name=f"comexio_{self.server_id}_function_plan_backup",
-            )
+            # cycle is blocked by the ~0.5s/plan bulk load. Skip spawning a new task entirely
+            # while a previous cycle is still running, instead of creating one just to have it
+            # return immediately on the lock check.
+            if not self._function_plan_backup_lock.locked():
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self._async_function_plan_backup_cycle(),
+                    name=f"comexio_{self.server_id}_function_plan_backup",
+                )
 
             return final_data
 

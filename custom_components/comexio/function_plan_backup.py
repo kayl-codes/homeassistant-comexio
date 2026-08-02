@@ -269,8 +269,11 @@ class FunctionPlanBackupManager:
         # Lazy-loaded caches: {fub_id_str: {plan_name: [snapshot, ...]}} — newest first per identity.
         # fub_id alone is not a stable identity (Comexio reuses IDs after deletion), so rotation
         # and lookups are always scoped to the (fub_id, plan_name) pair, never to fub_id alone.
-        self._auto_data: dict[str, dict[str, list[dict[str, Any]]]] | None = None
-        self._change_data: dict[str, dict[str, list[dict[str, Any]]]] | None = None
+        # Kept non-Optional (empty dict until loaded, guarded by _loaded) so callers never need
+        # to narrow away a None — avoids sprinkling `assert ... is not None` through this class.
+        self._loaded = False
+        self._auto_data: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        self._change_data: dict[str, dict[str, list[dict[str, Any]]]] = {}
 
     @staticmethod
     def _migrate_legacy_shape(data: dict[str, Any]) -> bool:
@@ -291,21 +294,22 @@ class FunctionPlanBackupManager:
         return changed
 
     async def _async_ensure_loaded(self) -> None:
-        if self._auto_data is None:
-            self._auto_data = await self._auto_store.async_load() or {}
-            if self._migrate_legacy_shape(self._auto_data):
-                await self._auto_store.async_save(self._auto_data)
-                _LOGGER.info(
-                    "[%s] Function Plan backup: migrated auto-backup storage to identity-scoped shape", self._server_id
-                )
-        if self._change_data is None:
-            self._change_data = await self._change_store.async_load() or {}
-            if self._migrate_legacy_shape(self._change_data):
-                await self._change_store.async_save(self._change_data)
-                _LOGGER.info(
-                    "[%s] Function Plan backup: migrated change-backup storage to identity-scoped shape",
-                    self._server_id,
-                )
+        if self._loaded:
+            return
+        self._auto_data = await self._auto_store.async_load() or {}
+        if self._migrate_legacy_shape(self._auto_data):
+            await self._auto_store.async_save(self._auto_data)
+            _LOGGER.info(
+                "[%s] Function Plan backup: migrated auto-backup storage to identity-scoped shape", self._server_id
+            )
+        self._change_data = await self._change_store.async_load() or {}
+        if self._migrate_legacy_shape(self._change_data):
+            await self._change_store.async_save(self._change_data)
+            _LOGGER.info(
+                "[%s] Function Plan backup: migrated change-backup storage to identity-scoped shape",
+                self._server_id,
+            )
+        self._loaded = True
 
     @staticmethod
     def _build_snapshot(
@@ -365,7 +369,6 @@ class FunctionPlanBackupManager:
         expected and no others.
         """
         await self._async_ensure_loaded()
-        assert self._auto_data is not None
         changed_identities: list[dict[str, Any]] = []
         for fub_id, plan_data in plans.items():
             key = str(fub_id)
@@ -424,7 +427,6 @@ class FunctionPlanBackupManager:
         async_auto_backup / _referenced_label_metadata.
         """
         await self._async_ensure_loaded()
-        assert self._change_data is not None
         history = self._change_data.setdefault(str(fub_id), {}).setdefault(plan_name, [])
         label_metadata = _referenced_label_metadata(plan_data, markers_by_id or {}, webio_by_id or {}, ios_by_id or {})
         snapshot = self._build_snapshot(
@@ -460,7 +462,6 @@ class FunctionPlanBackupManager:
         await self._async_ensure_loaded()
         filled = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
-            assert data is not None
             dirty = False
             for key, identities in data.items():
                 live_name = fub_data.get(key, {}).get("Name")
@@ -505,7 +506,6 @@ class FunctionPlanBackupManager:
             (self._auto_data, self._auto_store, FUNCTION_PLAN_AUTO_BACKUP_SLOTS),
             (self._change_data, self._change_store, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS),
         ):
-            assert data is not None
             old_identities = data.get(old_key)
             old_history = old_identities.pop(plan_name, None) if old_identities else None
             if old_identities is not None and not old_identities:
@@ -543,7 +543,6 @@ class FunctionPlanBackupManager:
         key = str(fub_id)
         removed = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
-            assert data is not None
             identities = data.get(key)
             if not identities or plan_name not in identities:
                 continue
@@ -565,13 +564,13 @@ class FunctionPlanBackupManager:
         """Delete a single stored snapshot (one slot of one plan identity/kind). Returns True if removed."""
         await self._async_ensure_loaded()
         data, store = (self._auto_data, self._auto_store) if kind == "auto" else (self._change_data, self._change_store)
-        assert data is not None
         key = str(fub_id)
         history = data.get(key, {}).get(plan_name)
         if not history or not (0 <= slot < len(history)):
             return False
         del history[slot]
-        if not history:
+        history_emptied = len(history) == 0
+        if history_emptied:
             del data[key][plan_name]
             if not data[key]:
                 del data[key]
@@ -592,7 +591,6 @@ class FunctionPlanBackupManager:
         key = str(fub_id)
         removed = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
-            assert data is not None
             identities = data.get(key)
             history = identities.pop(plan_name, None) if identities else None
             if identities is not None and not identities:
@@ -613,7 +611,6 @@ class FunctionPlanBackupManager:
     async def async_delete_all_backups(self) -> int:
         """Delete every stored snapshot for every plan (auto + change). Returns the number removed."""
         await self._async_ensure_loaded()
-        assert self._auto_data is not None and self._change_data is not None
 
         def _count(data: dict[str, dict[str, list]]) -> int:
             return sum(len(h) for identities in data.values() for h in identities.values())
@@ -637,7 +634,6 @@ class FunctionPlanBackupManager:
         slot is scoped per (fub_id, plan_name) identity, not per raw fub_id.
         """
         await self._async_ensure_loaded()
-        assert self._auto_data is not None and self._change_data is not None
 
         def _meta(data: dict[str, dict[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
             entries = []
@@ -742,7 +738,6 @@ class FunctionPlanBackupManager:
         deleted) is corrected by the refresh-on-change trigger once the bulk load lands.
         """
         await self._async_ensure_loaded()
-        assert self._auto_data is not None
         referenced: set[str] = set()
         for identities in self._auto_data.values():
             for history in identities.values():
@@ -804,7 +799,6 @@ class FunctionPlanBackupManager:
         """
         await self._async_ensure_loaded()
         data = self._auto_data if kind == "auto" else self._change_data
-        assert data is not None
         history = data.get(str(fub_id), {}).get(plan_name, [])
         if 0 <= slot < len(history):
             return history[slot]

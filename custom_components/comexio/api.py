@@ -203,6 +203,10 @@ class ComexioAPI:
         """Return Logikplan plan metadata (fub_id_str → {Id, Name, Paper, ...}), populated by parse_config()."""
         return self._fub_data
 
+    def update_fub_cache_entry(self, fub_id: int | str, fub_info: dict[str, Any]) -> None:
+        """Refresh a single plan's cached metadata (e.g. after an out-of-band get_raw_config() lookup)."""
+        self._fub_data[str(fub_id)] = fub_info
+
     def _clean_value(self, val: Any) -> float:
         """Standardizes values: replaces German comma with dot and converts to numbers."""
         if val is None:
