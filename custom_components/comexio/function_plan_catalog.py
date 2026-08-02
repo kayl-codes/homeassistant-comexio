@@ -244,7 +244,11 @@ class FunctionPlanCatalogManager:
             fub_types = {}
         fub_modules = raw_config.get("FubModules")
         fub_base_i18n = raw_config.get("FubBaseI18N")
-        if not fub_types or not fub_modules or fub_base_i18n is None:
+        # Same PHP empty-mapping-as-array quirk as fub_types above — _extract_fub_base_catalog
+        # calls .get() on this, so a non-dict here would break the "never raises" contract.
+        if not isinstance(fub_base_i18n, dict):
+            fub_base_i18n = {}
+        if not fub_types or not fub_modules or not fub_base_i18n:
             # Admin page didn't expose these vars this cycle — keep the existing cache.
             _LOGGER.debug(
                 "[%s] Function Plan catalog: skipping update, required Fub* vars missing or empty "
@@ -252,7 +256,7 @@ class FunctionPlanCatalogManager:
                 self._server_id,
                 bool(fub_types),
                 bool(fub_modules),
-                fub_base_i18n is not None,
+                bool(fub_base_i18n),
             )
             return
 
