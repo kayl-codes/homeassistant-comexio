@@ -191,6 +191,9 @@ class FunctionPlanCatalogManager:
         # instead of raising, per this class's "never raises" contract.
         self._data: dict[str, Any] = {}
         self._loaded = False
+        # Throttles the shrink-guard warnings below to once per episode instead of once
+        # per poll, since a partial/logged-out scrape can persist for a while.
+        self._shrink_warned = False
 
     async def _async_ensure_loaded(self) -> None:
         if self._loaded:
@@ -226,6 +229,15 @@ class FunctionPlanCatalogManager:
         self._data = loaded
         self._loaded = True
 
+    def _log_shrink_warning(self, message: str, *args: Any) -> None:
+        """Log a shrink-guard hit at WARNING once per episode, then downgrade repeats to
+        DEBUG — a partial/logged-out scrape can persist for a while, and re-logging the
+        same warning on every poll in the meantime just adds noise.
+        """
+        log = _LOGGER.debug if self._shrink_warned else _LOGGER.warning
+        log(message, *args)
+        self._shrink_warned = True
+
     async def async_update_from_raw_config(self, raw_config: dict[str, Any], comexio_version: str | None) -> None:
         """Extract, validate and persist the catalog if it changed and isn't corrupt.
 
@@ -235,14 +247,30 @@ class FunctionPlanCatalogManager:
         change block templates, and there's no other way to correlate a plan backup
         (see function_plan_backup.py, same stamp) against "the catalog as it was back then".
 
-        Never raises — a catalog problem must never affect the core marker/IO poll.
+        Never raises — a catalog problem must never affect the core marker/IO poll. This
+        is the outer boundary of that contract: it delegates to _async_update_from_raw_config
+        and turns any unexpected error there into a logged warning instead of propagating,
+        so callers (the coordinator's poll loop) don't need their own safety net.
         """
+        try:
+            await self._async_update_from_raw_config(raw_config, comexio_version)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Function Plan catalog: unexpected error while updating catalog — keeping previous catalog",
+                self._server_id,
+            )
+
+    async def _async_update_from_raw_config(self, raw_config: dict[str, Any], comexio_version: str | None) -> None:
         fub_types = raw_config.get("FubTypes")
         # PHP serializes an empty mapping as a JSON array (same quirk as _module_group) —
         # normalize so the shrink-guard's len() comparisons and the persisted shape stay a dict.
         if not isinstance(fub_types, dict):
             fub_types = {}
         fub_modules = raw_config.get("FubModules")
+        # Same PHP empty-mapping-as-array quirk as fub_types above — _module_group calls
+        # .get() on this, so a non-dict here would break the "never raises" contract.
+        if not isinstance(fub_modules, dict):
+            fub_modules = {}
         fub_base_i18n = raw_config.get("FubBaseI18N")
         # Same PHP empty-mapping-as-array quirk as fub_types above — _extract_fub_base_catalog
         # calls .get() on this, so a non-dict here would break the "never raises" contract.
@@ -291,7 +319,7 @@ class FunctionPlanCatalogManager:
         # (or post-scrape-failure) shrink through instead of being incorrectly rejected.
         version_changed = comexio_version != old_version
         if old_types and len(fub_types) < len(old_types) and not version_changed:
-            _LOGGER.warning(
+            self._log_shrink_warning(
                 "[%s] Function Plan catalog: new FubTypes count (%d) < cached (%d) — keeping previous catalog",
                 self._server_id,
                 len(fub_types),
@@ -299,13 +327,16 @@ class FunctionPlanCatalogManager:
             )
             return
         if old_base and len(fub_base) < len(old_base) and not version_changed:
-            _LOGGER.warning(
+            self._log_shrink_warning(
                 "[%s] Function Plan catalog: new fubBase count (%d) < cached (%d) — keeping previous catalog",
                 self._server_id,
                 len(fub_base),
                 len(old_base),
             )
             return
+        # Past both shrink-guard checks — reset the throttle so a genuine future episode
+        # is reported at WARNING again instead of staying silently downgraded to DEBUG.
+        self._shrink_warned = False
 
         if (
             fub_types == old_types

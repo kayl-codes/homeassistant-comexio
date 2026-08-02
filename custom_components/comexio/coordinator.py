@@ -163,10 +163,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             live_states = await self.api.get_live_states(max_id)
             parsed_data = self.api.parse_config(raw_config, live_states)
 
-            try:
-                await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
-            except Exception:
-                _LOGGER.exception("[%s] Function Plan catalog update failed", self.server_id)
+            # async_update_from_raw_config never raises (own contract, enforced internally) —
+            # no local guard needed here.
+            await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
 
             import_markers = conf.get("import_markers", True)
             import_ios = conf.get("import_ios", True)
