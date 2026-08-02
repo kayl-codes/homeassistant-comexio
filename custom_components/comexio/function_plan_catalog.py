@@ -33,6 +33,7 @@ import logging
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -194,13 +195,18 @@ class FunctionPlanCatalogManager:
         # Throttles the shrink-guard warnings below to once per episode instead of once
         # per poll, since a partial/logged-out scrape can persist for a while.
         self._shrink_warned = False
+        # Same throttle idea for the missing-Fub*-vars debug log below.
+        self._missing_vars_logged = False
 
     async def _async_ensure_loaded(self) -> None:
         if self._loaded:
             return
         try:
             loaded = await self._store.async_load()
-        except Exception:
+        except (HomeAssistantError, OSError):
+            # Narrowed to storage/IO failures (disk, permissions, JSON decode — the last
+            # wrapped as HomeAssistantError by HA's storage helper) so a real bug in this
+            # class still surfaces instead of being silently absorbed here.
             # Give up on this file for the session (rather than retrying every poll and
             # spamming the log) — an empty in-memory catalog is a safe permanent fallback.
             _LOGGER.exception(
@@ -238,6 +244,66 @@ class FunctionPlanCatalogManager:
         log(message, *args)
         self._shrink_warned = True
 
+    def _shrink_guard_blocks_update(
+        self,
+        fub_types: dict[str, Any],
+        fub_base: dict[str, Any],
+        old_types: dict[str, Any],
+        old_base: dict[str, Any],
+        comexio_version: str | None,
+        old_version: str | None,
+    ) -> bool:
+        """Return True if a suspicious element-count drop should block this update.
+
+        Shrink guard for fub_types/fub_base only: within the same firmware, a catalog
+        only grows, so a drop in count more likely means a partial/logged-out page
+        scrape than a genuine removal — UNLESS the version stamp itself changed, which
+        means a real firmware update was detected and may legitimately have removed or
+        consolidated block types. time_modules is user configuration (like Markers) and
+        legitimately shrinks when the user deletes a timer — no guard for it.
+        A missing baseline (no stored old_version — catalog persisted before
+        version-stamping existed, or first-ever save) or a missing current reading
+        (comexio_version is None — transient scrape failure, see api.py's version
+        parsing) both mean there's no reliable version comparison to block on, so
+        either case counts as a version change too, letting a legitimate post-upgrade
+        (or post-scrape-failure) shrink through instead of being incorrectly rejected.
+        """
+        version_changed = comexio_version is None or old_version is None or comexio_version != old_version
+        shrank_types = bool(old_types) and len(fub_types) < len(old_types)
+        shrank_base = bool(old_base) and len(fub_base) < len(old_base)
+        if version_changed and (shrank_types or shrank_base):
+            # Debug trail for post-upgrade catalog changes: the guard below only blocks
+            # this shrink when the version stamp is unchanged, so record the accepted
+            # case too — otherwise a legitimate post-upgrade shrink leaves no log trace.
+            _LOGGER.debug(
+                "[%s] Function Plan catalog: accepting shrink (FubTypes %d -> %d, fubBase %d -> %d) "
+                "because the version stamp changed (%s -> %s)",
+                self._server_id,
+                len(old_types),
+                len(fub_types),
+                len(old_base),
+                len(fub_base),
+                old_version,
+                comexio_version,
+            )
+        if shrank_types and not version_changed:
+            self._log_shrink_warning(
+                "[%s] Function Plan catalog: new FubTypes count (%d) < cached (%d) — keeping previous catalog",
+                self._server_id,
+                len(fub_types),
+                len(old_types),
+            )
+            return True
+        if shrank_base and not version_changed:
+            self._log_shrink_warning(
+                "[%s] Function Plan catalog: new fubBase count (%d) < cached (%d) — keeping previous catalog",
+                self._server_id,
+                len(fub_base),
+                len(old_base),
+            )
+            return True
+        return False
+
     async def async_update_from_raw_config(self, raw_config: dict[str, Any], comexio_version: str | None) -> None:
         """Extract, validate and persist the catalog if it changed and isn't corrupt.
 
@@ -251,6 +317,13 @@ class FunctionPlanCatalogManager:
         is the outer boundary of that contract: it delegates to _async_update_from_raw_config
         and turns any unexpected error there into a logged warning instead of propagating,
         so callers (the coordinator's poll loop) don't need their own safety net.
+
+        Deliberately kept broad (`except Exception`, not a narrower tuple like the Store
+        I/O handling inside _async_update_from_raw_config): this guards a data-extraction
+        pipeline over untrusted, scraped admin-page HTML/JSON, where a malformed field can
+        surface as KeyError, TypeError, AttributeError, IndexError or ValueError depending
+        on which assumption it violates — no fixed exception tuple would be exhaustive here,
+        and this boundary exists specifically to keep any of them from reaching the poll loop.
         """
         try:
             await self._async_update_from_raw_config(raw_config, comexio_version)
@@ -278,15 +351,22 @@ class FunctionPlanCatalogManager:
             fub_base_i18n = {}
         if not fub_types or not fub_modules or not fub_base_i18n:
             # Admin page didn't expose these vars this cycle — keep the existing cache.
-            _LOGGER.debug(
-                "[%s] Function Plan catalog: skipping update, required Fub* vars missing or empty "
-                "(FubTypes present=%s, FubModules present=%s, FubBaseI18N present=%s)",
-                self._server_id,
-                bool(fub_types),
-                bool(fub_modules),
-                bool(fub_base_i18n),
-            )
+            # Throttled like the shrink-guard warnings below: a partial/logged-out scrape
+            # can persist for many consecutive polls, and re-logging every single one
+            # would just add noise without new information.
+            if not self._missing_vars_logged:
+                _LOGGER.debug(
+                    "[%s] Function Plan catalog: skipping update, required Fub* vars missing or empty "
+                    "(FubTypes present=%s, FubModules present=%s, FubBaseI18N present=%s) — "
+                    "further occurrences this episode are suppressed",
+                    self._server_id,
+                    bool(fub_types),
+                    bool(fub_modules),
+                    bool(fub_base_i18n),
+                )
+                self._missing_vars_logged = True
             return
+        self._missing_vars_logged = False
 
         fub_base = _extract_fub_base_catalog(fub_modules, fub_base_i18n)
         if not fub_base:
@@ -305,53 +385,9 @@ class FunctionPlanCatalogManager:
         old_calendar_functions: dict[str, Any] = self._data.get("calendar_functions", {})
         old_version = self._data.get("comexio_version")
 
-        # Shrink guard for fub_types/fub_base only: within the same firmware, a catalog
-        # only grows, so a drop in count more likely means a partial/logged-out page
-        # scrape than a genuine removal — UNLESS the version stamp itself changed, which
-        # means a real firmware update was detected and may legitimately have removed or
-        # consolidated block types. time_modules is user configuration (like Markers) and
-        # legitimately shrinks when the user deletes a timer — no guard for it.
-        # A missing baseline (no stored old_version — catalog persisted before
-        # version-stamping existed, or first-ever save) or a missing current reading
-        # (comexio_version is None — transient scrape failure, see api.py's version
-        # parsing) both mean there's no reliable version comparison to block on, so
-        # either case counts as a version change too, letting a legitimate post-upgrade
-        # (or post-scrape-failure) shrink through instead of being incorrectly rejected.
-        version_changed = comexio_version is None or old_version is None or comexio_version != old_version
-        shrank_types = bool(old_types) and len(fub_types) < len(old_types)
-        shrank_base = bool(old_base) and len(fub_base) < len(old_base)
-        if version_changed and (shrank_types or shrank_base):
-            # Debug trail for post-upgrade catalog changes: the guard below only blocks
-            # this shrink when the version stamp is unchanged, so record the accepted
-            # case too — otherwise a legitimate post-upgrade shrink leaves no log trace.
-            _LOGGER.debug(
-                "[%s] Function Plan catalog: accepting shrink (FubTypes %d -> %d, fubBase %d -> %d) "
-                "because the version stamp changed (%s -> %s)",
-                self._server_id,
-                len(old_types),
-                len(fub_types),
-                len(old_base),
-                len(fub_base),
-                old_version,
-                comexio_version,
-            )
-        if shrank_types and not version_changed:
-            self._log_shrink_warning(
-                "[%s] Function Plan catalog: new FubTypes count (%d) < cached (%d) — keeping previous catalog",
-                self._server_id,
-                len(fub_types),
-                len(old_types),
-            )
+        if self._shrink_guard_blocks_update(fub_types, fub_base, old_types, old_base, comexio_version, old_version):
             return
-        if shrank_base and not version_changed:
-            self._log_shrink_warning(
-                "[%s] Function Plan catalog: new fubBase count (%d) < cached (%d) — keeping previous catalog",
-                self._server_id,
-                len(fub_base),
-                len(old_base),
-            )
-            return
-        # Past both shrink-guard checks — reset the throttle so a genuine future episode
+        # Past the shrink-guard check — reset the throttle so a genuine future episode
         # is reported at WARNING again instead of staying silently downgraded to DEBUG.
         self._shrink_warned = False
 
@@ -374,7 +410,8 @@ class FunctionPlanCatalogManager:
         }
         try:
             await self._store.async_save(self._data)
-        except Exception:
+        except (HomeAssistantError, OSError):
+            # Same narrowing rationale as the load path above.
             _LOGGER.exception(
                 "[%s] Function Plan catalog: failed to persist catalog — keeping in-memory only",
                 self._server_id,
