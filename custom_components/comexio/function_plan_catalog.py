@@ -279,10 +279,13 @@ class FunctionPlanCatalogManager:
         # means a real firmware update was detected and may legitimately have removed or
         # consolidated block types. time_modules is user configuration (like Markers) and
         # legitimately shrinks when the user deletes a timer — no guard for it.
-        # No stored old_version (catalog persisted before version-stamping existed, or
-        # first-ever save) means there's no baseline to compare against — treat that as
-        # a version change too, so the guard doesn't block a legitimate post-upgrade shrink.
-        version_changed = bool(comexio_version) and comexio_version != old_version
+        # A missing baseline (no stored old_version — catalog persisted before
+        # version-stamping existed, or first-ever save) or a missing current reading
+        # (comexio_version is None — transient scrape failure, see api.py's version
+        # parsing) both mean there's no reliable version comparison to block on, so
+        # either case counts as a version change too, letting a legitimate post-upgrade
+        # (or post-scrape-failure) shrink through instead of being incorrectly rejected.
+        version_changed = comexio_version != old_version
         if old_types and len(fub_types) < len(old_types) and not version_changed:
             _LOGGER.warning(
                 "[%s] Function Plan catalog: new FubTypes count (%d) < cached (%d) — keeping previous catalog",
