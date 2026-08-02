@@ -1,4 +1,5 @@
 # Version: 0.7.5
+import asyncio
 import base64
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from multidict import MultiDict
 
 # Mandatory DOMAIN import for Audit logic
 from .const import (
+    FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     KNOWN_DOMAINS,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
@@ -535,6 +537,16 @@ class ComexioAPI:
         paper_id = str(fub.get("Paper", ""))
         paper = self._paper_data.get(paper_id, {})
         return str(paper.get("Name", "A4"))
+
+    def get_fub_dpi(self, fub_id: int) -> int:
+        """Return the configured resolution (DPI) for a Logikplan plan, defaulting to 90."""
+        fub = self._fub_data.get(str(fub_id), {})
+        return int(fub.get("Resolution", self._CANVAS_REF_RES))
+
+    def get_fub_orientation(self, fub_id: int) -> str:
+        """Return 'portrait' or 'landscape' for a Logikplan plan, defaulting to 'landscape'."""
+        fub = self._fub_data.get(str(fub_id), {})
+        return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
 
     def get_fub_canvas_bounds(self, fub_id: int, paper_name: str | None = None) -> tuple[float, float]:
         """Return estimated (x_max, y_max) canvas bounds for a Logikplan plan.
@@ -1336,6 +1348,37 @@ class ComexioAPI:
             _LOGGER.exception("logikplan_load_elements fub_id=%s failed", fub_id)
             return None
 
+    async def function_plan_load_all_plans(self, concurrency: int = 4) -> dict[int, dict]:
+        """Load elements and connections for ALL known Logikplan plans concurrently.
+
+        Uses the fub list cached by parse_config (self._fub_data). Requests run in
+        parallel, limited by a semaphore so the embedded Comexio server is not
+        overwhelmed. Plans that fail to load are skipped.
+        Returns {fub_id: {"elements": {...}, "connections": {...}}}.
+        """
+        fub_ids = [int(fid) for fid in self._fub_data]
+        if not fub_ids:
+            return {}
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _load_one(fid: int) -> tuple[int, dict | None]:
+            async with semaphore:
+                return fid, await self.logikplan_load_elements(fid)
+
+        t_start = time.monotonic()
+        results = await asyncio.gather(*(_load_one(fid) for fid in fub_ids))
+        duration = time.monotonic() - t_start
+        plans = {fid: data for fid, data in results if data is not None}
+        _LOGGER.info(
+            "function_plan_load_all_plans: %d/%d plans loaded in %.2fs (concurrency=%d)",
+            len(plans),
+            len(fub_ids),
+            duration,
+            concurrency,
+        )
+        return plans
+
     async def logikplan_stop_fup(self, fub_id: int) -> bool:
         """Stop/pause a Logikplan plan (stop_fup)."""
         url = f"{self._base_url}/admin/function_function_module/stop_fup/"
@@ -1355,6 +1398,80 @@ class ComexioAPI:
         except Exception:
             _LOGGER.exception("logikplan_stop_fup: fub_id=%s failed", fub_id)
             return False
+
+    async def function_plan_add_comment_element(
+        self,
+        fub_id: int,
+        text: str,
+        x: float = 100.0,
+        y: float = 7.5,
+    ) -> int | None:
+        """Place a text/comment block (type=14, ref_id=3) on a Logikplan canvas.
+
+        Returns the fubElementId assigned by the server, or None on failure.
+        """
+        url = f"{self._base_url}/admin/function_function_module/add_element/"
+        timestamp = _js_timestamp()
+        payload = {
+            "fubid": str(fub_id),
+            "name": text,
+            "ref_id": "3",
+            "type": "14",
+            "id": "0",
+            "x": str(x),
+            "y": str(y),
+            "timestamp": timestamp,
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.error("function_plan_add_comment_element failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                return None
+            try:
+                result = await resp.json(content_type=None)
+                elem_id = result.get("id")
+                if elem_id is None:
+                    _LOGGER.error("function_plan_add_comment_element: no id in response (fub=%s): %s", fub_id, result)
+                    return None
+                _LOGGER.debug("function_plan_add_comment_element: fub=%s → elem_id=%s", fub_id, elem_id)
+            except Exception:
+                _LOGGER.exception("function_plan_add_comment_element: failed to parse response")
+                return None
+        # add_element has no width parameter — the width lives in the comment
+        # properties dialog, saved via a separate endpoint.
+        await self._function_plan_set_comment_width(int(elem_id), text)
+        return elem_id
+
+    async def _function_plan_set_comment_width(self, elem_id: int, text: str, width: int = 5) -> bool:
+        """Set a comment element's text width via savefupcommentelement (5 = 'Sehr Breit')."""
+        url = f"{self._base_url}/admin/function_function_module/savefupcommentelement/"
+        payload = {
+            "id": str(elem_id),
+            "use_base_64": "1",
+            "name": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+            "width": str(width),
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.warning("savefupcommentelement failed (HTTP %s, elem=%s)", resp.status, elem_id)
+                return False
+            try:
+                result = await resp.json(content_type=None)
+            except Exception:
+                _LOGGER.exception("savefupcommentelement: failed to parse response (elem=%s)", elem_id)
+                return False
+        if result.get("result") != 1:
+            _LOGGER.warning("savefupcommentelement rejected (elem=%s): %s", elem_id, result)
+            return False
+        _LOGGER.debug("savefupcommentelement: elem=%s width=%s → %s", elem_id, width, result.get("data"))
+        return True
 
     async def create_fup(
         self,
@@ -1455,14 +1572,102 @@ class ComexioAPI:
             _LOGGER.exception("create_fup: verification (config reload) failed")
             return None
 
-    async def logikplan_run_fup(self, fub_id: int) -> bool:
+    async def function_plan_update_paper(
+        self, fub_id: int, paper_format: str, dpi: int, orientation: str, name: str | None = None
+    ) -> bool:
+        """Update an EXISTING plan's paper format/DPI/orientation (same save_fub endpoint as
+        create_fup, but with fub_id set and fub_save='Speichern' instead of fub_create).
+
+        Needed before an in-place restore whose snapshot's canvas settings differ from the
+        live plan's current ones (e.g. force_override onto an unrelated plan) — otherwise
+        element positions computed for the snapshot's original canvas can end up clipped or
+        overlapping on the live plan's (different) canvas.
+
+        name: if given, also renames the plan (force_override restores the snapshot's
+        original name too, so the plan comes back exactly as it was — not just its content).
+        None keeps the current live name unchanged.
+
+        All other plan properties (comment, position, active state) are read from the
+        current live data and passed through UNCHANGED. Known gap: Comexio's $Fubs dump does
+        not expose "reset on close", so that flag is always sent as "0" (Comexio's own
+        create-time default) rather than preserved — a cosmetic Comexio Studio setting this
+        integration doesn't otherwise manage.
+        """
+        fub = self._fub_data.get(str(fub_id))
+        if fub is None:
+            _LOGGER.error("function_plan_update_paper: fub_id=%s not found in live data", fub_id)
+            return False
+
+        paper_map = {"A3": "2", "A4": "3", "A5": "4"}
+        paper_id = paper_map.get(paper_format.upper(), "3")
+        orient_id = "1" if orientation.lower() == "portrait" else "0"
+        target_name = name if name is not None else fub.get("Name", "")
+
+        url = f"{self._base_url}/admin/function_function_module/save_fub"
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        payload = {
+            "fub_id": str(fub_id),
+            "fub_position": str(fub.get("Position", "-1")),
+            "fub_type": "1",
+            "fub_page_count_x": "1",
+            "fub_page_count_y": "1",
+            "fub_name": target_name,
+            "fub_comment": fub.get("Comment", ""),
+            "fub_active": str(int(bool(fub.get("Active", False)))),
+            "fub_reset_on_close": "0",
+            "fub_paper": paper_id,
+            "fub_orientation": orient_id,
+            "fub_resolution": str(dpi),
+            "fub_save": "Speichern",
+        }
+
+        try:
+            async with self.session.post(url, data=payload, headers=headers, allow_redirects=False) as resp:
+                if resp.status not in (301, 302, 303):
+                    _LOGGER.error("function_plan_update_paper: save_fub failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                    return False
+                redirect_location = resp.headers.get("Location", "")
+                if "saved=1" not in redirect_location:
+                    _LOGGER.error(
+                        "function_plan_update_paper: redirect missing 'saved=1' (fub=%s, location: %s)",
+                        fub_id,
+                        redirect_location,
+                    )
+                    return False
+        except Exception:
+            _LOGGER.exception("function_plan_update_paper: save_fub request failed (fub=%s)", fub_id)
+            return False
+
+        # Keep the local cache in sync so get_fub_paper_format/dpi/orientation reflect the change
+        fub["Paper"] = paper_id
+        fub["Resolution"] = dpi
+        fub["Orientation"] = int(orient_id)
+        if name is not None:
+            fub["Name"] = name
+        _LOGGER.info(
+            "function_plan_update_paper: fub=%s -> paper=%s dpi=%s orientation=%s name=%s",
+            fub_id,
+            paper_format,
+            dpi,
+            orientation,
+            name,
+        )
+        return True
+
+    async def logikplan_run_fup(self, fub_id: int, plan_data: dict | None = None) -> bool:
         """Save and activate a Logikplan plan (run_fup).
 
-        Loads the current plan state and posts it back to save + activate.
+        By default the CURRENT state is loaded via loadelements; pass an explicit
+        plan_data (e.g. a backup snapshot with 'elements' and 'connections') to
+        restore that state instead.
         The output field in connections is converted from list (loadelements)
         to indexed dict (run_fup expectation).
         """
-        plan_data = await self.logikplan_load_elements(fub_id)
+        if plan_data is None:
+            plan_data = await self.logikplan_load_elements(fub_id)
         if plan_data is None:
             _LOGGER.error("logikplan_run_fup: could not load plan %s", fub_id)
             return False
@@ -1495,6 +1700,129 @@ class ComexioAPI:
         except Exception:
             _LOGGER.exception("logikplan_run_fup: fub_id=%s failed", fub_id)
             return False
+
+    async def function_plan_rebuild_plan_from_snapshot(
+        self, fub_id: int, snapshot: dict[str, Any]
+    ) -> tuple[int, int, list[str]]:
+        """Recreate a snapshot's elements and connections on a freshly created (empty) plan.
+
+        Snapshot element IDs are plan-local and meaningless on a new plan, so every
+        connected Marker+WebIO pair is recreated via add_element with the connection
+        inlined, using each element's own reference (ref_id) and original position.
+        Comment blocks (type=14) are recreated with the fixed managed-plan text —
+        Comexio does not expose the original comment text via loadelements, so custom
+        wording on non-managed plans is lost. Any element not part of a Marker→WebIO
+        connection is skipped (best-effort restore; managed plans never have such orphans).
+
+        Returns (elements_created, connections_created, warnings).
+        """
+        elements = snapshot.get("elements", {})
+        connections = snapshot.get("connections", {})
+
+        elements_created, warnings = await self._rebuild_comment_elements(fub_id, elements)
+        connections_created = 0
+        for conn_id, conn in connections.items():
+            e_delta, c_delta, conn_warnings = await self._rebuild_one_connection(fub_id, conn_id, conn, elements)
+            elements_created += e_delta
+            connections_created += c_delta
+            warnings.extend(conn_warnings)
+
+        _LOGGER.info(
+            "function_plan_rebuild_plan_from_snapshot: fub=%s elements=%d connections=%d warnings=%d",
+            fub_id,
+            elements_created,
+            connections_created,
+            len(warnings),
+        )
+        return elements_created, connections_created, warnings
+
+    async def _rebuild_comment_elements(self, fub_id: int, elements: dict[str, Any]) -> tuple[int, list[str]]:
+        """Recreate every comment-block (type=14) element from a snapshot. Returns (created, warnings)."""
+        created = 0
+        warnings: list[str] = []
+        for elem in elements.values():
+            if elem.get("reference", {}).get("type") != 14:
+                continue
+            x, y = elem.get("position_x", 0.0), elem.get("position_y", 0.0)
+            if (
+                await self.function_plan_add_comment_element(fub_id, FUNCTION_PLAN_MANAGED_PLAN_COMMENT, x=x, y=y)
+                is None
+            ):
+                warnings.append("comment element failed to recreate")
+            else:
+                created += 1
+        return created, warnings
+
+    async def _rebuild_one_connection(
+        self, fub_id: int, conn_id: str, conn: dict[str, Any], elements: dict[str, Any]
+    ) -> tuple[int, int, list[str]]:
+        """Recreate one snapshot connection (Marker -> one or more WebIO outputs).
+
+        Returns (elements_created, connections_created, warnings).
+        """
+        inp_eid = conn.get("input", {}).get("FubElementId")
+        marker_elem = elements.get(str(inp_eid))
+        if not marker_elem or marker_elem.get("reference", {}).get("type") != 2:
+            return 0, 0, [f"connection {conn_id}: input element {inp_eid} is not a marker — skipped"]
+        marker_ref = marker_elem["reference"]["ref_id"]
+        mx, my = marker_elem.get("position_x", 0.0), marker_elem.get("position_y", 0.0)
+        conn_type = "analog" if conn.get("type") in (1, "analog") else "binary"
+
+        outputs = conn.get("output", [])
+        outputs = list(outputs.values()) if isinstance(outputs, dict) else outputs
+
+        elements_created = 0
+        connections_created = 0
+        warnings: list[str] = []
+        for out in outputs:
+            e_delta, c_delta, out_warnings = await self._rebuild_one_connection_output(
+                fub_id, conn_id, out, elements, marker_ref, mx, my, conn_type
+            )
+            elements_created += e_delta
+            connections_created += c_delta
+            warnings.extend(out_warnings)
+        return elements_created, connections_created, warnings
+
+    async def _rebuild_one_connection_output(
+        self,
+        fub_id: int,
+        conn_id: str,
+        out: dict[str, Any],
+        elements: dict[str, Any],
+        marker_ref: int,
+        mx: float,
+        my: float,
+        conn_type: str,
+    ) -> tuple[int, int, list[str]]:
+        """Recreate one Marker->WebIO edge of a snapshot connection.
+
+        Returns (elements_created, connections_created, warnings).
+        """
+        out_eid = out.get("FubElementId")
+        webio_elem = elements.get(str(out_eid))
+        if not webio_elem or webio_elem.get("reference", {}).get("type") != 10:
+            return 0, 0, [f"connection {conn_id}: output element {out_eid} is not a WebIO block — skipped"]
+        webio_ref = webio_elem["reference"]["ref_id"]
+        wx, wy = webio_elem.get("position_x", 0.0), webio_elem.get("position_y", 0.0)
+
+        elem_marker = await self.logikplan_add_element(fub_id=fub_id, ref_id=marker_ref, element_type=2, x=mx, y=my)
+        if elem_marker is None:
+            return 0, 0, [f"M{marker_ref}: add_element (Marker) failed during rebuild"]
+        conn_payload = {
+            "0": {
+                "id": "new",
+                "fub_id": fub_id,
+                "type": conn_type,
+                "input": {"element": str(elem_marker), "pos": "0", "inverted": False},
+                "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
+            }
+        }
+        elem_webio = await self.logikplan_add_element(
+            fub_id=fub_id, ref_id=webio_ref, element_type=10, x=wx, y=wy, connection=conn_payload
+        )
+        if elem_webio is None:
+            return 0, 0, [f"M{marker_ref}: add_element (WebIO, webIoId={webio_ref}) failed during rebuild"]
+        return 2, 1, []
 
     async def set_value(
         self,

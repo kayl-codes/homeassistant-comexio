@@ -53,7 +53,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         [
             ComexioSyncStatusSensor(coordinator, coordinator.server_id),
             ComexioOfflineExtensionsSensor(coordinator, coordinator.server_id),
+            ComexioFunctionPlanBackupSensor(coordinator, coordinator.server_id),
             ComexioVersionSensor(coordinator, coordinator.server_id),
+            ComexioPlanChangedSensor(coordinator, coordinator.server_id),
             ComexioBusLoadSensor(coordinator, coordinator.server_id),
         ]
     )
@@ -129,6 +131,43 @@ class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
         return attrs
 
 
+class ComexioFunctionPlanBackupSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor summarizing stored function plan backup snapshots."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_name = "Function Plan Backups"
+    _attr_icon = "mdi:backup-restore"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_function_plan_backups_sensor"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Load the backup stores so the summary is available right after startup."""
+        await super().async_added_to_hass()
+        await self.coordinator.function_plan_backup.async_load()
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> int:
+        summary = self.coordinator.function_plan_backup.summary()
+        return summary["auto_snapshots"] + summary["change_snapshots"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.coordinator.function_plan_backup.summary()
+
+
 class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):
     """Diagnostic sensor listing extension modules currently offline."""
 
@@ -192,6 +231,42 @@ class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> str | None:
         return self.coordinator.api.comexio_version
+
+
+class ComexioPlanChangedSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor listing plans whose auto-backup got a new snapshot this poll cycle.
+
+    Pure last-cycle control aid (does not accumulate across polls): right after making an
+    intentional plan edit, this sensor lets you confirm that exactly the expected plan(s)
+    changed and no others — a quick way to catch unexpected wiring changes in plans that
+    were not meant to be touched.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:file-compare"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_plan_changed_sensor"
+        self._attr_translation_key = "plan_changed"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.last_changed_plans)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"plans": self.coordinator.last_changed_plans}
 
 
 class ComexioBusLoadSensor(SensorEntity):

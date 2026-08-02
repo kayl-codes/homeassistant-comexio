@@ -1,6 +1,8 @@
 # Version: 0.7.6
 import contextlib
+from datetime import datetime, timedelta
 import functools
+import json
 import logging
 import pathlib
 import re
@@ -8,10 +10,22 @@ import time
 from typing import Any
 
 from homeassistant.components import persistent_notification
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.helpers.service import async_set_service_schema
+from homeassistant.util import dt as dt_util
 import yaml
 
-from .const import CONF_IGNORED_MARKERS, DOMAIN, WEBIO_CLASSES, webio_class_name
+from .const import (
+    CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    CONF_IGNORED_MARKERS,
+    DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    DOMAIN,
+    TIMESTAMP_DISPLAY_FORMAT,
+    WEBIO_CLASSES,
+    webio_class_name,
+)
+from .coordinator import ComexioCoordinator
+from .function_plan_backup import diff_snapshots, retention_cutoff, snapshot_label_maps
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +74,751 @@ def _available_plans_str(fub_data: dict) -> str:
     return ", ".join(
         f"'{fub.get('Name', '?')}' (ID {fid})" for fid, fub in sorted(fub_data.items(), key=lambda x: int(x[0]))
     )
+
+
+_AGE_KEYS = ("days", "hours", "minutes", "seconds")
+
+
+def _coerce_int(value) -> int | None:
+    """Best-effort int conversion for service field values (number selectors may deliver floats/strings)."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _age_cutoff(age) -> datetime | None:
+    """Translate a max_age service field (duration dict or plain hours) into a UTC cutoff timestamp."""
+    if not age:
+        return None
+    try:
+        if isinstance(age, dict):
+            delta = timedelta(**{k: float(v) for k, v in age.items() if k in _AGE_KEYS and v})
+        else:
+            delta = timedelta(hours=float(age))
+    except (TypeError, ValueError):
+        return None
+    if delta.total_seconds() <= 0:
+        return None
+    return dt_util.utcnow() - delta
+
+
+def _backup_entry_matches(
+    entry: dict,
+    fub_id: int | None,
+    plan_name: str | None,
+    slot: int | None,
+    cutoff: datetime | None,
+) -> bool:
+    """Check a backup metadata entry against the optional list_backups filters."""
+    if fub_id is not None and _coerce_int(entry.get("fub_id")) != fub_id:
+        return False
+    if plan_name and plan_name.lower() not in str(entry.get("plan_name", "")).lower():
+        return False
+    if slot is not None and _coerce_int(entry.get("slot")) != slot:
+        return False
+    if cutoff is not None:
+        captured = dt_util.parse_datetime(str(entry.get("captured_at", "")))
+        return captured is not None and captured >= cutoff
+    return True
+
+
+def _sort_backup_entries(entries: list[dict], order_by: str) -> list[dict]:
+    """Sort list_backups metadata entries; slot 0 is always the newest snapshot of a plan."""
+    if order_by == "oldest":
+        return sorted(entries, key=lambda e: e.get("captured_at") or "")
+    if order_by == "plan":
+        return sorted(entries, key=lambda e: (str(e.get("plan_name", "")).lower(), e.get("slot", 0)))
+    if order_by == "fub_id":
+        return sorted(entries, key=lambda e: (_coerce_int(e.get("fub_id")) or 0, e.get("slot", 0)))
+    if order_by == "slot":
+        return sorted(entries, key=lambda e: (e.get("slot", 0), str(e.get("plan_name", "")).lower()))
+    return sorted(entries, key=lambda e: e.get("captured_at") or "", reverse=True)  # newest (default)
+
+
+# --- Pulled forward from function_plan_render.py (Cluster 4, not yet merged) — pure label
+# resolution only, no HA/Comexio-API dependencies. Re-import from there instead once that
+# module lands.
+def _named_ref_label(by_id: dict, ref_id: str, fallback: str) -> str:
+    """Label of a marker/IO/WebIO reference: the entity's HA display name or a typed fallback."""
+    entry = by_id.get(ref_id)
+    return entry["name"] if entry else fallback
+
+
+_TIME_MODULE_KIND_LABELS = {
+    "on_delayed": "Einschaltverzögert",
+    "off_delayed": "Ausschaltverzögert",
+    "on_pulse": "Einschaltwischend",
+}
+_TIME_MODULE_KINDS_WITHOUT_T2 = frozenset(_TIME_MODULE_KIND_LABELS)
+
+
+def _fmt_value(value: Any) -> str:
+    """Live value display like Studio: compact number, German decimal comma."""
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{float(value):g}".replace(".", ",")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _time_module_tooltip(catalog: dict[str, Any], ref_id: str) -> str:
+    entry = catalog.get("time_modules", {}).get(ref_id) or {}
+    name = entry.get("name") or "Zeitglied"
+    kind = entry.get("kind")
+    lines = [f"T{ref_id} {name}"]
+    if kind:
+        lines.append(f"Typ: {_TIME_MODULE_KIND_LABELS.get(kind, kind)}")
+    if (t1 := entry.get("t1")) is not None:
+        lines.append(f"t1: {_fmt_value(t1 / 10)} Sek.")
+    if kind not in _TIME_MODULE_KINDS_WITHOUT_T2 and (t2 := entry.get("t2")) is not None:
+        lines.append(f"t2: {_fmt_value(t2 / 10)} Sek.")
+    return "\n".join(lines)
+
+
+def _block_label(catalog: dict[str, Any], ref_id: str, elem_name: str) -> str:
+    fub_base = catalog.get("fub_base", {}).get(ref_id) or {}
+    block = fub_base.get("short_name") or fub_base.get("display_name") or fub_base.get("name")
+    if block and elem_name:
+        return f"{block}: {elem_name}"
+    return block or elem_name or f"Baustein ref={ref_id}"
+
+
+def resolve_element_label(
+    elem: dict[str, Any],
+    catalog: dict[str, Any],
+    markers_by_id: dict,
+    webio_by_id: dict,
+    ios_by_id: dict,
+) -> str:
+    """Human-readable label for one plan element, matching the Function Plan preview's naming.
+
+    Trimmed copy (no calendar-function/sun-times branch — that needs coordinator sun-time
+    data not available to the backup-diff caller) of the full resolver that will live in
+    function_plan_render.py (Cluster 4).
+    """
+    ref = elem.get("reference") or {}
+    etype = ref.get("type")
+    ref_id = str(ref.get("ref_id", "?"))
+    elem_name = (elem.get("name") or "").strip()
+    named_by_type: dict[Any, tuple[dict, str]] = {
+        2: (markers_by_id, f"M{ref_id} (unknown)"),
+        10: (webio_by_id, f"WebIO ref={ref_id}"),
+        1: (ios_by_id, f"IO ref={ref_id}"),
+    }
+    if named := named_by_type.get(etype):
+        return _named_ref_label(named[0], ref_id, named[1])
+    if etype == 4:
+        return _time_module_tooltip(catalog, ref_id)
+    if etype == 16:
+        return elem_name or "?"
+    if etype == 14:
+        return elem_name or "(Kommentar)"
+    if etype == 5:
+        return _block_label(catalog, ref_id, elem_name)
+    type_name = catalog.get("fub_types", {}).get(str(etype)) or f"Typ{etype}"
+    return f"{type_name} {elem_name}".strip() if elem_name else f"{type_name} ref={ref_id}"
+
+
+def _label_backup_identity(
+    identity: tuple, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
+) -> str:
+    """Human-readable label for one diff_snapshots() element/endpoint identity tuple.
+
+    identity is (type, ref_id) for types with a globally stable reference (marker/IO/WebIO/
+    time module — see function_plan_backup._STABLE_REF_TYPES), or (type, x, y, ref_id, name) as a
+    position-based fallback for everything else (blocks/constants/comments have no stable
+    cross-snapshot ID).
+    """
+    etype = identity[0]
+    ref_id, name = (identity[1], "") if len(identity) == 2 else (identity[3], identity[4])
+    elem = {"reference": {"type": etype, "ref_id": ref_id}, "name": name}
+    return resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id)
+
+
+def _label_backup_wire(wire: tuple, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict) -> str:
+    """Human-readable 'source → target' label for one diff_snapshots() connection tuple."""
+    (src_identity, _src_port, src_inv), (dst_identity, _dst_port, dst_inv) = wire
+    src_label = _label_backup_identity(src_identity, catalog, markers_by_id, webio_by_id, ios_by_id)
+    dst_label = _label_backup_identity(dst_identity, catalog, markers_by_id, webio_by_id, ios_by_id)
+    inv = " ¬" if src_inv or dst_inv else ""
+    return f"{src_label} → {dst_label}{inv}"
+
+
+def _label_backup_moved_wire(
+    pair: tuple[tuple, tuple], catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
+) -> str:
+    """Human-readable label for one diff_snapshots() connections['moved'] (old_wire, new_wire) pair."""
+    old_wire, new_wire = pair
+    label = _label_backup_wire(new_wire, catalog, markers_by_id, webio_by_id, ios_by_id)
+    (old_src, _, _), (old_dst, _, _) = old_wire
+    (new_src, _, _), (new_dst, _, _) = new_wire
+    moves = [
+        f"({old_id[1]},{old_id[2]}) → ({new_id[1]},{new_id[2]})"
+        for old_id, new_id in ((old_src, new_src), (old_dst, new_dst))
+        if len(old_id) == 5 and (old_id[1], old_id[2]) != (new_id[1], new_id[2])
+    ]
+    suffix = f" [{', '.join(moves)}]" if moves else ""
+    return f"{label}{suffix}"
+
+
+def _label_diff_group(
+    group: dict[str, list],
+    catalog: dict,
+    newer_maps: tuple[dict, dict, dict],
+    older_maps: tuple[dict, dict, dict],
+) -> dict[str, list[str]]:
+    """Label an added/removed identity group.
+
+    Added resolves against the newer snapshot's label maps, removed against the older
+    snapshot's (see _attach_backup_diffs), so each side of the diff shows the name as it was
+    AT THAT SNAPSHOT rather than today's possibly since-renamed live name.
+    """
+    return {
+        "added": [_label_backup_identity(i, catalog, *newer_maps) for i in group["added"]],
+        "removed": [_label_backup_identity(i, catalog, *older_maps) for i in group["removed"]],
+    }
+
+
+def _label_connection_diff(
+    group: dict[str, list],
+    catalog: dict,
+    newer_maps: tuple[dict, dict, dict],
+    older_maps: tuple[dict, dict, dict],
+) -> dict[str, list[str]]:
+    """Like _label_diff_group, but also labels the 'moved' pairs diff_snapshots() reports for
+    connections (see _split_moved in function_plan_backup.py): a wire whose endpoint only shifted
+    position, with no actual add/remove, shown as one entry instead of a confusing pair.
+    """
+    n_markers, n_webio, n_ios = newer_maps
+    o_markers, o_webio, o_ios = older_maps
+    labeled = {
+        "added": [_label_backup_wire(w, catalog, n_markers, n_webio, n_ios) for w in group["added"]],
+        "removed": [_label_backup_wire(w, catalog, o_markers, o_webio, o_ios) for w in group["removed"]],
+    }
+    labeled["moved"] = [_label_backup_moved_wire(pair, catalog, n_markers, n_webio, n_ios) for pair in group["moved"]]
+    return labeled
+
+
+async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[dict], kind: str) -> None:
+    """Add a 'diff' field to each entry vs. its same-kind predecessor slot (slot+1), in-place.
+
+    Entries without a predecessor (the oldest known snapshot of that plan identity) are left
+    without a 'diff' key. Each snapshot's own captured label metadata (if any — see
+    function_plan_backup.snapshot_label_maps) is overlaid on the live maps, per side of the diff,
+    so a renamed/deleted marker doesn't misrepresent an old backup with today's name.
+    """
+    live_markers, live_webio, live_ios = coordinator.function_plan_label_maps()
+    catalog = await coordinator.function_plan_catalog.async_get_catalog()
+    for entry in entries:
+        fub_id, plan_name, slot = entry["fub_id"], entry["plan_name"], entry["slot"]
+        older = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot + 1)
+        if older is None:
+            continue
+        newer = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
+        if newer is None:
+            continue
+        raw_diff = diff_snapshots(newer, older)
+        newer_maps = snapshot_label_maps(newer.get("labels"), live_markers, live_webio, live_ios)
+        older_maps = snapshot_label_maps(older.get("labels"), live_markers, live_webio, live_ios)
+        entry["diff"] = {
+            "markers": _label_diff_group(raw_diff["markers"], catalog, newer_maps, older_maps),
+            "ios": _label_diff_group(raw_diff["ios"], catalog, newer_maps, older_maps),
+            "connections": _label_connection_diff(raw_diff["connections"], catalog, newer_maps, older_maps),
+        }
+
+
+_MULTI_INSTANCE_MSG = "Multiple Comexio instances — please specify `config_entry`."
+_LOGIN_FAILED_MSG = "Comexio admin login failed."
+_INSTANCE_NOT_FOUND_LOG = "Comexio instance %s not found in hass.data"
+
+_TITLE_RESTORE_ERR = "Function Plan Restore — Error"
+_TITLE_LIST_BACKUPS_ERR = "Function Plan Backups — Error"
+_TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
+_TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
+
+
+async def _async_get_service_context(
+    hass: HomeAssistant,
+    call: ServiceCall,
+    error_title: str,
+    *,
+    resolve_plan: bool = True,
+    do_login: bool = True,
+) -> tuple[ComexioCoordinator, Any, int | None] | None:
+    """Resolve coordinator, api and (optionally) target fub_id for a function plan backup
+    service call. Posts an English error notification and returns None on any failure.
+
+    Sibling of _resolve_logikplan_plan (kept separate rather than extended in place) since the
+    backup services need to resolve WITHOUT requiring a live plan/admin login — a deleted
+    plan's stored backups are still listable/restorable, and pure local-storage operations
+    (delete/purge) never need a Comexio session at all.
+    """
+    domain_data = hass.data.get(DOMAIN, {})
+    entry_id = call.data.get("config_entry")
+    if not entry_id:
+        entries = [k for k, v in domain_data.items() if isinstance(v, ComexioCoordinator)]
+        if len(entries) != 1:
+            persistent_notification.async_create(hass, _MULTI_INSTANCE_MSG, title=error_title)
+            return None
+        entry_id = entries[0]
+    coordinator = domain_data.get(entry_id)
+    if not isinstance(coordinator, ComexioCoordinator):
+        _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
+        return None
+    api = coordinator.api
+
+    fub_id: int | None = None
+    if resolve_plan:
+        explicit_fub_id = call.data.get("fub_id")
+        fub_id_raw = explicit_fub_id or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
+        fub_id = _resolve_fub_id(str(fub_id_raw), api.fub_data, hass)
+        if fub_id is None:
+            reason = (
+                f"Plan '{fub_id_raw}' not found."
+                if explicit_fub_id
+                else "No plan selected — the 'Function Plans' selector is empty. "
+                "Please specify the plan (fub_id) explicitly."
+            )
+            persistent_notification.async_create(
+                hass,
+                f"{reason}\nAvailable: {_available_plans_str(api.fub_data)}",
+                title=error_title,
+            )
+            return None
+
+    if do_login and not await api.login():
+        persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=error_title)
+        return None
+
+    return coordinator, api, fub_id
+
+
+def _split_plan_field(raw: str) -> tuple[int, str | None] | None:
+    """Split a Plan dropdown value into (fub_id, plan_name).
+
+    Accepts the current composite 'fub_id:plan_name' value as well as a bare legacy
+    fub_id (pre-hardening dropdown value, or a hand-typed numeric ID in a scripted call) —
+    plan_name is then None and the caller must disambiguate via _resolve_backup_identity.
+    Returns None if the fub_id part isn't numeric at all (e.g. a plain plan name or entity_id,
+    which callers resolve differently).
+    """
+    fub_id_part, sep, name_part = str(raw).partition(":")
+    if not fub_id_part.strip().lstrip("-").isdigit():
+        return None
+    return int(fub_id_part), (name_part if sep else None)
+
+
+async def _resolve_backup_identity(
+    coordinator: ComexioCoordinator, fub_id: int, plan_name_hint: str | None
+) -> tuple[str | None, str | None]:
+    """Resolve the (fub_id, plan_name) identity for a backup action. Returns (plan_name, error).
+
+    fub_id alone is not a stable identity — Comexio reuses IDs after deletion, so two
+    different plans can share one fub_id in the backup store. plan_name_hint short-circuits
+    the lookup when already known precisely (composite dropdown value, or a currently-live
+    plan's own name). Otherwise looks up stored identities for that fub_id: exactly one
+    resolves automatically; none is an error; two or more (a reused ID with more than one
+    identity still on record) is ambiguous and asks the caller to reselect from the dropdown.
+    """
+    if plan_name_hint is not None:
+        return plan_name_hint, None
+    identities = [
+        (name, count)
+        for fid, name, count in await coordinator.function_plan_backup.async_backed_up_plans()
+        if fid == fub_id
+    ]
+    if len(identities) == 1:
+        return identities[0][0], None
+    if not identities:
+        return None, f"No stored backups for plan {fub_id}."
+    names = ", ".join(f"'{name}'" for name, _ in identities)
+    return None, (
+        f"fub_id {fub_id} is ambiguous — {len(identities)} different plan identities share this reused ID in "
+        f"the backup store ({names}). Please reselect from the Plan/Snapshot dropdown."
+    )
+
+
+async def _resolve_restore_target(
+    hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator, api
+) -> tuple[int | None, str | None, str | None]:
+    """Resolve the restore target as (fub_id, plan_name_hint, error).
+
+    Accepts the composite 'fub_id:plan_name' dropdown value (plan_name_hint is then already
+    exact and unambiguous). Otherwise resolves via _resolve_fub_id (bare fub_id, plan name, or
+    the 'Function Plans' selector entity when the field is left empty) — if that fub_id is
+    currently live, its live name is used as the hint; if not (plan deleted), plan_name_hint
+    stays None and the caller must disambiguate via _resolve_backup_identity. Falls back to a
+    name lookup in the stored backup metadata for a plan name that no longer exists live.
+    """
+    raw = str(call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector")
+    split = _split_plan_field(raw)
+    if split and split[1] is not None:
+        return split[0], split[1], None
+
+    fub_id = _resolve_fub_id(raw, api.fub_data, hass)
+    if fub_id is not None:
+        return fub_id, api.fub_data.get(str(fub_id), {}).get("Name"), None
+
+    raw_lower = raw.strip().lower()
+    backups = await coordinator.function_plan_backup.async_list_backups()
+    matches = {
+        (entry["fub_id"], entry.get("plan_name"))
+        for entries in backups.values()
+        for entry in entries
+        if str(entry.get("plan_name", "")).lower() == raw_lower
+    }
+    if len(matches) == 1:
+        fub_id, plan_name = next(iter(matches))
+        return fub_id, plan_name, None
+    if len(matches) > 1:
+        ids = sorted({m[0] for m in matches})
+        return (
+            None,
+            None,
+            (
+                f"Plan name '{raw}' is ambiguous across stored backups (fub_ids {ids}) "
+                "— please specify the numeric plan ID instead."
+            ),
+        )
+    return None, None, f"Plan '{raw}' not found — neither live nor in any stored backup."
+
+
+def _parse_snapshot_field(raw: str) -> tuple[int, str, int, str | None] | None:
+    """Parse the combined snapshot picker field value, or None if malformed.
+
+    Accepts the current 'fub_id:kind:slot:plan_name' value as well as the legacy 3-part
+    'fub_id:kind:slot' (plan_name unknown — caller must disambiguate via
+    _resolve_backup_identity).
+    """
+    parts = raw.split(":", 3)
+    if len(parts) not in (3, 4):
+        return None
+    fub_id_str, kind, slot_str = parts[0], parts[1], parts[2]
+    plan_name = parts[3] if len(parts) == 4 else None
+    try:
+        return int(fub_id_str), kind, int(slot_str), plan_name
+    except ValueError:
+        return None
+
+
+def _restore_conflict_message(fub_id: int, snapshot_name: str, live_name: str | None, on_conflict: str) -> str:
+    """Build the confirmation-required notification text for a plan_missing/identity_mismatch restore."""
+    reason = (
+        f"Plan '{snapshot_name}' (ID {fub_id}) no longer exists."
+        if live_name is None
+        else f"ID {fub_id} is now used by a different plan ('{live_name}'), not '{snapshot_name}'."
+    )
+    action = (
+        f"the LIVE plan '{live_name}' (ID {fub_id}) will be OVERWRITTEN"
+        if on_conflict == "force_override" and live_name is not None
+        else f"a NEW plan named '{snapshot_name}' will be created and rebuilt from the snapshot"
+    )
+    return (
+        f"{reason}\nWith on_conflict='{on_conflict}', {action}.\nRe-run with `confirm: true` to proceed, "
+        "or change `on_conflict`."
+    )
+
+
+async def _restore_plan_in_place(
+    hass: HomeAssistant,
+    coordinator: ComexioCoordinator,
+    api,
+    fub_id: int,
+    snapshot: dict,
+    kind: str,
+    slot: int,
+    plan_hash,
+    identity_was_mismatched: bool = False,
+) -> None:
+    """Restore a snapshot onto the SAME live plan via run_fup (the original, safe-path restore).
+
+    Also used for force_override onto an unrelated live plan (identity_was_mismatched=True) —
+    in that case the live plan's name and canvas settings likely differ from the snapshot's,
+    so both are aligned first (function_plan_update_paper) so the plan comes back exactly as it
+    was, not just its wiring.
+    """
+    live_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    plan_name = snapshot.get("plan_name", live_name)
+    was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+    t_start = time.monotonic()
+
+    # Safety net: snapshot the CURRENT state before restoring, so the restore itself is undoable
+    await coordinator.async_function_plan_change_backup(fub_id, f"pre_restore {kind}[{slot}]")
+
+    apply = await _restore_apply_snapshot(api, fub_id, snapshot, live_name, plan_name, was_active)
+    verify = await _restore_verify(api, fub_id, snapshot, plan_hash)
+    duration = time.monotonic() - t_start
+
+    # identity_was_mismatched (force_override onto a DIFFERENT plan): that plan's elements
+    # never existed under the snapshot's IDs, so Comexio always assigns fresh ones — a
+    # byte-for-byte hash match can never be achieved there, matching counts is the
+    # meaningful signal instead. Same-identity restore: elements keep their IDs, so a hash
+    # match IS achievable and more precise (run_fup returns result=False on an inactive plan
+    # even though the data payload IS applied).
+    content_ok = verify["counts_match"] if identity_was_mismatched else verify["hash_match"]
+    status = _restore_status(content_ok, apply, verify)
+
+    msg = _restore_build_message(
+        plan_name, fub_id, kind, slot, snapshot, status, apply, verify, identity_was_mismatched, was_active, duration
+    )
+    _LOGGER.info(
+        "Function Plan Restore result: fub=%s status=%s identity_was_mismatched=%s hash_match=%s "
+        "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s duration=%.1fs",
+        fub_id,
+        status,
+        identity_was_mismatched,
+        verify["hash_match"],
+        verify["counts_match"],
+        apply["pos_ok"],
+        apply["run_ok"],
+        apply["properties_changed"],
+        apply["paper_ok"],
+        duration,
+    )
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}")
+
+
+async def _restore_apply_snapshot(
+    api, fub_id: int, snapshot: dict, live_name: str, plan_name: str, was_active: bool
+) -> dict:
+    """Apply a snapshot onto the live plan (align paper/name, restore positions, run_fup).
+
+    Align name + canvas settings with the snapshot first — a no-op when they already match
+    (the normal same-identity restore), but required when force_override targets a plan
+    whose current name/paper/DPI differs from the snapshot's.
+    """
+    paper = snapshot.get("paper", "A3")
+    dpi = snapshot.get("dpi", 90)
+    orientation = snapshot.get("orientation", "landscape")
+    properties_changed = (
+        api.get_fub_paper_format(fub_id) != paper
+        or api.get_fub_dpi(fub_id) != dpi
+        or api.get_fub_orientation(fub_id) != orientation
+        or live_name != plan_name
+    )
+    paper_ok = True
+    if properties_changed:
+        paper_ok = await api.function_plan_update_paper(fub_id, paper, dpi, orientation, name=plan_name)
+
+    await api.logikplan_stop_fup(fub_id)
+
+    # Restore element positions via saveelementspos (known-good mechanism from sort)
+    positions = [
+        (int(elem_id), elem.get("position_x", 0.0), elem.get("position_y", 0.0))
+        for elem_id, elem in snapshot.get("elements", {}).items()
+    ]
+    pos_ok = await api.logikplan_save_elements_pos(positions) if positions else True
+
+    # Restore structure + activate via run_fup with the snapshot payload
+    run_ok = await api.logikplan_run_fup(fub_id, plan_data=snapshot)
+
+    # Preserve previous inactive state
+    if run_ok and not was_active:
+        await api.logikplan_stop_fup(fub_id)
+
+    return {
+        "paper": paper,
+        "dpi": dpi,
+        "orientation": orientation,
+        "properties_changed": properties_changed,
+        "paper_ok": paper_ok,
+        "pos_ok": pos_ok,
+        "run_ok": run_ok,
+    }
+
+
+async def _restore_verify(api, fub_id: int, snapshot: dict, plan_hash) -> dict:
+    """Reload the plan after a restore and compare it against the snapshot (hash + counts)."""
+    fresh = await api.logikplan_load_elements(fub_id)
+    fresh_hash = plan_hash(fresh) if fresh else None
+    hash_match = fresh_hash == snapshot.get("hash")
+    elem_count = len(snapshot.get("elements", {}))
+    conn_count = len(snapshot.get("connections", {}))
+    fresh_elem = len(fresh.get("elements", {})) if fresh else -1
+    fresh_conn = len(fresh.get("connections", {})) if fresh else -1
+    counts_match = fresh_elem == elem_count and fresh_conn == conn_count
+    return {
+        "hash_match": hash_match,
+        "counts_match": counts_match,
+        "elem_count": elem_count,
+        "conn_count": conn_count,
+        "fresh_elem": fresh_elem,
+        "fresh_conn": fresh_conn,
+    }
+
+
+def _restore_status(content_ok: bool, apply: dict, verify: dict) -> str:
+    """Overall OK/PARTIAL/FAILED verdict for a restore (see _restore_plan_in_place)."""
+    if content_ok and apply["paper_ok"]:
+        return "OK"
+    if apply["run_ok"] or apply["pos_ok"] or apply["paper_ok"] or verify["counts_match"]:
+        return "PARTIAL"
+    return "FAILED"
+
+
+def _restore_build_message(
+    plan_name: str,
+    fub_id: int,
+    kind: str,
+    slot: int,
+    snapshot: dict,
+    status: str,
+    apply: dict,
+    verify: dict,
+    identity_was_mismatched: bool,
+    was_active: bool,
+    duration: float,
+) -> str:
+    """Human-readable persistent_notification body for a restore result."""
+    reactivation_note = ""
+    if apply["run_ok"]:
+        run_label = "✅"
+    elif was_active:
+        run_label = "❌"
+        reactivation_note = "\n⚠️ Plan could not be re-activated — please check/activate it in Comexio."
+    else:
+        # Data payload was applied; the server merely skipped activating an inactive plan.
+        run_label = "➖ (plan inactive — activation skipped)"
+    paper_line = ""
+    if apply["properties_changed"]:
+        paper_line = (
+            f"Aligned with snapshot: name '{plan_name}', paper {apply['paper']} @ {apply['dpi']} DPI, "
+            f"{apply['orientation']} — {'✅' if apply['paper_ok'] else '❌ failed, restore may look wrong'}\n"
+        )
+    if identity_was_mismatched:
+        content_line = (
+            f"Content match: {'✅' if verify['counts_match'] else '❌'} "
+            "(element IDs are always reassigned when overriding a different plan — "
+            "matching counts is what matters here, not a byte-for-byte hash)\n"
+        )
+    else:
+        content_line = f"Hash match: {'✅' if verify['hash_match'] else '❌'} | "
+    return (
+        f"Restore of plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] "
+        f"({snapshot.get('captured_at')}): **{status}**\n"
+        f"Snapshot: {verify['elem_count']} elements / {verify['conn_count']} connections → "
+        f"now: {verify['fresh_elem']} / {verify['fresh_conn']}\n"
+        f"{paper_line}"
+        f"{content_line}positions: {'✅' if apply['pos_ok'] else '❌'} | "
+        f"run_fup: {run_label}"
+        f"{reactivation_note}\n"
+        f"Duration: {duration:.1f}s"
+    )
+
+
+async def _restore_plan_as_new(
+    hass: HomeAssistant,
+    coordinator: ComexioCoordinator,
+    api,
+    old_fub_id: int,
+    snapshot: dict,
+    kind: str,
+    slot: int,
+    old_id_still_live: bool = False,
+) -> None:
+    """Recreate a deleted/reassigned plan as a brand-new plan and rebuild it from the snapshot.
+
+    old_id_still_live: True for the identity-mismatch/on_conflict='new_id' case, where
+    old_fub_id is occupied by an unrelated live plan rather than genuinely deleted — that
+    plan's own backup lineage must stay under its own ID, so the rekey below is skipped.
+    """
+    plan_name = snapshot.get("plan_name", str(old_fub_id))
+    t_start = time.monotonic()
+
+    # Snapshots captured before paper/DPI tracking existed (or never backfilled) fall back to
+    # A3 @ 90 DPI landscape — a spacious default so the rebuild cannot come out clipped.
+    paper = snapshot.get("paper", "A3")
+    dpi = snapshot.get("dpi", 90)
+    orientation = snapshot.get("orientation", "landscape")
+    new_fub_id = await api.create_fup(plan_name, paper_format=paper, dpi=dpi, orientation=orientation)
+    if new_fub_id is None:
+        persistent_notification.async_create(
+            hass,
+            f"Could not create a replacement plan named '{plan_name}' (the name may already be in use live). "
+            f"Restore of {kind}[{slot}] for the former plan {old_fub_id} was aborted.",
+            title=_TITLE_RESTORE_ERR,
+        )
+        return
+
+    elements_created, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(
+        new_fub_id, snapshot
+    )
+    # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
+    # therefore routinely reports result=False even though the data payload IS applied — the
+    # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
+    # criterion here; the recreated/expected element+connection counts are.
+    run_ok = await api.logikplan_run_fup(new_fub_id)
+    duration = time.monotonic() - t_start
+
+    if old_id_still_live:
+        purged = await coordinator.function_plan_backup.async_purge_identity(old_fub_id, plan_name)
+    else:
+        await coordinator.function_plan_backup.async_rekey_fub_id(old_fub_id, new_fub_id, plan_name)
+        purged = 0
+    updated_consumers = await coordinator.async_repoint_function_plan_fub_id(plan_name, old_fub_id, new_fub_id)
+    if updated_consumers:
+        await hass.config_entries.async_reload(coordinator.config_entry.entry_id)
+
+    elem_count = len(snapshot.get("elements", {}))
+    conn_count = len(snapshot.get("connections", {}))
+    structurally_complete = elements_created == elem_count and connections_created == conn_count
+    status = "OK" if structurally_complete and not warnings else "PARTIAL"
+
+    captured_raw = snapshot.get("captured_at")
+    captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
+    captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
+
+    activation_line = (
+        "Activation: ✅ active"
+        if run_ok
+        else "Activation: ➖ not active yet (Comexio always creates new plans inactive — "
+        "activate manually in Comexio Studio if needed)"
+    )
+    consumer_line = (
+        f"Updated references: {', '.join(updated_consumers)}"
+        if updated_consumers
+        else "References: nothing pointed at the old ID (cluster plan map / plan selector) — nothing to update."
+    )
+    lineage_line = (
+        f"Backup lineage: {purged} old snapshot(s) for '{plan_name}' removed from old ID {old_fub_id} "
+        f"(superseded — the plan now lives at {new_fub_id}; the old ID's OTHER plan is untouched)."
+        if old_id_still_live
+        else f"Backup lineage: moved from old ID {old_fub_id} to new ID {new_fub_id}."
+    )
+
+    msg = (
+        f"Plan '{plan_name}' restored as a NEW plan (old ID {old_fub_id} → new ID {new_fub_id})\n\n"
+        f"Source: {kind}[{slot}], captured {captured_label}\n"
+        f"Elements: {elements_created}/{elem_count} recreated\n"
+        f"Connections: {connections_created}/{conn_count} recreated\n"
+        f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
+        f"{activation_line}\n\n"
+        "Comment text (if any) was reset to the managed-plan default — original wording isn't recoverable.\n"
+        f"{consumer_line}\n"
+        f"{lineage_line}\n\n"
+        f"Duration: {duration:.1f}s"
+    )
+    if warnings:
+        shown = warnings[:10]
+        msg += "\n\nWarnings:\n" + "\n".join(f"- {w}" for w in shown)
+        if len(warnings) > len(shown):
+            msg += f"\n… and {len(warnings) - len(shown)} more (see log)"
+
+    _LOGGER.info(
+        "Function Plan Restore (new plan): old_fub=%s new_fub=%s status=%s elements=%d connections=%d/%d "
+        "run_ok=%s duration=%.1fs",
+        old_fub_id,
+        new_fub_id,
+        status,
+        elements_created,
+        connections_created,
+        conn_count,
+        run_ok,
+        duration,
+    )
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}")
 
 
 def _build_sorted_pairs(
@@ -894,6 +1653,408 @@ async def handle_logikplan_activate(hass: HomeAssistant, call: ServiceCall) -> N
     persistent_notification.async_create(hass, msg, title=f"Logikplan Aktivieren — {'OK' if success else 'Fehler'}")
 
 
+def _build_restore_options(restore_plans: list[tuple[int, str, bool, int]]) -> list[dict]:
+    """{label, value} dropdown options for the fub_id field of the restore-related services."""
+    return [
+        {
+            "label": (
+                f"{name} — fub {fub_id} ({'live' if is_live else 'deleted'}, "
+                f"{count} snapshot{'s' if count != 1 else ''})"
+            ),
+            "value": f"{fub_id}:{name}",
+        }
+        for fub_id, name, is_live, count in sorted(restore_plans, key=lambda p: (p[1].lower(), p[0]))
+    ]
+
+
+_SNAPSHOT_OPTION_MAX_OP_LEN = 30
+
+
+def _snapshot_option_row(kind: str, entry: dict) -> tuple[str, float, dict]:
+    """One (sort_key, -epoch, option) row for _build_snapshot_options."""
+    ts = dt_util.parse_datetime(str(entry.get("captured_at", "")))
+    epoch = ts.timestamp() if ts else 0.0
+    ts_label = dt_util.as_local(ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if ts else "?"
+    operation = str(entry.get("operation", ""))
+    # Some operations embed a full marker-ID list (e.g. add_marker_pairs) — that's
+    # useful in the log but far too long for a dropdown label, so truncate it here.
+    if len(operation) > _SNAPSHOT_OPTION_MAX_OP_LEN:
+        operation = operation[: _SNAPSHOT_OPTION_MAX_OP_LEN - 1] + "…"
+    op_suffix = f" ({operation})" if kind == "change" and operation else ""
+    label = (
+        f"{entry.get('plan_name')} — fub {entry.get('fub_id')} — {kind}[{entry.get('slot')}] — {ts_label}{op_suffix}"
+    )
+    value = f"{entry.get('fub_id')}:{kind}:{entry.get('slot')}:{entry.get('plan_name')}"
+    return str(entry.get("plan_name", "")).lower(), -epoch, {"label": label, "value": value}
+
+
+def _build_snapshot_options(backups: dict[str, list[dict]]) -> list[dict]:
+    """Build one dropdown option per stored snapshot for the combined 'snapshot' picker.
+
+    value: 'fub_id:kind:slot:plan_name' (parsed back by _parse_snapshot_field) — plan_name is
+    included because fub_id alone is not a stable identity (a reused ID can carry two
+    different plans' snapshots at once).
+    """
+    rows = [_snapshot_option_row(kind, entry) for kind in ("auto", "change") for entry in backups.get(kind, [])]
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return [option for _, _, option in rows]
+
+
+def _set_yaml_field_options(
+    content: dict, service: str, field: str, options: list, *, custom_value: bool = True
+) -> None:
+    # custom_value=False for the {label, value} dict-option fields (fub_id/snapshot on the
+    # restore-related services): with custom_value=True, HA's frontend shows the raw
+    # submitted value instead of the matching label once an option is picked — acceptable
+    # for the plain-string options elsewhere, but defeats the point of a readable label here.
+    target_field = content.get(service, {}).get("fields", {}).get(field)
+    if target_field:
+        target_field["selector"] = {"select": {"options": options, "custom_value": custom_value}}
+
+
+_BACKUP_DYNAMIC_SERVICES = ("function_plan_restore", "function_plan_list_backups", "function_plan_delete_backups")
+
+
+def _update_services_yaml_backup_options(
+    restore_plans: list[tuple[int, str, bool, int]], snapshot_options: list[dict]
+) -> dict | None:
+    """Blocking read/modify/write of services.yaml's backup-related dropdowns; executor job only.
+
+    Trimmed sibling of _rewrite_services_yaml_plans (which independently owns the
+    logikplan_* services' fub_id dropdown) — only touches the fub_id/snapshot fields of the
+    three backup services, so that function is left completely untouched.
+    """
+    try:
+        content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        _LOGGER.warning("services.yaml missing or invalid, skipping backup option rewrite: %s", exc)
+        return None
+    restore_options = _build_restore_options(restore_plans)
+    for svc in _BACKUP_DYNAMIC_SERVICES:
+        _set_yaml_field_options(content, svc, "fub_id", restore_options, custom_value=False)
+    _set_yaml_field_options(content, "function_plan_restore", "snapshot", snapshot_options, custom_value=False)
+    _set_yaml_field_options(content, "function_plan_delete_backups", "snapshot", snapshot_options, custom_value=False)
+    try:
+        _SERVICES_YAML_PATH.write_text(
+            yaml.dump(content, allow_unicode=True, sort_keys=False, default_flow_style=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        _LOGGER.warning("Could not write services.yaml backup option rewrite: %s", exc)
+        return None
+    return content
+
+
+async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
+    """Rewrite services.yaml's backup dropdowns and push them into HA's live schema cache.
+
+    Re-registering an already-registered service does NOT make Home Assistant reload its
+    cached description — only async_set_service_schema writes directly into that cache and
+    is guaranteed to take effect immediately. Called by coordinator.py right after a new
+    auto-/change-backup is captured, and by this module's own backup service handlers.
+    """
+    restore_plans: list[tuple[int, str, bool, int]] = []
+    snapshot_options: list[dict] = []
+    for coordinator in hass.data.get(DOMAIN, {}).values():
+        if isinstance(coordinator, ComexioCoordinator):
+            live_fub_ids = {int(k) for k in coordinator.api.fub_data}
+            for fub_id, name, count in await coordinator.function_plan_backup.async_backed_up_plans():
+                restore_plans.append((fub_id, name, fub_id in live_fub_ids, count))
+            backups = await coordinator.function_plan_backup.async_list_backups()
+            snapshot_options.extend(_build_snapshot_options(backups))
+    if not restore_plans:
+        return
+    content = await hass.async_add_executor_job(_update_services_yaml_backup_options, restore_plans, snapshot_options)
+    if not content:
+        return
+    for svc in _BACKUP_DYNAMIC_SERVICES:
+        if schema := content.get(svc):
+            async_set_service_schema(hass, DOMAIN, svc, schema)
+
+
+async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
+    """Restore a function plan from a stored backup snapshot.
+
+    Branches on the CURRENT live state of the snapshot's fub_id:
+    - free (plan deleted) → always rebuilt as a new plan (see _restore_plan_as_new).
+    - live under the SAME name → normal in-place restore via run_fup (unchanged, safe path).
+    - live under a DIFFERENT name (ID reused by an unrelated plan) → identity mismatch;
+      requires explicit `confirm: true` plus `on_conflict` ('new_id' rebuilds separately,
+      'force_override' overwrites the live plan anyway).
+    """
+    from .function_plan_backup import plan_hash
+
+    ctx = await _async_get_service_context(hass, call, _TITLE_RESTORE_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return
+    coordinator, api, _unused_fub_id = ctx
+
+    snapshot_raw = call.data.get("snapshot")
+    if snapshot_raw:
+        parsed = _parse_snapshot_field(str(snapshot_raw))
+        if parsed is None:
+            persistent_notification.async_create(
+                hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=_TITLE_RESTORE_ERR
+            )
+            return
+        fub_id, kind, slot, plan_name_hint = parsed
+    else:
+        fub_id, plan_name_hint, resolve_err = await _resolve_restore_target(hass, call, coordinator, api)
+        if resolve_err:
+            persistent_notification.async_create(hass, resolve_err, title=_TITLE_RESTORE_ERR)
+            return
+        kind = str(call.data.get("kind", "auto")).strip().lower()
+        slot = int(call.data.get("slot", 0))
+
+    plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+    if identity_err:
+        persistent_notification.async_create(hass, identity_err, title=_TITLE_RESTORE_ERR)
+        return
+
+    on_conflict = str(call.data.get("on_conflict", "new_id")).strip().lower()
+    confirm = bool(call.data.get("confirm", False))
+    _LOGGER.info(
+        "Function Plan Restore: fub_id=%s plan_name=%s kind=%s slot=%s on_conflict=%s confirm=%s",
+        fub_id,
+        plan_name,
+        kind,
+        slot,
+        on_conflict,
+        confirm,
+    )
+
+    snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
+    if snapshot is None:
+        backups = await coordinator.function_plan_backup.async_list_backups()
+        available = [
+            f"{kind}[{b['slot']}] {b['captured_at']}"
+            for b in backups.get(kind, [])
+            if b["fub_id"] == fub_id and b.get("plan_name") == plan_name
+        ]
+        persistent_notification.async_create(
+            hass,
+            f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).\n"
+            f"Available {kind} snapshots: {', '.join(available) if available else 'none'}",
+            title=_TITLE_RESTORE_ERR,
+        )
+        return
+
+    if not await api.login():
+        persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=_TITLE_RESTORE_ERR)
+        return
+
+    # Fresh live lookup — api.fub_data may be up to one poll interval stale, and this
+    # decision (does the plan still exist, under what name?) must not be made on stale data.
+    raw_config = await api.get_raw_config()
+    live_fub = raw_config.get("Fubs", {}).get(str(fub_id))
+    if live_fub is not None:
+        api._fub_data[str(fub_id)] = live_fub  # keep the cache fresh for _restore_plan_in_place's reads
+    snapshot_name = snapshot.get("plan_name", str(fub_id))
+    live_name = live_fub.get("Name") if live_fub else None
+    conflict = live_fub is None or live_name != snapshot_name
+
+    if conflict:
+        if not confirm:
+            persistent_notification.async_create(
+                hass,
+                _restore_conflict_message(fub_id, snapshot_name, live_name, on_conflict),
+                title=_TITLE_RESTORE_ERR,
+            )
+            return
+        if live_fub is None or on_conflict != "force_override":
+            await _restore_plan_as_new(
+                hass, coordinator, api, fub_id, snapshot, kind, slot, old_id_still_live=live_fub is not None
+            )
+            await _refresh_service_descriptions(hass)
+            return
+        # force_override on an identity mismatch: fall through and deliberately
+        # overwrite the plan that now occupies this fub_id.
+
+    await _restore_plan_in_place(
+        hass, coordinator, api, fub_id, snapshot, kind, slot, plan_hash, identity_was_mismatched=conflict
+    )
+    await _refresh_service_descriptions(hass)
+
+
+async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: ServiceCall):
+    """Delete stored function plan backup snapshots — one snapshot, one plan's, or all of them.
+
+    Pick ONE of "snapshot" (deletes just that one snapshot) or "fub_id" (deletes ALL
+    snapshots of that plan, auto + change). Leave both empty to wipe every stored backup
+    for every plan on this instance — new ones are rebuilt automatically starting with
+    the next backup cycle / next change. Local storage only, no Comexio API call needed.
+    """
+    ctx = await _async_get_service_context(hass, call, _TITLE_DELETE_BACKUPS_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return
+    coordinator, _api, _unused_fub_id = ctx
+
+    if not bool(call.data.get("confirm", False)):
+        persistent_notification.async_create(
+            hass, "Nothing deleted — 'confirm' must be enabled.", title=_TITLE_DELETE_BACKUPS_ERR
+        )
+        return
+
+    snapshot_raw = call.data.get("snapshot")
+    fub_id_raw = call.data.get("fub_id")
+
+    if snapshot_raw:
+        parsed = _parse_snapshot_field(str(snapshot_raw))
+        if parsed is None:
+            persistent_notification.async_create(
+                hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=_TITLE_DELETE_BACKUPS_ERR
+            )
+            return
+        fub_id, kind, slot, plan_name_hint = parsed
+        plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+        if identity_err:
+            persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
+            return
+        deleted = await coordinator.function_plan_backup.async_delete_snapshot(kind, fub_id, plan_name, slot)
+        msg = (
+            f"Deleted snapshot {kind}[{slot}] for plan '{plan_name}' (fub {fub_id})."
+            if deleted
+            else f"No snapshot found at {kind}[{slot}] for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
+        )
+    elif fub_id_raw not in (None, ""):
+        split = _split_plan_field(str(fub_id_raw))
+        if split is None:
+            persistent_notification.async_create(
+                hass, f"Invalid 'fub_id' value: '{fub_id_raw}'.", title=_TITLE_DELETE_BACKUPS_ERR
+            )
+            return
+        fub_id, plan_name_hint = split
+        plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+        if identity_err:
+            persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
+            return
+        count = await coordinator.function_plan_backup.async_delete_plan_backups(fub_id, plan_name)
+        msg = (
+            f"Deleted all {count} snapshot(s) for plan '{plan_name}' (fub {fub_id})."
+            if count
+            else f"No stored snapshots for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
+        )
+    else:
+        count = await coordinator.function_plan_backup.async_delete_all_backups()
+        msg = (
+            f"Deleted ALL {count} stored snapshot(s) across ALL plans on this instance.\n"
+            "Fresh backups will be created automatically starting with the next backup cycle / next change."
+        )
+
+    _LOGGER.info("Function Plan Delete Backups: %s", msg)
+    coordinator.async_update_listeners()  # refresh the backup-summary diagnostic sensor
+    await _refresh_service_descriptions(hass)
+    persistent_notification.async_create(hass, msg, title="Function Plan Delete Backups")
+
+
+async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call: ServiceCall):
+    """Delete backup snapshots (auto + change) of plans that no longer exist live in Comexio.
+
+    Only orphaned identities (fub_id/plan_name pairs whose plan was deleted directly in
+    Comexio Studio) are ever touched, and only once their newest snapshot is older than
+    the configured retention (Options → Function Plan, default 6 months) — a live plan's
+    backups are never purged, no matter how old. Runs automatically on the periodic
+    backup cycle too; this service is normally only needed to force an out-of-schedule
+    cleanup. Local storage only, no Comexio API call needed.
+    """
+    ctx = await _async_get_service_context(
+        hass, call, _TITLE_PURGE_ORPHANED_BACKUPS_ERR, resolve_plan=False, do_login=False
+    )
+    if ctx is None:
+        return
+    coordinator, api, _unused_fub_id = ctx
+
+    if not bool(call.data.get("confirm", False)):
+        persistent_notification.async_create(
+            hass, "Nothing purged — 'confirm' must be enabled.", title=_TITLE_PURGE_ORPHANED_BACKUPS_ERR
+        )
+        return
+
+    retention_months = coordinator.config_entry.options.get(
+        CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
+    )
+    purged = await coordinator.function_plan_backup.async_purge_orphaned(
+        api.fub_data, cutoff=retention_cutoff(int(retention_months))
+    )
+    total = sum(p["removed"] for p in purged)
+    msg = (
+        f"Purged {total} snapshot(s) across {len(purged)} orphaned plan(s) (older than {retention_months} month(s))."
+        if purged
+        else f"No orphaned plan backups older than {retention_months} month(s) found — nothing purged."
+    )
+
+    _LOGGER.info("Function Plan Purge Orphaned Backups: %s", msg)
+    coordinator.async_update_listeners()  # refresh the backup-summary diagnostic sensor
+    await _refresh_service_descriptions(hass)
+    persistent_notification.async_create(hass, msg, title="Function Plan Purge Orphaned Backups")
+
+
+async def _handle_function_plan_list_backups(hass: HomeAssistant, call: ServiceCall) -> dict:
+    """List stored function plan backup snapshots as a service response, optionally filtered."""
+    ctx = await _async_get_service_context(hass, call, _TITLE_LIST_BACKUPS_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return {"error": "Comexio instance could not be resolved — see notification for details."}
+    coordinator, api, _fub_id = ctx
+
+    # Optional filters: plan (ID or name via the usual resolver), name substring, slot, age.
+    # fub_id alone can be ambiguous (a reused ID may carry two identities in the backup
+    # store) — that's harmless for a pure listing filter, but if the dropdown's composite
+    # 'fub_id:plan_name' value is used, the name is extracted to pre-fill the separate
+    # plan_name filter for free when it wasn't already set explicitly.
+    plan_raw = call.data.get("fub_id")
+    plan_name = call.data.get("plan_name") or None
+    fub_id = None
+    if plan_raw not in (None, ""):
+        split = _split_plan_field(str(plan_raw))
+        if split:
+            fub_id, name_hint = split
+            plan_name = plan_name or name_hint
+        else:
+            fub_id = _resolve_fub_id(str(plan_raw), api.fub_data, hass)
+            if fub_id is None:
+                fub_id = _coerce_int(plan_raw)  # deleted plans: accept the raw numeric ID
+    slot = _coerce_int(call.data.get("slot"))
+    cutoff = _age_cutoff(call.data.get("max_age"))
+    kind = call.data.get("kind", "all")
+    order_by = call.data.get("order_by", "newest")
+    export_as_json = bool(call.data.get("export_as_json", False))
+    diff = bool(call.data.get("diff", False))
+
+    backups = await coordinator.function_plan_backup.async_list_backups()
+
+    def _filtered(entries: list[dict]) -> list[dict]:
+        matches = [e for e in entries if _backup_entry_matches(e, fub_id, plan_name, slot, cutoff)]
+        return _sort_backup_entries(matches, order_by)
+
+    auto_entries = _filtered(backups.get("auto", [])) if kind != "change" else []
+    change_entries = _filtered(backups.get("change", [])) if kind != "auto" else []
+    if diff:
+        await _attach_backup_diffs(coordinator, auto_entries, "auto")
+        await _attach_backup_diffs(coordinator, change_entries, "change")
+    _LOGGER.info(
+        "Function Plan Backups: %d auto / %d change listed "
+        "(plan=%s name=%s slot=%s max_age=%s kind=%s order=%s diff=%s)",
+        len(auto_entries),
+        len(change_entries),
+        plan_raw,
+        plan_name,
+        slot,
+        call.data.get("max_age"),
+        kind,
+        order_by,
+        diff,
+    )
+    result = {
+        "auto_count": len(auto_entries),
+        "change_count": len(change_entries),
+        "auto_backups": auto_entries,
+        "change_backups": change_entries,
+    }
+    if export_as_json:
+        return {"json": json.dumps(result, indent=2, default=str)}
+    return result
+
+
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Register additional services for the Comexio integration."""
     if not hass.services.has_service(DOMAIN, "generate_web_io"):
@@ -910,5 +2071,32 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         hass.services.async_register(DOMAIN, "logikplan_stop", functools.partial(handle_logikplan_stop, hass))
     if not hass.services.has_service(DOMAIN, "logikplan_activate"):
         hass.services.async_register(DOMAIN, "logikplan_activate", functools.partial(handle_logikplan_activate, hass))
+    if not hass.services.has_service(DOMAIN, "function_plan_restore"):
+        hass.services.async_register(
+            DOMAIN, "function_plan_restore", functools.partial(_handle_function_plan_restore, hass)
+        )
+    if not hass.services.has_service(DOMAIN, "function_plan_delete_backups"):
+        hass.services.async_register(
+            DOMAIN, "function_plan_delete_backups", functools.partial(_handle_function_plan_delete_backups, hass)
+        )
+    if not hass.services.has_service(DOMAIN, "function_plan_purge_orphaned_backups"):
+        hass.services.async_register(
+            DOMAIN,
+            "function_plan_purge_orphaned_backups",
+            functools.partial(_handle_function_plan_purge_orphaned_backups, hass),
+        )
+    if not hass.services.has_service(DOMAIN, "function_plan_list_backups"):
+        hass.services.async_register(
+            DOMAIN,
+            "function_plan_list_backups",
+            functools.partial(_handle_function_plan_list_backups, hass),
+            supports_response=SupportsResponse.ONLY,
+        )
 
     await _update_services_yaml_plans(hass)
+
+    # Exposed so coordinator.py can trigger the same refresh right after it writes a new auto-
+    # or change-backup — those happen on the polling cycle and before plan-mutating actions,
+    # neither of which routes through this module's own service handlers.
+    hass.data[DOMAIN]["_refresh_service_descriptions"] = functools.partial(_refresh_service_descriptions, hass)
+    await _refresh_service_descriptions(hass)

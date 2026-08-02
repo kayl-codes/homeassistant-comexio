@@ -69,6 +69,14 @@
         "fix": "✅ Fix now",
         "ignore": "🔇 Suppress this message"
       }
+    },
+    "function_plan_backup_retention_months": {
+      "options": {
+        "1": "1 mes",
+        "3": "3 meses",
+        "6": "6 meses",
+        "12": "12 meses"
+      }
     }
   },
   "options": {
@@ -82,12 +90,14 @@
           "enable_notifications": "Mostrar notificaciones emergentes durante la sincronización",
           "audit_ignored": "Ignorar advertencias de clase Web-IO faltante",
           "include_offline_extensions": "Mostrar entidades de extensiones sin conexión como no disponibles (en lugar de ocultarlas)",
-          "cover_keywords": "Palabras clave para detectar persianas"
+          "cover_keywords": "Palabras clave para detectar persianas",
+          "function_plan_backup_retention_months": "Retención de backups huérfanos"
         },
         "data_description": {
           "schema_marker": "Variables disponibles: '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_io": "Variables disponibles: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
-          "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)"
+          "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)",
+          "function_plan_backup_retention_months": "Las copias de seguridad de un plan eliminado directamente en Comexio se purgan automáticamente en cuanto son más antiguas que este período. Las copias de un plan aún activo nunca se ven afectadas. También disponible como la acción 'Function Plan Purge Orphaned Backups' para una limpieza manual."
         }
       }
     }
@@ -124,6 +134,9 @@
       },
       "comexio_version": {
         "name": "Versión de Comexio"
+      },
+      "plan_changed": {
+        "name": "Plan modificado"
       }
     }
   },

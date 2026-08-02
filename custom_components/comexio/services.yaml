@@ -136,6 +136,221 @@ logikplan_activate:
           options: []
           custom_value: true
 
+function_plan_restore:
+  name: Function Plan Restore
+  description: >
+    Restores a function plan from a stored backup snapshot (auto or pre-change backup).
+    Two ways to pick the target — use ONE, not both: (1) "Snapshot" (recommended) — pick
+    the exact snapshot directly; (2) Advanced: Plan + Backup type + Version manually
+    (e.g. for scripting). Setting "Snapshot" makes the advanced fields ignored.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    snapshot:
+      name: Snapshot (recommended)
+      description: "Pick the exact snapshot to restore, with plan, fub_id, type/slot and timestamp shown together. Overrides the advanced Plan/Backup type/Version fields below when set."
+      required: false
+      selector:
+        select:
+          options: []
+    fub_id:
+      name: Plan
+      description: "Manual alternative to 'Snapshot' above (e.g. for scripting) — ignored whenever 'Snapshot' is set. Only plans with existing backup snapshots are listed. Leave both empty to use the plan selected in the 'Function Plans' entity."
+      required: false
+      advanced: true
+      selector:
+        select:
+          options: []
+    kind:
+      name: Backup type
+      description: "Manual alternative to 'Snapshot' above — ignored whenever 'Snapshot' is set. auto (default when left empty) = cyclic backups written on every detected change (3 slots per plan); change = safety snapshots taken right before each HA-side plan modification (10 slots per plan)."
+      required: false
+      advanced: true
+      selector:
+        select:
+          options:
+            - auto
+            - change
+    slot:
+      name: Version / slot
+      description: "Manual alternative to 'Snapshot' above — ignored whenever 'Snapshot' is set. Which version to restore: 0 (default when left empty) = newest snapshot, 1 = the one before, and so on."
+      required: false
+      advanced: true
+      selector:
+        number:
+          min: 0
+          max: 9
+          mode: box
+    on_conflict:
+      name: On conflict (optional)
+      description: >
+        Only relevant if the plan was deleted, or its ID is now used by a different plan.
+        new_id = create a fresh plan and rebuild it from the snapshot (default, safe).
+        force_override = restore directly onto the live plan that now occupies this ID,
+        overwriting it. Requires 'confirm'.
+      required: false
+      selector:
+        select:
+          options:
+            - new_id
+            - force_override
+    confirm:
+      name: Confirm conflict resolution
+      description: >
+        Must be enabled to proceed when the plan was deleted or its ID now belongs to a
+        different plan. Ignored for a normal restore onto an unchanged, still-existing plan.
+      default: false
+      selector:
+        boolean:
+
+function_plan_delete_backups:
+  name: Function Plan Delete Backups
+  description: >
+    Deletes stored function plan backup snapshots. Pick ONE of "Snapshot" (deletes just that
+    one snapshot) or "Plan" (deletes ALL snapshots — auto and change — of that plan). Leave
+    BOTH empty to delete ALL stored backups of ALL plans on this instance — fresh ones are
+    then rebuilt automatically starting with the next backup cycle / next plan change.
+    Requires "confirm".
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    snapshot:
+      name: Snapshot (optional)
+      description: "Delete only this exact snapshot. Overrides 'Plan' below when set."
+      required: false
+      selector:
+        select:
+          options: []
+    fub_id:
+      name: Plan (optional)
+      description: "Delete ALL snapshots of this plan — ignored whenever 'Snapshot' is set. Leave both empty to delete ALL backups of ALL plans."
+      required: false
+      advanced: true
+      selector:
+        select:
+          options: []
+    confirm:
+      name: Confirm deletion
+      description: "Must be enabled — otherwise nothing is deleted."
+      required: true
+      default: false
+      selector:
+        boolean:
+
+function_plan_purge_orphaned_backups:
+  name: Function Plan Purge Orphaned Backups
+  description: >
+    Deletes backup snapshots (auto and change) of plans that no longer exist live in Comexio
+    (deleted directly in Comexio Studio) and whose newest snapshot is older than the
+    configured retention period (Options → Function Plan, default 6 months). A live plan's
+    backups are never touched, no matter how old. Runs automatically on the periodic backup
+    cycle too — this service is normally only needed to force an out-of-schedule cleanup.
+    Requires "confirm".
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    confirm:
+      name: Confirm purge
+      description: "Must be enabled — otherwise nothing is purged."
+      required: true
+      default: false
+      selector:
+        boolean:
+
+function_plan_list_backups:
+  name: Function Plan List Backups
+  description: Returns stored function plan backup snapshots (plan, type, slot, timestamp, operation) as a service response. All filters are optional and can be combined.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional filter)
+      description: "Only show snapshots of this plan."
+      required: false
+      selector:
+        select:
+          options: []
+    plan_name:
+      name: Plan name contains (optional filter)
+      description: "Only show snapshots whose plan name contains this text (case-insensitive), e.g. 'Licht'."
+      required: false
+      selector:
+        text:
+    kind:
+      name: Backup type (optional filter)
+      description: "Only show one backup type: auto (cyclic) or change (pre-change safety snapshots)."
+      required: false
+      default: all
+      selector:
+        select:
+          options:
+            - all
+            - auto
+            - change
+    slot:
+      name: Version / slot (optional filter)
+      description: "Only show snapshots in this slot (0 = newest). Leave empty for all slots."
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 9
+          mode: box
+    max_age:
+      name: Maximum age (optional filter)
+      description: "Only show snapshots captured within this time span (e.g. last 2 hours)."
+      required: false
+      selector:
+        duration:
+          enable_day: true
+    order_by:
+      name: Sort by (optional)
+      description: "Sort order of the results: newest / oldest (by timestamp), plan (name A-Z, newest first within a plan), fub_id (plan ID, newest first within a plan), slot (slot number, then plan name)."
+      required: false
+      default: newest
+      selector:
+        select:
+          options:
+            - newest
+            - oldest
+            - plan
+            - fub_id
+            - slot
+    export_as_json:
+      name: Export as JSON (optional)
+      description: "If enabled, the response contains ONLY a 'json' field with the full result as a pretty-printed JSON string — handy to copy & paste into a shell (e.g. PowerShell) for further filtering. Disabled (default): the normal structured fields."
+      required: false
+      default: false
+      selector:
+        boolean:
+    diff:
+      name: Include diff vs. predecessor (optional)
+      description: "If enabled, each snapshot (except the oldest known one of its plan/type) gets a 'diff' field showing added/removed markers, IOs and connections compared to the previous snapshot of the SAME type (auto vs. auto, change vs. change). Disabled by default to keep the normal response compact."
+      required: false
+      default: false
+      selector:
+        boolean:
+
 logikplan_visualize:
   name: Logikplan Visualize
   description: Zeigt den aktuellen Zustand eines Logikplan-Plans (Verbindungen + unbeschaltete Elemente) als Benachrichtigung.

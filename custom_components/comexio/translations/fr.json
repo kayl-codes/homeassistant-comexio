@@ -69,6 +69,14 @@
         "fix": "✅ Fix now",
         "ignore": "🔇 Suppress this message"
       }
+    },
+    "function_plan_backup_retention_months": {
+      "options": {
+        "1": "1 mois",
+        "3": "3 mois",
+        "6": "6 mois",
+        "12": "12 mois"
+      }
     }
   },
   "options": {
@@ -82,12 +90,14 @@
           "enable_notifications": "Afficher les notifications contextuelles pendant la synchronisation",
           "audit_ignored": "Ignorer les avertissements de classe Web-IO manquante",
           "include_offline_extensions": "Afficher les entités d'extensions hors ligne comme indisponibles (au lieu de les masquer)",
-          "cover_keywords": "Mots-clés pour la détection des volets"
+          "cover_keywords": "Mots-clés pour la détection des volets",
+          "function_plan_backup_retention_months": "Rétention des sauvegardes orphelines"
         },
         "data_description": {
           "schema_marker": "Variables disponibles : '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_io": "Variables disponibles : '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
-          "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)"
+          "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)",
+          "function_plan_backup_retention_months": "Les sauvegardes d'un plan supprimé directement dans Comexio sont purgées automatiquement dès qu'elles dépassent cette durée. Les sauvegardes d'un plan encore actif ne sont jamais concernées. Également disponible via l'action 'Function Plan Purge Orphaned Backups' pour un nettoyage manuel."
         }
       }
     }
@@ -124,6 +134,9 @@
       },
       "comexio_version": {
         "name": "Version Comexio"
+      },
+      "plan_changed": {
+        "name": "Plan modifié"
       }
     }
   },
