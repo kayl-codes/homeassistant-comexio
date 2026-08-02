@@ -177,13 +177,16 @@ class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        return {
+        info: dict[str, Any] = {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
             "manufacturer": "Comexio",
             "model": "IO-Server",
-            "sw_version": self.coordinator.api.comexio_version,
         }
+        version = self.coordinator.api.comexio_version
+        if version:
+            info["sw_version"] = version
+        return info
 
     @property
     def native_value(self) -> str | None:
