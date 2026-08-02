@@ -56,15 +56,17 @@ def plan_hash(plan_data: dict[str, Any]) -> str:
 _STABLE_REF_TYPES = {1, 2, 10, 4}
 
 
-def _element_identity(elem: dict[str, Any]) -> tuple[Any, ...]:
+def _element_identity(elem: dict[str, Any]) -> tuple[Any, Any, float | None, float | None, Any]:
     """Stable cross-snapshot identity for one plan element (see _STABLE_REF_TYPES).
 
-    The position-based fallback also carries ref_id and name — not needed for equality
-    (position already disambiguates), but this is the only place the caller-side label
-    resolver (services.py's _label_backup_identity) can still get them from, since the diff
-    only ever sees identity tuples, not the original element dicts. Carrying them also means
-    a block swapped for a different kind at the same spot, or a renamed constant/comment,
-    correctly shows up as removed+added instead of being silently treated as unchanged.
+    Always a fixed-shape (type, ref_id, x, y, name) tuple — x/y/name are None for the
+    stable-ref-id types, since those need neither for identity. The position-based fallback
+    also carries ref_id and name — not needed for equality (position already disambiguates),
+    but this is the only place the caller-side label resolver (services.py's
+    _label_backup_identity) can still get them from, since the diff only ever sees identity
+    tuples, not the original element dicts. Carrying them also means a block swapped for a
+    different kind at the same spot, or a renamed constant/comment, correctly shows up as
+    removed+added instead of being silently treated as unchanged.
 
     Position itself is NOT rounded/bucketed here — a plain float difference (even a sub-unit
     Comexio re-save drift) is intentional: it lets _split_moved() downstream recognize a wire
@@ -73,16 +75,15 @@ def _element_identity(elem: dict[str, Any]) -> tuple[Any, ...]:
     """
     ref = elem.get("reference", {})
     etype = ref.get("type")
+    ref_id = ref.get("ref_id")
     if etype in _STABLE_REF_TYPES:
-        return (etype, ref.get("ref_id"))
-    return (etype, elem.get("position_x"), elem.get("position_y"), ref.get("ref_id"), elem.get("name"))
+        return (etype, ref_id, None, None, None)
+    return (etype, ref_id, elem.get("position_x"), elem.get("position_y"), elem.get("name"))
 
 
 def _strip_position(identity: tuple[Any, ...]) -> tuple[Any, ...]:
     """Position-agnostic form of an element identity, used to pair up moved connections."""
-    if len(identity) == 2:
-        return identity
-    etype, _pos_x, _pos_y, ref_id, name = identity
+    etype, ref_id, _pos_x, _pos_y, name = identity
     return (etype, ref_id, name)
 
 
@@ -229,6 +230,106 @@ def snapshot_label_maps(
         _overlay(live_webio, labels.get("webio", {})),
         _overlay(live_ios, labels.get("ios", {})),
     )
+
+
+def _backfill_identity_group(
+    identities: dict[str, list[dict[str, Any]]],
+    live_name: str | None,
+    live_format: tuple[str, int, str] | None,
+) -> int:
+    """Fill in missing paper/dpi/orientation on every snapshot under one fub_id key.
+
+    Paper format is the same for every snapshot of a given plan_name (see
+    async_backfill_paper_metadata), so it's resolved once per plan_name bucket rather than
+    once per snapshot. Returns the number of snapshots filled in.
+    """
+    filled = 0
+    for plan_name, history in identities.items():
+        is_live_identity = live_format is not None and live_name is not None and plan_name == live_name
+        fallback = (_FALLBACK_PAPER, _FALLBACK_DPI, _FALLBACK_ORIENTATION)
+        paper, dpi, orientation = live_format if is_live_identity else fallback
+        for snap in history:
+            if "paper" in snap:
+                continue
+            snap["paper"] = paper
+            snap["dpi"] = dpi
+            snap["orientation"] = orientation
+            filled += 1
+    return filled
+
+
+def _backup_entry(key: str, plan_name: str, slot: int, snap: dict[str, Any]) -> dict[str, Any]:
+    """One async_list_backups() metadata entry for a single stored snapshot."""
+    entry = {
+        "fub_id": int(key),
+        "plan_name": snap.get("plan_name", plan_name),
+        "captured_at": snap.get("captured_at"),
+        "hash": snap.get("hash"),
+        "slot": slot,
+    }
+    if "operation" in snap:
+        entry["operation"] = snap["operation"]
+    for opt_key in ("paper", "dpi", "orientation"):
+        if opt_key in snap:
+            entry[opt_key] = snap[opt_key]
+    return entry
+
+
+def _list_backup_entries(data: dict[str, dict[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
+    """Flatten one store's {fub_id: {plan_name: [snap, ...]}} into sorted metadata entries."""
+    entries = []
+    for key, identities in data.items():
+        for plan_name, history in identities.items():
+            for slot, snap in enumerate(history):
+                entries.append(_backup_entry(key, plan_name, slot, snap))
+    entries.sort(key=lambda e: e.get("captured_at") or "", reverse=True)
+    return entries
+
+
+def _newer_timestamp(a: str | None, b: str | None) -> str | None:
+    """The later of two ISO-8601 captured_at timestamps (either side may be missing)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if a > b else b
+
+
+def _newest_orphaned_in_store(
+    data: dict[str, dict[str, list[dict[str, Any]]]] | None, fub_data: dict[str, Any]
+) -> dict[tuple[int, str], str | None]:
+    """Newest captured_at per orphaned (no-longer-live) (fub_id, plan_name) identity in one store."""
+    newest: dict[tuple[int, str], str | None] = {}
+    for key, identities in (data or {}).items():
+        fub_id = int(key)
+        for plan_name, history in identities.items():
+            if fub_data.get(key, {}).get("Name") == plan_name:
+                continue  # still live under this fub_id
+            captured_at = history[0].get("captured_at") if history else None
+            newest[(fub_id, plan_name)] = _newer_timestamp(newest.get((fub_id, plan_name)), captured_at)
+    return newest
+
+
+def _iter_snapshots(*stores: dict[str, dict[str, list[dict[str, Any]]]] | None):
+    """Yield every stored snapshot dict across any number of {fub_id: {plan_name: [snap, ...]}} stores."""
+    for data in stores:
+        for identities in (data or {}).values():
+            for history in identities.values():
+                yield from history
+
+
+def _snapshot_count(data: dict[str, dict[str, list]] | None) -> int:
+    return sum(len(history) for identities in (data or {}).values() for history in identities.values())
+
+
+def _identity_count(data: dict[str, dict[str, list]] | None) -> int:
+    return sum(len(identities) for identities in (data or {}).values())
+
+
+def _latest_capture(*stores: dict[str, dict[str, list[dict[str, Any]]]] | None) -> str | None:
+    """Newest captured_at timestamp across any number of {fub_id: {plan_name: [snap, ...]}} stores."""
+    timestamps = (snap.get("captured_at") for snap in _iter_snapshots(*stores) if snap.get("captured_at"))
+    return max(timestamps, default=None)
 
 
 def retention_cutoff(months: int) -> datetime:
@@ -462,25 +563,14 @@ class FunctionPlanBackupManager:
         await self._async_ensure_loaded()
         filled = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
-            dirty = False
+            group_filled = 0
             for key, identities in data.items():
                 live_name = fub_data.get(key, {}).get("Name")
                 live_format = plan_format.get(key)
-                for plan_name, history in identities.items():
-                    is_live_identity = live_format is not None and live_name is not None and plan_name == live_name
-                    for snap in history:
-                        if "paper" in snap:
-                            continue
-                        paper, dpi, orientation = (
-                            live_format if is_live_identity else (_FALLBACK_PAPER, _FALLBACK_DPI, _FALLBACK_ORIENTATION)
-                        )
-                        snap["paper"] = paper
-                        snap["dpi"] = dpi
-                        snap["orientation"] = orientation
-                        filled += 1
-                        dirty = True
-            if dirty:
+                group_filled += _backfill_identity_group(identities, live_name, live_format)
+            if group_filled:
                 await store.async_save(data)
+            filled += group_filled
         if filled:
             _LOGGER.info(
                 "[%s] Function Plan backup: backfilled paper/DPI metadata on %d snapshot(s)", self._server_id, filled
@@ -634,29 +724,7 @@ class FunctionPlanBackupManager:
         slot is scoped per (fub_id, plan_name) identity, not per raw fub_id.
         """
         await self._async_ensure_loaded()
-
-        def _meta(data: dict[str, dict[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
-            entries = []
-            for key, identities in data.items():
-                for plan_name, history in identities.items():
-                    for slot, snap in enumerate(history):
-                        entry = {
-                            "fub_id": int(key),
-                            "plan_name": snap.get("plan_name", plan_name),
-                            "captured_at": snap.get("captured_at"),
-                            "hash": snap.get("hash"),
-                            "slot": slot,
-                        }
-                        if "operation" in snap:
-                            entry["operation"] = snap["operation"]
-                        for opt_key in ("paper", "dpi", "orientation"):
-                            if opt_key in snap:
-                                entry[opt_key] = snap[opt_key]
-                        entries.append(entry)
-            entries.sort(key=lambda e: e.get("captured_at") or "", reverse=True)
-            return entries
-
-        return {"auto": _meta(self._auto_data), "change": _meta(self._change_data)}
+        return {"auto": _list_backup_entries(self._auto_data), "change": _list_backup_entries(self._change_data)}
 
     async def async_load(self) -> None:
         """Ensure both stores are loaded into the caches (for sensors reading them synchronously)."""
@@ -689,15 +757,8 @@ class FunctionPlanBackupManager:
         """
         newest_by_identity: dict[tuple[int, str], str | None] = {}
         for data in (self._auto_data, self._change_data):
-            for key, identities in (data or {}).items():
-                fub_id = int(key)
-                for plan_name, history in identities.items():
-                    if fub_data.get(key, {}).get("Name") == plan_name:
-                        continue  # still live under this fub_id
-                    newest = history[0].get("captured_at") if history else None
-                    current = newest_by_identity.get((fub_id, plan_name))
-                    if current is None or (newest and newest > current):
-                        newest_by_identity[(fub_id, plan_name)] = newest
+            for identity, captured_at in _newest_orphaned_in_store(data, fub_data).items():
+                newest_by_identity[identity] = _newer_timestamp(newest_by_identity.get(identity), captured_at)
         return [(fid, name, ts) for (fid, name), ts in newest_by_identity.items()]
 
     async def async_purge_orphaned(
@@ -769,27 +830,12 @@ class FunctionPlanBackupManager:
 
     def summary(self) -> dict[str, Any]:
         """Return a sync summary from the caches (zeros before the first async_load)."""
-
-        def _count(data: dict[str, dict[str, list]] | None) -> int:
-            return sum(len(history) for identities in (data or {}).values() for history in identities.values())
-
-        def _identity_count(data: dict[str, dict[str, list]] | None) -> int:
-            return sum(len(identities) for identities in (data or {}).values())
-
-        latest: str | None = None
-        for data in (self._auto_data, self._change_data):
-            for identities in (data or {}).values():
-                for history in identities.values():
-                    for snap in history:
-                        ts = snap.get("captured_at")
-                        if ts and (latest is None or ts > latest):
-                            latest = ts
         return {
-            "auto_snapshots": _count(self._auto_data),
-            "change_snapshots": _count(self._change_data),
+            "auto_snapshots": _snapshot_count(self._auto_data),
+            "change_snapshots": _snapshot_count(self._change_data),
             "plans_with_auto_backup": _identity_count(self._auto_data),
             "plans_with_change_backup": _identity_count(self._change_data),
-            "last_capture": latest,
+            "last_capture": _latest_capture(self._auto_data, self._change_data),
         }
 
     async def async_get_snapshot(self, kind: str, fub_id: int, plan_name: str, slot: int = 0) -> dict[str, Any] | None:

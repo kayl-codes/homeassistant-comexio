@@ -229,14 +229,13 @@ def _label_backup_identity(
 ) -> str:
     """Human-readable label for one diff_snapshots() element/endpoint identity tuple.
 
-    identity is (type, ref_id) for types with a globally stable reference (marker/IO/WebIO/
-    time module — see function_plan_backup._STABLE_REF_TYPES), or (type, x, y, ref_id, name) as a
-    position-based fallback for everything else (blocks/constants/comments have no stable
-    cross-snapshot ID).
+    identity is a fixed-shape (type, ref_id, x, y, name) tuple — x/y/name are None for types
+    with a globally stable reference (marker/IO/WebIO/time module — see
+    function_plan_backup._STABLE_REF_TYPES); populated as a position-based fallback for
+    everything else (blocks/constants/comments have no stable cross-snapshot ID).
     """
-    etype = identity[0]
-    ref_id, name = (identity[1], "") if len(identity) == 2 else (identity[3], identity[4])
-    elem = {"reference": {"type": etype, "ref_id": ref_id}, "name": name}
+    etype, ref_id, _pos_x, _pos_y, name = identity
+    elem = {"reference": {"type": etype, "ref_id": ref_id}, "name": name or ""}
     return resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id)
 
 
@@ -1008,7 +1007,7 @@ def _resolve_logikplan_plan(hass: HomeAssistant, call: ServiceCall, error_title:
             return None
         entry_id = entries[0]
     if entry_id not in domain_data:
-        _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
+        _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
         return None
 
     coordinator = domain_data[entry_id]
@@ -1372,7 +1371,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
     entry_id = call.data.get("config_entry")
 
     if entry_id not in hass.data[DOMAIN]:
-        _LOGGER.error("Comexio instance %s not found in hass.data", entry_id)
+        _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
         return
 
     coordinator = hass.data[DOMAIN][entry_id]
@@ -1784,6 +1783,86 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
             async_set_service_schema(hass, DOMAIN, svc, schema)
 
 
+async def _resolve_restore_params(
+    hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator, api
+) -> tuple[int, str, int, str | None] | None:
+    """Resolve (fub_id, kind, slot, plan_name_hint) from the call's 'snapshot' or 'fub_id' field.
+
+    Returns None if resolution failed — the error notification has already been shown.
+    """
+    snapshot_raw = call.data.get("snapshot")
+    if snapshot_raw:
+        parsed = _parse_snapshot_field(str(snapshot_raw))
+        if parsed is None:
+            persistent_notification.async_create(
+                hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=_TITLE_RESTORE_ERR
+            )
+            return None
+        return parsed
+    fub_id, plan_name_hint, resolve_err = await _resolve_restore_target(hass, call, coordinator, api)
+    if resolve_err:
+        persistent_notification.async_create(hass, resolve_err, title=_TITLE_RESTORE_ERR)
+        return None
+    kind = str(call.data.get("kind", "auto")).strip().lower()
+    slot = int(call.data.get("slot", 0))
+    return fub_id, kind, slot, plan_name_hint
+
+
+async def _resolve_restore_snapshot(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int, plan_name: str, kind: str, slot: int
+) -> dict[str, Any] | None:
+    """Look up the requested snapshot; notifies with the available alternatives if missing."""
+    snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
+    if snapshot is not None:
+        return snapshot
+    backups = await coordinator.function_plan_backup.async_list_backups()
+    available = [
+        f"{kind}[{b['slot']}] {b['captured_at']}"
+        for b in backups.get(kind, [])
+        if b["fub_id"] == fub_id and b.get("plan_name") == plan_name
+    ]
+    persistent_notification.async_create(
+        hass,
+        f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).\n"
+        f"Available {kind} snapshots: {', '.join(available) if available else 'none'}",
+        title=_TITLE_RESTORE_ERR,
+    )
+    return None
+
+
+async def _resolve_restore_conflict(
+    hass: HomeAssistant,
+    coordinator: ComexioCoordinator,
+    api,
+    fub_id: int,
+    snapshot: dict[str, Any],
+    kind: str,
+    slot: int,
+    live_fub: dict[str, Any] | None,
+    live_name: str | None,
+    snapshot_name: str,
+    on_conflict: str,
+    confirm: bool,
+) -> bool:
+    """Handle an identity-mismatch conflict. Returns True if the caller should stop here."""
+    if not confirm:
+        persistent_notification.async_create(
+            hass,
+            _restore_conflict_message(fub_id, snapshot_name, live_name, on_conflict),
+            title=_TITLE_RESTORE_ERR,
+        )
+        return True
+    if live_fub is None or on_conflict != "force_override":
+        await _restore_plan_as_new(
+            hass, coordinator, api, fub_id, snapshot, kind, slot, old_id_still_live=live_fub is not None
+        )
+        await _refresh_service_descriptions(hass)
+        return True
+    # force_override on an identity mismatch: fall through and deliberately
+    # overwrite the plan that now occupies this fub_id.
+    return False
+
+
 async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
     """Restore a function plan from a stored backup snapshot.
 
@@ -1801,22 +1880,10 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         return
     coordinator, api, _unused_fub_id = ctx
 
-    snapshot_raw = call.data.get("snapshot")
-    if snapshot_raw:
-        parsed = _parse_snapshot_field(str(snapshot_raw))
-        if parsed is None:
-            persistent_notification.async_create(
-                hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=_TITLE_RESTORE_ERR
-            )
-            return
-        fub_id, kind, slot, plan_name_hint = parsed
-    else:
-        fub_id, plan_name_hint, resolve_err = await _resolve_restore_target(hass, call, coordinator, api)
-        if resolve_err:
-            persistent_notification.async_create(hass, resolve_err, title=_TITLE_RESTORE_ERR)
-            return
-        kind = str(call.data.get("kind", "auto")).strip().lower()
-        slot = int(call.data.get("slot", 0))
+    resolved = await _resolve_restore_params(hass, call, coordinator, api)
+    if resolved is None:
+        return
+    fub_id, kind, slot, plan_name_hint = resolved
 
     plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
     if identity_err:
@@ -1835,20 +1902,8 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         confirm,
     )
 
-    snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
+    snapshot = await _resolve_restore_snapshot(hass, coordinator, fub_id, plan_name, kind, slot)
     if snapshot is None:
-        backups = await coordinator.function_plan_backup.async_list_backups()
-        available = [
-            f"{kind}[{b['slot']}] {b['captured_at']}"
-            for b in backups.get(kind, [])
-            if b["fub_id"] == fub_id and b.get("plan_name") == plan_name
-        ]
-        persistent_notification.async_create(
-            hass,
-            f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).\n"
-            f"Available {kind} snapshots: {', '.join(available) if available else 'none'}",
-            title=_TITLE_RESTORE_ERR,
-        )
         return
 
     if not await api.login():
@@ -1865,27 +1920,61 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
     live_name = live_fub.get("Name") if live_fub else None
     conflict = live_fub is None or live_name != snapshot_name
 
-    if conflict:
-        if not confirm:
-            persistent_notification.async_create(
-                hass,
-                _restore_conflict_message(fub_id, snapshot_name, live_name, on_conflict),
-                title=_TITLE_RESTORE_ERR,
-            )
-            return
-        if live_fub is None or on_conflict != "force_override":
-            await _restore_plan_as_new(
-                hass, coordinator, api, fub_id, snapshot, kind, slot, old_id_still_live=live_fub is not None
-            )
-            await _refresh_service_descriptions(hass)
-            return
-        # force_override on an identity mismatch: fall through and deliberately
-        # overwrite the plan that now occupies this fub_id.
+    if conflict and await _resolve_restore_conflict(
+        hass, coordinator, api, fub_id, snapshot, kind, slot, live_fub, live_name, snapshot_name, on_conflict, confirm
+    ):
+        return
 
     await _restore_plan_in_place(
         hass, coordinator, api, fub_id, snapshot, kind, slot, plan_hash, identity_was_mismatched=conflict
     )
     await _refresh_service_descriptions(hass)
+
+
+async def _delete_one_snapshot(hass: HomeAssistant, coordinator: ComexioCoordinator, snapshot_raw: str) -> str | None:
+    """Delete the single snapshot named by the call's 'snapshot' field.
+
+    Returns the result message, or None on error (the notification has already been shown).
+    """
+    parsed = _parse_snapshot_field(str(snapshot_raw))
+    if parsed is None:
+        persistent_notification.async_create(
+            hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=_TITLE_DELETE_BACKUPS_ERR
+        )
+        return None
+    fub_id, kind, slot, plan_name_hint = parsed
+    plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+    if identity_err:
+        persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
+        return None
+    deleted = await coordinator.function_plan_backup.async_delete_snapshot(kind, fub_id, plan_name, slot)
+    if deleted:
+        return f"Deleted snapshot {kind}[{slot}] for plan '{plan_name}' (fub {fub_id})."
+    return f"No snapshot found at {kind}[{slot}] for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
+
+
+async def _delete_plan_backups_by_fub_id(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id_raw: str
+) -> str | None:
+    """Delete all snapshots of the plan named by the call's 'fub_id' field.
+
+    Returns the result message, or None on error (the notification has already been shown).
+    """
+    split = _split_plan_field(str(fub_id_raw))
+    if split is None:
+        persistent_notification.async_create(
+            hass, f"Invalid 'fub_id' value: '{fub_id_raw}'.", title=_TITLE_DELETE_BACKUPS_ERR
+        )
+        return None
+    fub_id, plan_name_hint = split
+    plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+    if identity_err:
+        persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
+        return None
+    count = await coordinator.function_plan_backup.async_delete_plan_backups(fub_id, plan_name)
+    if count:
+        return f"Deleted all {count} snapshot(s) for plan '{plan_name}' (fub {fub_id})."
+    return f"No stored snapshots for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
 
 
 async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: ServiceCall):
@@ -1911,47 +2000,17 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
     fub_id_raw = call.data.get("fub_id")
 
     if snapshot_raw:
-        parsed = _parse_snapshot_field(str(snapshot_raw))
-        if parsed is None:
-            persistent_notification.async_create(
-                hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=_TITLE_DELETE_BACKUPS_ERR
-            )
-            return
-        fub_id, kind, slot, plan_name_hint = parsed
-        plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-        if identity_err:
-            persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
-            return
-        deleted = await coordinator.function_plan_backup.async_delete_snapshot(kind, fub_id, plan_name, slot)
-        msg = (
-            f"Deleted snapshot {kind}[{slot}] for plan '{plan_name}' (fub {fub_id})."
-            if deleted
-            else f"No snapshot found at {kind}[{slot}] for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
-        )
+        msg = await _delete_one_snapshot(hass, coordinator, snapshot_raw)
     elif fub_id_raw not in (None, ""):
-        split = _split_plan_field(str(fub_id_raw))
-        if split is None:
-            persistent_notification.async_create(
-                hass, f"Invalid 'fub_id' value: '{fub_id_raw}'.", title=_TITLE_DELETE_BACKUPS_ERR
-            )
-            return
-        fub_id, plan_name_hint = split
-        plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-        if identity_err:
-            persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
-            return
-        count = await coordinator.function_plan_backup.async_delete_plan_backups(fub_id, plan_name)
-        msg = (
-            f"Deleted all {count} snapshot(s) for plan '{plan_name}' (fub {fub_id})."
-            if count
-            else f"No stored snapshots for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
-        )
+        msg = await _delete_plan_backups_by_fub_id(hass, coordinator, fub_id_raw)
     else:
         count = await coordinator.function_plan_backup.async_delete_all_backups()
         msg = (
             f"Deleted ALL {count} stored snapshot(s) across ALL plans on this instance.\n"
             "Fresh backups will be created automatically starting with the next backup cycle / next change."
         )
+    if msg is None:
+        return
 
     _LOGGER.info("Function Plan Delete Backups: %s", msg)
     coordinator.async_update_listeners()  # refresh the backup-summary diagnostic sensor
