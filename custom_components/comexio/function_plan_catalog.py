@@ -317,7 +317,7 @@ class FunctionPlanCatalogManager:
         # parsing) both mean there's no reliable version comparison to block on, so
         # either case counts as a version change too, letting a legitimate post-upgrade
         # (or post-scrape-failure) shrink through instead of being incorrectly rejected.
-        version_changed = comexio_version != old_version
+        version_changed = comexio_version is None or old_version is None or comexio_version != old_version
         if old_types and len(fub_types) < len(old_types) and not version_changed:
             self._log_shrink_warning(
                 "[%s] Function Plan catalog: new FubTypes count (%d) < cached (%d) — keeping previous catalog",
