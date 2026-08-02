@@ -175,17 +175,17 @@ class FunctionPlanCatalogManager:
     async def _async_ensure_loaded(self) -> None:
         if self._loaded:
             return
-        self._loaded = True
         try:
             loaded = await self._store.async_load()
         except Exception:
             _LOGGER.exception(
-                "[%s] Function Plan catalog: failed to load persisted catalog — starting empty",
+                "[%s] Function Plan catalog: failed to load persisted catalog — will retry next poll",
                 self._server_id,
             )
             return
         if isinstance(loaded, dict):
             self._data = loaded
+        self._loaded = True
 
     async def async_update_from_raw_config(self, raw_config: dict[str, Any], comexio_version: str | None) -> None:
         """Extract, validate and persist the catalog if it changed and isn't corrupt.
@@ -270,7 +270,7 @@ class FunctionPlanCatalogManager:
                 "[%s] Function Plan catalog: failed to persist catalog — keeping in-memory only",
                 self._server_id,
             )
-        _LOGGER.info(
+        _LOGGER.debug(
             "[%s] Function Plan catalog updated (Comexio %s): %d element types, %d fubBase blocks, "
             "%d time modules, %d calendar functions",
             self._server_id,
