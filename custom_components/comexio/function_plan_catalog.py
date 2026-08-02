@@ -126,6 +126,14 @@ def _port_types(ports: list[dict[str, Any]] | None) -> list[int]:
     return [_try_int(port.get("Type")) or 0 for port in sorted_ports]
 
 
+def _to_bool_flag(value: Any) -> bool:
+    """Normalize a Comexio boolean-ish flag — numeric-string values like "0"/"1" are
+    compared as integers so "0" isn't misread as truthy by a plain bool() cast.
+    """
+    as_int = _try_int(value)
+    return bool(as_int) if as_int is not None else bool(value)
+
+
 def _extract_time_modules(fub_modules: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Build {ref_id: {name, kind, t1, t2}} from $FubModules["4"].
 
@@ -162,7 +170,7 @@ def _extract_calendar_functions(fub_modules: dict[str, Any]) -> dict[str, dict[s
     return {
         ref_id: {
             "name": entry.get("Name"),
-            "active": bool(entry.get("Active")),
+            "active": _to_bool_flag(entry.get("Active")),
             "freq": entry.get("Freq"),
             "by_day": entry.get("ByDay"),
         }
@@ -189,10 +197,14 @@ class FunctionPlanCatalogManager:
         try:
             loaded = await self._store.async_load()
         except Exception:
+            # Give up on this file for the session (rather than retrying every poll and
+            # spamming the log) — an empty in-memory catalog is a safe permanent fallback.
             _LOGGER.exception(
-                "[%s] Function Plan catalog: failed to load persisted catalog — will retry next poll",
+                "[%s] Function Plan catalog: failed to load persisted catalog — "
+                "falling back to empty in-memory catalog",
                 self._server_id,
             )
+            self._loaded = True
             return
         if loaded is None:
             # No file yet (first run) — empty catalog is the correct, permanent state.
@@ -229,6 +241,14 @@ class FunctionPlanCatalogManager:
         fub_base_i18n = raw_config.get("FubBaseI18N")
         if not fub_types or not fub_modules or fub_base_i18n is None:
             # Admin page didn't expose these vars this cycle — keep the existing cache.
+            _LOGGER.debug(
+                "[%s] Function Plan catalog: skipping update, required Fub* vars missing or empty "
+                "(FubTypes present=%s, FubModules present=%s, FubBaseI18N present=%s)",
+                self._server_id,
+                bool(fub_types),
+                bool(fub_modules),
+                fub_base_i18n is not None,
+            )
             return
 
         fub_base = _extract_fub_base_catalog(fub_modules, fub_base_i18n)
@@ -254,7 +274,10 @@ class FunctionPlanCatalogManager:
         # means a real firmware update was detected and may legitimately have removed or
         # consolidated block types. time_modules is user configuration (like Markers) and
         # legitimately shrinks when the user deletes a timer — no guard for it.
-        version_changed = bool(comexio_version) and bool(old_version) and comexio_version != old_version
+        # No stored old_version (catalog persisted before version-stamping existed, or
+        # first-ever save) means there's no baseline to compare against — treat that as
+        # a version change too, so the guard doesn't block a legitimate post-upgrade shrink.
+        version_changed = bool(comexio_version) and comexio_version != old_version
         if old_types and len(fub_types) < len(old_types) and not version_changed:
             _LOGGER.warning(
                 "[%s] Function Plan catalog: new FubTypes count (%d) < cached (%d) — keeping previous catalog",
