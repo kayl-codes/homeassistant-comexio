@@ -2,6 +2,7 @@
 import asyncio
 from datetime import datetime, timedelta
 import logging
+import re
 import socket
 from typing import Any
 
@@ -21,6 +22,7 @@ from .const import (
     CONF_API_USERNAME,
     CONF_COVER_KEYWORDS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
+    CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     CONF_HOST,
     CONF_IGNORED_MARKERS,
     CONF_PASSWORD,
@@ -28,6 +30,7 @@ from .const import (
     CONF_STATISTICS_CLEANUP_IGNORED,
     CONF_USERNAME,
     DEFAULT_COVER_KEYWORDS,
+    DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DOMAIN,
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
@@ -40,9 +43,15 @@ from .const import (
     is_io_audit_key,
     webio_class_label,
 )
+from .function_plan_backup import FunctionPlanBackupManager, retention_cutoff
 from .function_plan_catalog import FunctionPlanCatalogManager
 
 _LOGGER = logging.getLogger(__name__)
+
+# Matches the "(ID <n>)" suffix format.format_plan_label() appends to a plan select-option
+# label, letting get_active_function_plan_fub_id() resolve the fub_id directly instead of
+# matching by (non-unique) plan name.
+_PLAN_LABEL_ID_SUFFIX_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
 
 async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
@@ -87,6 +96,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api.config_entry = entry
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
+        self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id)
+        self._function_plan_backup_lock: asyncio.Lock = asyncio.Lock()
+        self.last_changed_plans: list[dict[str, Any]] = []
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
@@ -507,11 +519,188 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
 
+            # Function Plan backup: load all plan wirings + rotate auto backups in the background.
+            # Entry-scoped task (cancelled on unload/reload) so neither startup nor the poll
+            # cycle is blocked by the ~0.5s/plan bulk load. Skip spawning a new task entirely
+            # while a previous cycle is still running, instead of creating one just to have it
+            # return immediately on the lock check.
+            if not self._function_plan_backup_lock.locked():
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self._async_function_plan_backup_cycle(),
+                    name=f"comexio_{self.server_id}_function_plan_backup",
+                )
+
             return final_data
 
         except Exception as e:
             _LOGGER.exception("[%s] Data fetch failed: %s", self.server_id, e)
             raise
+
+    async def _async_function_plan_backup_cycle(self) -> None:
+        """Load all plan wirings and rotate auto backups (runs as entry-scoped background task)."""
+        if self._function_plan_backup_lock.locked():
+            _LOGGER.debug("[%s] Function Plan backup cycle skipped: previous run still in progress", self.server_id)
+            return
+        async with self._function_plan_backup_lock:
+            # Reset up front so a failed/empty cycle never leaves a stale result from a
+            # previous poll behind — ComexioPlanChangedSensor must reflect *this* cycle only.
+            self.last_changed_plans = []
+            try:
+                plans = await self.api.function_plan_load_all_plans()
+            except Exception:
+                _LOGGER.exception("[%s] Function Plan bulk load failed — keeping previous snapshot", self.server_id)
+                return
+            if not plans:
+                return
+            fub_data = self.api.fub_data
+            plan_format = self._current_plan_format(fub_data)
+            markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
+            try:
+                self.last_changed_plans = await self.function_plan_backup.async_auto_backup(
+                    plans,
+                    fub_data,
+                    plan_format,
+                    self.api.comexio_version,
+                    markers_by_id,
+                    webio_by_id,
+                    ios_by_id,
+                )
+                await self._async_refresh_service_descriptions()
+            except Exception:
+                _LOGGER.exception("[%s] Function Plan auto backup failed", self.server_id)
+            try:
+                await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
+            except Exception:
+                _LOGGER.exception("[%s] Function Plan paper/DPI backfill failed", self.server_id)
+            try:
+                retention_months = self.config_entry.options.get(
+                    CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
+                )
+                purged = await self.function_plan_backup.async_purge_orphaned(
+                    fub_data, cutoff=retention_cutoff(int(retention_months))
+                )
+                if purged:
+                    _LOGGER.info(
+                        "[%s] Function Plan backup: purged %d orphaned identity(ies) older than %s month(s)",
+                        self.server_id,
+                        len(purged),
+                        retention_months,
+                    )
+            except Exception:
+                _LOGGER.exception("[%s] Function Plan orphaned-backup purge failed", self.server_id)
+            # Refresh diagnostic entities (backup summary sensor) without a full data update
+            self.async_update_listeners()
+
+    async def _async_refresh_service_descriptions(self) -> None:
+        """Refresh services.yaml's dynamic dropdowns after a new backup was just captured.
+
+        The callback is registered by services.py (async_setup_services); it may not exist
+        yet on the very first backup cycle right after HA startup.
+        """
+        if refresh := self.hass.data.get(DOMAIN, {}).get("_refresh_service_descriptions"):
+            await refresh()
+
+    def _current_plan_format(self, fub_data: dict) -> dict[str, tuple[str, int, str]]:
+        """Return {fub_id_str: (paper, dpi, orientation)} for every plan currently in fub_data."""
+        return {
+            key: (
+                self.api.get_fub_paper_format(int(key)),
+                self.api.get_fub_dpi(int(key)),
+                self.api.get_fub_orientation(int(key)),
+            )
+            for key in fub_data
+        }
+
+    async def async_function_plan_change_backup(
+        self, fub_id: int, operation: str, plan_data: dict | None = None
+    ) -> None:
+        """Store a pre-mutation snapshot of one plan. Never raises — a failed backup
+        is logged loudly but must not block the operation itself."""
+        try:
+            if plan_data is None:
+                plan_data = await self.api.logikplan_load_elements(fub_id)
+            if not plan_data:
+                _LOGGER.warning("[%s] Pre-change backup skipped: plan %s could not be loaded", self.server_id, fub_id)
+                return
+            plan_name = self.api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+            paper = self.api.get_fub_paper_format(fub_id)
+            dpi = self.api.get_fub_dpi(fub_id)
+            orientation = self.api.get_fub_orientation(fub_id)
+            markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
+            await self.function_plan_backup.async_change_backup(
+                fub_id,
+                plan_data,
+                plan_name,
+                operation,
+                paper,
+                dpi,
+                orientation,
+                self.api.comexio_version,
+                markers_by_id,
+                webio_by_id,
+                ios_by_id,
+            )
+            await self._async_refresh_service_descriptions()
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Pre-change Function Plan backup failed (fub=%s, op=%s)", self.server_id, fub_id, operation
+            )
+
+    def get_active_function_plan_fub_id(self) -> int | None:
+        """Return the fub_id for the currently selected 'Function Plans' plan, or None.
+
+        Shared by select.py (backup selector) — kept on the coordinator rather than as a
+        free function in an entity-platform module. Parses the fub_id directly out of the
+        selector's "<name> (ID <n>)" label (see services.format_plan_label) rather than
+        matching on the bare name, since plan names aren't unique in Comexio.
+        """
+        from homeassistant.helpers import entity_registry as er
+
+        uid = f"comexio_{self.server_id}_logikplan_plan_selector"
+        select_eid = er.async_get(self.hass).async_get_entity_id("select", DOMAIN, uid) or ""
+        lp_state = self.hass.states.get(select_eid)
+        if not lp_state or lp_state.state in ("unavailable", "unknown"):
+            return None
+        if match := _PLAN_LABEL_ID_SUFFIX_RE.search(lp_state.state):
+            return int(match.group(1))
+        return next((int(fid) for fid, fi in self.api.fub_data.items() if fi.get("Name") == lp_state.state), None)
+
+    def function_plan_label_maps(self) -> tuple[dict, dict, dict]:
+        """Lookup dicts (marker/WebIO/IO id -> {"name": ..., ...}) for backup snapshot labeling.
+
+        webio_by_id is built from the live webio_commands map (HA-managed Web-IO classes
+        only) — a WebIO block wired into a plan from an unrelated, non-HA-managed Comexio
+        device falls back to the generic "WebIO ref=<id>" label in resolve_element_label.
+        """
+        data = self.data or {}
+        markers_by_id = {str(m["id"]): m for m in data.get("markers", [])}
+        webio_by_id: dict[str, Any] = {}
+        for name, cmd in data.get("webio_commands", {}).items():
+            w_id = cmd.get("webIoId")
+            if w_id is not None:
+                webio_by_id[str(w_id)] = {"name": name, "analog": cmd.get("typeId") == 2}
+        ios_by_id = {str(io["id"]): io for io in data.get("io", [])}
+        return markers_by_id, webio_by_id, ios_by_id
+
+    async def async_repoint_function_plan_fub_id(self, plan_name: str, old_fub_id: int, new_fub_id: int) -> list[str]:
+        """Point any config that references old_fub_id by name at the plan's new fub_id.
+
+        Called after a restore-as-new gives a deleted/reassigned plan a fresh fub_id.
+        Degrades to a no-op for the plan-map entry when CONF_FUNCTION_PLAN_PLAN_MAP isn't
+        set (that option belongs to the not-yet-merged managed-cluster-plans feature).
+        Returns a list of human-readable descriptions of what was updated, for the
+        restore service's response message.
+        """
+        updated: list[str] = []
+        new_options = dict(self.config_entry.options)
+        plan_map = new_options.get("logikplan_plan_map", {})
+        if plan_map.get(plan_name) == old_fub_id:
+            new_options["logikplan_plan_map"] = {**plan_map, plan_name: new_fub_id}
+            updated.append(f"cluster plan map entry '{plan_name}' → fub_id {new_fub_id}")
+        if updated:
+            self.request_options_update_without_reload(new_options)
+        return updated
 
     def update_marker(self, marker_id: str | int, value: float | int | str) -> None:
         marker_id_str = str(marker_id)

@@ -69,6 +69,14 @@
         "fix": "✅ Jetzt korrigieren",
         "ignore": "🔇 Diese Nachricht ignorieren"
       }
+    },
+    "function_plan_backup_retention_months": {
+      "options": {
+        "1": "1 Monat",
+        "3": "3 Monate",
+        "6": "6 Monate",
+        "12": "12 Monate"
+      }
     }
   },
   "options": {
@@ -83,13 +91,15 @@
           "audit_ignored": "Warnung bei fehlender Web-IO Klasse ignorieren",
           "include_offline_extensions": "Offline-Extensions als 'Nicht verfügbar' anzeigen (statt ausblenden)",
           "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung",
-          "ignored_markers": "Merker-IDs von der Logikplan-Verbindung ausschließen"
+          "ignored_markers": "Merker-IDs von der Logikplan-Verbindung ausschließen",
+          "function_plan_backup_retention_months": "Aufbewahrung verwaister Backups"
         },
         "data_description": {
           "schema_marker": "Verfügbare Variablen: '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_io": "Verfügbare Variablen: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "cover_keywords": "Kommaseparierte Liste (z.B. rollo, jalousie, blind)",
-          "ignored_markers": "Komma- oder Semikolon-getrennte Merker-IDs mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456; M789'). Nur Merker mit Beschreibung können ignoriert werden."
+          "ignored_markers": "Komma- oder Semikolon-getrennte Merker-IDs mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456; M789'). Nur Merker mit Beschreibung können ignoriert werden.",
+          "function_plan_backup_retention_months": "Backup-Schnappschüsse eines Plans, der direkt in Comexio gelöscht wurde, werden automatisch geräumt, sobald sie älter als diese Frist sind. Backups eines noch existierenden Plans sind davon nie betroffen. Steht auch als Action 'Function Plan Purge Orphaned Backups' für eine manuelle Bereinigung zur Verfügung."
         }
       }
     }
@@ -126,6 +136,9 @@
       },
       "comexio_version": {
         "name": "Comexio-Version"
+      },
+      "plan_changed": {
+        "name": "Plan geändert"
       }
     }
   },

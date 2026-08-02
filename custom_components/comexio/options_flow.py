@@ -8,12 +8,14 @@ import voluptuous as vol
 from .const import (
     CONF_COVER_KEYWORDS,
     CONF_ENABLE_NOTIFICATIONS,
+    CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     CONF_IGNORED_MARKERS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
     CONF_SCHEMA_MARKER,
     DEFAULT_COVER_KEYWORDS,
     DEFAULT_ENABLE_NOTIFICATIONS,
+    DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DEFAULT_SCHEMA_IO,
     DEFAULT_SCHEMA_MARKER,
     SCAN_INTERVAL_DEFAULT,
@@ -87,6 +89,10 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             user_input["scan_interval"] = int(user_input["scan_interval"])
+            if CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS in user_input:
+                user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
+                    user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
+                )
             self._process_ignored_markers(user_input, conf, errors)
 
             if not errors:
@@ -131,6 +137,21 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                         CONF_COVER_KEYWORDS, default=conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS)
                     ): str,
                     vol.Optional(CONF_IGNORED_MARKERS, default=conf.get(CONF_IGNORED_MARKERS, "")): str,
+                    vol.Required(
+                        CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+                        default=str(
+                            conf.get(
+                                CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+                                DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+                            )
+                        ),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=["1", "3", "6", "12"],
+                            mode=SelectSelectorMode.DROPDOWN,
+                            translation_key="function_plan_backup_retention_months",
+                        )
+                    ),
                 }
             ),
             errors=errors,

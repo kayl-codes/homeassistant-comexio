@@ -137,6 +137,17 @@ def bus_load_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_bus_load_update"
 
 
+# Function Plan backup/restore: rotating snapshot slots per plan (see function_plan_backup.py).
+FUNCTION_PLAN_AUTO_BACKUP_SLOTS = 3
+FUNCTION_PLAN_CHANGE_BACKUP_SLOTS = 10
+CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = "function_plan_backup_retention_months"
+DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = 6
+TIMESTAMP_DISPLAY_FORMAT = "%d.%m.%Y %H:%M"
+
+# Marker for a comment element the restore-as-new path adds to a rebuilt plan, so a user
+# opening it in Comexio Studio immediately understands why it exists and shouldn't hand-edit it.
+FUNCTION_PLAN_MANAGED_PLAN_COMMENT = "! Administrated by HomeAssistant, dont delete or rename !"
+
 # need for ha ip dns validation, to avoid false positives
 KNOWN_DOMAINS = [
     "fritz.box",

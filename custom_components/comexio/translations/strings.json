@@ -69,6 +69,14 @@
         "fix": "✅ Fix now",
         "ignore": "🔇 Suppress this message"
       }
+    },
+    "function_plan_backup_retention_months": {
+      "options": {
+        "1": "1 month",
+        "3": "3 months",
+        "6": "6 months",
+        "12": "12 months"
+      }
     }
   },
   "options": {
@@ -83,13 +91,15 @@
           "audit_ignored": "Ignore missing Web-IO warnings",
           "include_offline_extensions": "Show offline extension entities as unavailable (instead of hiding them)",
           "cover_keywords": "Keywords for cover detection",
-          "ignored_markers": "Marker IDs to exclude from Logikplan connection"
+          "ignored_markers": "Marker IDs to exclude from Logikplan connection",
+          "function_plan_backup_retention_months": "Orphaned backup retention"
         },
         "data_description": {
           "schema_marker": "Available variables: '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_io": "Available variables: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)",
-          "ignored_markers": "Comma- or semicolon-separated marker IDs with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456; M789'). Only markers with a description can be ignored."
+          "ignored_markers": "Comma- or semicolon-separated marker IDs with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456; M789'). Only markers with a description can be ignored.",
+          "function_plan_backup_retention_months": "Backup snapshots of a plan that was deleted directly in Comexio are purged automatically once they are older than this. A live plan's backups are never affected. Also available as the 'Function Plan Purge Orphaned Backups' action for an on-demand cleanup."
         }
       }
     }
@@ -126,6 +136,9 @@
       },
       "comexio_version": {
         "name": "Comexio Version"
+      },
+      "plan_changed": {
+        "name": "Plan Changed"
       }
     }
   },
