@@ -318,7 +318,24 @@ class FunctionPlanCatalogManager:
         # either case counts as a version change too, letting a legitimate post-upgrade
         # (or post-scrape-failure) shrink through instead of being incorrectly rejected.
         version_changed = comexio_version is None or old_version is None or comexio_version != old_version
-        if old_types and len(fub_types) < len(old_types) and not version_changed:
+        shrank_types = bool(old_types) and len(fub_types) < len(old_types)
+        shrank_base = bool(old_base) and len(fub_base) < len(old_base)
+        if version_changed and (shrank_types or shrank_base):
+            # Debug trail for post-upgrade catalog changes: the guard below only blocks
+            # this shrink when the version stamp is unchanged, so record the accepted
+            # case too — otherwise a legitimate post-upgrade shrink leaves no log trace.
+            _LOGGER.debug(
+                "[%s] Function Plan catalog: accepting shrink (FubTypes %d -> %d, fubBase %d -> %d) "
+                "because the version stamp changed (%s -> %s)",
+                self._server_id,
+                len(old_types),
+                len(fub_types),
+                len(old_base),
+                len(fub_base),
+                old_version,
+                comexio_version,
+            )
+        if shrank_types and not version_changed:
             self._log_shrink_warning(
                 "[%s] Function Plan catalog: new FubTypes count (%d) < cached (%d) — keeping previous catalog",
                 self._server_id,
@@ -326,7 +343,7 @@ class FunctionPlanCatalogManager:
                 len(old_types),
             )
             return
-        if old_base and len(fub_base) < len(old_base) and not version_changed:
+        if shrank_base and not version_changed:
             self._log_shrink_warning(
                 "[%s] Function Plan catalog: new fubBase count (%d) < cached (%d) — keeping previous catalog",
                 self._server_id,
@@ -378,6 +395,12 @@ class FunctionPlanCatalogManager:
 
         A deep copy is returned so callers can't mutate the manager's internal cache,
         including its nested fub_types/fub_base/time_modules/calendar_functions dicts.
+        A shallow immutable view (e.g. MappingProxyType) would only protect the top-level
+        dict, not those nested ones, so it would weaken this guarantee rather than just
+        making it cheaper — not a trade worth making for a catalog this size. This isn't
+        a hot path: it's meant to be called once per analysis/rebuild operation, not per
+        poll cycle. A future caller that does need repeated access in a tight loop should
+        cache the returned copy itself rather than re-calling this per iteration.
         """
         await self._async_ensure_loaded()
         return copy.deepcopy(self._data)
