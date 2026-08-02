@@ -1,4 +1,5 @@
 # Version: 0.7.6
+import asyncio
 import contextlib
 from datetime import datetime, timedelta
 import functools
@@ -648,11 +649,16 @@ async def _restore_verify(api, fub_id: int, snapshot: dict, plan_hash) -> dict:
         "conn_count": conn_count,
         "fresh_elem": fresh_elem,
         "fresh_conn": fresh_conn,
+        # False when logikplan_load_elements failed post-restore (fresh is None) — a restore
+        # we can't verify must never be reported as OK/PARTIAL.
+        "reload_ok": fresh is not None,
     }
 
 
 def _restore_status(content_ok: bool, apply: dict, verify: dict) -> str:
     """Overall OK/PARTIAL/FAILED verdict for a restore (see _restore_plan_in_place)."""
+    if not verify["reload_ok"]:
+        return "FAILED"
     if content_ok and apply["paper_ok"]:
         return "OK"
     if apply["run_ok"] or apply["pos_ok"] or apply["paper_ok"] or verify["counts_match"]:
@@ -935,6 +941,10 @@ _LOGIKPLAN_SERVICES = (
     "logikplan_visualize",
 )
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent / "services.yaml"
+# Serializes the two independent read-modify-write rewrites of services.yaml below
+# (_update_services_yaml_plans and _refresh_service_descriptions) so a run of one can't
+# clobber the other's changes with a stale on-disk snapshot.
+_SERVICES_YAML_LOCK = asyncio.Lock()
 
 
 def _rewrite_services_yaml_plans(plan_options: list[str]) -> None:
@@ -983,7 +993,8 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
 
     plan_options = sorted(plan_labels, key=str.lower)
     try:
-        await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options)
+        async with _SERVICES_YAML_LOCK:
+            await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options)
         _LOGGER.debug("Updated services.yaml: %d Logikplan plan options (labels) written", len(plan_options))
     except Exception as exc:  # noqa: BLE001
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
@@ -1772,7 +1783,10 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get(_SERVICE_DESCRIPTIONS_CACHE_KEY) == cache_key:
         return
-    content = await hass.async_add_executor_job(_update_services_yaml_backup_options, restore_plans, snapshot_options)
+    async with _SERVICES_YAML_LOCK:
+        content = await hass.async_add_executor_job(
+            _update_services_yaml_backup_options, restore_plans, snapshot_options
+        )
     if not content:
         return
     domain_data[_SERVICE_DESCRIPTIONS_CACHE_KEY] = cache_key
