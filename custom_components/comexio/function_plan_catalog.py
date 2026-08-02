@@ -28,6 +28,7 @@ cached catalog reflects, and correlate it against the same stamp on plan backup
 snapshots (function_plan_backup.py).
 """
 
+import copy
 import logging
 from typing import Any
 
@@ -213,10 +214,14 @@ class FunctionPlanCatalogManager:
         if not isinstance(loaded, dict):
             _LOGGER.warning(
                 "[%s] Function Plan catalog: persisted catalog has unexpected type %s — "
-                "discarding and retrying next poll",
+                "discarding and falling back to empty in-memory catalog for this session",
                 self._server_id,
                 type(loaded).__name__,
             )
+            # Same "give up for the session" contract as the load-exception branch above —
+            # a corrupted file would otherwise re-trigger this warning on every poll.
+            self._data = {}
+            self._loaded = True
             return
         self._data = loaded
         self._loaded = True
@@ -333,7 +338,8 @@ class FunctionPlanCatalogManager:
     async def async_get_catalog(self) -> dict[str, Any]:
         """Return a copy of the cached catalog (for future consumers: analyses, rebuild).
 
-        A shallow copy is returned so callers can't mutate the manager's internal cache.
+        A deep copy is returned so callers can't mutate the manager's internal cache,
+        including its nested fub_types/fub_base/time_modules/calendar_functions dicts.
         """
         await self._async_ensure_loaded()
-        return dict(self._data)
+        return copy.deepcopy(self._data)
