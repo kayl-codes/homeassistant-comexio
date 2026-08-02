@@ -194,8 +194,19 @@ class FunctionPlanCatalogManager:
                 self._server_id,
             )
             return
-        if isinstance(loaded, dict):
-            self._data = loaded
+        if loaded is None:
+            # No file yet (first run) — empty catalog is the correct, permanent state.
+            self._loaded = True
+            return
+        if not isinstance(loaded, dict):
+            _LOGGER.warning(
+                "[%s] Function Plan catalog: persisted catalog has unexpected type %s — "
+                "discarding and retrying next poll",
+                self._server_id,
+                type(loaded).__name__,
+            )
+            return
+        self._data = loaded
         self._loaded = True
 
     async def async_update_from_raw_config(self, raw_config: dict[str, Any], comexio_version: str | None) -> None:
