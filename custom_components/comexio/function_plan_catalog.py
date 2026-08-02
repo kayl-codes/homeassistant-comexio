@@ -97,6 +97,16 @@ def _extract_fub_base_catalog(fub_modules: dict[str, Any], fub_base_i18n: dict[s
     return catalog
 
 
+def _try_int(value: Any) -> int | None:
+    """Best-effort int conversion — non-numeric values from Comexio are dropped instead
+    of raising, since one malformed port/position must not abort catalog extraction.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _auto_hide_positions(entry: dict[str, Any], side: str) -> list[int]:
     """Port positions Studio hides while a block is collapsed ('Alles anzeigen' off).
 
@@ -107,12 +117,13 @@ def _auto_hide_positions(entry: dict[str, Any], side: str) -> list[int]:
     auto_hide = entry.get("auto_hide")
     if not isinstance(auto_hide, dict):
         return []
-    return [int(pos) for pos in auto_hide.get(side) or []]
+    return [pos for pos in (_try_int(raw) for raw in auto_hide.get(side) or []) if pos is not None]
 
 
 def _port_types(ports: list[dict[str, Any]] | None) -> list[int]:
     """Port data types in Pos order (0=digital, 1=analog; Comexio's per-port Type field)."""
-    return [int(port.get("Type") or 0) for port in sorted(ports or [], key=lambda p: p.get("Pos") or 0)]
+    sorted_ports = sorted(ports or [], key=lambda p: _try_int(p.get("Pos")) or 0)
+    return [_try_int(port.get("Type")) or 0 for port in sorted_ports]
 
 
 def _extract_time_modules(fub_modules: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -199,6 +210,10 @@ class FunctionPlanCatalogManager:
         Never raises — a catalog problem must never affect the core marker/IO poll.
         """
         fub_types = raw_config.get("FubTypes")
+        # PHP serializes an empty mapping as a JSON array (same quirk as _module_group) —
+        # normalize so the shrink-guard's len() comparisons and the persisted shape stay a dict.
+        if not isinstance(fub_types, dict):
+            fub_types = {}
         fub_modules = raw_config.get("FubModules")
         fub_base_i18n = raw_config.get("FubBaseI18N")
         if not fub_types or not fub_modules or fub_base_i18n is None:
@@ -282,6 +297,9 @@ class FunctionPlanCatalogManager:
         )
 
     async def async_get_catalog(self) -> dict[str, Any]:
-        """Return the cached catalog (for future consumers: analyses, rebuild)."""
+        """Return a copy of the cached catalog (for future consumers: analyses, rebuild).
+
+        A shallow copy is returned so callers can't mutate the manager's internal cache.
+        """
         await self._async_ensure_loaded()
-        return self._data
+        return dict(self._data)
