@@ -40,6 +40,7 @@ from .const import (
     is_io_audit_key,
     webio_class_label,
 )
+from .function_plan_catalog import FunctionPlanCatalogManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api: ComexioAPI = api
         self.api.config_entry = entry
         self.server_id: str = entry.data[CONF_SERVER_ID]
+        self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
@@ -160,6 +162,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             live_states = await self.api.get_live_states(max_id)
             parsed_data = self.api.parse_config(raw_config, live_states)
+
+            # async_update_from_raw_config never raises (own contract, enforced internally) —
+            # no local guard needed here.
+            await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
 
             import_markers = conf.get("import_markers", True)
             import_ios = conf.get("import_ios", True)
