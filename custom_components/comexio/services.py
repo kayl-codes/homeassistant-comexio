@@ -1768,8 +1768,6 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
                 restore_plans.append((fub_id, name, fub_id in live_fub_ids, count))
             backups = await coordinator.function_plan_backup.async_list_backups()
             snapshot_options.extend(_build_snapshot_options(backups))
-    if not restore_plans:
-        return
     cache_key = (tuple(restore_plans), tuple((opt["label"], opt["value"]) for opt in snapshot_options))
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get(_SERVICE_DESCRIPTIONS_CACHE_KEY) == cache_key:
