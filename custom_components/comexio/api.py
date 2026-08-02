@@ -1762,6 +1762,10 @@ class ComexioAPI:
     ) -> tuple[int, int, list[str]]:
         """Recreate one snapshot connection (Marker -> one or more WebIO outputs).
 
+        The marker element is created once and its new id is reused across every WebIO
+        output below, so a single marker fanning out to multiple outputs keeps that
+        fan-out topology on rebuild instead of duplicating the marker per output.
+
         Returns (elements_created, connections_created, warnings).
         """
         inp_eid = conn.get("input", {}).get("FubElementId")
@@ -1775,12 +1779,16 @@ class ComexioAPI:
         outputs = conn.get("output", [])
         outputs = list(outputs.values()) if isinstance(outputs, dict) else outputs
 
-        elements_created = 0
+        elem_marker = await self.logikplan_add_element(fub_id=fub_id, ref_id=marker_ref, element_type=2, x=mx, y=my)
+        if elem_marker is None:
+            return 0, 0, [f"M{marker_ref}: add_element (Marker) failed during rebuild"]
+
+        elements_created = 1
         connections_created = 0
         warnings: list[str] = []
         for out in outputs:
             e_delta, c_delta, out_warnings = await self._rebuild_one_connection_output(
-                fub_id, conn_id, out, elements, marker_ref, mx, my, conn_type
+                fub_id, conn_id, out, elements, elem_marker, marker_ref, conn_type
             )
             elements_created += e_delta
             connections_created += c_delta
@@ -1793,12 +1801,11 @@ class ComexioAPI:
         conn_id: str,
         out: dict[str, Any],
         elements: dict[str, Any],
+        elem_marker: int,
         marker_ref: int,
-        mx: float,
-        my: float,
         conn_type: str,
     ) -> tuple[int, int, list[str]]:
-        """Recreate one Marker->WebIO edge of a snapshot connection.
+        """Recreate one Marker->WebIO edge of a snapshot connection, reusing the already-created marker.
 
         Returns (elements_created, connections_created, warnings).
         """
@@ -1809,9 +1816,6 @@ class ComexioAPI:
         webio_ref = webio_elem["reference"]["ref_id"]
         wx, wy = webio_elem.get("position_x", 0.0), webio_elem.get("position_y", 0.0)
 
-        elem_marker = await self.logikplan_add_element(fub_id=fub_id, ref_id=marker_ref, element_type=2, x=mx, y=my)
-        if elem_marker is None:
-            return 0, 0, [f"M{marker_ref}: add_element (Marker) failed during rebuild"]
         conn_payload = {
             "0": {
                 "id": "new",
@@ -1826,7 +1830,7 @@ class ComexioAPI:
         )
         if elem_webio is None:
             return 0, 0, [f"M{marker_ref}: add_element (WebIO, webIoId={webio_ref}) failed during rebuild"]
-        return 2, 1, []
+        return 1, 1, []
 
     async def set_value(
         self,

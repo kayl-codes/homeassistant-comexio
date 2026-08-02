@@ -543,6 +543,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("[%s] Function Plan backup cycle skipped: previous run still in progress", self.server_id)
             return
         async with self._function_plan_backup_lock:
+            # Reset up front so a failed/empty cycle never leaves a stale result from a
+            # previous poll behind — ComexioPlanChangedSensor must reflect *this* cycle only.
+            self.last_changed_plans = []
             try:
                 plans = await self.api.function_plan_load_all_plans()
             except Exception:

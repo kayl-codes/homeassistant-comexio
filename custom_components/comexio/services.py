@@ -119,7 +119,10 @@ def _backup_entry_matches(
         return False
     if cutoff is not None:
         captured = dt_util.parse_datetime(str(entry.get("captured_at", "")))
-        return captured is not None and captured >= cutoff
+        # max_age only excludes entries known to be older than the cutoff; entries with a
+        # missing/unparseable captured_at (legacy or corrupted metadata) are kept rather
+        # than silently dropped from the listing.
+        return captured is None or captured >= cutoff
     return True
 
 
@@ -1713,6 +1716,7 @@ def _set_yaml_field_options(
 
 
 _BACKUP_DYNAMIC_SERVICES = ("function_plan_restore", "function_plan_list_backups", "function_plan_delete_backups")
+_SERVICE_DESCRIPTIONS_CACHE_KEY = "_service_descriptions_cache"
 
 
 def _update_services_yaml_backup_options(
@@ -1751,7 +1755,10 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
     Re-registering an already-registered service does NOT make Home Assistant reload its
     cached description — only async_set_service_schema writes directly into that cache and
     is guaranteed to take effect immediately. Called by coordinator.py right after a new
-    auto-/change-backup is captured, and by this module's own backup service handlers.
+    auto-/change-backup is captured, and by this module's own backup service handlers —
+    i.e. up to once per poll cycle plus once per restore/delete/purge call. The computed
+    options are cached and compared first, so the blocking file rewrite and schema push
+    are skipped whenever nothing actually changed since the last refresh.
     """
     restore_plans: list[tuple[int, str, bool, int]] = []
     snapshot_options: list[dict] = []
@@ -1764,9 +1771,14 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
             snapshot_options.extend(_build_snapshot_options(backups))
     if not restore_plans:
         return
+    cache_key = (tuple(restore_plans), tuple((opt["label"], opt["value"]) for opt in snapshot_options))
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if domain_data.get(_SERVICE_DESCRIPTIONS_CACHE_KEY) == cache_key:
+        return
     content = await hass.async_add_executor_job(_update_services_yaml_backup_options, restore_plans, snapshot_options)
     if not content:
         return
+    domain_data[_SERVICE_DESCRIPTIONS_CACHE_KEY] = cache_key
     for svc in _BACKUP_DYNAMIC_SERVICES:
         if schema := content.get(svc):
             async_set_service_schema(hass, DOMAIN, svc, schema)
