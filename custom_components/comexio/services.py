@@ -1165,9 +1165,24 @@ def _is_managed_cluster_plan(coordinator: ComexioCoordinator, fub_id: int) -> bo
     Sorting rewrites every element's position — safe for HA's own marker/IO cluster grids,
     destructive for a user's hand-built Comexio plan. Backstops the services.yaml dropdown
     (which already restricts the picker) against scripted/YAML calls with a raw fub_id.
+
+    Falls back to "not managed" for a malformed/unparseable plan_map: this gate only ever
+    removes capability, so refusing to sort is the safe direction — the alternative is an
+    unhandled exception in the service handler.
     """
     plan_map = coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-    return int(fub_id) in {int(v) for v in plan_map.values()}
+    if not isinstance(plan_map, dict):
+        _LOGGER.warning(
+            "Ignoring malformed %s option (%s) — refusing to sort",
+            CONF_FUNCTION_PLAN_PLAN_MAP,
+            type(plan_map).__name__,
+        )
+        return False
+    managed: set[int] = set()
+    for value in plan_map.values():
+        with contextlib.suppress(TypeError, ValueError):
+            managed.add(int(value))
+    return int(fub_id) in managed
 
 
 _LOGIKPLAN_SERVICES = (
