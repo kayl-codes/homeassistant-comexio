@@ -1083,8 +1083,14 @@ def _assign_webio_partner_positions(
     """Place each connected Web-IO element on its partner IO's grid row; returns the pair count."""
     pair_count = 0
     for conn in connections.values():
-        slot = elem_slot.get(conn.get("input", {}).get("FubElementId"))
-        if not slot:
+        # FubElementId comes straight out of the raw plan JSON and may be a string, while
+        # elem_slot is int-keyed — without the cast every Web-IO element would miss its
+        # partner slot and get parked outside the grid (same cast as _build_sorted_pairs).
+        try:
+            in_eid = int(conn.get("input", {}).get("FubElementId"))
+        except (TypeError, ValueError):
+            continue
+        if not (slot := elem_slot.get(in_eid)):
             continue
         x_off, y = slot
         for out in conn.get("output", []):

@@ -577,9 +577,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
+            # Managed cluster plans are fully auto-generated/regenerable by
+            # resolve_marker_clusters / resolve_io_clusters — auto-backing them up on every
+            # poll-detected hash change (they mutate on every sync) would burn storage slots
+            # on content that is reproducible on demand. Pre-mutation change-backups still
+            # cover them, so an accidental Comexio-side edit stays recoverable.
+            prefix = self._function_plan_prefix()
+            backup_plans = {
+                fid: pd
+                for fid, pd in plans.items()
+                if not self._is_managed_cluster_plan_name(str(fub_data.get(str(fid), {}).get("Name", "")), prefix)
+            }
             try:
                 self.last_changed_plans = await self.function_plan_backup.async_auto_backup(
-                    plans,
+                    backup_plans,
                     fub_data,
                     plan_format,
                     self.api.comexio_version,
@@ -1269,13 +1280,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Public counterpart of _io_plan_membership for the services module's grid/sort code.
         """
         return self._io_plan_membership(self._function_plan_prefix()).get(fub_id)
-
-    def _io_cluster_plan_name_for_ext(self, ext_name: str, prefix: str) -> str:
-        """Plan name the extension belongs to (existing membership) or would get (new plan)."""
-        for members in self._io_plan_membership(prefix).values():
-            if ext_name in members:
-                return self._io_plan_name(prefix, members)
-        return self._io_plan_name(prefix, [ext_name])
 
     def _io_rows_needed(self, ext_name: str) -> int:
         """Column rows one extension package needs (IOs + header/blank separator rows)."""

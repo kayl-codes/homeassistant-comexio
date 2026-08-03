@@ -54,10 +54,9 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         # unique_id keeps the legacy "logikplan" spelling — it is persisted in the entity
         # registry and referenced by coordinator.get_active_function_plan_fub_id().
         self._attr_unique_id = f"comexio_{coordinator.server_id}_logikplan_plan_selector"
-        # Restore the last choice from entry.options: the coordinator's first refresh runs
-        # before the select platform is set up, so a purely in-memory selection would leave
-        # every startup audit blind to which plan is actively managed.
-        self._selected: str | None = self._label_for_persisted_fub_id()
+        # None = no explicit choice yet in this HA run; current_option then falls back to the
+        # choice persisted in entry.options (see current_option).
+        self._selected: str | None = None
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -80,10 +79,19 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
 
     @property
     def current_option(self) -> str | None:
-        # No implicit fallback to the first plan: with the choice persisted, "nothing
-        # selected" is a real, restorable state, and silently acting on an arbitrary
-        # plan is worse than reporting no selection.
-        return self._selected if self._selected in self.options else None
+        # Restore the last choice from entry.options rather than keeping it purely in memory:
+        # the coordinator's first refresh runs before this platform is set up, so an in-memory
+        # selection would leave every startup audit blind to which plan is actively managed.
+        # Resolved lazily (not once in __init__) because fub_data can still be empty at setup
+        # time after a failed plan fetch — the coordinator would then act on the persisted plan
+        # while this selector showed nothing.
+        # No implicit fallback to the first plan: with the choice persisted, "nothing selected"
+        # is a real, restorable state, and silently acting on an arbitrary plan is worse.
+        options = self.options
+        if self._selected in options:
+            return self._selected
+        label = self._label_for_persisted_fub_id()
+        return label if label in options else None
 
     async def async_select_option(self, option: str) -> None:
         self._selected = option
