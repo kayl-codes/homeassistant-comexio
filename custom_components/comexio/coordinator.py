@@ -1047,7 +1047,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 DOMAIN,
                 cleanup_issue_id,
                 is_fixable=True,
-                severity=ir.IssueSeverity.INFO,
+                severity=ir.IssueSeverity.WARNING,
                 translation_key="ignored_markers_cleanup",
                 translation_placeholders={"server_id": self.server_id, "ids": valid_ids_str},
                 data={"entry_id": self.config_entry.entry_id, "ignored_marker_ids": valid_ids},

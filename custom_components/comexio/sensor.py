@@ -207,7 +207,6 @@ class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_device_class = SensorDeviceClass.VERSION
     _attr_icon = "mdi:chip"
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
