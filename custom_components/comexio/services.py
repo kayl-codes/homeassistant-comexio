@@ -1094,9 +1094,14 @@ def _assign_webio_partner_positions(
             continue
         x_off, y = slot
         for out in conn.get("output", []):
-            out_eid = out.get("FubElementId")
-            if out_eid is not None and int(out_eid) not in positions:
-                positions[int(out_eid)] = (_LAYOUT_X_WEBIO + x_off, y)
+            # Same cast + guard as the input side above: a non-numeric endpoint id (partial
+            # write, format change) must skip that one endpoint, not abort the whole sort.
+            try:
+                out_eid = int(out.get("FubElementId"))
+            except (TypeError, ValueError):
+                continue
+            if out_eid not in positions:
+                positions[out_eid] = (_LAYOUT_X_WEBIO + x_off, y)
                 pair_count += 1
     return pair_count
 
