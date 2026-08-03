@@ -70,6 +70,13 @@
         "ignore": "🔇 Suppress this message"
       }
     },
+    "function_plan_max_pairs_per_plan": {
+      "options": {
+        "50": "50 pairs / 1 extension",
+        "100": "100 pairs / 2 extensions",
+        "150": "150 pairs / 3 extensions"
+      }
+    },
     "function_plan_backup_retention_months": {
       "options": {
         "1": "1 month",
@@ -91,6 +98,9 @@
           "audit_ignored": "Ignore missing Web-IO warnings",
           "include_offline_extensions": "Show offline extension entities as unavailable (instead of hiding them)",
           "cover_keywords": "Keywords for cover detection",
+          "logikplan_plan_prefix": "Name prefix for managed function plans",
+          "logikplan_max_pairs_per_plan": "Max. pairs per managed function plan",
+          "logikplan_io_extensions": "Extensions managed as IO cluster plans",
           "ignored_markers": "Marker IDs to exclude from Logikplan connection",
           "function_plan_backup_retention_months": "Orphaned backup retention"
         },
@@ -98,6 +108,9 @@
           "schema_marker": "Available variables: '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_io": "Available variables: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)",
+          "logikplan_plan_prefix": "Prefix for auto-created cluster plans. Plans are named like: HA - Marker [1-100].",
+          "logikplan_max_pairs_per_plan": "How many Web-IO + marker pairs fit into one managed plan before a new cluster plan is created. For IO cluster plans this maps to 1 (50), 2 (100) or 3 (150) extensions per plan.",
+          "logikplan_io_extensions": "Each selected extension gets its IOs wired into a managed IO cluster plan (e.g. HA - IO [Ext]), one column per extension. Start with a single extension to test, then add the others.",
           "ignored_markers": "Comma- or semicolon-separated marker IDs with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456; M789'). Only markers with a description can be ignored.",
           "function_plan_backup_retention_months": "Backup snapshots of a plan that was deleted directly in Comexio are purged automatically once they are older than this. A live plan's backups are never affected. Also available as the 'Function Plan Purge Orphaned Backups' action for an on-demand cleanup."
         }

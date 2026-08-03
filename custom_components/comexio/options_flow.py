@@ -9,6 +9,9 @@ from .const import (
     CONF_COVER_KEYWORDS,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    CONF_FUNCTION_PLAN_IO_EXTENSIONS,
+    CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
+    CONF_FUNCTION_PLAN_PLAN_PREFIX,
     CONF_IGNORED_MARKERS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
@@ -16,8 +19,11 @@ from .const import (
     DEFAULT_COVER_KEYWORDS,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
+    DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DEFAULT_SCHEMA_IO,
     DEFAULT_SCHEMA_MARKER,
+    DOMAIN,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
 )
@@ -89,6 +95,10 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             user_input["scan_interval"] = int(user_input["scan_interval"])
+            if CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN in user_input:
+                user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN] = int(
+                    user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN]
+                )
             if CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS in user_input:
                 user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
                     user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
@@ -105,6 +115,14 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                     merged_options.pop(CONF_IGNORED_MARKERS, None)
 
                 return self.async_create_entry(title="", data=merged_options)
+
+        # Extension names for the IO cluster multi-select: live coordinator data first,
+        # excluding offline extensions (no hardware present — wiring them is pointless),
+        # but keeping already-saved selections choosable so they can be deselected.
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
+        coordinator_data = getattr(coordinator, "data", None) or {}
+        ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
+        ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
 
         return self.async_show_form(
             step_id="init",
@@ -137,6 +155,30 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                         CONF_COVER_KEYWORDS, default=conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS)
                     ): str,
                     vol.Optional(CONF_IGNORED_MARKERS, default=conf.get(CONF_IGNORED_MARKERS, "")): str,
+                    vol.Optional(
+                        CONF_FUNCTION_PLAN_PLAN_PREFIX,
+                        default=conf.get(CONF_FUNCTION_PLAN_PLAN_PREFIX, DEFAULT_FUNCTION_PLAN_PLAN_PREFIX),
+                    ): str,
+                    vol.Required(
+                        CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
+                        default=str(
+                            conf.get(CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN, DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN)
+                        ),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=["50", "100", "150"],
+                            mode=SelectSelectorMode.DROPDOWN,
+                            translation_key="function_plan_max_pairs_per_plan",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_FUNCTION_PLAN_IO_EXTENSIONS,
+                        default=list(conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, [])),
+                    ): SelectSelector(
+                        # No translation_key: the options are live Comexio extension names,
+                        # so there is nothing to translate them against.
+                        SelectSelectorConfig(options=ext_names, multiple=True, mode=SelectSelectorMode.DROPDOWN)
+                    ),
                     vol.Required(
                         CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
                         default=str(

@@ -1,6 +1,8 @@
 # Version: 0.1.0
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any
 
 from homeassistant.components.select import SelectEntity
@@ -12,10 +14,22 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN
 from .coordinator import ComexioCoordinator
 from .function_plan_backup import format_backup_label
 from .services import format_plan_label
+
+_LOGGER = logging.getLogger(__name__)
+
+# "<name> (ID <n>)" suffix written by format_plan_label — the ID is the only unambiguous
+# handle, since plan names aren't unique in Comexio.
+_PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
+
+
+def _fub_id_from_label(option: str) -> int | None:
+    """Parse the fub_id back out of a plan select-option label."""
+    match = _PLAN_LABEL_ID_RE.search(option)
+    return int(match.group(1)) if match else None
 
 
 async def async_setup_entry(
@@ -28,17 +42,22 @@ async def async_setup_entry(
 
 
 class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
-    """Select entity listing available Logikplan plans for use in service calls."""
+    """Select entity listing available function plans for use in service calls."""
 
     _attr_has_entity_name = True
-    _attr_name = "Logikplan Plan"
+    _attr_name = "Function Plans"
     _attr_icon = "mdi:file-tree-outline"
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: ComexioCoordinator) -> None:
         super().__init__(coordinator)
+        # unique_id keeps the legacy "logikplan" spelling — it is persisted in the entity
+        # registry and referenced by coordinator.get_active_function_plan_fub_id().
         self._attr_unique_id = f"comexio_{coordinator.server_id}_logikplan_plan_selector"
-        self._selected: str | None = None
+        # Restore the last choice from entry.options: the coordinator's first refresh runs
+        # before the select platform is set up, so a purely in-memory selection would leave
+        # every startup audit blind to which plan is actively managed.
+        self._selected: str | None = self._label_for_persisted_fub_id()
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -61,23 +80,40 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
 
     @property
     def current_option(self) -> str | None:
-        opts = self.options
-        if self._selected in opts:
-            return self._selected
-        return opts[0] if opts else None
+        # No implicit fallback to the first plan: with the choice persisted, "nothing
+        # selected" is a real, restorable state, and silently acting on an arbitrary
+        # plan is worse than reporting no selection.
+        return self._selected if self._selected in self.options else None
 
     async def async_select_option(self, option: str) -> None:
         self._selected = option
         self.async_write_ha_state()
+        fub_id = _fub_id_from_label(option)
+        if fub_id is None:
+            _LOGGER.warning("Could not resolve a fub_id from plan option %r — selection not persisted", option)
+            return
+        new_options = dict(self.coordinator.config_entry.options)
+        new_options[CONF_FUNCTION_PLAN_FUB_ID] = fub_id
+        self.coordinator.request_options_update_without_reload(new_options)
+
+    def _label_for_persisted_fub_id(self) -> str | None:
+        """Select-option label matching the fub_id persisted in entry.options, or None."""
+        fub_id = self.coordinator.persisted_function_plan_fub_id()
+        if fub_id is None:
+            return None
+        fub = self.coordinator.api.fub_data.get(str(fub_id))
+        if fub is None:
+            return None
+        return format_plan_label(fub.get("Name") or f"Plan {fub_id}", fub_id)
 
 
 class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
-    """Select entity listing stored backup snapshots for the plan chosen in the 'Logikplan Plan' selector.
+    """Select entity listing stored backup snapshots for the plan chosen in the 'Function Plans' selector.
 
     Purely an in-memory preview/targeting control — no entry.options persistence, since it is
     an ephemeral viewing choice, not a lasting configuration value. Without an explicit user
     choice the selector defaults to the newest auto backup (auto[0]) of the active plan;
-    a 'Logikplan Plan' plan change discards the explicit choice and falls back to that default,
+    a 'Function Plans' plan change discards the explicit choice and falls back to that default,
     so a stale backup choice can never be silently applied to a newly-selected, unrelated plan.
     """
 
@@ -104,7 +140,7 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
         }
 
     async def async_added_to_hass(self) -> None:
-        """Track the 'Logikplan Plan' selector: a plan change resets this selector to its default.
+        """Track the 'Function Plans' selector: a plan change resets this selector to its default.
 
         Also eagerly loads the backup manager's caches so options() is populated from
         persisted storage right after a restart, instead of staying empty until some

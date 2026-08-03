@@ -33,7 +33,7 @@ logikplan_connect_poc:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
       required: false
       selector:
         select:
@@ -78,7 +78,7 @@ logikplan_sort:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
       required: false
       selector:
         select:
@@ -109,7 +109,7 @@ logikplan_stop:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
       required: false
       selector:
         select:
@@ -129,7 +129,7 @@ logikplan_activate:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
       required: false
       selector:
         select:
@@ -364,7 +364,7 @@ logikplan_visualize:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Logikplan Plan'-Entität gewählte Plan verwendet."
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
       required: false
       selector:
         select:
