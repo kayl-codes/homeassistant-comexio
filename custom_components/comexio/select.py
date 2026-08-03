@@ -118,11 +118,16 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
 class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
     """Select entity listing stored backup snapshots for the plan chosen in the 'Function Plans' selector.
 
+    Lets the Plan Preview button (button.py) render a historical snapshot instead of the
+    live plan, so a backup can be visually sighted before deciding whether to restore it.
     Purely an in-memory preview/targeting control — no entry.options persistence, since it is
     an ephemeral viewing choice, not a lasting configuration value. Without an explicit user
     choice the selector defaults to the newest auto backup (auto[0]) of the active plan;
     a 'Function Plans' plan change discards the explicit choice and falls back to that default,
     so a stale backup choice can never be silently applied to a newly-selected, unrelated plan.
+    There is deliberately no "Live" entry: the preview returns to the live view on its own via
+    the webhook-driven refresh (coordinator.schedule_plan_preview_refresh), so the dropdown
+    only picks which stored snapshot to sight.
     """
 
     _attr_has_entity_name = True

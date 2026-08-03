@@ -350,6 +350,43 @@ _TITLE_RESTORE_ERR = "Function Plan Restore — Error"
 _TITLE_LIST_BACKUPS_ERR = "Function Plan Backups — Error"
 _TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
 _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
+_TITLE_SET_VALUE_ERR = "Set Value — Error"
+_TITLE_DEBUG_SESSION_ERR = "Function Plan Debug Session — Error"
+
+# Command syntax accepted by the set_value service (and the plan card's debug input):
+# "M107" (marker) or "IOX2#Q3" (extension#identifier).
+_SET_VALUE_MARKER_RX = re.compile(r"^[mM](\d+)$")
+_SET_VALUE_IO_RX = re.compile(r"^([^#\s]+)#([^#\s]+)$")
+
+
+def _resolve_set_value_target(target: str, data: dict) -> tuple[dict | None, str]:
+    """Map a set_value target token onto api.set_value kwargs.
+
+    Accepts 'M<id>' (marker) or '<Extension>#<IO>' (case-insensitive). Only targets that
+    exist in the current coordinator data are accepted — unknown ids never reach the
+    Comexio API. Returns (kwargs, "") on success or (None, error_message).
+    """
+    if m := _SET_VALUE_MARKER_RX.match(target):
+        marker_id = m.group(1)
+        if any(str(mk.get("id")) == marker_id for mk in data.get("markers", [])):
+            return {"target_type": "marker", "target_id": marker_id}, ""
+        return None, f"Unknown marker 'M{marker_id}' — not in the current Comexio configuration."
+    if m := _SET_VALUE_IO_RX.match(target):
+        ext, ident = m.group(1).lower(), m.group(2).lower()
+        for io in data.get("io", []):
+            if io.get("ext_name", "").lower() == ext and io.get("identifier", "").lower() == ident:
+                if io.get("is_input"):
+                    # Physical inputs (I/AI/…) are read-only for the Comexio API — a write
+                    # would silently do nothing, so reject it with a clear message instead.
+                    return None, f"IO '{target}' is an input (read-only) — the Comexio API cannot write inputs."
+                return {
+                    "target_type": "io",
+                    "target_id": io.get("id", 0),
+                    "ext": io.get("ext_name"),
+                    "identifier": io.get("identifier"),
+                }, ""
+        return None, f"Unknown IO '{target}' — not in the current Comexio configuration (or inactive)."
+    return None, f"Invalid target '{target}' — expected 'M<id>' or '<Extension>#<IO>' (e.g. M107 or IOX2#Q3)."
 
 
 async def _async_get_service_context(
@@ -1786,33 +1823,93 @@ async def handle_logikplan_connect_poc(hass: HomeAssistant, call: ServiceCall) -
     persistent_notification.async_create(hass, msg, title=title)
 
 
-async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Service to visualize current state of a Logikplan plan as a text diagram."""
-    error_title = "Logikplan Visualize — Fehler"
-    ctx = await _resolve_logikplan_context(hass, call, error_title)
-    if ctx is None:
-        return
-    coordinator, api, fub_id = ctx
+async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> dict | None:
+    """Service to visualize a Logikplan plan (live or a stored backup snapshot) as a text
+    diagram, or — format='svg' — render it to the Function Plan preview SVG and return its
+    /local/ URL (used by coordinator.async_generate_plan_preview / the comexio-plan-card
+    frontend, see [[project-logikplan-preview]]).
 
-    plan_data = await api.logikplan_load_elements(fub_id)
-    if not plan_data:
-        persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
-        return
+    Snapshot resolution mirrors _handle_function_plan_restore: a 'snapshot' field (composite
+    'fub_id:kind:slot:plan_name' dropdown value) targets one exact stored backup, entirely
+    offline — no live Comexio call needed, since snapshots already carry elements/connections
+    in the same shape as a live plan (function_plan_backup.py). Without 'snapshot', behaviour
+    for the text diagram is unchanged: the live plan is loaded via the usual fub_id resolution.
+    """
+    error_title = "Logikplan Visualize — Fehler"
+    fmt = str(call.data.get("format", "text")).strip().lower()
+    snapshot_raw = call.data.get("snapshot")
+    plan_name: str
+    label_metadata: dict[str, dict[str, str]] | None
+
+    if snapshot_raw:
+        ctx = await _async_get_service_context(hass, call, error_title, resolve_plan=False)
+        if ctx is None:
+            return None
+        coordinator, api, _unused_fub_id = ctx
+        parsed = _parse_snapshot_field(str(snapshot_raw))
+        if parsed is None:
+            persistent_notification.async_create(
+                hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=error_title
+            )
+            return None
+        fub_id, kind, slot, plan_name_hint = parsed
+        plan_name_resolved, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+        if identity_err:
+            persistent_notification.async_create(hass, identity_err, title=error_title)
+            return None
+        plan_name = plan_name_resolved
+        snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
+        if snapshot is None:
+            persistent_notification.async_create(
+                hass,
+                f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).",
+                title=error_title,
+            )
+            return None
+        elements = snapshot.get("elements", {})
+        connections = snapshot.get("connections", {})
+        source = f"snapshot:{kind}:{slot}"
+        label_metadata = snapshot.get("labels")
+    else:
+        ctx = await _resolve_logikplan_context(hass, call, error_title)
+        if ctx is None:
+            return None
+        coordinator, api, fub_id = ctx
+        plan_data = await api.logikplan_load_elements(fub_id)
+        if not plan_data:
+            persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
+            return None
+        elements = plan_data.get("elements", {})
+        connections = plan_data.get("connections", {})
+        plan_name = api._fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+        source = "live"
+        label_metadata = None
+
+    if fmt == "svg":
+        preview_url = await coordinator.async_generate_plan_preview(
+            fub_id, plan_name, elements, connections, source, label_metadata
+        )
+        persistent_notification.async_create(
+            hass,
+            f"Preview for '{plan_name}' updated — see the Plan Preview sensor.",
+            title=f"Logikplan Visualize — {plan_name}",
+        )
+        return {"plan_name": plan_name, "url": preview_url}
 
     markers_by_id = {str(m["id"]): m for m in coordinator.data.get("markers", [])}
     webio_commands = coordinator.data.get("webio_commands", {})
     webio_by_id = {
         str(cmd.get("webIoId")): name for name, cmd in webio_commands.items() if cmd.get("webIoId") is not None
     }
-    elements = plan_data.get("elements", {})
-    connections = plan_data.get("connections", {})
 
     conn_lines, orphan_lines = _build_visualize_lines(elements, connections, markers_by_id, webio_by_id)
 
-    paper_fmt = api.get_fub_paper_format(fub_id)
-    x_max, y_max = api.get_fub_canvas_bounds(fub_id)
-    lines = [
-        f"**Plan {fub_id}** — {paper_fmt}, Canvas {x_max:.0f}×{y_max:.0f}",
+    lines = [f"**Plan {fub_id}** ({source})"]
+    if source == "live":
+        paper_fmt = api.get_fub_paper_format(fub_id)
+        x_max, y_max = api.get_fub_canvas_bounds(fub_id)
+        lines[0] += f" — {paper_fmt}, Canvas {x_max:.0f}×{y_max:.0f}"
+    lines += [
         f"{len(elements)} Elemente, {len(connections)} Verbindungen",
         "",
         f"**Verbindungen ({len(connections)}):**",
@@ -1825,6 +1922,7 @@ async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> 
     persistent_notification.async_create(
         hass, "\n".join(lines), title=f"Logikplan Plan {fub_id} — {len(connections)} Verbindungen"
     )
+    return None
 
 
 async def handle_logikplan_sort(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -2090,6 +2188,11 @@ def _set_yaml_field_options(
 
 
 _BACKUP_DYNAMIC_SERVICES = ("function_plan_restore", "function_plan_list_backups", "function_plan_delete_backups")
+# logikplan_visualize's fub_id dropdown stays owned by _rewrite_services_yaml_plans (plain
+# plan labels, not the composite fub_id:name backup identity) — only its 'snapshot' field
+# (added for the SVG-format/backup-snapshot preview, Cluster 4) is populated here, alongside
+# the three backup services above.
+_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, "logikplan_visualize")
 _SERVICE_DESCRIPTIONS_CACHE_KEY = "_service_descriptions_cache"
 
 
@@ -2100,7 +2203,8 @@ def _update_services_yaml_backup_options(
 
     Trimmed sibling of _rewrite_services_yaml_plans (which independently owns the
     logikplan_* services' fub_id dropdown) — only touches the fub_id/snapshot fields of the
-    three backup services, so that function is left completely untouched.
+    three backup services (plus logikplan_visualize's snapshot field), so that function is
+    left completely untouched.
     """
     try:
         content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
@@ -2110,8 +2214,8 @@ def _update_services_yaml_backup_options(
     restore_options = _build_restore_options(restore_plans)
     for svc in _BACKUP_DYNAMIC_SERVICES:
         _set_yaml_field_options(content, svc, "fub_id", restore_options, custom_value=False)
-    _set_yaml_field_options(content, "function_plan_restore", "snapshot", snapshot_options, custom_value=False)
-    _set_yaml_field_options(content, "function_plan_delete_backups", "snapshot", snapshot_options, custom_value=False)
+    for svc in _SNAPSHOT_DYNAMIC_SERVICES:
+        _set_yaml_field_options(content, svc, "snapshot", snapshot_options, custom_value=False)
     try:
         _SERVICES_YAML_PATH.write_text(
             yaml.dump(content, allow_unicode=True, sort_keys=False, default_flow_style=False),
@@ -2154,7 +2258,7 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
     if not content:
         return
     domain_data[_SERVICE_DESCRIPTIONS_CACHE_KEY] = cache_key
-    for svc in _BACKUP_DYNAMIC_SERVICES:
+    for svc in _SNAPSHOT_DYNAMIC_SERVICES:
         if schema := content.get(svc):
             async_set_service_schema(hass, DOMAIN, svc, schema)
 
@@ -2502,8 +2606,75 @@ async def _handle_function_plan_list_backups(hass: HomeAssistant, call: ServiceC
     return result
 
 
+async def _handle_function_plan_debug_session(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Switch the live plan preview's Stufe-2 connection-value poll cadence.
+
+    Called by the plan card on debug-box open/close (no fub_id/entity targeting — it
+    always addresses whichever plan is currently armed for live preview, same as
+    set_value's single-instance resolution). Silent by design: this fires on every
+    debug-box toggle, so a notification per call would flood the tray for no benefit —
+    only ambiguous multi-instance setups get a message, via _async_get_service_context.
+    """
+    ctx = await _async_get_service_context(hass, call, _TITLE_DEBUG_SESSION_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return
+    coordinator, _api, _fub_id = ctx
+    active = bool(call.data.get("open"))
+    _LOGGER.debug("Function Plan Debug Session: open=%s", active)
+    coordinator.set_debug_session_active(active)
+
+
+async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | None:
+    """Write a raw value to a Comexio marker or IO via the Basic-Auth API.
+
+    Backend of the plan card's debug command input ('M107=1' / 'IOX2#Q3=0') — target
+    tokens match the labels the preview shows. Success is reported via the service
+    response (the card logs it); only failures post a persistent notification, so
+    rapid-fire debug commands don't flood the notification tray.
+    """
+    ctx = await _async_get_service_context(hass, call, _TITLE_SET_VALUE_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return {"success": False, "error": "Comexio instance not resolved."}
+    coordinator, api, _fub_id = ctx
+
+    target = str(call.data.get("target", "")).strip()
+    raw_value = str(call.data.get("value", "")).strip().replace(",", ".")
+    try:
+        value: float | int = float(raw_value)
+    except ValueError:
+        error = f"Invalid value '{raw_value}' — expected a number."
+        kwargs = None
+    else:
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)  # send '1', not '1.0', for digital targets
+        kwargs, error = _resolve_set_value_target(target, coordinator.data or {})
+
+    _LOGGER.info("Set Value: target='%s' value='%s'%s", target, raw_value, f" error='{error}'" if error else "")
+    if kwargs is None:
+        persistent_notification.async_create(hass, error, title=_TITLE_SET_VALUE_ERR)
+        return {"success": False, "error": error}
+
+    t_start = time.monotonic()
+    success = await api.set_value(**kwargs, value=value)
+    duration = time.monotonic() - t_start
+    if not success:
+        persistent_notification.async_create(
+            hass,
+            f"Write failed: {target} = {value}.\nDuration: {duration:.1f}s",
+            title=_TITLE_SET_VALUE_ERR,
+        )
+    return {"success": success, "target": target, "value": value, "duration": round(duration, 2)}
+
+
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Register additional services for the Comexio integration."""
+    if not hass.services.has_service(DOMAIN, "set_value"):
+        hass.services.async_register(
+            DOMAIN,
+            "set_value",
+            functools.partial(_handle_set_value, hass),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
     if not hass.services.has_service(DOMAIN, "generate_web_io"):
         hass.services.async_register(DOMAIN, "generate_web_io", functools.partial(handle_generate_web_io, hass))
     if not hass.services.has_service(DOMAIN, "logikplan_connect_poc"):
@@ -2511,7 +2682,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             DOMAIN, "logikplan_connect_poc", functools.partial(handle_logikplan_connect_poc, hass)
         )
     if not hass.services.has_service(DOMAIN, "logikplan_visualize"):
-        hass.services.async_register(DOMAIN, "logikplan_visualize", functools.partial(handle_logikplan_visualize, hass))
+        hass.services.async_register(
+            DOMAIN,
+            "logikplan_visualize",
+            functools.partial(handle_logikplan_visualize, hass),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
     if not hass.services.has_service(DOMAIN, "logikplan_sort"):
         hass.services.async_register(DOMAIN, "logikplan_sort", functools.partial(handle_logikplan_sort, hass))
     if not hass.services.has_service(DOMAIN, "logikplan_stop"):
@@ -2538,6 +2714,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             "function_plan_list_backups",
             functools.partial(_handle_function_plan_list_backups, hass),
             supports_response=SupportsResponse.ONLY,
+        )
+    if not hass.services.has_service(DOMAIN, "function_plan_debug_session"):
+        hass.services.async_register(
+            DOMAIN, "function_plan_debug_session", functools.partial(_handle_function_plan_debug_session, hass)
         )
 
     await _update_services_yaml_plans(hass)

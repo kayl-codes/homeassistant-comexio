@@ -13,9 +13,10 @@ from homeassistant.components import persistent_notification
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr, entity_platform
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr, entity_platform, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
 
@@ -34,6 +35,7 @@ from .const import (
     webio_class_name,
 )
 from .coordinator import ComexioCoordinator
+from .function_plan_backup import format_backup_label
 from .services import async_resync_io_group_headers, async_sort_function_plan
 
 _LOGGER = logging.getLogger(__name__)
@@ -123,7 +125,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     migration_button = ComexioEntityIdMigrationButton(coordinator, coordinator.server_id)
     stats_cleanup_button = ComexioStatisticsCleanupButton(coordinator, coordinator.server_id)
     fw_check_button = ComexioFirmwareCheckButton(coordinator, coordinator.server_id)
-    async_add_entities([sync_button, cancel_button, migration_button, stats_cleanup_button, fw_check_button])
+    preview_button = ComexioPlanPreviewButton(coordinator, coordinator.server_id)
+    async_add_entities(
+        [sync_button, cancel_button, migration_button, stats_cleanup_button, fw_check_button, preview_button]
+    )
 
     # Register the entity service.
     # As a custom integration, the service is registered under
@@ -1289,3 +1294,128 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
 
         _LOGGER.info("[%s] Cleared %d orphaned statistics", self.server_id, len(ids))
         self.coordinator.async_set_updated_data(self.coordinator.data)
+
+
+class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
+    """Button to render the plan currently selected in the 'Function Plans' selector as an SVG preview."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_plan_preview_btn"
+        self._attr_translation_key = "plan_preview"
+        self._attr_icon = "mdi:image-outline"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Track the 'Function Plans' selector so 'available' re-evaluates on every selection change.
+
+        Picking a plan there only writes the select's own state (see select.py's
+        async_select_option, which explicitly skips a coordinator reload) — without this
+        listener, this button's published 'available' state would stay stuck at whatever it
+        was at startup.
+        """
+        await super().async_added_to_hass()
+        select_eid = er.async_get(self.hass).async_get_entity_id(
+            "select", DOMAIN, f"comexio_{self.server_id}_logikplan_plan_selector"
+        )
+        if select_eid:
+            self.async_on_remove(async_track_state_change_event(self.hass, [select_eid], self._handle_selector_change))
+
+    @callback
+    def _handle_selector_change(self, event: Event[EventStateChangedData]) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        """Only available while the 'Function Plans' selector points at one concrete plan."""
+        return self.coordinator.get_active_function_plan_fub_id() is not None
+
+    def _active_backup_choice(self, fub_id: int, plan_name: str) -> tuple[str, int] | None:
+        """Return (kind, slot) if the backup selector points at a stored snapshot, else None.
+
+        Lets the Preview button render a historical state instead of live — the selector
+        itself only ever shows entries for the currently active plan (see select.py), so no
+        extra identity check against fub_id/plan_name is needed here beyond looking them up.
+        """
+        select_eid = er.async_get(self.hass).async_get_entity_id(
+            "select", DOMAIN, f"comexio_{self.server_id}_plan_backup_selector"
+        )
+        state = self.hass.states.get(select_eid) if select_eid else None
+        if not state or state.state in ("unavailable", "unknown"):
+            return None
+        entries = self.coordinator.function_plan_backup.plan_backups_for_identity_sync(fub_id, plan_name)
+        return next(((e["kind"], e["slot"]) for e in entries if format_backup_label(e) == state.state), None)
+
+    async def _async_arm_live_refresh(self, fub_id: int, plan_name: str) -> None:
+        """Prime the coordinator's live plan cache after a snapshot render.
+
+        The backup selector has no "Live" entry — the preview returns to the live view
+        solely via the webhook-driven refresh, which needs a primed plan cache. Right
+        after startup or a plan change no live render has filled it yet, so fetch the
+        live elements once here; if the cache is already armed (any plan — a foreign one
+        is dropped by async_generate_plan_preview), this is a no-op.
+        """
+        if self.coordinator._preview_plan_cache is not None:
+            return
+        plan_data = await self.coordinator.api.logikplan_load_elements(fub_id)
+        if plan_data:
+            self.coordinator._preview_plan_cache = {
+                "fub_id": fub_id,
+                "plan_name": plan_name,
+                "elements": plan_data.get("elements", {}),
+                "connections": plan_data.get("connections", {}),
+            }
+            # Mirrors async_generate_plan_preview's plan_switched branch — this cache prime
+            # bypasses that method entirely, so it must start the Stufe-2 poll itself or the
+            # live view never gets real connection values (wires stay on _net_hot forever).
+            self.coordinator._restart_connection_poll(fast=self.coordinator._connection_poll_fast_requested)
+
+    async def async_press(self) -> None:
+        """Render the active plan into the Plan Preview sensor — live, or a chosen backup snapshot."""
+        api = self.coordinator.api
+        fub_id = self.coordinator.get_active_function_plan_fub_id()
+        if fub_id is None:
+            _LOGGER.warning("[%s] Plan preview requested but no plan is selected", self.server_id)
+            return
+        plan_name = api._fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+
+        backup_choice = self._active_backup_choice(fub_id, plan_name)
+        if backup_choice is not None:
+            kind, slot = backup_choice
+            snapshot = await self.coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
+            if snapshot is None:
+                _LOGGER.warning(
+                    "[%s] Plan preview: backup %s[%d] not found for '%s'", self.server_id, kind, slot, plan_name
+                )
+                return
+            await self.coordinator.async_generate_plan_preview(
+                fub_id,
+                plan_name,
+                snapshot.get("elements", {}),
+                snapshot.get("connections", {}),
+                f"snapshot:{kind}:{slot}",
+                snapshot.get("labels"),
+            )
+            await self._async_arm_live_refresh(fub_id, plan_name)
+            return
+
+        plan_data = await api.logikplan_load_elements(fub_id)
+        if not plan_data:
+            _LOGGER.warning("[%s] Plan preview: could not load plan %s", self.server_id, fub_id)
+            return
+        await self.coordinator.async_generate_plan_preview(
+            fub_id, plan_name, plan_data.get("elements", {}), plan_data.get("connections", {}), "live"
+        )
