@@ -70,6 +70,13 @@
         "ignore": "🔇 Suppress this message"
       }
     },
+    "function_plan_max_pairs_per_plan": {
+      "options": {
+        "50": "50 paires / 1 extension",
+        "100": "100 paires / 2 extensions",
+        "150": "150 paires / 3 extensions"
+      }
+    },
     "function_plan_backup_retention_months": {
       "options": {
         "1": "1 mois",
@@ -90,12 +97,18 @@
           "enable_notifications": "Afficher les notifications contextuelles pendant la synchronisation",
           "audit_ignored": "Ignorer les avertissements de classe Web-IO manquante",
           "include_offline_extensions": "Afficher les entités d'extensions hors ligne comme indisponibles (au lieu de les masquer)",
+          "logikplan_plan_prefix": "Préfixe de nom des plans fonctionnels gérés",
+          "logikplan_max_pairs_per_plan": "Nombre max. de paires par plan fonctionnel géré",
+          "logikplan_io_extensions": "Extensions gérées comme plans de cluster IO",
           "cover_keywords": "Mots-clés pour la détection des volets",
           "function_plan_backup_retention_months": "Rétention des sauvegardes orphelines"
         },
         "data_description": {
           "schema_marker": "Variables disponibles : '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_io": "Variables disponibles : '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
+          "logikplan_plan_prefix": "Préfixe des plans de cluster créés automatiquement. Les plans seront nommés par ex. : HA - Marker [1-100].",
+          "logikplan_max_pairs_per_plan": "Nombre de paires Web-IO + marqueur tenant dans un plan géré avant la création d'un nouveau plan de cluster. Pour les plans de cluster IO, cela correspond à 1 (50), 2 (100) ou 3 (150) extensions par plan.",
+          "logikplan_io_extensions": "Les IO de chaque extension sélectionnée sont câblés dans un plan de cluster IO géré (par ex. HA - IO [Ext]), une colonne par extension. Commencez par une seule extension pour tester, puis ajoutez les autres.",
           "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)",
           "function_plan_backup_retention_months": "Les sauvegardes d'un plan supprimé directement dans Comexio sont purgées automatiquement dès qu'elles dépassent cette durée. Les sauvegardes d'un plan encore actif ne sont jamais concernées. Également disponible via l'action 'Function Plan Purge Orphaned Backups' pour un nettoyage manuel."
         }

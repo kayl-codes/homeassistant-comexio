@@ -1,6 +1,7 @@
 # Version: 0.7.5
 import asyncio
 import base64
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 import io
@@ -23,11 +24,20 @@ from multidict import MultiDict
 
 # Mandatory DOMAIN import for Audit logic
 from .const import (
+    FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH,
+    FUNCTION_PLAN_LAYOUT_X_MARKER,
+    FUNCTION_PLAN_LAYOUT_X_WEBIO,
+    FUNCTION_PLAN_LAYOUT_Y_START,
+    FUNCTION_PLAN_LAYOUT_Y_STEP,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
+    FUNCTION_PLAN_PAIR_RELOAD_INITIAL_DELAY,
+    FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS,
     KNOWN_DOMAINS,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
+    io_column_rows,
+    io_sort_key,
     webio_class_label,
     webio_class_name,
 )
@@ -552,17 +562,24 @@ class ComexioAPI:
         fub = self._fub_data.get(str(fub_id), {})
         return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
 
-    def get_fub_canvas_bounds(self, fub_id: int, paper_name: str | None = None) -> tuple[float, float]:
+    def get_fub_canvas_bounds(
+        self, fub_id: int, paper_name: str | None = None, orientation: str | None = None
+    ) -> tuple[float, float]:
         """Return estimated (x_max, y_max) canvas bounds for a Logikplan plan.
 
         Scales proportionally from the A4-landscape-90-DPI reference (870×720).
-        DPI (Resolution) and Orientation are always taken from $Fubs plan data.
+        DPI (Resolution) is always taken from $Fubs plan data.
         paper_name overrides the format (A2/A3/A4/A5); None = read from $Fubs/$Paper.
-        Orientation 0 = landscape (long side → X), 1 = portrait (long side → Y).
+        orientation overrides as "landscape"/"portrait" — needed for a plan that was just
+        created and is not in the cached $Fubs data yet; None = read from $Fubs, where
+        0 = landscape (long side → X), 1 = portrait (long side → Y).
         """
         fub = self._fub_data.get(str(fub_id), {})
         res = int(fub.get("Resolution", self._CANVAS_REF_RES))
-        orientation = int(fub.get("Orientation", 0))
+        if orientation is None:
+            orient_id = int(fub.get("Orientation", 0))
+        else:
+            orient_id = 1 if orientation.lower() == "portrait" else 0
 
         if paper_name and paper_name in self._PAPER_MM_BY_NAME:
             mm_long, mm_short = self._PAPER_MM_BY_NAME[paper_name]
@@ -572,7 +589,7 @@ class ComexioAPI:
             mm_long = paper.get("MMX", self._CANVAS_REF_MM_LONG)
             mm_short = paper.get("MMY", self._CANVAS_REF_MM_SHORT)
 
-        if orientation == 0:
+        if orient_id == 0:
             width_mm, height_mm = mm_long, mm_short
         else:
             width_mm, height_mm = mm_short, mm_long
@@ -1704,6 +1721,360 @@ class ComexioAPI:
         except Exception:
             _LOGGER.exception("logikplan_run_fup: fub_id=%s failed", fub_id)
             return False
+
+    async def _reload_config_until_commands_ready(self, expected_names_fn: Callable[[dict], set[str]]) -> dict:
+        """Reload Comexio config, retrying with backoff until webio_commands is ready.
+
+        A freshly uploaded Web-IO command does not always appear in the very next
+        `/admin/function_function_module/home` response — Comexio seems to regenerate
+        that page on its own cycle rather than synchronously per write. expected_names_fn
+        derives the Web-IO command names to wait for from each reload's own parsed data
+        (marker names/IO identifiers are stable; only webio_commands is expected to lag).
+        Returns the last parsed config regardless of outcome — callers report per-item
+        errors for any names still missing after the final attempt.
+        """
+        delay = FUNCTION_PLAN_PAIR_RELOAD_INITIAL_DELAY
+        fresh_data: dict = {}
+        for attempt in range(FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS):
+            raw = await self.get_raw_config()
+            fresh_data = self.parse_config(raw)
+            missing = expected_names_fn(fresh_data) - fresh_data.get("webio_commands", {}).keys()
+            if not missing:
+                return fresh_data
+            if attempt < FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS - 1:
+                _LOGGER.info(
+                    "function plan pairing: %d Web-IO command(s) not yet visible after reload "
+                    "(attempt %d/%d), retrying in %.1fs",
+                    len(missing),
+                    attempt + 1,
+                    FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+        return fresh_data
+
+    @staticmethod
+    def _function_plan_existing_refs(plan_data: dict | None) -> tuple[dict[tuple[int, int], int], list[set[int]]]:
+        """Index a plan's elements by (ref_type, ref_id) and collect connection endpoint sets.
+
+        Keys are normalized to int — the raw JSON may carry type/ref_id as strings.
+        """
+        existing_by_ref: dict[tuple[int, int], int] = {}
+        conn_endpoints: list[set[int]] = []
+        if not plan_data:
+            return existing_by_ref, conn_endpoints
+        for elem_id_str, elem in plan_data.get("elements", {}).items():
+            ref = elem.get("reference") or {}
+            with suppress(TypeError, ValueError, KeyError):
+                existing_by_ref[(int(ref["type"]), int(ref["ref_id"]))] = int(elem_id_str)
+        for conn in (plan_data.get("connections") or {}).values():
+            endpoints: set[int] = set()
+            outputs = conn.get("output") or []
+            if isinstance(outputs, dict):
+                outputs = list(outputs.values())
+            for endpoint in [conn.get("input") or {}, *outputs]:
+                with suppress(TypeError, ValueError, KeyError):
+                    endpoints.add(int(endpoint["FubElementId"]))
+            conn_endpoints.append(endpoints)
+        return existing_by_ref, conn_endpoints
+
+    async def _function_plan_wire_ref_pair(
+        self,
+        fub_id: int,
+        src_type: int,
+        src_ref_id: int,
+        web_ref_id: int,
+        conn_type: str,
+        label: str,
+        existing_by_ref: dict[tuple[int, int], int],
+        conn_endpoints: list[set[int]],
+        pos: tuple[float, float, float],
+    ) -> str | None:
+        """Wire one source element (Marker type=2 / IO type=1) to its Web-IO (type=10) element.
+
+        Existing elements are reused: if both already sit in the plan but the wire
+        between them is missing (orphan pair, e.g. a connection lost during a
+        restore cycle), only the connection is drawn. conn_endpoints holds the
+        FubElementId endpoint set of every existing connection to detect that case.
+        Returns None on success, "" when the pair is already wired in the plan
+        (skip, not an error), or an error message.
+        """
+        x_src, x_webio, y = pos
+
+        existing_src_elem = existing_by_ref.get((src_type, src_ref_id))
+        existing_webio_elem = existing_by_ref.get((10, web_ref_id))
+        if existing_src_elem and existing_webio_elem:
+            if any(existing_src_elem in eps and existing_webio_elem in eps for eps in conn_endpoints):
+                _LOGGER.info("function plan pair %s already wired in plan fub=%s, skipping", label, fub_id)
+                return ""
+            # Orphan pair: both elements exist but the wire is missing — draw only the connection
+            conn_id = await self.logikplan_save_connection(fub_id, existing_src_elem, existing_webio_elem, conn_type)
+            if conn_id is None:
+                return f"{label}: save_connection between existing elements failed"
+            _LOGGER.info(
+                "function plan pair %s rewired existing elements %s→%s (fub=%s, conn_id=%s)",
+                label,
+                existing_src_elem,
+                existing_webio_elem,
+                fub_id,
+                conn_id,
+            )
+            return None
+
+        elem_src = existing_src_elem or await self.logikplan_add_element(
+            fub_id=fub_id, ref_id=src_ref_id, element_type=src_type, x=x_src, y=y
+        )
+        if elem_src is None:
+            return f"{label}: add_element (source, type={src_type}) failed"
+
+        if existing_webio_elem:
+            # Web-IO element already in the plan — wire the (possibly fresh) source to it
+            conn_id = await self.logikplan_save_connection(fub_id, int(elem_src), existing_webio_elem, conn_type)
+            if conn_id is None:
+                return f"{label}: save_connection to existing Web-IO element failed"
+            return None
+
+        conn_payload = {
+            "0": {
+                "id": "new",
+                "fub_id": fub_id,
+                "type": conn_type,
+                "input": {"element": str(elem_src), "pos": "0", "inverted": False},
+                "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
+            }
+        }
+        elem_webio = await self.logikplan_add_element(
+            fub_id=fub_id,
+            ref_id=web_ref_id,
+            element_type=10,
+            x=x_webio,
+            y=y,
+            connection=conn_payload,
+        )
+        if elem_webio is None:
+            return f"{label}: add_element (Web-IO, webIoId={web_ref_id}) failed"
+
+        _LOGGER.info(
+            "function plan pair %s → src_elem=%s webio_elem=%s (fub=%s, conn=%s)",
+            label,
+            elem_src,
+            elem_webio,
+            fub_id,
+            conn_type,
+        )
+        return None
+
+    async def function_plan_add_marker_pairs(
+        self,
+        fub_id: int,
+        marker_ids: list[int],
+        fresh_plan: bool = False,
+        progress_cb: Callable[[int, int], None] | None = None,
+    ) -> tuple[list[int], list[str]]:
+        """Add Marker (type=2) + Web-IO (type=10) element pairs to a stopped plan.
+
+        Reloads Comexio config to pick up freshly created Web-IO commands (webIoId),
+        retrying with backoff (see _reload_config_until_commands_ready) since a
+        just-uploaded command does not always show up on the very next reload.
+        fresh_plan=True places the pairs directly at their final grid positions
+        (sorted by marker ID) — no sort pass is needed afterwards. Otherwise the
+        elements get placeholder positions and a sort run must follow.
+        progress_cb(done, total) is invoked after every processed marker.
+        Returns (added_marker_ids, error_messages).
+        """
+
+        def _expected_names(data: dict) -> set[str]:
+            markers = {int(m["id"]): m for m in data.get("markers", [])}
+            return {f"HA {markers[mid]['name']}" for mid in marker_ids if mid in markers}
+
+        fresh_data = await self._reload_config_until_commands_ready(_expected_names)
+        webio_commands = fresh_data.get("webio_commands", {})
+        markers_by_id = {int(m["id"]): m for m in fresh_data.get("markers", [])}
+
+        plan_data = await self.logikplan_load_elements(fub_id)
+        existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
+
+        if fresh_plan:
+            marker_ids = sorted(marker_ids)
+        _, y_max = self.get_fub_canvas_bounds(fub_id)
+        rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+
+        def _pair_pos(n_added: int, n_loop: int) -> tuple[float, float, float]:
+            """(x_marker, x_webio, y): final grid slot for fresh plans, placeholder otherwise."""
+            if fresh_plan:
+                col, row = divmod(n_added, rows_per_col)
+                x_off = col * FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH
+                return (
+                    FUNCTION_PLAN_LAYOUT_X_MARKER + x_off,
+                    FUNCTION_PLAN_LAYOUT_X_WEBIO + x_off,
+                    FUNCTION_PLAN_LAYOUT_Y_START + row * FUNCTION_PLAN_LAYOUT_Y_STEP,
+                )
+            # Off-canvas parking row: the follow-up sort pass assigns the real slots.
+            return (
+                FUNCTION_PLAN_LAYOUT_X_MARKER,
+                FUNCTION_PLAN_LAYOUT_X_WEBIO,
+                10000.0 + n_loop * FUNCTION_PLAN_LAYOUT_Y_STEP,
+            )
+
+        added: list[int] = []
+        errors: list[str] = []
+        for i, marker_id in enumerate(marker_ids):
+            err = await self._function_plan_add_single_pair(
+                fub_id,
+                marker_id,
+                markers_by_id,
+                webio_commands,
+                existing_by_ref,
+                conn_endpoints,
+                _pair_pos(len(added), i),
+            )
+            if err is None:
+                added.append(marker_id)
+            elif err:
+                errors.append(err)
+            if progress_cb:
+                progress_cb(i + 1, len(marker_ids))
+
+        return added, errors
+
+    async def _function_plan_add_single_pair(
+        self,
+        fub_id: int,
+        marker_id: int,
+        markers_by_id: dict,
+        webio_commands: dict,
+        existing_by_ref: dict[tuple[int, int], int],
+        conn_endpoints: list[set[int]],
+        pos: tuple[float, float, float],
+    ) -> str | None:
+        """Add one Marker+Web-IO pair at pos=(x_marker, x_webio, y).
+
+        Return semantics as _function_plan_wire_ref_pair (None = added, "" = already wired).
+        """
+        marker = markers_by_id.get(marker_id)
+        if not marker:
+            return f"M{marker_id}: not found in fresh config"
+
+        expected_cmd_name = f"HA {marker['name']}"
+        webio_cmd = webio_commands.get(expected_cmd_name)
+        if not webio_cmd:
+            _LOGGER.warning("function_plan_add_marker_pairs: M%s — Web-IO '%s' not found", marker_id, expected_cmd_name)
+            return f"M{marker_id}: Web-IO '{expected_cmd_name}' not found after config reload"
+
+        web_ref_id = webio_cmd.get("webIoId")
+        if web_ref_id is None:
+            return f"M{marker_id}: no webIoId for '{expected_cmd_name}'"
+
+        conn_type = "binary" if marker["type"] == "digital" else "analog"
+        return await self._function_plan_wire_ref_pair(
+            fub_id, 2, marker_id, int(web_ref_id), conn_type, f"M{marker_id}", existing_by_ref, conn_endpoints, pos
+        )
+
+    async def function_plan_add_io_pairs(
+        self,
+        fub_id: int,
+        ext_name: str,
+        identifiers: list[str],
+        column_index: int = 0,
+        progress_cb: Callable[[int, int], None] | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """Add IO (type=1) + Web-IO (type=10) element pairs for one extension column.
+
+        identifiers: the IOs to wire in this run. Row slots derive from ALL of the
+        extension's HA-relevant IOs (io_column_rows), so a pair retrofitted later lands
+        exactly in the slot the initial layout reserved for it — IO plans therefore never
+        need a sort pass. Should a column outgrow the canvas anyway, it wraps into a
+        sub-column right next to it as a defensive fallback (the plan-creation side is
+        expected to pick a canvas tall enough to avoid this).
+        Returns (added_identifiers, error_messages).
+        """
+
+        def _expected_names(data: dict) -> set[str]:
+            ext_idents = {io["identifier"] for io in data.get("io", []) if io["ext_name"] == ext_name}
+            return {f"HA IO {ext_name} {ident}" for ident in identifiers if ident in ext_idents}
+
+        fresh_data = await self._reload_config_until_commands_ready(_expected_names)
+        webio_commands = fresh_data.get("webio_commands", {})
+        ext_ios = {io["identifier"]: io for io in fresh_data.get("io", []) if io["ext_name"] == ext_name}
+        rows = io_column_rows(list(ext_ios))
+
+        plan_data = await self.logikplan_load_elements(fub_id)
+        existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
+
+        _, y_max = self.get_fub_canvas_bounds(fub_id)
+        rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+
+        added: list[str] = []
+        errors: list[str] = []
+        todo = sorted(identifiers, key=io_sort_key)
+        for i, ident in enumerate(todo):
+            err = await self._function_plan_add_single_io_pair(
+                fub_id,
+                ext_name,
+                ident,
+                ext_ios,
+                webio_commands,
+                existing_by_ref,
+                conn_endpoints,
+                (rows.get(ident, 0), column_index, rows_per_col),
+            )
+            if err is None:
+                added.append(ident)
+            elif err:
+                errors.append(err)
+            if progress_cb:
+                progress_cb(i + 1, len(todo))
+
+        return added, errors
+
+    async def _function_plan_add_single_io_pair(
+        self,
+        fub_id: int,
+        ext_name: str,
+        ident: str,
+        ext_ios: dict[str, dict],
+        webio_commands: dict,
+        existing_by_ref: dict[tuple[int, int], int],
+        conn_endpoints: list[set[int]],
+        slot: tuple[int, int, int],
+    ) -> str | None:
+        """Add one IO+Web-IO pair at its deterministic slot=(row, column_index, rows_per_col).
+
+        Return semantics as _function_plan_wire_ref_pair (None = added, "" = already wired).
+        """
+        label = f"{ext_name} {ident}"
+        io_entry = ext_ios.get(ident)
+        if not io_entry:
+            return f"{label}: not found in fresh config"
+
+        expected_cmd_name = f"HA IO {ext_name} {ident}"
+        webio_cmd = webio_commands.get(expected_cmd_name)
+        if not webio_cmd:
+            _LOGGER.warning("function_plan_add_io_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
+            return f"{label}: Web-IO '{expected_cmd_name}' not found after config reload"
+
+        web_ref_id = webio_cmd.get("webIoId")
+        if web_ref_id is None:
+            return f"{label}: no webIoId for '{expected_cmd_name}'"
+
+        try:
+            io_ref_id = int(io_entry["id"])
+        except (TypeError, ValueError):
+            return f"{label}: invalid internal io id '{io_entry.get('id')}'"
+
+        row, column_index, rows_per_col = slot
+        sub_col, row_in_col = divmod(row, rows_per_col)
+        x_off = (column_index + sub_col) * FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH
+        pos = (
+            FUNCTION_PLAN_LAYOUT_X_MARKER + x_off,
+            FUNCTION_PLAN_LAYOUT_X_WEBIO + x_off,
+            FUNCTION_PLAN_LAYOUT_Y_START + row_in_col * FUNCTION_PLAN_LAYOUT_Y_STEP,
+        )
+        conn_type = "binary" if io_entry.get("is_binary") else "analog"
+        return await self._function_plan_wire_ref_pair(
+            fub_id, 1, io_ref_id, int(web_ref_id), conn_type, label, existing_by_ref, conn_endpoints, pos
+        )
 
     async def function_plan_rebuild_plan_from_snapshot(
         self, fub_id: int, snapshot: dict[str, Any]

@@ -1,6 +1,7 @@
 # Version: 0.7.5
 import asyncio
 from collections.abc import Callable
+import contextlib
 from dataclasses import dataclass
 import datetime
 from functools import partial
@@ -20,6 +21,7 @@ import voluptuous as vol
 
 from .const import (
     CONF_ENABLE_NOTIFICATIONS,
+    CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
     SYNC_DURATION_DELETE,
@@ -32,13 +34,65 @@ from .const import (
     webio_class_name,
 )
 from .coordinator import ComexioCoordinator
+from .services import async_resync_io_group_headers, async_sort_function_plan
 
 _LOGGER = logging.getLogger(__name__)
+
+# Progress percentages of the function plan wiring pass, which runs after the Web-IO sync
+# has already consumed the SYNC_PROGRESS_START_PCT..SYNC_PROGRESS_END_PCT span.
+_PCT_PLAN_PAIRS = 60
+_PCT_PLAN_FINALIZE = 92
+
+_NOTE_ACTIVATED = ", plan activated"
+_NOTE_NOT_ACTIVATED = ", ⚠️ plan NOT activated"
+_ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
     """Filter an audit-result list (missing/renamed/type/orphan) down to one Web-IO class."""
     return [i for i in seq if i.get("webio_class") == cls]
+
+
+def _mmss(seconds: float) -> str:
+    """Format a duration as m:ss."""
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
+def _plan_summary_line(
+    plan_name: str,
+    is_fresh: bool,
+    n_added: int,
+    n_total: int,
+    unit: str,
+    t0: float,
+    note: str,
+    errors: list[str],
+) -> str:
+    """One '• <plan>: +n/m pairs in m:ss' line for the sync notification's Function Plan block."""
+    err_note = f", ⚠️ {len(errors)} errors" if errors else ""
+    return (
+        f"• '{plan_name}'{' (new)' if is_fresh else ''}: +{n_added}/{n_total} {unit}"
+        f" in {_mmss(time.monotonic() - t0)} min{note}{err_note}"
+    )
+
+
+def _plan_pair_progress(ctx: "_SyncContext", state: dict, plan_name: str, done: int, total: int) -> None:
+    """Push a progress update while pairs are being wired into a managed cluster plan.
+
+    state carries the run-wide counters ({"done", "total", "t0"}) so the percentage spans
+    all plans of the run, not just the plan currently being written.
+    """
+    overall_done = state["done"] + done
+    overall_total = max(1, state["total"])
+    elapsed = time.monotonic() - state["t0"]
+    remaining = (elapsed / overall_done) * (overall_total - overall_done) if overall_done else 0.0
+    ctx.update_status(
+        f"**Function Plan:** `{plan_name}`\n"
+        f"**Progress:** pair {overall_done} of {overall_total}\n\n---\n"
+        f"🏁 **Remaining:** ~{_mmss(remaining)} min",
+        pct=_PCT_PLAN_PAIRS + int((_PCT_PLAN_FINALIZE - _PCT_PLAN_PAIRS) * (overall_done / overall_total)),
+        step_info=f"Function Plan '{plan_name}': pair {done}/{total}",
+    )
 
 
 @dataclass
@@ -192,7 +246,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 recreated_classes,
                 skipped_creates,
                 per_class,
+                created_names,
             ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
+
+            plan_summary = await self._wire_created_pairs(ctx, created_names)
 
             duration = datetime.datetime.now() - start_time
             duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
@@ -207,6 +264,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 skipped_creates,
                 per_class,
             )
+            if plan_summary:
+                msg += "\n\n**Function Plan:**\n" + "\n".join(plan_summary)
 
             self.coordinator.last_audit_failed = False
             update_status(msg, pct=100, step_info="Done")
@@ -242,8 +301,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def _sync_all_classes(
         self, ctx: _SyncContext, audit_data: dict[str, Any], dev_ids: dict[str, str | None]
-    ) -> tuple[int, int, int, int, bool, list[str], int, dict[str, dict[str, int]]]:
-        """Run `_sync_class` for every Web-IO class and aggregate the results."""
+    ) -> tuple[int, int, int, int, bool, list[str], int, dict[str, dict[str, int]], list[str]]:
+        """Run `_sync_class` for every Web-IO class and aggregate the results.
+
+        The trailing element is the flat list of Web-IO command names created in this run
+        (across all classes) — the input of the managed cluster plan wiring pass.
+        """
         missing_items = audit_data.get("missing", [])
         renamed_items = audit_data.get("rename", [])
         type_mismatches = audit_data.get("type", [])
@@ -254,6 +317,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         recreated_classes: list[str] = []
         skipped_creates = 0
         per_class: dict[str, dict[str, int]] = {}
+        created_names: list[str] = []
         # Split the shared progress span evenly across however many classes exist,
         # so the UI bar advances smoothly regardless of len(WEBIO_CLASSES).
         pct_span = (SYNC_PROGRESS_END_PCT - SYNC_PROGRESS_START_PCT) / len(WEBIO_CLASSES)
@@ -285,6 +349,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             renamed += cls_result["renamed"]
             updated_ip = updated_ip or cls_result["updated_ip"]
             skipped_creates += cls_result["skipped_creates"]
+            created_names.extend(cls_result.get("created_names", []))
             if cls_result["recreated"]:
                 recreated_classes.append(cls)
             else:
@@ -297,7 +362,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     "renamed": cls_result["renamed"],
                 }
 
-        return added, removed, updated, renamed, updated_ip, recreated_classes, skipped_creates, per_class
+        return (
+            added,
+            removed,
+            updated,
+            renamed,
+            updated_ip,
+            recreated_classes,
+            skipped_creates,
+            per_class,
+            created_names,
+        )
 
     def _build_sync_result_message(
         self,
@@ -631,7 +706,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Run the collected delta-sync tasks against the Comexio API, in order."""
         api = ctx.api
         dev_reg = dr.async_get(self.hass)
-        result = {"added": 0, "removed": 0, "updated": 0, "renamed": 0}
+        result: dict[str, Any] = {"added": 0, "removed": 0, "updated": 0, "renamed": 0, "created_names": []}
         for idx, task in enumerate(tasks_to_do):
             if getattr(self.coordinator, "cancel_sync", False):
                 break
@@ -653,6 +728,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             elif t_type == "create":
                 await api.save_single_command(base_id, class_dev_id, item["payload"])
                 result["added"] += 1
+                result["created_names"].append(item["name"])
         return result
 
     async def _sync_class(
@@ -682,6 +758,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         if cls_effective_action == "recreate":
             await self._recreate_class(ctx, cls, class_name, label, class_dev_id, pct_start, pct_end)
+            # Everything in this class is brand new, so every command of it needs the
+            # function plan pairing pass too: its old webIoId (if any) went away with the
+            # deleted class, and the pre-sync audit never flagged a wiring gap for it (it
+            # only checks keys already present in com_map, which was empty here). Pairing
+            # is idempotent — already-wired markers/IOs are skipped.
             return {
                 "added": 0,
                 "removed": 0,
@@ -690,6 +771,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 "updated_ip": False,
                 "recreated": True,
                 "skipped_creates": 0,
+                "created_names": [
+                    cmd["Name"]
+                    for cmd in ctx.api.build_webio_commands(self.server_id, self.coordinator.data, webio_class=cls)
+                ],
             }
 
         result = await self._delta_sync_class(
@@ -709,6 +794,333 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
         result["recreated"] = False
         return result
+
+    # --- MANAGED CLUSTER PLAN WIRING ---
+
+    async def _wire_created_pairs(self, ctx: _SyncContext, created_names: list[str]) -> list[str]:
+        """Wire every Web-IO command created in this run into its managed cluster plan.
+
+        Marker commands are distributed across marker cluster plans (one per ID range),
+        IO commands across the IO cluster plan of their extension — but only for the
+        extensions the user opted into (CONF_FUNCTION_PLAN_IO_EXTENSIONS), and never for
+        an extension that is currently offline (its hardware isn't there, so wiring it is
+        pointless; the next sync picks it up once it's back).
+        Returns per-plan summary lines for the final sync notification.
+        """
+        marker_ids: list[int] = []
+        io_items: list[dict[str, str]] = []
+        managed_exts = set(self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
+        managed_exts -= self.coordinator.offline_extensions or set()
+
+        for name in created_names:
+            if (mid := _parse_marker_id_from_webio_name(name)) is not None:
+                marker_ids.append(mid)
+            elif (io_ref := _parse_io_from_webio_name(name)) is not None and io_ref[0] in managed_exts:
+                io_items.append({"ext_name": io_ref[0], "identifier": io_ref[1]})
+
+        marker_ids = list(dict.fromkeys(marker_ids))
+        if not marker_ids and not io_items:
+            return []
+
+        progress_state = {"done": 0, "total": len(marker_ids) + len(io_items), "t0": time.monotonic()}
+        summary: list[str] = []
+        n_added = 0
+        n_errors = 0
+
+        if marker_ids:
+            lines, added, errors = await self._wire_marker_clusters(ctx, marker_ids, progress_state)
+            summary.extend(lines)
+            n_added += added
+            n_errors += errors
+        if io_items:
+            lines, added, errors = await self._wire_io_clusters(ctx, io_items, progress_state)
+            summary.extend(lines)
+            n_added += added
+            n_errors += errors
+
+        _LOGGER.info("[%s] Cluster plan wiring done: added=%d, errors=%d", self.server_id, n_added, n_errors)
+        return summary
+
+    async def _wire_marker_clusters(
+        self, ctx: _SyncContext, marker_ids: list[int], progress_state: dict
+    ) -> tuple[list[str], int, int]:
+        """Resolve the marker cluster plans and add the pairs. Returns (lines, added, errors)."""
+        plan_to_ids, created_plans = await self.coordinator.resolve_marker_clusters(marker_ids)
+        if not plan_to_ids:
+            _LOGGER.warning("[%s] Cluster plan wiring: no marker cluster plan available", self.server_id)
+            return ["⚠️ No marker cluster plan available — see log."], 0, 1
+
+        summary: list[str] = []
+        added = 0
+        errors = 0
+        for fub_id, cluster_ids in plan_to_ids.items():
+            line, lp_added, lp_errors = await self._add_pairs_to_plan(
+                ctx, fub_id, sorted(cluster_ids), fub_id in created_plans, progress_state
+            )
+            summary.append(line)
+            added += len(lp_added)
+            errors += len(lp_errors)
+        return summary, added, errors
+
+    async def _wire_io_clusters(
+        self, ctx: _SyncContext, io_items: list[dict[str, str]], progress_state: dict
+    ) -> tuple[list[str], int, int]:
+        """Resolve the IO cluster plans and add the pairs. Returns (lines, added, errors)."""
+        by_ext: dict[str, list[str]] = {}
+        for item in io_items:
+            by_ext.setdefault(item["ext_name"], []).append(item["identifier"])
+
+        ext_plans, created_plans = await self.coordinator.resolve_io_clusters(sorted(by_ext))
+        if not ext_plans:
+            _LOGGER.warning("[%s] Cluster plan wiring: no IO cluster plan available", self.server_id)
+            return ["⚠️ No IO cluster plan available — see log."], 0, 1
+
+        plan_exts: dict[int, list[tuple[str, int]]] = {}
+        for ext, (fub_id, column) in ext_plans.items():
+            plan_exts.setdefault(fub_id, []).append((ext, column))
+
+        summary: list[str] = []
+        added = 0
+        errors = 0
+        for fub_id, ext_cols in plan_exts.items():
+            line, lp_added, lp_errors = await self._add_io_pairs_to_plan(
+                ctx, fub_id, sorted(ext_cols, key=lambda t: t[1]), by_ext, fub_id in created_plans, progress_state
+            )
+            summary.append(line)
+            added += len(lp_added)
+            errors += len(lp_errors)
+        return summary, added, errors
+
+    def _plan_name(self, fub_id: int) -> str:
+        """Live name of a plan, falling back to its fub_id when it isn't in the cache."""
+        return self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") or str(fub_id)
+
+    async def _add_pairs_to_plan(
+        self,
+        ctx: _SyncContext,
+        fub_id: int,
+        cluster_ids: list[int],
+        is_fresh: bool,
+        progress_state: dict,
+    ) -> tuple[str, list[int], list[str]]:
+        """Add marker pairs to one plan. Returns (summary_line, added_ids, errors).
+
+        Freshly created plans get their pairs at final grid positions (no sort pass)
+        and are activated afterwards; existing plans are re-sorted quietly and — if
+        they were active before this run stopped them — reactivated.
+        """
+        api = ctx.api
+        plan_name = self._plan_name(fub_id)
+        if (mismatch := self._check_plan_rename_mismatch(fub_id, cluster_ids, plan_name)) is not None:
+            return mismatch
+
+        # Capture the activation state BEFORE stop_fup: function_plan_add_marker_pairs
+        # reloads the config (refreshing fub_data) after the stop, so any later lookup
+        # would see the plan as inactive and skip reactivation.
+        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        t0 = time.monotonic()
+        ctx.update_status(
+            f"Adding {len(cluster_ids)} pair(s) to Function Plan '{plan_name}'...",
+            pct=_PCT_PLAN_PAIRS,
+            step_info="Function Plan: adding pairs",
+        )
+        await self.coordinator.async_function_plan_change_backup(
+            fub_id, f"add_marker_pairs {[f'M{m}' for m in cluster_ids]}"
+        )
+        await api.logikplan_stop_fup(fub_id)
+        lp_added, lp_errors = await api.function_plan_add_marker_pairs(
+            fub_id,
+            cluster_ids,
+            fresh_plan=is_fresh,
+            progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+        )
+        progress_state["done"] += len(cluster_ids)
+        if lp_errors:
+            _LOGGER.warning("[%s] function_plan_add_marker_pairs errors: %s", self.server_id, lp_errors)
+
+        note = await self._finalize_plan_after_pairs(ctx, fub_id, plan_name, lp_added, is_fresh, was_active)
+        return (
+            _plan_summary_line(plan_name, is_fresh, len(lp_added), len(cluster_ids), "pairs", t0, note, lp_errors),
+            lp_added,
+            lp_errors,
+        )
+
+    def _check_plan_rename_mismatch(
+        self, fub_id: int, cluster_ids: list[int], plan_name: str
+    ) -> tuple[str, list[int], list[str]] | None:
+        """Aborted-result tuple if the plan was renamed/repurposed since resolve_marker_clusters() ran."""
+        expected_name = self.coordinator.expected_marker_cluster_name(cluster_ids[0])
+        if plan_name == expected_name:
+            return None
+        _LOGGER.error(
+            "[%s] Aborting marker pair write to fub=%s: expected managed plan '%s' but it is now named "
+            "'%s' — it was renamed/repurposed since resolve_marker_clusters() ran",
+            self.server_id,
+            fub_id,
+            expected_name,
+            plan_name,
+        )
+        return (
+            f"⚠️ fub {fub_id}: aborted — expected '{expected_name}' but plan is now '{plan_name}'",
+            [],
+            [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
+        )
+
+    async def _finalize_plan_after_pairs(
+        self,
+        ctx: _SyncContext,
+        fub_id: int,
+        plan_name: str,
+        lp_added: list[int],
+        is_fresh: bool,
+        was_active: bool,
+    ) -> str:
+        """Activate/sort/restart the plan after pairs were added; returns the summary-line note."""
+        if not lp_added:
+            # Nothing changed (all pairs already wired) — only undo our own stop_fup.
+            self._plan_finalize_status(ctx, plan_name, "restarting plan", "restarting")
+            if was_active:
+                await ctx.api.logikplan_run_fup(fub_id)
+            return ""
+
+        if is_fresh:
+            # Fresh plan: pairs already sit at their final grid slots — skip the sort pass.
+            self._plan_finalize_status(ctx, plan_name, "activating plan", "activating")
+            return _NOTE_ACTIVATED if await ctx.api.logikplan_run_fup(fub_id) else _NOTE_NOT_ACTIVATED
+
+        return await self._sort_and_reactivate(ctx, fub_id, plan_name, was_active)
+
+    @staticmethod
+    def _plan_finalize_status(ctx: _SyncContext, plan_name: str, what: str, step: str) -> None:
+        """Progress line for the finalize phase of one managed cluster plan."""
+        ctx.update_status(
+            f"Finalizing Function Plan '{plan_name}' — {what}...",
+            pct=_PCT_PLAN_FINALIZE,
+            step_info=f"Function Plan: {step}",
+        )
+
+    async def _sort_and_reactivate(self, ctx: _SyncContext, fub_id: int, plan_name: str, was_active: bool) -> str:
+        """Re-sort an existing plan after new pairs landed on placeholder slots, then reactivate."""
+        self._plan_finalize_status(ctx, plan_name, "sorting elements", "sorting")
+        sort_res = await async_sort_function_plan(
+            self.hass, self.coordinator, ctx.api, fub_id, notify=False, was_active=was_active
+        )
+        sorted_ok = bool(sort_res and sort_res["success"])
+        note = f", sorted in {sort_res['duration']:.1f}s" if sorted_ok else ", ⚠️ sort failed"
+        if was_active and not (sort_res and sort_res.get("activated")):
+            # Sort was skipped or lost the reactivation (e.g. save_elements_pos failed) —
+            # don't leave a previously active plan stopped.
+            note += _NOTE_ACTIVATED if await ctx.api.logikplan_run_fup(fub_id) else _NOTE_NOT_ACTIVATED
+        return note
+
+    async def _add_io_pairs_to_plan(
+        self,
+        ctx: _SyncContext,
+        fub_id: int,
+        ext_cols: list[tuple[str, int]],
+        by_ext: dict[str, list[str]],
+        is_fresh: bool,
+        progress_state: dict,
+    ) -> tuple[str, list[str], list[str]]:
+        """Add the missing IO pairs of one or more extensions to one IO cluster plan.
+
+        Unlike marker plans there is never a sort pass: every IO pair lands in its
+        deterministic slot (see api.function_plan_add_io_pairs), so finalizing is just
+        reactivating the plan (fresh plans and plans that were active before the stop).
+        Returns (summary_line, added_labels, errors).
+        """
+        api = ctx.api
+        plan_name = self._plan_name(fub_id)
+        stale_exts = [ext for ext, _ in ext_cols if not self.coordinator.io_cluster_plan_contains(plan_name, ext)]
+        if stale_exts:
+            _LOGGER.error(
+                "[%s] Aborting IO pair write to fub=%s: plan is now named '%s', no longer a managed IO "
+                "cluster plan for %s — it was renamed/repurposed since resolve_io_clusters() ran",
+                self.server_id,
+                fub_id,
+                plan_name,
+                stale_exts,
+            )
+            return (
+                f"⚠️ fub {fub_id} ('{plan_name}'): aborted — no longer matches expected IO cluster for {stale_exts}",
+                [],
+                [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
+            )
+
+        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        n_total = sum(len(by_ext[ext]) for ext, _ in ext_cols)
+        t0 = time.monotonic()
+        ctx.update_status(
+            f"Adding {n_total} IO pair(s) to Function Plan '{plan_name}'...",
+            pct=_PCT_PLAN_PAIRS,
+            step_info="Function Plan: adding IO pairs",
+        )
+        await self.coordinator.async_function_plan_change_backup(
+            fub_id, f"add_io_pairs {[f'{ext}:{len(by_ext[ext])}' for ext, _ in ext_cols]}"
+        )
+        await api.logikplan_stop_fup(fub_id)
+
+        added: list[str] = []
+        errors: list[str] = []
+        for ext, column in ext_cols:
+            lp_added, lp_errors = await api.function_plan_add_io_pairs(
+                fub_id,
+                ext,
+                by_ext[ext],
+                column_index=column,
+                progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+            )
+            progress_state["done"] += len(by_ext[ext])
+            added.extend(f"{ext} {ident}" for ident in lp_added)
+            errors.extend(lp_errors)
+        if errors:
+            _LOGGER.warning("[%s] function_plan_add_io_pairs errors: %s", self.server_id, errors)
+
+        if added:
+            n_headers = await async_resync_io_group_headers(self.coordinator, api, fub_id)
+            _LOGGER.info(
+                "[%s] function_plan_add_io_pairs: resynced %d group header(s) for plan '%s'",
+                self.server_id,
+                n_headers,
+                plan_name,
+            )
+
+        note = ""
+        if is_fresh or was_active:
+            ctx.update_status(
+                f"Finalizing Function Plan '{plan_name}' — activating plan...",
+                pct=_PCT_PLAN_FINALIZE,
+                step_info="Function Plan: activating",
+            )
+            activated = await api.logikplan_run_fup(fub_id)
+            if added:
+                note = _NOTE_ACTIVATED if activated else _NOTE_NOT_ACTIVATED
+
+        return _plan_summary_line(plan_name, is_fresh, len(added), n_total, "IO pairs", t0, note, errors), added, errors
+
+
+def _parse_marker_id_from_webio_name(name: str) -> int | None:
+    """Extract the marker ID from a Web-IO command name like 'HA M68 Title'.
+
+    Returns the integer marker ID, or None if the name doesn't match the marker pattern.
+    """
+    parts = name.split()
+    if len(parts) >= 2 and parts[0] == "HA" and parts[1].upper().startswith("M"):
+        with contextlib.suppress(ValueError):
+            return int(parts[1][1:])
+    return None
+
+
+def _parse_io_from_webio_name(name: str) -> tuple[str, str] | None:
+    """Extract (ext_name, identifier) from a Web-IO command name like 'HA IO UD1 Q3'.
+
+    Extension names containing spaces are not parseable this way — the same known
+    limitation as the audit's com_map key parsing.
+    """
+    parts = name.split()
+    if len(parts) >= 4 and parts[0] == "HA" and parts[1] == "IO":
+        return parts[2], parts[3]
+    return None
 
 
 class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):

@@ -1,5 +1,6 @@
 # Version: 0.8.0
 import asyncio
+import contextlib
 from datetime import datetime, timedelta
 import logging
 import re
@@ -23,6 +24,10 @@ from .const import (
     CONF_COVER_KEYWORDS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    CONF_FUNCTION_PLAN_FUB_ID,
+    CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
+    CONF_FUNCTION_PLAN_PLAN_MAP,
+    CONF_FUNCTION_PLAN_PLAN_PREFIX,
     CONF_HOST,
     CONF_IGNORED_MARKERS,
     CONF_PASSWORD,
@@ -31,16 +36,25 @@ from .const import (
     CONF_USERNAME,
     DEFAULT_COVER_KEYWORDS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
+    DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DOMAIN,
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
+    FUNCTION_PLAN_FUB_ID_AUTO,
+    FUNCTION_PLAN_LAYOUT_COMMENT_Y,
+    FUNCTION_PLAN_LAYOUT_Y_START,
+    FUNCTION_PLAN_LAYOUT_Y_STEP,
+    FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
     bus_load_signal,
     fw_update_signal,
     io_audit_key,
+    io_column_rows,
     is_io_audit_key,
+    snap_to_grid,
     webio_class_label,
 )
 from .function_plan_backup import FunctionPlanBackupManager, retention_cutoff
@@ -52,6 +66,13 @@ _LOGGER = logging.getLogger(__name__)
 # label, letting get_active_function_plan_fub_id() resolve the fub_id directly instead of
 # matching by (non-unique) plan name.
 _PLAN_LABEL_ID_SUFFIX_RE = re.compile(r"\(ID (\d+)\)\s*$")
+
+# Managed cluster plans are always created as A3 — big enough for a full marker cluster or
+# two/three extension columns, while still printable.
+_MANAGED_PLAN_PAPER = "A3"
+_ORIENT_LANDSCAPE = "landscape"
+_ORIENT_PORTRAIT = "portrait"
+_PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 
 
 async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
@@ -556,9 +577,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
+            # Managed cluster plans are fully auto-generated/regenerable by
+            # resolve_marker_clusters / resolve_io_clusters — auto-backing them up on every
+            # poll-detected hash change (they mutate on every sync) would burn storage slots
+            # on content that is reproducible on demand. Pre-mutation change-backups still
+            # cover them, so an accidental Comexio-side edit stays recoverable.
+            prefix = self._function_plan_prefix()
+            backup_plans = {
+                fid: pd
+                for fid, pd in plans.items()
+                if not self._is_managed_cluster_plan_name(str(fub_data.get(str(fid), {}).get("Name", "")), prefix)
+            }
             try:
                 self.last_changed_plans = await self.function_plan_backup.async_auto_backup(
-                    plans,
+                    backup_plans,
                     fub_data,
                     plan_format,
                     self.api.comexio_version,
@@ -654,6 +686,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         free function in an entity-platform module. Parses the fub_id directly out of the
         selector's "<name> (ID <n>)" label (see services.format_plan_label) rather than
         matching on the bare name, since plan names aren't unique in Comexio.
+
+        At startup the select entity is not in the state machine yet (the coordinator's
+        first refresh runs before the platforms are set up), so the choice persisted in
+        entry.options by the selector is used as the fallback.
         """
         from homeassistant.helpers import entity_registry as er
 
@@ -661,10 +697,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
         select_eid = er.async_get(self.hass).async_get_entity_id("select", DOMAIN, uid) or ""
         lp_state = self.hass.states.get(select_eid)
         if not lp_state or lp_state.state in ("unavailable", "unknown"):
-            return None
+            return self.persisted_function_plan_fub_id()
         if match := _PLAN_LABEL_ID_SUFFIX_RE.search(lp_state.state):
             return int(match.group(1))
         return next((int(fid) for fid, fi in self.api.fub_data.items() if fi.get("Name") == lp_state.state), None)
+
+    def persisted_function_plan_fub_id(self) -> int | None:
+        """fub_id the 'Function Plans' selector last persisted, or None if unset/legacy 'auto'."""
+        saved = self.config_entry.options.get(CONF_FUNCTION_PLAN_FUB_ID)
+        if saved in (None, "", FUNCTION_PLAN_FUB_ID_AUTO):
+            return None
+        try:
+            return int(saved)
+        except (TypeError, ValueError):
+            _LOGGER.warning("[%s] Ignoring unparseable persisted function plan id %r", self.server_id, saved)
+            return None
 
     def function_plan_label_maps(self) -> tuple[dict, dict, dict]:
         """Lookup dicts (marker/WebIO/IO id -> {"name": ..., ...}) for backup snapshot labeling.
@@ -687,17 +734,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Point any config that references old_fub_id by name at the plan's new fub_id.
 
         Called after a restore-as-new gives a deleted/reassigned plan a fresh fub_id.
-        Degrades to a no-op for the plan-map entry when CONF_FUNCTION_PLAN_PLAN_MAP isn't
-        set (that option belongs to the not-yet-merged managed-cluster-plans feature).
+        Updates both places a fub_id can be pinned: the managed cluster plan map and the
+        single-plan selector's persisted choice (CONF_FUNCTION_PLAN_FUB_ID) — a restored
+        plan is otherwise silently dropped from cluster management, or leaves the selector
+        pointing at a fub_id that no longer exists.
         Returns a list of human-readable descriptions of what was updated, for the
         restore service's response message.
         """
         updated: list[str] = []
         new_options = dict(self.config_entry.options)
-        plan_map = new_options.get("logikplan_plan_map", {})
+        plan_map = new_options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         if plan_map.get(plan_name) == old_fub_id:
-            new_options["logikplan_plan_map"] = {**plan_map, plan_name: new_fub_id}
+            new_options[CONF_FUNCTION_PLAN_PLAN_MAP] = {**plan_map, plan_name: new_fub_id}
             updated.append(f"cluster plan map entry '{plan_name}' → fub_id {new_fub_id}")
+        if str(new_options.get(CONF_FUNCTION_PLAN_FUB_ID)) == str(old_fub_id):
+            new_options[CONF_FUNCTION_PLAN_FUB_ID] = new_fub_id
+            updated.append(f"selected function plan → fub_id {new_fub_id}")
         if updated:
             self.request_options_update_without_reload(new_options)
         return updated
@@ -1074,3 +1126,286 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.entity_id_mismatches = []
         _LOGGER.info("[%s] Entity ID migration complete: %d IDs updated", self.server_id, migrated)
         return migrated
+
+    # --- MANAGED CLUSTER PLANS ---
+
+    def _function_plan_prefix(self) -> str:
+        """Configured name prefix of the HA-managed cluster plans (default 'HA')."""
+        return self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_PREFIX, DEFAULT_FUNCTION_PLAN_PLAN_PREFIX)
+
+    def _function_plan_cluster_size(self) -> int:
+        """Configured maximum number of element pairs per managed cluster plan."""
+        return int(
+            self.config_entry.options.get(
+                CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN, DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN
+            )
+        )
+
+    @staticmethod
+    def _cluster_plan_name(marker_id: int, prefix: str, cluster_size: int) -> str:
+        """Name of the managed cluster plan a marker belongs to (deterministic bucket math)."""
+        start = ((marker_id - 1) // cluster_size) * cluster_size + 1
+        return f"{prefix} - Marker [{start}-{start + cluster_size - 1}]"
+
+    def expected_marker_cluster_name(self, marker_id: int) -> str:
+        """Deterministic cluster-plan name a marker ID currently maps to (config-aware)."""
+        return self._cluster_plan_name(marker_id, self._function_plan_prefix(), self._function_plan_cluster_size())
+
+    def io_cluster_plan_contains(self, live_plan_name: str, ext_name: str) -> bool:
+        """True if a live plan name still parses as a managed IO cluster plan naming ext_name.
+
+        Used right before writing IO pairs to catch a plan that was renamed/repurposed
+        between resolve_io_clusters() resolving its fub_id and the actual write (e.g. its
+        fub_id got reused by an unrelated create elsewhere in the meantime) — see
+        expected_marker_cluster_name() for the marker-side counterpart.
+        """
+        members = self._io_plan_members(live_plan_name, self._function_plan_prefix())
+        return members is not None and ext_name in members
+
+    async def resolve_marker_clusters(self, marker_ids: list[int]) -> tuple[dict[int, list[int]], set[int]]:
+        """Group marker IDs by cluster plan and resolve/create each plan.
+
+        Returns ({fub_id: [marker_ids_in_cluster]}, {fub_ids of freshly created plans}).
+        Lookup order per cluster: CONF_FUNCTION_PLAN_PLAN_MAP cache → name scan → create.
+        """
+        prefix = self._function_plan_prefix()
+        cluster_size = self._function_plan_cluster_size()
+        fub_data = self.api.fub_data
+
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        plan_map: dict[str, int] = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
+        stale = self._stale_plan_map_entries(fub_data)
+
+        clusters: dict[str, list[int]] = {}
+        for mid in marker_ids:
+            clusters.setdefault(self._cluster_plan_name(mid, prefix, cluster_size), []).append(mid)
+
+        result: dict[int, list[int]] = {}
+        created_plans: set[int] = set()
+        plan_map_updates: dict[str, int] = {}
+
+        for plan_name, cluster_ids in clusters.items():
+            fub_id, created = await self._resolve_single_cluster_plan(plan_name, plan_map, fub_data)
+            if fub_id is None:
+                _LOGGER.error("[%s] Failed to resolve/create cluster plan '%s'", self.server_id, plan_name)
+                continue
+            result[fub_id] = cluster_ids
+            if created:
+                created_plans.add(fub_id)
+            plan_map_updates[plan_name] = fub_id
+
+        if plan_map_updates or stale:
+            await self._persist_plan_map(plan_map_updates, removals=set(stale))
+
+        return result, created_plans
+
+    async def _resolve_single_cluster_plan(
+        self, plan_name: str, plan_map: dict[str, int], fub_data: dict
+    ) -> tuple[int | None, bool]:
+        """Find or create a single cluster plan by name. Returns (fub_id, freshly_created)."""
+        cached = plan_map.get(plan_name)
+        if cached is not None and fub_data.get(str(cached), {}).get("Name") == plan_name:
+            return cached, False
+
+        for fid_str, fub_info in fub_data.items():
+            if fub_info.get("Name") == plan_name:
+                _LOGGER.info("[%s] Found cluster plan '%s' (fub_id=%s)", self.server_id, plan_name, fid_str)
+                return int(fid_str), False
+
+        fub_id = await self._create_managed_plan(plan_name)
+        return fub_id, fub_id is not None
+
+    async def _create_managed_plan(self, plan_name: str, orientation: str = _ORIENT_LANDSCAPE) -> int | None:
+        """Create a managed A3 cluster plan carrying the 'administrated by HA' comment."""
+        _LOGGER.info("[%s] Creating cluster plan '%s'", self.server_id, plan_name)
+        fub_id = await self.api.create_fup(
+            plan_name=plan_name, paper_format=_MANAGED_PLAN_PAPER, orientation=orientation
+        )
+        if fub_id is None:
+            _LOGGER.error("[%s] Failed to create cluster plan '%s'", self.server_id, plan_name)
+            return None
+
+        # paper_name/orientation override is required: the freshly created plan is not in the
+        # cached $Fubs data yet, so bounds lookup by fub_id would fall back to A4 landscape.
+        x_max, _ = self.api.get_fub_canvas_bounds(fub_id, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
+        await self.api.function_plan_add_comment_element(
+            fub_id=fub_id,
+            text=FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
+            x=snap_to_grid(x_max / 2),
+            y=FUNCTION_PLAN_LAYOUT_COMMENT_Y,
+        )
+        return fub_id
+
+    @staticmethod
+    def _io_plan_members(plan_name: str, prefix: str) -> list[str] | None:
+        """Extension names encoded in a managed IO plan name '{prefix} - IO [A,B]', else None."""
+        m = re.fullmatch(re.escape(prefix) + r" - IO \[(.+)\]", plan_name)
+        if not m:
+            return None
+        return [p.strip() for p in m.group(1).split(",") if p.strip()]
+
+    @classmethod
+    def _is_managed_cluster_plan_name(cls, plan_name: str, prefix: str) -> bool:
+        """True for a name matching either managed cluster scheme (Marker or IO cluster).
+
+        Matched by name rather than plan_map membership so a cluster plan orphaned from
+        plan_map (e.g. after a stale-prune) is still recognized as auto-generated content.
+        """
+        if cls._io_plan_members(plan_name, prefix) is not None:
+            return True
+        return bool(re.fullmatch(re.escape(prefix) + r" - Marker \[\d+-\d+\]", plan_name))
+
+    @staticmethod
+    def _io_plan_name(prefix: str, members: list[str]) -> str:
+        """Managed IO cluster plan name encoding its extension membership."""
+        return f"{prefix} - IO [{','.join(members)}]"
+
+    def _io_plan_membership(self, prefix: str) -> dict[int, list[str]]:
+        """Live membership of every managed IO cluster plan: {fub_id: [ext names]}.
+
+        Read from the live $Fubs plan names (authoritative — plan_map keys can go stale
+        after renames); membership order defines each extension's column index.
+        """
+        result: dict[int, list[str]] = {}
+        for fid_str, fub_info in self.api.fub_data.items():
+            members = self._io_plan_members(str(fub_info.get("Name", "")), prefix)
+            if members:
+                with contextlib.suppress(TypeError, ValueError):
+                    result[int(fid_str)] = members
+        return result
+
+    def managed_io_plan_members(self, fub_id: int) -> list[str] | None:
+        """Extension membership when fub_id is an HA-managed IO cluster plan, else None.
+
+        Public counterpart of _io_plan_membership for the services module's grid/sort code.
+        """
+        return self._io_plan_membership(self._function_plan_prefix()).get(fub_id)
+
+    def _io_rows_needed(self, ext_name: str) -> int:
+        """Column rows one extension package needs (IOs + header/blank separator rows)."""
+        idents = [io["identifier"] for io in (self.data or {}).get("io", []) if io["ext_name"] == ext_name]
+        rows = io_column_rows(idents)
+        return (max(rows.values()) + 1) if rows else 0
+
+    async def resolve_io_clusters(self, ext_names: list[str]) -> tuple[dict[str, tuple[int, int]], set[int]]:
+        """Resolve/create the managed IO cluster plan of every extension (membership-true).
+
+        Returns ({ext_name: (fub_id, column_index)}, {fub_ids of freshly created plans}).
+        An extension already encoded in a managed IO plan name keeps that plan and column
+        forever; a new extension joins the first plan with free capacity (the plan is
+        renamed to extend its membership list) or gets a fresh plan. Capacity derives from
+        CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN: 50 → 1, 100 → 2, 150 → 3 extensions per plan.
+        """
+        prefix = self._function_plan_prefix()
+        capacity = max(1, self._function_plan_cluster_size() // 50)
+
+        stale = self._stale_plan_map_entries(self.api.fub_data)
+        membership = self._io_plan_membership(prefix)
+        result: dict[str, tuple[int, int]] = {}
+        created_plans: set[int] = set()
+        plan_map_updates: dict[str, int] = {}
+
+        for ext in ext_names:
+            placed = next(
+                ((fid, members.index(ext)) for fid, members in membership.items() if ext in members),
+                None,
+            )
+            if placed is None:
+                placed = await self._join_or_create_io_plan(ext, membership, capacity, prefix)
+            if placed is None:
+                _LOGGER.error("[%s] Failed to resolve/create IO cluster plan for '%s'", self.server_id, ext)
+                continue
+            fub_id, _column = placed
+            result[ext] = placed
+            if fub_id not in membership:
+                created_plans.add(fub_id)
+                membership[fub_id] = [ext]
+            plan_map_updates[self._io_plan_name(prefix, membership[fub_id])] = fub_id
+
+        if plan_map_updates or stale:
+            await self._persist_plan_map(plan_map_updates, removals=set(stale))
+        return result, created_plans
+
+    async def _join_or_create_io_plan(
+        self, ext: str, membership: dict[int, list[str]], capacity: int, prefix: str
+    ) -> tuple[int, int] | None:
+        """Place a new extension: join an existing plan with free capacity (renaming the
+        plan to extend its membership list) or create a fresh single-extension plan.
+
+        A fresh plan turns A3 portrait when the extension package would not fit the
+        landscape column height (rows derive from the live IO list incl. blank separators).
+        Returns (fub_id, column_index) or None; membership is updated in place on join —
+        the caller registers fresh plans itself (fub_id not yet in membership = created).
+        """
+        for fid, members in membership.items():
+            if len(members) < capacity:
+                new_members = [*members, ext]
+                if not await self._rename_io_plan(fid, self._io_plan_name(prefix, new_members)):
+                    _LOGGER.warning(
+                        "[%s] Could not rename IO plan fub=%s to add '%s' — creating a fresh plan instead",
+                        self.server_id,
+                        fid,
+                        ext,
+                    )
+                    break
+                membership[fid] = new_members
+                return fid, len(new_members) - 1
+
+        landscape_rows = self._io_plan_rows_per_col(_ORIENT_LANDSCAPE)
+        orientation = _ORIENT_PORTRAIT if self._io_rows_needed(ext) > landscape_rows else _ORIENT_LANDSCAPE
+        fub_id = await self._create_managed_plan(self._io_plan_name(prefix, [ext]), orientation=orientation)
+        if fub_id is None:
+            return None
+        return fub_id, 0
+
+    def _io_plan_rows_per_col(self, orientation: str) -> int:
+        """Row slots one column offers on a fresh A3 plan of the given orientation."""
+        _, y_max = self.api.get_fub_canvas_bounds(-1, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
+        return max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+
+    async def _rename_io_plan(self, fub_id: int, new_name: str) -> bool:
+        """Rename a managed IO plan (membership join), keeping paper/DPI/orientation as-is."""
+        fub = self.api.fub_data.get(str(fub_id), {})
+        paper = _PAPER_NAME_BY_ID.get(str(fub.get("Paper")), _MANAGED_PLAN_PAPER)
+        dpi = int(fub.get("Resolution", 90))
+        orientation = _ORIENT_PORTRAIT if str(fub.get("Orientation")) == "1" else _ORIENT_LANDSCAPE
+        return await self.api.function_plan_update_paper(fub_id, paper, dpi, orientation, name=new_name)
+
+    async def _persist_plan_map(self, updates: dict[str, int], removals: set[str] | None = None) -> None:
+        """Merge updates into CONF_FUNCTION_PLAN_PLAN_MAP, dropping any stale names in removals
+        first — a single options write so a stale-prune never races the update it's paired with
+        for the reload-skip flag (see R2)."""
+        new_options = dict(self.config_entry.options)
+        current_map = dict(new_options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}))
+        for name in removals or ():
+            current_map.pop(name, None)
+        current_map |= updates
+        new_options[CONF_FUNCTION_PLAN_PLAN_MAP] = current_map
+        self.request_options_update_without_reload(new_options)
+
+    def _stale_plan_map_entries(self, fub_data: dict) -> dict[str, int]:
+        """plan_map entries whose fub_id no longer exists (or was renamed) in the live $Fubs
+        listing — leftovers from a plan deleted directly in Comexio (extension removed, or a
+        forced full resync where all function plans + Web-IO were wiped and recreated under
+        different names). The caller is responsible for persisting the options removal via
+        _persist_plan_map.
+        """
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(raw_map, dict) or not fub_data:
+            # No live $Fubs snapshot to compare against — an empty/unpopulated fub_data must
+            # never be read as "every plan is gone", or a single fetch hiccup would wipe the
+            # whole map.
+            return {}
+        stale = {
+            name: int(fid)
+            for name, fid in raw_map.items()
+            if str(fid) not in fub_data or fub_data[str(fid)].get("Name") != name
+        }
+        for name, fub_id in stale.items():
+            _LOGGER.info(
+                "[%s] Pruned stale plan_map entry '%s' (fub %s) — no longer exists in Comexio",
+                self.server_id,
+                name,
+                fub_id,
+            )
+        return stale

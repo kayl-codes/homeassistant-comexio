@@ -18,11 +18,22 @@ import yaml
 
 from .const import (
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_IGNORED_MARKERS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DOMAIN,
+    FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH as _LAYOUT_COLUMN_WIDTH,
+    FUNCTION_PLAN_LAYOUT_COMMENT_Y as _LAYOUT_COMMENT_Y,
+    FUNCTION_PLAN_LAYOUT_X_MARKER as _LAYOUT_X_MARKER,
+    FUNCTION_PLAN_LAYOUT_X_WEBIO as _LAYOUT_X_WEBIO,
+    FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
+    FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
+    FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     TIMESTAMP_DISPLAY_FORMAT,
     WEBIO_CLASSES,
+    io_column_rows,
+    io_group_headers,
+    snap_to_grid,
     webio_class_name,
 )
 from .coordinator import ComexioCoordinator
@@ -30,12 +41,11 @@ from .function_plan_backup import diff_snapshots, retention_cutoff, snapshot_lab
 
 _LOGGER = logging.getLogger(__name__)
 
-# Canvas layout constants for Logikplan POC
-_LAYOUT_X_MARKER = 7.5
-_LAYOUT_X_WEBIO = 202.5
-_LAYOUT_Y_START = 7.5
-_LAYOUT_Y_STEP = 22.5
-_LAYOUT_COLUMN_WIDTH = 450.0  # x-Abstand zwischen Spaltengruppen
+# Comment-element (type=14) reference type, and the pinned managed-plan marker comment.
+_COMMENT_REF_TYPE = "14"
+_MANAGED_COMMENT_TEXT = FUNCTION_PLAN_MANAGED_PLAN_COMMENT
+
+_TITLE_SORT_ERR = "Logikplan Sort — Fehler"
 
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
@@ -933,6 +943,253 @@ def _assign_grid_positions(
     return [(eid, x, y) for eid, (x, y) in positions.items()]
 
 
+# --- MANAGED IO CLUSTER PLAN GRID ---
+
+
+def _io_ref_slots(
+    coordinator: ComexioCoordinator,
+    members: list[str],
+    rows_per_col: int,
+) -> dict[int, tuple[float, float]]:
+    """Canonical (x_offset, y) slot per IO ref_id across the plan's extension columns.
+
+    Same math as the wire path (api._function_plan_add_single_io_pair): column index =
+    membership order, row slots from io_column_rows over the extension's FULL
+    identifier list, overlong columns wrap into a sub-column right next to them.
+    """
+    ios = (coordinator.data or {}).get("io", [])
+    slots: dict[int, tuple[float, float]] = {}
+    for ext_col, ext in enumerate(members):
+        by_ident = {io["identifier"]: io for io in ios if io["ext_name"] == ext}
+        for ident, row in io_column_rows(list(by_ident)).items():
+            sub_col, row_in_col = divmod(row, rows_per_col)
+            try:
+                ref_id = int(by_ident[ident]["id"])
+            except (TypeError, ValueError):
+                continue
+            slots[ref_id] = (
+                (ext_col + sub_col) * _LAYOUT_COLUMN_WIDTH,
+                _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP,
+            )
+    return slots
+
+
+def _io_header_slots(
+    coordinator: ComexioCoordinator,
+    members: list[str],
+    rows_per_col: int,
+) -> list[tuple[float, float, str]]:
+    """Canonical (x, y, text) header-comment slot per IO type-group block, one per column.
+
+    Same column math as _io_ref_slots, keyed by io_group_headers' reserved rows instead of
+    per-IO ref_ids — a header comment has no ref_id of its own, so callers place it by
+    position rather than matching it against an existing element.
+    """
+    ios = (coordinator.data or {}).get("io", [])
+    slots: list[tuple[float, float, str]] = []
+    for ext_col, ext in enumerate(members):
+        idents = [io["identifier"] for io in ios if io["ext_name"] == ext]
+        for row, text in io_group_headers(idents).items():
+            sub_col, row_in_col = divmod(row, rows_per_col)
+            slots.append(
+                (
+                    _LAYOUT_X_MARKER + (ext_col + sub_col) * _LAYOUT_COLUMN_WIDTH,
+                    _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP,
+                    text,
+                )
+            )
+    return slots
+
+
+def _stale_io_header_ids(plan_data: dict) -> list[int]:
+    """Element ids of a managed IO plan's existing type-group header comments.
+
+    Any comment element that isn't the pinned 'Administrated by HomeAssistant' marker —
+    managed plans aren't hand-edited (see FUNCTION_PLAN_MANAGED_PLAN_COMMENT), so this is
+    always our own, previously placed set of headers.
+    """
+    return [
+        int(eid)
+        for eid, elem in (plan_data.get("elements") or {}).items()
+        if str((elem.get("reference") or {}).get("type")) == _COMMENT_REF_TYPE
+        and (elem.get("name") or "").strip() != _MANAGED_COMMENT_TEXT
+    ]
+
+
+async def _resync_io_group_headers(
+    api,
+    fub_id: int,
+    plan_data: dict,
+    header_slots: list[tuple[float, float, str]],
+) -> int:
+    """Replace a managed IO plan's type-group header comments with a freshly placed set.
+
+    Comments carry no wiring, so delete-then-recreate is always safe and sidesteps having
+    to match stale headers back to a (possibly moved/renamed) slot. Returns the number of
+    headers placed.
+    """
+    if stale_ids := _stale_io_header_ids(plan_data):
+        await api.logikplan_delete_elements(stale_ids)
+    for x, y, text in header_slots:
+        await api.function_plan_add_comment_element(fub_id, text, x=x, y=y)
+    return len(header_slots)
+
+
+async def async_resync_io_group_headers(coordinator: ComexioCoordinator, api, fub_id: int) -> int:
+    """Recompute and place an IO cluster plan's type-group header comments.
+
+    The IO wiring path (api.function_plan_add_io_pairs) drops each pair straight into its
+    deterministic grid slot without a sort pass, so it never touches header comments —
+    call this right after wiring to keep a freshly created or extended IO cluster plan
+    labeled, without paying for a full sort run. Returns the number of headers placed,
+    or 0 if fub_id isn't a managed IO cluster plan.
+    """
+    members = coordinator.managed_io_plan_members(fub_id)
+    if not members:
+        return 0
+    _x_max, y_max = api.get_fub_canvas_bounds(fub_id)
+    rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / _LAYOUT_Y_STEP))
+    plan_data = await api.logikplan_load_elements(fub_id)
+    if not plan_data:
+        return 0
+    header_slots = _io_header_slots(coordinator, members, rows_per_col)
+    return await _resync_io_group_headers(api, fub_id, plan_data, header_slots)
+
+
+def _io_ref_positions(
+    elements: dict, ref_slots: dict[int, tuple[float, float]]
+) -> tuple[dict[int, tuple[float, float]], dict[int, tuple[float, float]]]:
+    """Grid slot for every IO element (type 1) referencing a known ref_slot; see _assign_io_grid_positions."""
+    positions: dict[int, tuple[float, float]] = {}
+    elem_slot: dict[int, tuple[float, float]] = {}
+    for eid, elem in elements.items():
+        ref = elem.get("reference") or {}
+        if str(ref.get("type")) != "1":
+            continue
+        try:
+            slot = ref_slots.get(int(ref.get("ref_id")))
+        except (TypeError, ValueError):
+            slot = None
+        if slot:
+            x_off, y = slot
+            positions[int(eid)] = (_LAYOUT_X_MARKER + x_off, y)
+            elem_slot[int(eid)] = slot
+    return positions, elem_slot
+
+
+def _assign_webio_partner_positions(
+    connections: dict, elem_slot: dict[int, tuple[float, float]], positions: dict[int, tuple[float, float]]
+) -> int:
+    """Place each connected Web-IO element on its partner IO's grid row; returns the pair count."""
+    pair_count = 0
+    for conn in connections.values():
+        # FubElementId comes straight out of the raw plan JSON and may be a string, while
+        # elem_slot is int-keyed — without the cast every Web-IO element would miss its
+        # partner slot and get parked outside the grid (same cast as _build_sorted_pairs).
+        try:
+            in_eid = int(conn.get("input", {}).get("FubElementId"))
+        except (TypeError, ValueError):
+            continue
+        if not (slot := elem_slot.get(in_eid)):
+            continue
+        x_off, y = slot
+        for out in conn.get("output", []):
+            # Same cast + guard as the input side above: a non-numeric endpoint id (partial
+            # write, format change) must skip that one endpoint, not abort the whole sort.
+            try:
+                out_eid = int(out.get("FubElementId"))
+            except (TypeError, ValueError):
+                continue
+            if out_eid not in positions:
+                positions[out_eid] = (_LAYOUT_X_WEBIO + x_off, y)
+                pair_count += 1
+    return pair_count
+
+
+def _assign_io_grid_positions(
+    coordinator: ComexioCoordinator,
+    plan_data: dict,
+    members: list[str],
+    rows_per_col: int,
+) -> tuple[list[tuple[int, float, float]], int, list[int]]:
+    """Restore the deterministic IO-cluster grid of a managed IO plan.
+
+    IO elements (type 1) go to their reserved slot, each connected Web-IO element to the
+    partner position on the same row. Returns (positions, pair_count, leftover element
+    ids) — leftovers are elements the grid has no slot for (stale refs, foreign
+    elements); comment blocks are excluded, pinning is the caller's job.
+    """
+    ref_slots = _io_ref_slots(coordinator, members, rows_per_col)
+    elements = plan_data.get("elements", {})
+    positions, elem_slot = _io_ref_positions(elements, ref_slots)
+    pair_count = _assign_webio_partner_positions(plan_data.get("connections", {}), elem_slot, positions)
+    leftovers = [
+        int(eid)
+        for eid, e in elements.items()
+        if int(eid) not in positions and str((e.get("reference") or {}).get("type")) != _COMMENT_REF_TYPE
+    ]
+    return [(eid, x, y) for eid, (x, y) in positions.items()], pair_count, leftovers
+
+
+def _park_leftover_positions(
+    placed: list[tuple[int, float, float]],
+    leftovers: list[int],
+    rows_per_col: int,
+) -> list[tuple[int, float, float]]:
+    """Park unplaceable elements in the first column right of the used IO grid —
+    never inside it, so reserved slots stay free for retrofitted pairs."""
+    if not leftovers:
+        return []
+    used_cols = {round((x - _LAYOUT_X_MARKER) / _LAYOUT_COLUMN_WIDTH) for _eid, x, _y in placed}
+    first_col = (max(used_cols) + 1) if used_cols else 0
+    parked: list[tuple[int, float, float]] = []
+    for i, eid in enumerate(leftovers):
+        col, row = divmod(i, rows_per_col)
+        x = _LAYOUT_X_MARKER + (first_col + col) * _LAYOUT_COLUMN_WIDTH
+        parked.append((eid, x, _LAYOUT_Y_START + row * _LAYOUT_Y_STEP))
+    return parked
+
+
+def _pinned_template_positions(plan_data: dict, x_max: float) -> list[tuple[int, float, float]]:
+    """Canonical positions for the managed-plan template elements (layout normalizer).
+
+    Every sort run re-rights the managed comment (top center) instead of scrambling it
+    into the marker grid — this is what keeps a hand-moved comment permanently in place.
+    """
+    return [
+        (int(eid), snap_to_grid(x_max / 2), _LAYOUT_COMMENT_Y)
+        for eid, elem in (plan_data.get("elements") or {}).items()
+        if str((elem.get("reference") or {}).get("type")) == _COMMENT_REF_TYPE
+        and (elem.get("name") or "").strip() == _MANAGED_COMMENT_TEXT
+    ]
+
+
+def _is_managed_cluster_plan(coordinator: ComexioCoordinator, fub_id: int) -> bool:
+    """Whether fub_id is one of this coordinator's HA-managed cluster plans.
+
+    Sorting rewrites every element's position — safe for HA's own marker/IO cluster grids,
+    destructive for a user's hand-built Comexio plan. Backstops the services.yaml dropdown
+    (which already restricts the picker) against scripted/YAML calls with a raw fub_id.
+
+    Falls back to "not managed" for a malformed/unparseable plan_map: this gate only ever
+    removes capability, so refusing to sort is the safe direction — the alternative is an
+    unhandled exception in the service handler.
+    """
+    plan_map = coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+    if not isinstance(plan_map, dict):
+        _LOGGER.warning(
+            "Ignoring malformed %s option (%s) — refusing to sort",
+            CONF_FUNCTION_PLAN_PLAN_MAP,
+            type(plan_map).__name__,
+        )
+        return False
+    managed: set[int] = set()
+    for value in plan_map.values():
+        with contextlib.suppress(TypeError, ValueError):
+            managed.add(int(value))
+    return int(fub_id) in managed
+
+
 _LOGIKPLAN_SERVICES = (
     "logikplan_connect_poc",
     "logikplan_sort",
@@ -1572,56 +1829,163 @@ async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> 
 
 async def handle_logikplan_sort(hass: HomeAssistant, call: ServiceCall) -> None:
     """Sort all Logikplan elements by marker ID, snapping every element to exact grid."""
-    error_title = "Logikplan Sort — Fehler"
-    ctx = await _resolve_logikplan_context(hass, call, error_title)
+    ctx = await _resolve_logikplan_context(hass, call, _TITLE_SORT_ERR)
     if ctx is None:
         return
-    _coordinator, api, fub_id = ctx
+    coordinator, api, fub_id = ctx
+    if not _is_managed_cluster_plan(coordinator, fub_id):
+        plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+        persistent_notification.async_create(
+            hass,
+            f"Plan '{plan_name}' (ID {fub_id}) ist kein HA-verwalteter Cluster-Plan. "
+            "Sort schreibt jede Elementposition neu — auf einem handgebauten Comexio-Plan "
+            "würde das dessen Layout zerstören.",
+            title=_TITLE_SORT_ERR,
+        )
+        return
+    await async_sort_function_plan(
+        hass, coordinator, api, fub_id, canvas_format=str(call.data.get("canvas_format", ""))
+    )
 
+
+async def async_sort_function_plan(
+    hass: HomeAssistant,
+    coordinator: ComexioCoordinator,
+    api,
+    fub_id: int,
+    canvas_format: str | None = None,
+    notify: bool = True,
+    was_active: bool | None = None,
+) -> dict | None:
+    """Sort all plan elements by marker ID, snapping every element to the exact grid.
+
+    Managed IO cluster plans ('{prefix} - IO [...]') are not marker-sorted — their
+    deterministic extension-column grid (io_column_rows) is restored instead.
+
+    Returns a result dict (success, pairs, orphans, act_note, activated, duration) or
+    None when the plan could not be loaded or is empty. With notify=False no persistent
+    notifications are created — used by the sync button, which reports the result in its
+    own summary notification.
+
+    was_active overrides the fub_data lookup: callers that already stopped the plan
+    themselves must pass the pre-stop state, because any config reload in between (e.g.
+    inside function_plan_add_marker_pairs) refreshes fub_data to the stopped state and
+    the plan would never be reactivated.
+    """
     t_start = time.monotonic()
-    plan_info = api.fub_data.get(str(fub_id), {})
-    was_active = bool(plan_info.get("Active", True))
+    if was_active is None:
+        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
 
-    canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
-    canvas_label, _x_max, _y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
+    canvas_label, x_max, rows_per_col, max_cols = _sort_canvas_bounds(api, fub_id, canvas_format)
 
     plan_data = await api.logikplan_load_elements(fub_id)
     if not plan_data:
-        persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
-        return
+        if notify:
+            persistent_notification.async_create(
+                hass, f"Plan {fub_id} konnte nicht geladen werden.", title=_TITLE_SORT_ERR
+            )
+        return None
 
-    pairs, orphans = _build_sorted_pairs(plan_data.get("elements", {}), plan_data.get("connections", {}))
-    new_positions = _assign_grid_positions(pairs, orphans, rows_per_col, max_cols)
-
+    new_positions, n_pairs, n_single, sort_line, header_slots, io_members = _sort_compute_positions(
+        coordinator, plan_data, fub_id, x_max, rows_per_col, max_cols
+    )
     if not new_positions:
-        persistent_notification.async_create(hass, "Keine Elemente im Plan.", title=f"Logikplan Sort Plan {fub_id}")
-        return
+        if notify:
+            persistent_notification.async_create(hass, "Keine Elemente im Plan.", title=f"Logikplan Sort Plan {fub_id}")
+        return None
 
     _LOGGER.info(
-        "Logikplan Sort: Plan %s — %d Paare, %d Waisen, %d Positionen (aktiv=%s)",
+        "Logikplan Sort: Plan %s — %d Paare, %d Einzelelemente, %d Positionen (io_plan=%s, aktiv=%s)",
         fub_id,
-        len(pairs),
-        len(orphans),
+        n_pairs,
+        n_single,
         len(new_positions),
+        bool(io_members),
         was_active,
     )
+    success, activated = await _sort_apply_and_activate(
+        coordinator, api, fub_id, plan_data, new_positions, header_slots, was_active
+    )
+    duration = time.monotonic() - t_start
+    act_note = _plan_activation_note(was_active, activated, has_changes=True, fub_id=fub_id)
+    if notify:
+        msg = (
+            f"Sortierung {'erfolgreich' if success else 'fehlgeschlagen'}: {sort_line}\n"
+            f"Canvas {canvas_label}: {max_cols} Spalten × {rows_per_col} Zeilen.\n"
+            f"{act_note}\n"
+            f"Dauer: {duration:.1f}s"
+        )
+        persistent_notification.async_create(
+            hass, msg, title=f"Logikplan Sort Plan {fub_id} — {'OK' if success else 'Fehler'}"
+        )
+    return {
+        "success": success,
+        "pairs": n_pairs,
+        "orphans": n_single,
+        "act_note": act_note,
+        "activated": activated,
+        "duration": duration,
+    }
+
+
+def _sort_canvas_bounds(api, fub_id: int, canvas_format: str | None) -> tuple[str, float, int, int]:
+    """Canvas label + content-x-bound + grid dimensions for a sort run (see async_sort_function_plan)."""
+    canvas_label, x_max, _y_max, rows_per_col, max_cols = _get_canvas_grid_dims(
+        api, fub_id, (canvas_format or "").strip().upper()
+    )
+    return canvas_label, x_max, rows_per_col, max_cols
+
+
+def _sort_compute_positions(
+    coordinator: ComexioCoordinator, plan_data: dict, fub_id: int, x_max: float, rows_per_col: int, max_cols: int
+) -> tuple[list[tuple[int, float, float]], int, int, str, list[tuple[float, float, str]], list[str] | None]:
+    """New element positions for a sort run — IO cluster grid or marker-ID grid (see async_sort_function_plan)."""
+    # Template elements (the managed comment) are pinned to their canonical spot instead
+    # of being sorted into the grid as orphans.
+    pinned = _pinned_template_positions(plan_data, x_max)
+    pinned_ids = {eid for eid, _x, _y in pinned}
+    io_members = coordinator.managed_io_plan_members(fub_id)
+    header_slots: list[tuple[float, float, str]] = []
+    if io_members and (coordinator.data or {}).get("io"):
+        # Managed IO cluster plan: the marker sort would scramble the extension grid —
+        # restore the deterministic column layout the wire path produced instead.
+        placed, n_pairs, leftovers = _assign_io_grid_positions(coordinator, plan_data, io_members, rows_per_col)
+        leftovers = [eid for eid in leftovers if eid not in pinned_ids]
+        new_positions = placed + _park_leftover_positions(placed, leftovers, rows_per_col) + pinned
+        n_single = len(leftovers)
+        header_slots = _io_header_slots(coordinator, io_members, rows_per_col)
+        sort_line = (
+            f"{n_pairs} IO-Paare im Erweiterungs-Raster [{','.join(io_members)}] wiederhergestellt"
+            f" + {n_single} weitere Elemente rechts daneben geparkt + {len(header_slots)} Blockköpfe."
+        )
+    else:
+        pairs, orphans = _build_sorted_pairs(plan_data.get("elements", {}), plan_data.get("connections", {}))
+        orphans = [eid for eid in orphans if eid not in pinned_ids]
+        new_positions = _assign_grid_positions(pairs, orphans, rows_per_col, max_cols) + pinned
+        n_pairs, n_single = len(pairs), len(orphans)
+        sort_line = f"{n_pairs} Paare nach Merker-ID geordnet + {n_single} Einzelelemente."
+    return new_positions, n_pairs, n_single, sort_line, header_slots, io_members
+
+
+async def _sort_apply_and_activate(
+    coordinator: ComexioCoordinator,
+    api,
+    fub_id: int,
+    plan_data: dict,
+    new_positions: list[tuple[int, float, float]],
+    header_slots: list[tuple[float, float, str]],
+    was_active: bool,
+) -> tuple[bool, bool]:
+    """Persist a sort run's positions and restore activation state; returns (success, activated)."""
+    # Pre-mutation snapshot — reuse the already-loaded plan_data (no second fetch)
+    await coordinator.async_function_plan_change_backup(fub_id, "sort", plan_data=plan_data)
     if was_active:
         await api.logikplan_stop_fup(fub_id)
+    if header_slots:
+        await _resync_io_group_headers(api, fub_id, plan_data, header_slots)
     success = await api.logikplan_save_elements_pos(new_positions)
     activated = await api.logikplan_run_fup(fub_id) if (success and was_active) else False
-    duration = time.monotonic() - t_start
-    status = "erfolgreich" if success else "fehlgeschlagen"
-    act_note = _plan_activation_note(was_active, activated, has_changes=True, fub_id=fub_id)
-    msg = (
-        f"Sortierung {status}: {len(pairs)} Paare nach Merker-ID geordnet"
-        f" + {len(orphans)} Einzelelemente.\n"
-        f"Canvas {canvas_label}: {max_cols} Spalten × {rows_per_col} Zeilen.\n"
-        f"{act_note}\n"
-        f"Dauer: {duration:.1f}s"
-    )
-    persistent_notification.async_create(
-        hass, msg, title=f"Logikplan Sort Plan {fub_id} — {'OK' if success else 'Fehler'}"
-    )
+    return success, activated
 
 
 async def handle_logikplan_stop(hass: HomeAssistant, call: ServiceCall) -> None:
