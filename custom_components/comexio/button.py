@@ -1390,7 +1390,7 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         if fub_id is None:
             _LOGGER.warning("[%s] Plan preview requested but no plan is selected", self.server_id)
             return
-        plan_name = api._fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+        plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
 
         backup_choice = self._active_backup_choice(fub_id, plan_name)
         if backup_choice is not None:

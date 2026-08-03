@@ -727,7 +727,7 @@ cards:
 - **Strukturelle** Änderungen (Elemente/Drähte in Comexio hinzugefügt/entfernt)
   benötigen einen erneuten Tasterdruck. **Live-Drahtfarben** hingegen aktualisieren
   sich danach von selbst — kein weiterer Druck nötig, solange sich nur Werte ändern.
-- Um stattdessen einen **gespeicherten Backup** anzuzeigen, die Aktion
+- Um stattdessen ein **gespeichertes Backup** anzuzeigen, die Aktion
   `function_plan_visualize` mit dem Feld `snapshot` und `format: svg` verwenden — das
   funktioniert vollständig offline.
 

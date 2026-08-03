@@ -359,18 +359,23 @@ _SET_VALUE_MARKER_RX = re.compile(r"^[mM](\d+)$")
 _SET_VALUE_IO_RX = re.compile(r"^([^#\s]+)#([^#\s]+)$")
 
 
-def _resolve_set_value_target(target: str, data: dict) -> tuple[dict | None, str]:
+def _resolve_set_value_target(target: str, value: float, data: dict) -> tuple[dict | None, str]:
     """Map a set_value target token onto api.set_value kwargs.
 
     Accepts 'M<id>' (marker) or '<Extension>#<IO>' (case-insensitive). Only targets that
     exist in the current coordinator data are accepted — unknown ids never reach the
-    Comexio API. Returns (kwargs, "") on success or (None, error_message).
+    Comexio API. Digital targets only accept 0/1 — value is checked against the target's
+    known type so a stray '2' or '0.7' is rejected here, not silently forwarded. Returns
+    (kwargs, "") on success or (None, error_message).
     """
     if m := _SET_VALUE_MARKER_RX.match(target):
         marker_id = m.group(1)
-        if any(str(mk.get("id")) == marker_id for mk in data.get("markers", [])):
-            return {"target_type": "marker", "target_id": marker_id}, ""
-        return None, f"Unknown marker 'M{marker_id}' — not in the current Comexio configuration."
+        marker = next((mk for mk in data.get("markers", []) if str(mk.get("id")) == marker_id), None)
+        if marker is None:
+            return None, f"Unknown marker 'M{marker_id}' — not in the current Comexio configuration."
+        if marker.get("type") == "digital" and value not in (0, 1):
+            return None, f"Digital marker 'M{marker_id}' only accepts 0 or 1 (got {value})."
+        return {"target_type": "marker", "target_id": marker_id}, ""
     if m := _SET_VALUE_IO_RX.match(target):
         ext, ident = m.group(1).lower(), m.group(2).lower()
         for io in data.get("io", []):
@@ -379,6 +384,8 @@ def _resolve_set_value_target(target: str, data: dict) -> tuple[dict | None, str
                     # Physical inputs (I/AI/…) are read-only for the Comexio API — a write
                     # would silently do nothing, so reject it with a clear message instead.
                     return None, f"IO '{target}' is an input (read-only) — the Comexio API cannot write inputs."
+                if io.get("is_binary") and value not in (0, 1):
+                    return None, f"IO '{target}' is digital — only 0 or 1 accepted (got {value})."
                 return {
                     "target_type": "io",
                     "target_id": io.get("id", 0),
@@ -1881,7 +1888,7 @@ async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> 
             return None
         elements = plan_data.get("elements", {})
         connections = plan_data.get("connections", {})
-        plan_name = api._fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+        plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
         source = "live"
         label_metadata = None
 
@@ -2647,7 +2654,7 @@ async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | No
     else:
         if isinstance(value, float) and value.is_integer():
             value = int(value)  # send '1', not '1.0', for digital targets
-        kwargs, error = _resolve_set_value_target(target, coordinator.data or {})
+        kwargs, error = _resolve_set_value_target(target, value, coordinator.data or {})
 
     _LOGGER.info("Set Value: target='%s' value='%s'%s", target, raw_value, f" error='{error}'" if error else "")
     if kwargs is None:
