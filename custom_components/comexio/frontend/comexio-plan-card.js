@@ -951,7 +951,11 @@ class ComexioPlanCard extends HTMLElement {
         .map((t) => this._wildcardToken(t))
         .join("");
       try {
-        return new RegExp(String.raw`(?<![\p{L}\p{N}])${body}(?![\p{L}\p{N}])`, "iu").test(label);
+        // Trailing boundary uses a lookahead (broadly supported); the leading boundary
+        // is checked manually in _hasBoundedMatch instead of via lookbehind, which
+        // Safari/WebKit before 16.4 doesn't support.
+        const re = new RegExp(String.raw`${body}(?![\p{L}\p{N}])`, "giu");
+        return this._hasBoundedMatch(label, re);
       } catch {
         return false;
       }
@@ -960,13 +964,27 @@ class ComexioPlanCard extends HTMLElement {
     // preceded by a letter/digit and a trailing digit must not be followed by another
     // digit, so "M4" hits M4 but not M40/M400/PWM4. Use * for loose matching.
     const esc = this._escapeRegexLiteral(pattern);
-    const before = /^[\p{L}\p{N}]/u.test(pattern) ? String.raw`(?<![\p{L}\p{N}])` : "";
+    const needsLeadingGuard = /^[\p{L}\p{N}]/u.test(pattern);
     const after = /\d$/.test(pattern) ? String.raw`(?!\d)` : "";
     try {
-      return new RegExp(before + esc + after, "iu").test(label);
+      const re = new RegExp(esc + after, "giu");
+      return this._hasBoundedMatch(label, re, needsLeadingGuard);
     } catch {
       return false;
     }
+  }
+
+  // Emulates a leading `(?<![\p{L}\p{N}])` lookbehind by checking the preceding character
+  // by hand instead — negative lookbehind isn't supported in Safari/WebKit before 16.4,
+  // and a regex that fails to compile there would silently disable all search matching.
+  _hasBoundedMatch(label, globalRegex, needsLeadingGuard = true) {
+    for (const m of label.matchAll(globalRegex)) {
+      const before = m.index > 0 ? label[m.index - 1] : undefined;
+      if (!needsLeadingGuard || !before || !/[\p{L}\p{N}]/u.test(before)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   _wildcardToken(t) {

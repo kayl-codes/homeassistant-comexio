@@ -682,7 +682,7 @@ hinzufügen:
 > sich ein neuer Dateiname (z. B. `comexio-plan-card-v2.js`) samt angepasster
 > Ressourcen-URL — nur den `?v=`-Parameter hochzuzählen wird nicht zuverlässig erkannt.
 
-Ohne diese Custom-Karte funktioniert die reine `image.*_plan_vorschau`-Entität auch auf
+Ohne diese Custom-Karte funktioniert die reine `image.*_plan_preview`-Entität auch auf
 einer normalen **Bild-Entität**-Karte — dabei fehlen dann aber Suche, Hover, Live-
 Drahtfarben und die Debug-Box (das Bild selbst wird korrekt dargestellt, die
 Bild-Entität-Karte kann nur nicht damit interagieren).
@@ -697,8 +697,8 @@ ersetzen):
 | Entität | Rolle |
 |---|---|
 | `select.iosrv1_function_plans` | Plan für die Vorschau auswählen. |
-| `button.iosrv1_vorschau` | Ausgewählten Plan rendern (erzeugt/aktualisiert das SVG). |
-| `image.iosrv1_plan_vorschau` | Enthält das zuletzt gerenderte SVG — Bildquelle für die Karte. |
+| `button.iosrv1_preview` | Ausgewählten Plan rendern (erzeugt/aktualisiert das SVG). |
+| `image.iosrv1_plan_preview` | Enthält das zuletzt gerenderte SVG — Bildquelle für die Karte. |
 
 Beispiel-Dashboard-Abschnitt:
 
@@ -708,9 +708,9 @@ cards:
   - type: tile
     entity: select.iosrv1_function_plans
   - type: tile
-    entity: button.iosrv1_vorschau
+    entity: button.iosrv1_preview
   - type: custom:comexio-plan-card
-    entity: image.iosrv1_plan_vorschau
+    entity: image.iosrv1_plan_preview
 ```
 
 > Die Auswahl-Entität heißt in der Home-Assistant-Oberfläche unabhängig von der
