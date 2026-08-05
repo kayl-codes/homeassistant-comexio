@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import functools
 import json
 import logging
+import math
 import pathlib
 import re
 import time
@@ -2790,8 +2791,10 @@ async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | No
     raw_value = str(call.data.get("value", "")).strip().replace(",", ".")
     try:
         value: float | int = float(raw_value)
+        if not math.isfinite(value):
+            raise ValueError(raw_value)
     except ValueError:
-        error = f"Invalid value '{raw_value}' — expected a number."
+        error = f"Invalid value '{raw_value}' — expected a finite number."
         kwargs = None
     else:
         if isinstance(value, float) and value.is_integer():
