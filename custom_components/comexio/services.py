@@ -292,6 +292,10 @@ def _build_label_matcher(query: str):
     M40/M400/PWM4 (use '*' for loose matching).
     """
     if any(ch in query for ch in "?*"):
+        # Collapse "**"/"***" to a single "*" first — semantically identical, but adjacent
+        # \S* \S* quantifiers on the same character class are super-linear on backtracking
+        # for a non-matching input. Mirrored in comexio-plan-card.js _matchesPattern.
+        query = re.sub(r"\*+", "*", query)
         body = "".join(
             "\\S" if tok == "?" else r"\S*" if tok == "*" else re.escape(tok) for tok in re.split(r"([?*])", query)
         )
@@ -353,9 +357,12 @@ def _resolve_set_value_io_target(
             return None, f"IO '{target}' is an input (read-only) — the Comexio API cannot write inputs."
         if io.get("is_binary") and value not in (0, 1):
             return None, f"IO '{target}' is digital — only 0 or 1 accepted (got {value})."
+        io_id = io.get("id")
+        if io_id is None:
+            return None, f"IO '{target}' has no id in the current configuration — cannot address it."
         return {
             "target_type": "io",
-            "target_id": io.get("id", 0),
+            "target_id": io_id,
             "ext": io.get("ext_name"),
             "identifier": io.get("identifier"),
         }, ""
