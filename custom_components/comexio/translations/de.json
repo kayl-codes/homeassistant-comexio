@@ -111,7 +111,7 @@
           "logikplan_plan_prefix": "Präfix für automatisch angelegte Cluster-Pläne. Pläne heißen dann z. B.: HA - Marker [1-100].",
           "logikplan_max_pairs_per_plan": "Wie viele Web-IO- und Merker-Paare in einen verwalteten Plan passen, bevor ein neuer Cluster-Plan angelegt wird. Für IO-Cluster-Pläne entspricht das 1 (50), 2 (100) bzw. 3 (150) Erweiterungen pro Plan.",
           "logikplan_io_extensions": "Für jede ausgewählte Erweiterung werden deren IOs in einen verwalteten IO-Cluster-Plan verdrahtet (z. B. HA - IO [Ext]), eine Spalte je Erweiterung. Zum Testen mit einer einzelnen Erweiterung beginnen und die übrigen danach ergänzen.",
-          "ignored_markers": "Komma- oder Semikolon-getrennte Merker-IDs mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456; M789'). Nur Merker mit Beschreibung können ignoriert werden.",
+          "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden.",
           "function_plan_backup_retention_months": "Backup-Schnappschüsse eines Plans, der direkt in Comexio gelöscht wurde, werden automatisch geräumt, sobald sie älter als diese Frist sind. Backups eines noch existierenden Plans sind davon nie betroffen. Steht auch als Action 'Function Plan Purge Orphaned Backups' für eine manuelle Bereinigung zur Verfügung."
         }
       }

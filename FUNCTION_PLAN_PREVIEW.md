@@ -47,8 +47,10 @@ automatically. The **interactive card**, however, is a separate frontend resourc
 HACS does not register automatically (it ships as a `.js` file inside the integration,
 not as its own HACS "plugin" repository). Add it once:
 
-1. Copy `custom_components/comexio/frontend/comexio-plan-card.js` into your Home
-   Assistant `config/www/` folder.
+1. Copy **both** `custom_components/comexio/frontend/comexio-plan-card.js` and
+   `custom_components/comexio/frontend/comexio-plan-card-utils.js` into your Home
+   Assistant `config/www/` folder (the main file imports the second one — they must sit
+   in the same folder).
 2. Go to **Settings → Dashboards → ⋮ (top right) → Resources → Add Resource**.
 3. URL: `/local/comexio-plan-card.js`, Resource type: **JavaScript Module**.
 4. Hard-refresh your browser. The browser console should log
@@ -669,8 +671,10 @@ Frontend-Ressource, die HACS nicht automatisch registriert (sie liegt als `.js`-
 innerhalb der Integration, nicht als eigenes HACS-"Plugin"-Repository). Einmalig
 hinzufügen:
 
-1. `custom_components/comexio/frontend/comexio-plan-card.js` in den
-   `config/www/`-Ordner von Home Assistant kopieren.
+1. **Beide** Dateien `custom_components/comexio/frontend/comexio-plan-card.js` und
+   `custom_components/comexio/frontend/comexio-plan-card-utils.js` in den
+   `config/www/`-Ordner von Home Assistant kopieren (die Hauptdatei importiert die
+   zweite — beide müssen im selben Ordner liegen).
 2. **Einstellungen → Dashboards → ⋮ (oben rechts) → Ressourcen → Ressource
    hinzufügen** öffnen.
 3. URL: `/local/comexio-plan-card.js`, Ressourcentyp: **JavaScript-Modul**.

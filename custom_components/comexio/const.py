@@ -1,3 +1,4 @@
+import contextlib
 from enum import StrEnum
 import re
 
@@ -303,3 +304,25 @@ KNOWN_DOMAINS = [
     "mshome.net",
     "internal",
 ]
+
+
+def expand_ignored_marker_ids(raw: str) -> set[int]:
+    """Expand an ignored_markers config string to a set of integer marker IDs.
+
+    Handles comma/semicolon/space separators, optional M/m prefix, and ranges like '8-12'.
+    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    """
+    result: set[int] = set()
+    for token in raw.replace(";", ",").replace(" ", ",").split(","):
+        stripped = token.strip().lstrip("Mm")
+        if not stripped:
+            continue
+        if "-" in stripped:
+            parts = stripped.split("-", 1)
+            with contextlib.suppress(ValueError):
+                start, end = int(parts[0]), int(parts[1].lstrip("Mm"))
+                result.update(range(min(start, end), max(start, end) + 1))
+        else:
+            with contextlib.suppress(ValueError):
+                result.add(int(stripped))
+    return result

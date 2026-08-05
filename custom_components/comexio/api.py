@@ -51,10 +51,7 @@ class SafeDict(dict):
 
 
 LOCAL_HOSTNAME_RE = re.compile(
-    r"^(?:localhost|"
-    r"(?:[a-zA-Z0-9_-]+\.local)|"
-    r"(?:[a-zA-Z0-9_-]+\.lan)|"
-    r"(?:[a-zA-Z0-9_-]+\.home))\.?$"
+    r"^(?:localhost|" r"(?:[a-zA-Z0-9_-]+\.local)|" r"(?:[a-zA-Z0-9_-]+\.lan)|" r"(?:[a-zA-Z0-9_-]+\.home))\.?$"
 )
 
 # Module-level compiled patterns for get_raw_config (used on every coordinator refresh).
@@ -1053,13 +1050,19 @@ class ComexioAPI:
             return resp.status == 200
 
     def build_webio_commands(
-        self, server_id: str, parsed_data: dict[str, Any], webio_class: str | None = None
+        self,
+        server_id: str,
+        parsed_data: dict[str, Any],
+        webio_class: str | None = None,
+        ignored_marker_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the list of Web-IO command dicts for the given parsed configuration.
 
         webio_class restricts the result to one Web-IO class ("marker"/"io"), for the bulk
         class-upload path (generate_webio_json); None returns both (delta-sync payload lookup,
         where the destination device is chosen separately per command).
+        ignored_marker_ids excludes markers the user configured as ignored — they have no HA
+        entity, so they need no Web-IO command pushing values back via webhook.
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
         """
         webhook_path = f"/api/webhook/comexio_{server_id}"
@@ -1068,6 +1071,8 @@ class ComexioAPI:
         # 1. Create Web-IO for markers
         markers = parsed_data.get("markers", []) if webio_class != WEBIO_CLASS_IO else []
         for m in markers:
+            if ignored_marker_ids and int(m["id"]) in ignored_marker_ids:
+                continue
             is_ana = m["type"] == "analog"
             safe_id = str(m["id"]).replace('"', '\\"')
             lua = (
@@ -1153,19 +1158,25 @@ class ComexioAPI:
         return commands
 
     def generate_webio_json(
-        self, server_id: str, webio_name: str, parsed_data: dict[str, Any], webio_class: str | None = None
+        self,
+        server_id: str,
+        webio_name: str,
+        parsed_data: dict[str, Any],
+        webio_class: str | None = None,
+        ignored_marker_ids: set[int] | None = None,
     ) -> str:
         """Generate the upload-ready JSON string for the Comexio Web-IO importer.
 
         webio_name here is already the class-specific name (see const.webio_class_name) —
         callers append the ' [M]'/' [IO]' suffix before calling this.
+        ignored_marker_ids is forwarded to build_webio_commands() to exclude ignored markers.
         """
         return json.dumps(
             {
                 "data": "web_io",
                 "format": 1,
                 "base": {"Identifier": webio_name, "UseCookies": 0, "Login": 2, "BaseId": 0},
-                "commands": self.build_webio_commands(server_id, parsed_data, webio_class),
+                "commands": self.build_webio_commands(server_id, parsed_data, webio_class, ignored_marker_ids),
             }
         )
 
