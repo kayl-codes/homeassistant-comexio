@@ -12,6 +12,8 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service import async_set_service_schema
 from homeassistant.util import dt as dt_util
 import yaml
@@ -38,6 +40,7 @@ from .const import (
 )
 from .coordinator import ComexioCoordinator
 from .function_plan_backup import diff_snapshots, retention_cutoff, snapshot_label_maps
+from .function_plan_render import resolve_element_label
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -148,91 +151,6 @@ def _sort_backup_entries(entries: list[dict], order_by: str) -> list[dict]:
     if order_by == "slot":
         return sorted(entries, key=lambda e: (e.get("slot", 0), str(e.get("plan_name", "")).lower()))
     return sorted(entries, key=lambda e: e.get("captured_at") or "", reverse=True)  # newest (default)
-
-
-# --- Pulled forward from function_plan_render.py (Cluster 4, not yet merged) — pure label
-# resolution only, no HA/Comexio-API dependencies. Re-import from there instead once that
-# module lands.
-def _named_ref_label(by_id: dict, ref_id: str, fallback: str) -> str:
-    """Label of a marker/IO/WebIO reference: the entity's HA display name or a typed fallback."""
-    entry = by_id.get(ref_id)
-    return entry["name"] if entry else fallback
-
-
-_TIME_MODULE_KIND_LABELS = {
-    "on_delayed": "Einschaltverzögert",
-    "off_delayed": "Ausschaltverzögert",
-    "on_pulse": "Einschaltwischend",
-}
-_TIME_MODULE_KINDS_WITHOUT_T2 = frozenset(_TIME_MODULE_KIND_LABELS)
-
-
-def _fmt_value(value: Any) -> str:
-    """Live value display like Studio: compact number, German decimal comma."""
-    if value is None or value == "":
-        return ""
-    try:
-        return f"{float(value):g}".replace(".", ",")
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _time_module_tooltip(catalog: dict[str, Any], ref_id: str) -> str:
-    entry = catalog.get("time_modules", {}).get(ref_id) or {}
-    name = entry.get("name") or "Zeitglied"
-    kind = entry.get("kind")
-    lines = [f"T{ref_id} {name}"]
-    if kind:
-        lines.append(f"Typ: {_TIME_MODULE_KIND_LABELS.get(kind, kind)}")
-    if (t1 := entry.get("t1")) is not None:
-        lines.append(f"t1: {_fmt_value(t1 / 10)} Sek.")
-    if kind not in _TIME_MODULE_KINDS_WITHOUT_T2 and (t2 := entry.get("t2")) is not None:
-        lines.append(f"t2: {_fmt_value(t2 / 10)} Sek.")
-    return "\n".join(lines)
-
-
-def _block_label(catalog: dict[str, Any], ref_id: str, elem_name: str) -> str:
-    fub_base = catalog.get("fub_base", {}).get(ref_id) or {}
-    block = fub_base.get("short_name") or fub_base.get("display_name") or fub_base.get("name")
-    if block and elem_name:
-        return f"{block}: {elem_name}"
-    return block or elem_name or f"Baustein ref={ref_id}"
-
-
-def resolve_element_label(
-    elem: dict[str, Any],
-    catalog: dict[str, Any],
-    markers_by_id: dict,
-    webio_by_id: dict,
-    ios_by_id: dict,
-) -> str:
-    """Human-readable label for one plan element, matching the Function Plan preview's naming.
-
-    Trimmed copy (no calendar-function/sun-times branch — that needs coordinator sun-time
-    data not available to the backup-diff caller) of the full resolver that will live in
-    function_plan_render.py (Cluster 4).
-    """
-    ref = elem.get("reference") or {}
-    etype = ref.get("type")
-    ref_id = str(ref.get("ref_id", "?"))
-    elem_name = (elem.get("name") or "").strip()
-    named_by_type: dict[Any, tuple[dict, str]] = {
-        2: (markers_by_id, f"M{ref_id} (unknown)"),
-        10: (webio_by_id, f"WebIO ref={ref_id}"),
-        1: (ios_by_id, f"IO ref={ref_id}"),
-    }
-    if named := named_by_type.get(etype):
-        return _named_ref_label(named[0], ref_id, named[1])
-    if etype == 4:
-        return _time_module_tooltip(catalog, ref_id)
-    if etype == 16:
-        return elem_name or "?"
-    if etype == 14:
-        return elem_name or "(Kommentar)"
-    if etype == 5:
-        return _block_label(catalog, ref_id, elem_name)
-    type_name = catalog.get("fub_types", {}).get(str(etype)) or f"Typ{etype}"
-    return f"{type_name} {elem_name}".strip() if elem_name else f"{type_name} ref={ref_id}"
 
 
 def _label_backup_identity(
@@ -352,11 +270,63 @@ _TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
 _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
 _TITLE_SET_VALUE_ERR = "Set Value — Error"
 _TITLE_DEBUG_SESSION_ERR = "Function Plan Debug Session — Error"
+_TITLE_SEARCH_ERR = "Function Plan Search — Error"
 
 # Command syntax accepted by the set_value service (and the plan card's debug input):
 # "M107" (marker) or "IOX2#Q3" (extension#identifier).
 _SET_VALUE_MARKER_RX = re.compile(r"^[mM](\d+)$")
 _SET_VALUE_IO_RX = re.compile(r"^([^#\s]+)#([^#\s]+)$")
+
+
+def _build_label_matcher(query: str):
+    """Compile the preview card's search syntax into a label predicate.
+
+    Same rules as comexio-plan-card.js _matchesPattern, so the dashboard search box and
+    this service accept identical input. Wildcards are TOKEN-ANCHORED: '?' = exactly one
+    non-space character, '*' = any run of non-space characters (also empty), and the
+    match must cover a whole token — 'M4?' hits M40–M49 but not M4/M400, 'M4*' hits
+    M4/M40/M400…. A query without wildcards is a case-insensitive substring test with
+    token guards — an alphanumeric start must not be preceded by a letter/digit and a
+    trailing digit must not be followed by another digit, so 'M4' hits M4 but not
+    M40/M400/PWM4 (use '*' for loose matching).
+    """
+    if any(ch in query for ch in "?*"):
+        body = "".join(
+            "\\S" if tok == "?" else r"\S*" if tok == "*" else re.escape(tok) for tok in re.split(r"([?*])", query)
+        )
+        try:
+            # [^\W_] = letter/digit (like JS [\p{L}\p{N}]) — both guards keep the
+            # match from bleeding into neighbouring id characters (M4? vs. M400).
+            pattern = re.compile(r"(?<![^\W_])" + body + r"(?![^\W_])", re.IGNORECASE)
+        except re.error:
+            return lambda _label: False
+        return lambda label: bool(pattern.search(label))
+    before = r"(?<![^\W_])" if query[0].isalnum() else ""  # [^\W_] = letter/digit, like JS [\p{L}\p{N}]
+    after = r"(?!\d)" if query[-1].isdigit() else ""
+    pattern = re.compile(before + re.escape(query) + after, re.IGNORECASE)
+    return lambda label: bool(pattern.search(label))
+
+
+async def _async_set_plan_selector(hass: HomeAssistant, coordinator: ComexioCoordinator, plan_name: str) -> bool:
+    """Point the 'Function Plans' select entity at the given plan (True when it was set).
+
+    Used by the search service on an unambiguous hit, so a follow-up action without
+    fub_id (visualize/sort/…) targets the plan just found. Goes through the regular
+    select_option service so the entity's own persistence logic runs.
+    """
+    entity_id = er.async_get(hass).async_get_entity_id(
+        "select", DOMAIN, f"comexio_{coordinator.server_id}_logikplan_plan_selector"
+    )
+    if not entity_id:
+        return False
+    try:
+        await hass.services.async_call(
+            "select", "select_option", {"entity_id": entity_id, "option": plan_name}, blocking=True
+        )
+    except HomeAssistantError as err:
+        _LOGGER.warning("Function Plan Search: could not set plan selector to '%s': %s", plan_name, err)
+        return False
+    return True
 
 
 def _resolve_set_value_target(target: str, value: float, data: dict) -> tuple[dict | None, str]:
@@ -2631,6 +2601,101 @@ async def _handle_function_plan_debug_session(hass: HomeAssistant, call: Service
     coordinator.set_debug_session_active(active)
 
 
+async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -> dict | None:
+    """Find which function plans contain elements matching a text/wildcard query.
+
+    Searches the resolved human-readable labels of EVERY element (markers, IOs, WebIOs,
+    blocks, time modules, constants, comments) in EVERY live plan — the same labels the
+    SVG preview shows — using the preview card's search syntax (see _build_label_matcher).
+    Answers "which plan is Mxx in?" without opening plans one by one.
+    """
+    query = str(call.data.get("query", "")).strip()
+    if not query:
+        persistent_notification.async_create(hass, "Empty 'query' — nothing to search for.", title=_TITLE_SEARCH_ERR)
+        return None
+    t_start = time.monotonic()
+    # No upfront login: the cache-hit path below reads only in-memory/storage data.
+    # Only the live fallback fetch needs the admin session — logged in lazily there.
+    ctx = await _async_get_service_context(hass, call, _TITLE_SEARCH_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return None
+    coordinator, api, _fub_id = ctx
+
+    matches_label = _build_label_matcher(query)
+    markers_by_id, webio_by_id, ios_by_id = coordinator.function_plan_label_maps()
+    catalog = await coordinator.function_plan_catalog.async_get_catalog()
+
+    plans = sorted(api.fub_data.items(), key=lambda kv: int(kv[0]))
+    results: list[dict] = []
+    failed: list[str] = []
+    total_hits = 0
+    login_ok: bool | None = None  # None = not attempted yet (lazy, at most once)
+    for fid, fub in plans:
+        # Prefer the bulk snapshot the backup cycle already loads in the background
+        # (see coordinator._async_function_plan_backup_cycle) — a live reload of all plans
+        # takes ~11s against the embedded Comexio server, which processes requests
+        # serially regardless of client-side concurrency. Only plans missing from the
+        # snapshot (e.g. right after startup) are fetched live.
+        plan_data = coordinator.function_plan_plans.get(int(fid))
+        if plan_data is None:
+            if login_ok is None:
+                login_ok = await api.login()
+            plan_data = await api.logikplan_load_elements(int(fid)) if login_ok else None
+        if not plan_data:
+            failed.append(f"{fub.get('Name', '?')} (fub {fid})")
+            continue
+        labels = {
+            # Comments carry multi-line text — flatten like the text visualization does.
+            " ".join(resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id).split())
+            for elem in plan_data.get("elements", {}).values()
+        }
+        hits = sorted(label for label in labels if matches_label(label))
+        if hits:
+            total_hits += len(hits)
+            results.append({"fub_id": int(fid), "plan_name": fub.get("Name", "?"), "matches": hits})
+
+    duration = time.monotonic() - t_start
+    # An unambiguous hit selects the plan right away (user wish): the next call
+    # without fub_id (visualize/sort/…) then targets the plan just found.
+    selector_set = len(results) == 1 and await _async_set_plan_selector(hass, coordinator, results[0]["plan_name"])
+    _LOGGER.info(
+        "Function Plan Search: query='%s' → %d match(es) in %d of %d plans, selector_set=%s (%.1fs)",
+        query,
+        total_hits,
+        len(results),
+        len(plans),
+        selector_set,
+        duration,
+    )
+    max_shown = 15  # a broad wildcard can match hundreds of labels — keep the notification readable
+    lines: list[str] = []
+    for res in results:
+        lines.append(f"**{res['plan_name']}** (fub {res['fub_id']}) — {len(res['matches'])} match(es):")
+        lines += [f"- {label}" for label in res["matches"][:max_shown]]
+        if len(res["matches"]) > max_shown:
+            lines.append(f"- … and {len(res['matches']) - max_shown} more (full list in the service response)")
+    if not results:
+        lines.append(f"No element matching '{query}' found in any of the {len(plans)} plans.")
+    if failed:
+        lines.append(f"\n**{len(failed)} plan(s) could not be loaded:** {', '.join(failed)}")
+    if selector_set:
+        lines.append(f"\nSingle plan hit — the 'Function Plans' selector was set to **{results[0]['plan_name']}**.")
+    lines.append(f"\nDuration: {duration:.1f}s")
+    persistent_notification.async_create(
+        hass,
+        "\n".join(lines),
+        title=f"Function Plan Search — '{query}': {total_hits} match(es) in {len(results)} plan(s)",
+    )
+    return {
+        "query": query,
+        "plan_count": len(results),
+        "match_count": total_hits,
+        "selector_set": selector_set,
+        "results": results,
+        "duration": round(duration, 1),
+    }
+
+
 async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | None:
     """Write a raw value to a Comexio marker or IO via the Basic-Auth API.
 
@@ -2725,6 +2790,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     if not hass.services.has_service(DOMAIN, "function_plan_debug_session"):
         hass.services.async_register(
             DOMAIN, "function_plan_debug_session", functools.partial(_handle_function_plan_debug_session, hass)
+        )
+    if not hass.services.has_service(DOMAIN, "function_plan_search"):
+        hass.services.async_register(
+            DOMAIN,
+            "function_plan_search",
+            functools.partial(_handle_function_plan_search, hass),
+            supports_response=SupportsResponse.OPTIONAL,
         )
 
     await _update_services_yaml_plans(hass)

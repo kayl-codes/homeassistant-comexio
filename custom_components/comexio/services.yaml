@@ -443,3 +443,28 @@ function_plan_debug_session:
       default: false
       selector:
         boolean:
+
+function_plan_search:
+  name: Function Plan Search
+  description: >
+    Finds which function plans contain elements matching a text query. Searches the
+    human-readable labels of every element (markers, IOs, WebIOs, blocks, time modules,
+    constants, comments) in every live plan — same syntax as the preview card's search
+    box: plain text = case-insensitive substring, wildcards ? (one non-space character)
+    and * (anything). Results come as a notification and as a service response. When
+    exactly ONE plan matches, the 'Function Plans' selector is set to it automatically —
+    a follow-up action without a plan then targets the plan just found.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    query:
+      name: Search text
+      description: "e.g. 'M33', 'Küche', 'M22?' or 'IOX3 #*'"
+      required: true
+      selector:
+        text:

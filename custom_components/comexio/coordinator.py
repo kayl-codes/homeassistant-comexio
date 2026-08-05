@@ -171,6 +171,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id)
         self._function_plan_backup_lock: asyncio.Lock = asyncio.Lock()
         self.last_changed_plans: list[dict[str, Any]] = []
+        # Bulk snapshot of every live plan's elements/connections, refreshed each backup
+        # cycle — lets function_plan_search answer instantly instead of a fresh ~11s
+        # live fetch per plan (Comexio serializes requests server-side regardless of
+        # client-side concurrency, so per-call fetching doesn't parallelize away).
+        self.function_plan_plans: dict[int, dict] = {}
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
@@ -641,6 +646,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 return
             if not plans:
                 return
+            self.function_plan_plans = plans
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
