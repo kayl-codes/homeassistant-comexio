@@ -1620,7 +1620,8 @@ def _element_label(elem_id: str | int, elements: dict, markers_by_id: dict, webi
         marker = markers_by_id.get(ref_id)
         return f"M{ref_id} {marker['name']}" if marker else f"M{ref_id} (unbekannt)"
     if etype == 10:
-        return webio_by_id.get(ref_id, f"WebIO ref={ref_id}")
+        webio = webio_by_id.get(ref_id)
+        return webio["name"] if webio else f"WebIO ref={ref_id}"
     return f"Typ{etype} ref={ref_id}"
 
 
@@ -1917,11 +1918,11 @@ async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> 
         )
         return {"plan_name": plan_name, "url": preview_url}
 
-    markers_by_id = {str(m["id"]): m for m in coordinator.data.get("markers", [])}
-    webio_commands = coordinator.data.get("webio_commands", {})
-    webio_by_id = {
-        str(cmd.get("webIoId")): name for name, cmd in webio_commands.items() if cmd.get("webIoId") is not None
-    }
+    markers_by_id, webio_by_id, _ios_by_id = coordinator.function_plan_label_maps()
+    if label_metadata:
+        markers_by_id, webio_by_id, _ios_by_id = snapshot_label_maps(
+            label_metadata, markers_by_id, webio_by_id, _ios_by_id
+        )
 
     conn_lines, orphan_lines = _build_visualize_lines(elements, connections, markers_by_id, webio_by_id)
 
