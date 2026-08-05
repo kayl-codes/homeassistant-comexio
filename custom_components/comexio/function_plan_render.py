@@ -526,6 +526,37 @@ def _build_geometries(
     }
 
 
+def _geometry_is_inactive(etype: int | None, ref_id: str, ios_by_id: dict, markers_by_id: dict) -> bool:
+    """Whether an element should render greyed-out: an inactive IO (Studio: cannot even be
+    wired) or an unnamed ("#nn") marker (extracted from _build_one_geometry to stay under
+    the complexity budget)."""
+    if etype == 1:
+        return bool((ios_by_id.get(ref_id) or {}).get("inactive"))
+    if etype == 2:
+        return bool((markers_by_id.get(ref_id) or {}).get("no_name"))
+    return False
+
+
+def _apply_geometry_target_fields(
+    geo: dict[str, Any], etype: int | None, ref_id: str, markers_by_id: dict, ios_by_id: dict
+) -> None:
+    """Debug-box addressing fields (target/writable/io_input), mutating geo in place
+    (extracted from _build_one_geometry to stay under the complexity budget).
+
+    Markers and IOs are addressable via comexio.set_value ("M4" / "UD2#Q2") — the plan
+    card reads these fields (as data-* attributes) for click-to-fill, autocomplete and
+    plan-local command validation. An IO INPUT (I/AI/…) is a pure source: the Comexio API
+    cannot write it, so it is not writable and _render_pill draws no input pin for it either.
+    """
+    if etype == 2 and ref_id in markers_by_id:
+        geo["target"] = f"M{ref_id}"
+        geo["writable"] = True
+    elif etype == 1 and (io := ios_by_id.get(ref_id)):
+        geo["target"] = f"{io.get('ext_name', '')}#{io.get('identifier', '')}"
+        geo["io_input"] = bool(io.get("is_input"))
+        geo["writable"] = not geo["io_input"] and not geo["inactive"]
+
+
 def _build_one_geometry(
     elem_id: str,
     elem: dict[str, Any],
@@ -551,11 +582,9 @@ def _build_one_geometry(
         "in": [],
         "out": [],
         "analog": _element_analog(elem, markers_by_id, webio_by_id, ios_by_id),
-        # Greyed elements: an inactive IO (Studio: cannot even be wired) and an unnamed
-        # ("#nn") marker — via CSS classes separate from node-orphan so all remain
+        # Greyed elements — via CSS classes separate from node-orphan so all remain
         # independently stylable (see _STYLE).
-        "inactive": (etype == 1 and bool((ios_by_id.get(ref_id) or {}).get("inactive")))
-        or (etype == 2 and bool((markers_by_id.get(ref_id) or {}).get("no_name"))),
+        "inactive": _geometry_is_inactive(etype, ref_id, ios_by_id, markers_by_id),
     }
     # Stufe 1 of Studio's live-wire coloring: only PILL sources (markers/IOs)
     # and constants carry a readable value — block-internal outputs stay
@@ -568,18 +597,7 @@ def _build_one_geometry(
     geo["value_raw"] = _element_raw_value(elem, markers_by_id, webio_by_id, ios_by_id)
     geo["hot"] = _is_high(geo["value_raw"]) and geo["analog"] is False
     _shape_special(geo, elem, fub_base, used_in.get(elem_id, set()), used_out.get(elem_id, set()))
-    # Debug-box support: markers and IOs are addressable via comexio.set_value
-    # ("M4" / "UD2#Q2") — the plan card reads these fields (as data-* attributes)
-    # for click-to-fill, autocomplete and plan-local command validation. An IO
-    # INPUT (I/AI/…) is a pure source: the Comexio API cannot write it, so it is
-    # not writable and _render_pill draws no input pin for it either.
-    if etype == 2 and ref_id in markers_by_id:
-        geo["target"] = f"M{ref_id}"
-        geo["writable"] = True
-    elif etype == 1 and (io := ios_by_id.get(ref_id)):
-        geo["target"] = f"{io.get('ext_name', '')}#{io.get('identifier', '')}"
-        geo["io_input"] = bool(io.get("is_input"))
-        geo["writable"] = not geo["io_input"] and not geo["inactive"]
+    _apply_geometry_target_fields(geo, etype, ref_id, markers_by_id, ios_by_id)
     geo["pins"] = geo["kind"] == "block" or (geo["kind"] in ("pill", "const") and geo["analog"] is not None)
     if geo["kind"] == "pill":
         geo["id_text"], geo["desc"], geo["value"] = _pill_parts(elem, catalog, markers_by_id, webio_by_id, ios_by_id)

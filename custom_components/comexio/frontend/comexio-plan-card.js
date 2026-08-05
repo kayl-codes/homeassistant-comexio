@@ -552,7 +552,12 @@ class ComexioPlanCard extends HTMLElement {
     if (this._filterPatterns.some((p) => p.toLowerCase() === target.toLowerCase())) {
       return; // already filtered
     }
-    const current = this._filterInput.value.replace(/[\s,]+$/, "");
+    // Strip trailing whitespace/commas one char at a time (no quantified regex — avoids
+    // the super-linear-backtracking pattern static analysis flags on `[\s,]+$`).
+    let current = this._filterInput.value;
+    while (current.length > 0 && /[\s,]/.test(current[current.length - 1])) {
+      current = current.slice(0, -1);
+    }
     const next = current ? `${current}, ${target}` : target;
     this._filterInput.value = next;
     this._setDebugFilter(next);

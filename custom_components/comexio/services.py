@@ -329,6 +329,38 @@ async def _async_set_plan_selector(hass: HomeAssistant, coordinator: ComexioCoor
     return True
 
 
+def _resolve_set_value_marker_target(marker_id: str, value: float, data: dict) -> tuple[dict | None, str]:
+    """Marker half of _resolve_set_value_target (kept separate to stay under the complexity budget)."""
+    marker = next((mk for mk in data.get("markers", []) if str(mk.get("id")) == marker_id), None)
+    if marker is None:
+        return None, f"Unknown marker 'M{marker_id}' — not in the current Comexio configuration."
+    if marker.get("type") == "digital" and value not in (0, 1):
+        return None, f"Digital marker 'M{marker_id}' only accepts 0 or 1 (got {value})."
+    return {"target_type": "marker", "target_id": marker_id}, ""
+
+
+def _resolve_set_value_io_target(
+    target: str, ext: str, ident: str, value: float, data: dict
+) -> tuple[dict | None, str]:
+    """IO half of _resolve_set_value_target (kept separate to stay under the complexity budget)."""
+    for io in data.get("io", []):
+        if io.get("ext_name", "").lower() != ext or io.get("identifier", "").lower() != ident:
+            continue
+        if io.get("is_input"):
+            # Physical inputs (I/AI/…) are read-only for the Comexio API — a write
+            # would silently do nothing, so reject it with a clear message instead.
+            return None, f"IO '{target}' is an input (read-only) — the Comexio API cannot write inputs."
+        if io.get("is_binary") and value not in (0, 1):
+            return None, f"IO '{target}' is digital — only 0 or 1 accepted (got {value})."
+        return {
+            "target_type": "io",
+            "target_id": io.get("id", 0),
+            "ext": io.get("ext_name"),
+            "identifier": io.get("identifier"),
+        }, ""
+    return None, f"Unknown IO '{target}' — not in the current Comexio configuration (or inactive)."
+
+
 def _resolve_set_value_target(target: str, value: float, data: dict) -> tuple[dict | None, str]:
     """Map a set_value target token onto api.set_value kwargs.
 
@@ -339,30 +371,9 @@ def _resolve_set_value_target(target: str, value: float, data: dict) -> tuple[di
     (kwargs, "") on success or (None, error_message).
     """
     if m := _SET_VALUE_MARKER_RX.match(target):
-        marker_id = m.group(1)
-        marker = next((mk for mk in data.get("markers", []) if str(mk.get("id")) == marker_id), None)
-        if marker is None:
-            return None, f"Unknown marker 'M{marker_id}' — not in the current Comexio configuration."
-        if marker.get("type") == "digital" and value not in (0, 1):
-            return None, f"Digital marker 'M{marker_id}' only accepts 0 or 1 (got {value})."
-        return {"target_type": "marker", "target_id": marker_id}, ""
+        return _resolve_set_value_marker_target(m.group(1), value, data)
     if m := _SET_VALUE_IO_RX.match(target):
-        ext, ident = m.group(1).lower(), m.group(2).lower()
-        for io in data.get("io", []):
-            if io.get("ext_name", "").lower() == ext and io.get("identifier", "").lower() == ident:
-                if io.get("is_input"):
-                    # Physical inputs (I/AI/…) are read-only for the Comexio API — a write
-                    # would silently do nothing, so reject it with a clear message instead.
-                    return None, f"IO '{target}' is an input (read-only) — the Comexio API cannot write inputs."
-                if io.get("is_binary") and value not in (0, 1):
-                    return None, f"IO '{target}' is digital — only 0 or 1 accepted (got {value})."
-                return {
-                    "target_type": "io",
-                    "target_id": io.get("id", 0),
-                    "ext": io.get("ext_name"),
-                    "identifier": io.get("identifier"),
-                }, ""
-        return None, f"Unknown IO '{target}' — not in the current Comexio configuration (or inactive)."
+        return _resolve_set_value_io_target(target, m.group(1).lower(), m.group(2).lower(), value, data)
     return None, f"Invalid target '{target}' — expected 'M<id>' or '<Extension>#<IO>' (e.g. M107 or IOX2#Q3)."
 
 
@@ -1800,6 +1811,76 @@ async def handle_logikplan_connect_poc(hass: HomeAssistant, call: ServiceCall) -
     persistent_notification.async_create(hass, msg, title=title)
 
 
+async def _resolve_visualize_snapshot_source(
+    hass: HomeAssistant, call: ServiceCall, snapshot_raw: str, error_title: str
+):
+    """Resolve handle_logikplan_visualize's data source from a stored backup snapshot
+    (extracted to stay under the complexity budget). Mirrors _handle_function_plan_restore's
+    snapshot resolution — entirely offline, no live Comexio call needed. Returns
+    (coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata),
+    or None on any failure (a notification has already been posted).
+    """
+    ctx = await _async_get_service_context(hass, call, error_title, resolve_plan=False)
+    if ctx is None:
+        return None
+    coordinator, api, _unused_fub_id = ctx
+    parsed = _parse_snapshot_field(snapshot_raw)
+    if parsed is None:
+        persistent_notification.async_create(hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=error_title)
+        return None
+    fub_id, kind, slot, plan_name_hint = parsed
+    plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+    if identity_err:
+        persistent_notification.async_create(hass, identity_err, title=error_title)
+        return None
+    snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
+    if snapshot is None:
+        persistent_notification.async_create(
+            hass,
+            f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).",
+            title=error_title,
+        )
+        return None
+    source = f"snapshot:{kind}:{slot}"
+    return (
+        coordinator,
+        api,
+        fub_id,
+        plan_name,
+        snapshot.get("elements", {}),
+        snapshot.get("connections", {}),
+        source,
+        snapshot.get("labels"),
+    )
+
+
+async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall, error_title: str):
+    """Resolve handle_logikplan_visualize's data source from the live plan — the 'snapshot'
+    field was not given (extracted to stay under the complexity budget). Returns
+    (coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata),
+    or None on any failure (a notification has already been posted).
+    """
+    ctx = await _resolve_logikplan_context(hass, call, error_title)
+    if ctx is None:
+        return None
+    coordinator, api, fub_id = ctx
+    plan_data = await api.logikplan_load_elements(fub_id)
+    if not plan_data:
+        persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
+        return None
+    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    return (
+        coordinator,
+        api,
+        fub_id,
+        plan_name,
+        plan_data.get("elements", {}),
+        plan_data.get("connections", {}),
+        "live",
+        None,
+    )
+
+
 async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> dict | None:
     """Service to visualize a Logikplan plan (live or a stored backup snapshot) as a text
     diagram, or — format='svg' — render it to the Function Plan preview SVG and return its
@@ -1815,52 +1896,15 @@ async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> 
     error_title = "Logikplan Visualize — Fehler"
     fmt = str(call.data.get("format", "text")).strip().lower()
     snapshot_raw = call.data.get("snapshot")
-    plan_name: str
-    label_metadata: dict[str, dict[str, str]] | None
 
-    if snapshot_raw:
-        ctx = await _async_get_service_context(hass, call, error_title, resolve_plan=False)
-        if ctx is None:
-            return None
-        coordinator, api, _unused_fub_id = ctx
-        parsed = _parse_snapshot_field(str(snapshot_raw))
-        if parsed is None:
-            persistent_notification.async_create(
-                hass, f"Invalid 'snapshot' value: '{snapshot_raw}'.", title=error_title
-            )
-            return None
-        fub_id, kind, slot, plan_name_hint = parsed
-        plan_name_resolved, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-        if identity_err:
-            persistent_notification.async_create(hass, identity_err, title=error_title)
-            return None
-        plan_name = plan_name_resolved
-        snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
-        if snapshot is None:
-            persistent_notification.async_create(
-                hass,
-                f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).",
-                title=error_title,
-            )
-            return None
-        elements = snapshot.get("elements", {})
-        connections = snapshot.get("connections", {})
-        source = f"snapshot:{kind}:{slot}"
-        label_metadata = snapshot.get("labels")
-    else:
-        ctx = await _resolve_logikplan_context(hass, call, error_title)
-        if ctx is None:
-            return None
-        coordinator, api, fub_id = ctx
-        plan_data = await api.logikplan_load_elements(fub_id)
-        if not plan_data:
-            persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
-            return None
-        elements = plan_data.get("elements", {})
-        connections = plan_data.get("connections", {})
-        plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-        source = "live"
-        label_metadata = None
+    source_result = (
+        await _resolve_visualize_snapshot_source(hass, call, str(snapshot_raw), error_title)
+        if snapshot_raw
+        else await _resolve_visualize_live_source(hass, call, error_title)
+    )
+    if source_result is None:
+        return None
+    coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata = source_result
 
     if fmt == "svg":
         preview_url = await coordinator.async_generate_plan_preview(
@@ -2601,6 +2645,64 @@ async def _handle_function_plan_debug_session(hass: HomeAssistant, call: Service
     coordinator.set_debug_session_active(active)
 
 
+async def _search_plan_labels(
+    coordinator: ComexioCoordinator,
+    api: Any,
+    fid: str,
+    fub: dict,
+    catalog: dict,
+    markers_by_id: dict,
+    webio_by_id: dict,
+    ios_by_id: dict,
+    matches_label: Any,
+    login_state: dict[str, bool | None],
+) -> tuple[list[str] | None, str | None]:
+    """Search one plan's element labels for function_plan_search (extracted to stay under
+    the complexity budget — mutable login_state carries the lazy, at-most-once login
+    across the caller's loop). Returns (hits, None) or (None, failure_description).
+    """
+    # Prefer the bulk snapshot the backup cycle already loads in the background
+    # (see coordinator._async_function_plan_backup_cycle) — a live reload of all plans
+    # takes ~11s against the embedded Comexio server, which processes requests
+    # serially regardless of client-side concurrency. Only plans missing from the
+    # snapshot (e.g. right after startup) are fetched live.
+    plan_data = coordinator.function_plan_plans.get(int(fid))
+    if plan_data is None:
+        if login_state["ok"] is None:
+            login_state["ok"] = await api.login()
+        plan_data = await api.logikplan_load_elements(int(fid)) if login_state["ok"] else None
+    if not plan_data:
+        return None, f"{fub.get('Name', '?')} (fub {fid})"
+    labels = {
+        # Comments carry multi-line text — flatten like the text visualization does.
+        " ".join(resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id).split())
+        for elem in plan_data.get("elements", {}).values()
+    }
+    return sorted(label for label in labels if matches_label(label)), None
+
+
+def _build_search_notification_lines(
+    query: str, results: list[dict], failed: list[str], plan_count: int, selector_set: bool, duration: float
+) -> list[str]:
+    """Build the function_plan_search notification body (extracted to stay under the
+    complexity budget)."""
+    max_shown = 15  # a broad wildcard can match hundreds of labels — keep the notification readable
+    lines: list[str] = []
+    for res in results:
+        lines.append(f"**{res['plan_name']}** (fub {res['fub_id']}) — {len(res['matches'])} match(es):")
+        lines += [f"- {label}" for label in res["matches"][:max_shown]]
+        if len(res["matches"]) > max_shown:
+            lines.append(f"- … and {len(res['matches']) - max_shown} more (full list in the service response)")
+    if not results:
+        lines.append(f"No element matching '{query}' found in any of the {plan_count} plans.")
+    if failed:
+        lines.append(f"\n**{len(failed)} plan(s) could not be loaded:** {', '.join(failed)}")
+    if selector_set:
+        lines.append(f"\nSingle plan hit — the 'Function Plans' selector was set to **{results[0]['plan_name']}**.")
+    lines.append(f"\nDuration: {duration:.1f}s")
+    return lines
+
+
 async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -> dict | None:
     """Find which function plans contain elements matching a text/wildcard query.
 
@@ -2629,27 +2731,14 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
     results: list[dict] = []
     failed: list[str] = []
     total_hits = 0
-    login_ok: bool | None = None  # None = not attempted yet (lazy, at most once)
+    login_state: dict[str, bool | None] = {"ok": None}  # lazy, at most one login attempt
     for fid, fub in plans:
-        # Prefer the bulk snapshot the backup cycle already loads in the background
-        # (see coordinator._async_function_plan_backup_cycle) — a live reload of all plans
-        # takes ~11s against the embedded Comexio server, which processes requests
-        # serially regardless of client-side concurrency. Only plans missing from the
-        # snapshot (e.g. right after startup) are fetched live.
-        plan_data = coordinator.function_plan_plans.get(int(fid))
-        if plan_data is None:
-            if login_ok is None:
-                login_ok = await api.login()
-            plan_data = await api.logikplan_load_elements(int(fid)) if login_ok else None
-        if not plan_data:
-            failed.append(f"{fub.get('Name', '?')} (fub {fid})")
+        hits, failure = await _search_plan_labels(
+            coordinator, api, fid, fub, catalog, markers_by_id, webio_by_id, ios_by_id, matches_label, login_state
+        )
+        if failure:
+            failed.append(failure)
             continue
-        labels = {
-            # Comments carry multi-line text — flatten like the text visualization does.
-            " ".join(resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id).split())
-            for elem in plan_data.get("elements", {}).values()
-        }
-        hits = sorted(label for label in labels if matches_label(label))
         if hits:
             total_hits += len(hits)
             results.append({"fub_id": int(fid), "plan_name": fub.get("Name", "?"), "matches": hits})
@@ -2667,20 +2756,7 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
         selector_set,
         duration,
     )
-    max_shown = 15  # a broad wildcard can match hundreds of labels — keep the notification readable
-    lines: list[str] = []
-    for res in results:
-        lines.append(f"**{res['plan_name']}** (fub {res['fub_id']}) — {len(res['matches'])} match(es):")
-        lines += [f"- {label}" for label in res["matches"][:max_shown]]
-        if len(res["matches"]) > max_shown:
-            lines.append(f"- … and {len(res['matches']) - max_shown} more (full list in the service response)")
-    if not results:
-        lines.append(f"No element matching '{query}' found in any of the {len(plans)} plans.")
-    if failed:
-        lines.append(f"\n**{len(failed)} plan(s) could not be loaded:** {', '.join(failed)}")
-    if selector_set:
-        lines.append(f"\nSingle plan hit — the 'Function Plans' selector was set to **{results[0]['plan_name']}**.")
-    lines.append(f"\nDuration: {duration:.1f}s")
+    lines = _build_search_notification_lines(query, results, failed, len(plans), selector_set, duration)
     persistent_notification.async_create(
         hass,
         "\n".join(lines),
