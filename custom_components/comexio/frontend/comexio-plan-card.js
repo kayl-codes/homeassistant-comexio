@@ -935,7 +935,8 @@ class ComexioPlanCard extends HTMLElement {
       // Wildcards, TOKEN-ANCHORED: ? = exactly one non-space char, * = any run of
       // non-space chars (also empty). Guards on both ends keep the match from bleeding
       // into neighbouring id characters — "M4?" hits M40–M49 but not M4/M400, "M4*"
-      // hits M4/M40/M400…. (Mirrored in services.py _build_label_matcher.)
+      // hits M4/M40/M400…. This is a client-only feature (search box + debug exclude
+      // filter) — there is no Python-side counterpart, so nothing to keep in sync there.
       const body = pattern
         // Collapse "**"/"***" to a single "*" first — semantically identical (both mean
         // "any run of non-space chars"), but adjacent \S* \S* quantifiers on the same

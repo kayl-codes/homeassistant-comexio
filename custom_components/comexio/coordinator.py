@@ -79,7 +79,7 @@ _ORIENT_PORTRAIT = "portrait"
 _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 
 # Debounce for live plan-preview refreshes: webhook bursts (e.g. a dimmer ramp) collapse
-# into one re-render at most every ~2 s; single value pushes still show up promptly.
+# into one re-render at most every ~0.5 s; single value pushes still show up promptly.
 _PREVIEW_LIVE_REFRESH_DELAY = 0.5
 
 # Stufe-2 connection-value poll (see async_generate_plan_preview / _async_poll_connection_values):
@@ -941,6 +941,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         if plan_switched:
             self._restart_connection_poll(fast=self._connection_poll_fast_requested)
+
+    @property
+    def has_live_preview_cache(self) -> bool:
+        """Whether a live plan-preview cache is currently armed (any plan)."""
+        return self._preview_plan_cache is not None
+
+    def prime_live_preview_cache(
+        self, fub_id: int, plan_name: str, elements: dict[str, Any], connections: dict[str, Any]
+    ) -> None:
+        """Prime the live preview cache from outside a live render (button.py's snapshot-view path).
+
+        The backup selector has no "Live" entry — the preview returns to live solely via the
+        webhook-driven refresh, which needs an armed cache. No-op if a cache is already armed
+        (any plan — a foreign one is dropped by async_generate_plan_preview). Delegates to
+        _update_live_preview_cache so marker_ids/io_ids (needed by _fire_plan_event) are built
+        the same way as for a normal live render, instead of callers assembling the dict by hand.
+        """
+        if self._preview_plan_cache is not None:
+            return
+        self._update_live_preview_cache(fub_id, plan_name, elements, connections, plan_switched=True)
 
     def _invalidate_stale_preview_cache(self) -> None:
         """Drop the live preview cache when a snapshot of a different plan is on display.

@@ -1360,28 +1360,19 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         return next(((e["kind"], e["slot"]) for e in entries if format_backup_label(e) == state.state), None)
 
     async def _async_arm_live_refresh(self, fub_id: int, plan_name: str) -> None:
-        """Prime the coordinator's live plan cache after a snapshot render.
+        """Fetch live elements (if needed) and hand them to the coordinator to prime its live cache.
 
-        The backup selector has no "Live" entry — the preview returns to the live view
-        solely via the webhook-driven refresh, which needs a primed plan cache. Right
-        after startup or a plan change no live render has filled it yet, so fetch the
-        live elements once here; if the cache is already armed (any plan — a foreign one
-        is dropped by async_generate_plan_preview), this is a no-op.
+        Right after startup or a plan change no live render has filled the cache yet, so fetch
+        the live elements once here; coordinator.prime_live_preview_cache() is a no-op if a cache
+        is already armed.
         """
-        if self.coordinator._preview_plan_cache is not None:
+        if self.coordinator.has_live_preview_cache:
             return
         plan_data = await self.coordinator.api.logikplan_load_elements(fub_id)
         if plan_data:
-            self.coordinator._preview_plan_cache = {
-                "fub_id": fub_id,
-                "plan_name": plan_name,
-                "elements": plan_data.get("elements", {}),
-                "connections": plan_data.get("connections", {}),
-            }
-            # Mirrors async_generate_plan_preview's plan_switched branch — this cache prime
-            # bypasses that method entirely, so it must start the Stufe-2 poll itself or the
-            # live view never gets real connection values (wires stay on _net_hot forever).
-            self.coordinator._restart_connection_poll(fast=self.coordinator._connection_poll_fast_requested)
+            self.coordinator.prime_live_preview_cache(
+                fub_id, plan_name, plan_data.get("elements", {}), plan_data.get("connections", {})
+            )
 
     async def async_press(self) -> None:
         """Render the active plan into the Plan Preview sensor — live, or a chosen backup snapshot."""
