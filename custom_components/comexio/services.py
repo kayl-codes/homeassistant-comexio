@@ -1821,7 +1821,7 @@ async def _resolve_visualize_snapshot_source(
     (coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata),
     or None on any failure (a notification has already been posted).
     """
-    ctx = await _async_get_service_context(hass, call, error_title, resolve_plan=False)
+    ctx = await _async_get_service_context(hass, call, error_title, resolve_plan=False, do_login=False)
     if ctx is None:
         return None
     coordinator, api, _unused_fub_id = ctx
