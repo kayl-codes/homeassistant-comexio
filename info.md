@@ -1,6 +1,6 @@
 # Comexio IO-Server Integration
 
-Bring the power of your Comexio IO-Server to Home Assistant! 
+Bring the power of your Comexio IO-Server to Home Assistant!
 This custom component uses real-time local push (Webhooks) and dynamic Lua scripts to achieve maximum performance and reliability without polling.
 
 ## Features

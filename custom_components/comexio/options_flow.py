@@ -31,31 +31,77 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-def _parse_ignored_markers(raw_input: str | None) -> list[int]:
-    """Parse comma/semicolon-separated marker IDs from user input, return list of ints.
+def _normalize_ignored_markers(raw_input: str | None) -> str:
+    """Normalize and validate user input for ignored markers before saving.
 
-    Accepts both plain integers (123, 456) and with M prefix (M123, M456).
-    Raises vol.Invalid if any token is not a valid integer.
+    Accepts: comma/semicolon/space/dot separators, optional M/m prefix, ranges like '8-12'.
+    Returns sorted, deduplicated comma-separated string (e.g. '1,3,4,6,20-25').
+    Raises vol.Invalid if any token is not a valid integer or range.
     """
     if not raw_input or not isinstance(raw_input, str):
-        return []
-    marker_ids = []
-    invalid_tokens = []
-    for token in raw_input.replace(";", ",").split(","):
-        if stripped := token.strip():
-            # Remove optional M/m prefix
-            if stripped.upper().startswith("M"):
-                stripped = stripped[1:]
-            try:
-                marker_ids.append(int(stripped))
-            except ValueError:
-                invalid_tokens.append(stripped)
+        return ""
+
+    seen_ints: set[int] = set()
+    seen_ranges: set[tuple[int, int]] = set()
+    items: list[int | tuple[int, int]] = []
+    invalid_tokens: list[str] = []
+
+    for token in raw_input.replace(".", ",").replace(";", ",").replace(" ", ",").split(","):
+        stripped = token.strip().lstrip("Mm")
+        if stripped:
+            _collect_ignored_marker_token(stripped, seen_ints, seen_ranges, items, invalid_tokens)
+
     if invalid_tokens:
         raise vol.Invalid(
-            f"Ungültige Merker-IDs (keine Ganzzahlen): {', '.join(repr(t) for t in invalid_tokens[:3])}. "
-            "Bitte Zahlen eingeben, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456; M789')."
+            f"Ungültige Merker-IDs: {', '.join(repr(t) for t in invalid_tokens[:3])}. "
+            "Zahlen (z.B. '3', 'M12'), Bereiche (z.B. '8-12') oder Listen (z.B. '1, 3, 5') eingeben."
         )
-    return marker_ids
+
+    items.sort(key=_ignored_marker_sort_key)
+    return ",".join(_format_ignored_marker_item(item) for item in items)
+
+
+def _collect_ignored_marker_token(
+    stripped: str,
+    seen_ints: set[int],
+    seen_ranges: set[tuple[int, int]],
+    items: list[int | tuple[int, int]],
+    invalid_tokens: list[str],
+) -> None:
+    """Parse one normalized ignored-markers token and append it to items if new and valid."""
+    parsed = _parse_ignored_marker_token(stripped)
+    if parsed is None:
+        invalid_tokens.append(stripped)
+    elif isinstance(parsed, tuple):
+        if parsed not in seen_ranges:
+            seen_ranges.add(parsed)
+            items.append(parsed)
+    elif parsed not in seen_ints:
+        seen_ints.add(parsed)
+        items.append(parsed)
+
+
+def _parse_ignored_marker_token(stripped: str) -> int | tuple[int, int] | None:
+    """Parse one normalized token into an int or a (start, end) range; None if invalid."""
+    if "-" not in stripped:
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    parts = stripped.split("-", 1)
+    try:
+        start, end = int(parts[0]), int(parts[1].lstrip("Mm"))
+    except ValueError:
+        return None
+    return (min(start, end), max(start, end))
+
+
+def _ignored_marker_sort_key(item: int | tuple[int, int]) -> int:
+    return item[0] if isinstance(item, tuple) else item
+
+
+def _format_ignored_marker_item(item: int | tuple[int, int]) -> str:
+    return f"{item[0]}-{item[1]}" if isinstance(item, tuple) else str(item)
 
 
 class ComexioOptionsFlow(config_entries.OptionsFlow):
@@ -65,56 +111,15 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         """Initialize options flow."""
         self._config_entry = config_entry
 
-    def _process_ignored_markers(self, user_input: dict, conf: dict, errors: dict) -> None:
-        """Validate and normalize CONF_IGNORED_MARKERS in-place on user_input; populate errors on failure."""
-        # If field not in user_input, voluptuous didn't receive changes; preserve old value
-        if CONF_IGNORED_MARKERS not in user_input:
-            user_input[CONF_IGNORED_MARKERS] = conf.get(CONF_IGNORED_MARKERS, "")
-
-        ignored_raw = user_input.get(CONF_IGNORED_MARKERS, "").strip()
-        if not ignored_raw:
-            user_input[CONF_IGNORED_MARKERS] = ""
-            return
-
-        try:
-            ignored_ids = _parse_ignored_markers(ignored_raw)
-            # Persist normalized plain-integer IDs (no "M" prefix) so downstream
-            # parsers (e.g. coordinator.async_check_ignored_markers) that expect
-            # plain ints stay in sync with what the user entered here.
-            user_input[CONF_IGNORED_MARKERS] = ",".join(str(mid) for mid in ignored_ids)
-        except vol.Invalid as e:
-            errors[CONF_IGNORED_MARKERS] = str(e)
-        except Exception as e:
-            _LOGGER.exception("Error validating ignored_markers: %s", e)
-            errors[CONF_IGNORED_MARKERS] = f"Fehler bei Validierung: {e}"
-
     async def async_step_init(self, user_input=None):
         """Manage the options."""
         conf = {**self._config_entry.data, **self._config_entry.options}
-        errors = {}
+        errors: dict[str, str] = {}
 
         if user_input is not None:
-            user_input["scan_interval"] = int(user_input["scan_interval"])
-            if CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN in user_input:
-                user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN] = int(
-                    user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN]
-                )
-            if CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS in user_input:
-                user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
-                    user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
-                )
-            self._process_ignored_markers(user_input, conf, errors)
-
+            self._normalize_user_input(user_input, conf, errors)
             if not errors:
-                # Merge new options with existing to preserve any fields not shown (e.g., passwords)
-                merged_options = dict(self._config_entry.options)
-                merged_options.update(user_input)
-
-                # Explicitly remove ignored_markers if empty (HA won't auto-delete it)
-                if not merged_options.get(CONF_IGNORED_MARKERS, "").strip():
-                    merged_options.pop(CONF_IGNORED_MARKERS, None)
-
-                return self.async_create_entry(title="", data=merged_options)
+                return self._create_options_entry(user_input)
 
         # Extension names for the IO cluster multi-select: live coordinator data first,
         # excluding offline extensions (no hardware present — wiring them is pointless),
@@ -198,3 +203,41 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             ),
             errors=errors,
         )
+
+    @staticmethod
+    def _normalize_user_input(user_input: dict, conf: dict, errors: dict) -> None:
+        """Validate and normalize user_input in-place; populate errors on failure."""
+        try:
+            user_input["scan_interval"] = int(user_input["scan_interval"])
+            if CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN in user_input:
+                user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN] = int(
+                    user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN]
+                )
+            if CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS in user_input:
+                user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
+                    user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
+                )
+
+            # If field not in user_input, voluptuous didn't receive changes; preserve old value
+            if CONF_IGNORED_MARKERS not in user_input:
+                _LOGGER.warning("ignored_markers field missing from user_input — restoring from saved options")
+                user_input[CONF_IGNORED_MARKERS] = conf.get(CONF_IGNORED_MARKERS, "")
+
+            ignored_raw = user_input.get(CONF_IGNORED_MARKERS, "").strip()
+            user_input[CONF_IGNORED_MARKERS] = _normalize_ignored_markers(ignored_raw)
+        except vol.Invalid as e:
+            errors[CONF_IGNORED_MARKERS] = str(e)
+        except Exception as e:
+            _LOGGER.exception("Unexpected error validating ignored_markers: %s", e)
+            errors[CONF_IGNORED_MARKERS] = f"Fehler bei Validierung: {e}"
+
+    def _create_options_entry(self, user_input: dict):
+        """Merge new options with existing entry options and create the config entry.
+
+        Preserves fields not shown in the form (e.g. passwords); explicitly removes
+        ignored_markers when empty since HA won't auto-delete an emptied optional field.
+        """
+        merged_options = {**self._config_entry.options, **user_input}
+        if not merged_options.get(CONF_IGNORED_MARKERS, "").strip():
+            merged_options.pop(CONF_IGNORED_MARKERS, None)
+        return self.async_create_entry(title="", data=merged_options)

@@ -1,11 +1,48 @@
 # Changelog
 
-All notable changes to this project are documented here.  
+All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
 ## [Unreleased]
+
+### ✨ New Features
+- **Function Plan Services:** Seven new services to manage Comexio function plans (Logikpläne) directly from Home Assistant: `function_plan_connect` (wire markers to their Web-IO commands), `function_plan_sort` (sort elements by marker ID and snap to grid), `function_plan_stop` / `function_plan_activate` (plan lifecycle), `function_plan_visualize` (connection overview), `function_plan_restore` (roll back a plan to a backup snapshot), and `function_plan_list_backups` (structured service response, like a REST query).
+- **Automatic Function Plan Backups:** Every coordinator poll captures a hash-delta snapshot of all function plans — per plan, SharePoint-style versioning with 3 auto slots. Before each HA-side plan modification an additional safety snapshot is stored (10 change slots per plan). Both live in HA's `.storage` and are included in normal HA backups.
+- **Function Plan Restore:** Roll back structure *and* element positions of a single plan to any stored snapshot (`kind` = auto/change, `slot` = version). A pre-restore safety snapshot is taken automatically; success is verified via content hash.
+- **Diagnostic Sensor — Function Plan Backups:** Shows the total number of stored snapshots; per-plan details in the state attributes.
+- **Backup List as Service Response:** `function_plan_list_backups` returns all snapshots (plan, type, slot, timestamp, operation) as a response visible directly in the Actions UI — with optional filters for plan, name substring, backup type, slot, and maximum age, plus a selectable sort order (`newest` / `oldest` / `plan` / `fub_id` / `slot`).
+- **Managed Cluster Plans:** Markers can be distributed automatically across managed function plans (`<prefix> - Marker [1-100]` …) with configurable plan prefix and maximum marker pairs per plan (new options). Managed plans are labelled with a comment element in Comexio.
+- **Plan Selector Entity:** A `select` entity lists all function plans; services use it as the default target when no plan is specified. A dedicated `Auto (cluster plans)` option switches to cluster mode: the sync button then distributes missing markers across the managed cluster plans instead of a single fixed plan.
+- **Dynamic Service Dropdowns:** Real plan names appear in the plan dropdowns of all function-plan services; the restore and list dropdowns list only plans that actually have backup snapshots. With a single Comexio instance the instance field is pre-filled automatically.
+- **Ignored Markers:** Marker IDs (single values and ranges, e.g. `1-5, 12, 30-40`) can be excluded from entity creation via the options flow; entries are normalized and stale IDs are cleaned up automatically.
+- **Bus Workload Monitoring:** New diagnostic `Bus Workload` sensor (%) and `SD Card Present` binary sensor, polled independently of the main coordinator every 10 seconds. The integration exposes the raw reading only — sustained-overload alerting is left to a native HA automation (`numeric_state` trigger with a `for:` duration) or a `threshold` helper, as documented in the README.
+- **Extension Firmware Updates:** New read-only `update` entity per extension module (plus one for the IO-Server base) showing installed/available firmware versions. Since Comexio warns the check can briefly interrupt extension outputs, it is never polled on a schedule — it only runs once, at the next nightly 04:00 window, when the already-tracked IO-Server software version has changed since the last check. A new diagnostic "Check Firmware Now" button lets you force the check on demand (e.g. for testing), bypassing the version gate but not the underlying risk. The last checked result is persisted to survive HA restarts, so the entities don't reset to "Unknown" and the version gate doesn't spuriously re-arm just because the process restarted.
+
+### 🛠️ Core & Stability Improvements
+- **Bulk plan loading:** All function plans are fetched concurrently (semaphore-limited) in a background task after each poll — no impact on HA startup time.
+- **Repair flows hardened:** Repair issue dialogs now use explicit description strings instead of `translation_key`, fixing missing texts in the Repairs UI.
+- **Service context helper:** Shared resolver for instance, plan and login across all function-plan services with consistent English error notifications.
+- **Multi-plan aware ignored-marker handling:** The link check and the entity cleanup now cover *all* managed plans (selected plan plus every cluster plan) instead of only the first one — markers wired in later cluster plans are detected and cleaned up correctly, with a pre-change safety snapshot per affected plan.
+- **Consolidated sync notifications:** The pair-adding step updates a single progress notification (overall pair counter, elapsed time and ETA) instead of stacking one notification per plan, a "Finalizing" status bridges the gap between the last pair and the summary (activation/sort/restart phase), and the sync finishes with a detailed summary — per plan: pairs added, duration, sort/activation result.
+- **Realistic "Add to Function Plan" ETA:** The repair dialog estimates the function-plan add step from the actual pair count (~1 s per pair plus a fixed finalize overhead) instead of a flat 90-second guess — 25 pairs now show ~35 s instead of ~1:30 min.
+- **No sort pass for freshly created cluster plans:** New cluster plans place their marker pairs directly at the final grid positions (sorted by marker ID) and are activated automatically afterwards — the separate sort run (plus its notification) only happens when pairs are added to an already existing plan.
+- **Unified "function plan" terminology:** The English UI now consistently says *function plan* (Comexio's own FUP vocabulary; previously a mix of "Logikplan" and "Logicplan" across entity names, repair dialogs, notifications and option labels). The plan selector entity is named "Function Plans", the backup selector "Function Plan Backup"; the German translation keeps "Logikplan". Persisted option/storage keys and entity unique IDs are unchanged — no migration needed.
+- **Sort leaves comment elements alone:** `function_plan_sort` no longer moves the "Administrated by HomeAssistant" comment (type-14 elements keep their position), and the comment element's text width is set to "Sehr Breit" via a follow-up properties save (`savefupcommentelement`) so the full text fits on one line.
+
+### 🐛 Bug Fixes & Refactoring
+- **Cluster plan creation:** `create_fup` verified the new plan against the wrong config section (`FubModules` instead of `Fubs`) and crashed, leaving a freshly created cluster plan empty and unwired. Verification now reads the plan metadata, so auto-created cluster plans are filled in the same sync run.
+- **Function-plan gap detection rebuilt:** "Missing in function plan" is now derived from the actual plan wiring (bulk `loadelements` snapshot) instead of the server's `WebCommandIoId` field — that field survives plan deletion and is not updated by API wiring, so deleting a plan left all its markers looking "wired" forever (and freshly wired pairs looked missing). Deleting a plan now correctly re-flags all affected markers on the next poll.
+- **Entity naming:** The plan selector entity is now named "Function Plans" (was the duplicated "Logikplan Plan").
+- **Service instance detection:** Service calls without an explicit `config_entry` no longer abort silently when webhook bookkeeping entries exist alongside the coordinator.
+- **Marker lookup:** Marker IDs are compared as integers when connecting plans — explicit marker lists and `*` (all) now resolve correctly.
+- **`delete_single_command`** returns `False` on failure instead of raising, so delta-sync continues with the remaining commands.
+- **Options form:** `ignored_markers` field no longer loses its stored value when reopening the options dialog.
+
+### ⚠️ Requirements & Notes
+- After updating, a **full HA restart** is required (new platform files and translation keys).
+- Function-plan services require admin (RSA) credentials; they stop/re-activate active plans automatically during edits.
 
 ---
 

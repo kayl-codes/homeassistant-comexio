@@ -27,9 +27,10 @@ Every contribution is greatly appreciated. Thank you for your support!
 
 - ⚡ **Real-Time Status (Local Push):** Uses Home Assistant Webhooks and dynamically generated LUA scripts in Comexio. Status changes of inputs/outputs and markers are pushed to Home Assistant without delay (no polling).
 - 🤖 **Smart Web-IO Lifecycle Management:** Automatically detects missing webhooks in Comexio and offers to create, repair, or clean them up directly via the HA dashboard.
-- 🔄 **Deep Delta-Sync:** If a name or type changes in Comexio, an intelligent comparison updates *only* the affected commands (delta), without breaking existing logic plans.
+- 🔄 **Deep Delta-Sync:** If a name or type changes in Comexio, an intelligent comparison updates *only* the affected commands (delta), without breaking existing function plans.
 - 🛠️ **Integrated Repair Dialogs (HA Repairs):** In case of inconsistencies between HA and Comexio, the integration creates interactive repair suggestions directly in the HA dashboard.
 - 📴 **Offline Extension Handling:** When a Comexio extension module goes offline, all its entities and its sub-device are automatically removed from the HA device list. A diagnostic sensor on the hub device shows which extensions are currently offline.
+- 🧩 **Function Plan Management & Backups:** Manage Comexio function plans (Logikpläne) directly from HA — wire markers to Web-IO commands, sort plan layouts, and roll back any plan to an automatically captured backup snapshot (SharePoint-style per-plan versioning).
 - 🔒 **Secure Authentication:** Full support for the modern RSA login method (v11) for administrative tasks as well as Basic Auth for standard API calls.
 
 ## 📦 Supported Entities
@@ -41,7 +42,12 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `switch` | Digital Outputs (Q) & Markers | Switches physical relays (classified as outlets) and digital markers. |
 | `number` | Analog Markers | Sets setpoints with automatic range checking (e.g., target temperature). |
 | `button` | System Functions | Manual "Smart-Sync" trigger and cancel button directly from the HA device view. |
+| `select` | Function Plans | Lists all Comexio function plans; used as the default target for the function-plan services. |
 | `sensor` (diagnostic) | Integration | `Offline Extensions` — shows how many extension modules are currently offline and lists their names as a state attribute. |
+| `sensor` (diagnostic) | Integration | `Function Plan Backups` — total number of stored plan snapshots, per-plan details as state attributes. |
+| `sensor` (diagnostic) | Integration | `Bus Workload` — internal Comexio bus/CPU load in %, polled independently every 10 s. |
+| `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
+| `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
 
 ## 🚀 Installation
 
@@ -110,9 +116,68 @@ When the extension comes back online, a full HA restart or integration reload wi
 > [!NOTE]
 > Detection works by checking the `Identifier` field returned by the Comexio API. An online extension returns a serial number (e.g. `8505-2057-2326`), while an offline one only returns its model code (e.g. `5010`) without dashes.
 
+## 📊 Bus Workload Monitoring
+
+The integration polls Comexio's internal bus/CPU workload (`Bus Workload` sensor, in %) and SD-card presence (`SD Card Present`) independently of the main coordinator, every 10 seconds — fast enough to catch short spikes without waiting for the regular audit interval.
+
+The integration only exposes the raw reading; it does not hard-code an "overloaded" threshold or alerting logic. Use Home Assistant's own tools for that — they already handle debounce/hysteresis correctly:
+
+- **Sustained overload alert** — a `numeric_state` trigger with a `for:` duration on `sensor.comexio_<server>_bus_workload`:
+  ```yaml
+  trigger:
+    - trigger: numeric_state
+      entity_id: sensor.comexio_<server>_bus_workload
+      above: 80
+      for: "00:01:00"
+  action:
+    - action: notify.persistent_notification
+      data:
+        title: "Comexio bus overload"
+        message: "Bus workload has been above 80% for over a minute."
+  ```
+- **Value-crossing without duration** — add a `threshold` helper (*Settings → Devices & Services → Helpers → Create Helper → Threshold*) pointing at the sensor for a ready-made `binary_sensor` with built-in hysteresis.
+
+## 🔧 Extension Firmware Updates
+
+Comexio can check every extension module on the local bus for available firmware updates — but it warns that running this check can briefly interrupt extension outputs. The integration therefore never polls it on a schedule. Instead, it piggybacks on the IO-Server software version it already tracks (`Version` diagnostic sensor): whenever that version changes, the extension firmware check runs once, at the next nightly window (04:00) — a base update makes a matching extension firmware update likely, so this catches it without any unattended risk on a normal day.
+
+Results show up as one `update.*` entity per extension module (in that extension's device) plus one for the IO-Server base itself, each reporting installed/available firmware version through HA's standard `update` entity (visible in the Settings → *Updates available* overview). These are read-only — Comexio's install trigger isn't wired up, so use the Comexio admin UI to actually apply an update once one is found.
+
+A diagnostic **"Check Firmware Now"** button forces the check on demand, bypassing the version gate (but not the underlying risk — the same brief output interruption Comexio warns about applies). Use it to test the `update.*` entities right away instead of waiting for both a version change and the nightly window.
+
+## 🧩 Function Plan Management (Logikplan)
+
+The integration can manage Comexio **function plans** directly from Home Assistant. All actions are available under *Developer Tools → Actions* (or in automations) and require the admin (RSA) credentials. Active plans are stopped, edited, and re-activated automatically.
+
+| Action | What it does |
+| :--- | :--- |
+| `comexio.function_plan_connect` | Wires markers to their Web-IO commands in a plan (single IDs, lists, or `*` for all). |
+| `comexio.function_plan_sort` | Sorts all plan elements by marker ID and snaps them to exact grid positions. |
+| `comexio.function_plan_visualize` | Shows a text overview of all connections and unconnected elements. |
+| `comexio.function_plan_stop` / `..._activate` | Manual plan lifecycle control (stop / save + activate). |
+| `comexio.function_plan_restore` | Rolls a plan back to a stored backup snapshot. |
+| `comexio.function_plan_list_backups` | Returns all stored snapshots as a structured service response — filterable by plan, name, backup type, slot, and age; sortable by timestamp, plan, or slot. |
+
+📖 **[Function Plan Preview guide →](FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
+
+### 🗂️ Automatic Backups & Restore
+
+Function plans are backed up automatically — no configuration needed:
+
+- **Auto backups:** On every coordinator poll, each plan is snapshotted *only if its content changed* (hash delta). The **3 newest versions per plan** are kept.
+- **Change backups:** Right before the integration modifies a plan (connect, sort, restore, …), a safety snapshot is stored — the **10 newest per plan**.
+- Snapshots live in HA's `.storage` folder and are therefore included in regular Home Assistant backups. Snapshots of deleted plans are kept.
+- Restore (`function_plan_restore`) brings back **structure, element positions, and canvas paper/DPI settings**, takes a pre-restore safety snapshot first, and verifies success via content hash. Pick the **Snapshot** field for a one-click, unambiguous target (plan + type + slot + timestamp in one option); the advanced `fub_id`/`kind`/`slot` fields are a manual alternative for scripting and are ignored whenever `snapshot` is set.
+- If the original plan was **deleted**, or its ID was **reused by an unrelated plan**, restore rebuilds it as a **new plan** by default (`on_conflict: new_id`) — or, with `confirm: true` and `on_conflict: force_override`, deliberately overwrites whatever now occupies that ID.
+- The diagnostic sensor **Function Plan Backups** shows the total snapshot count with per-plan details as attributes.
+
+### 🧱 Managed Cluster Plans
+
+For large installations, marker/Web-IO pairs can be distributed across auto-managed plans named like `HA - Marker [1-100]`. The plan name prefix and the maximum number of marker pairs per plan are configurable in the integration options. Managed plans are labelled with a comment element inside Comexio so they are easy to recognise.
+
 ## 🐛 Troubleshooting
 
-- **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a logic plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
+- **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a function plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
 - **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu.
 - **Extension entities don't reappear after coming back online:** Reload the integration via *Settings → Devices & Services → Comexio → ⋮ → Reload*. The coordinator will re-detect the extension as online and restore all its entities.
 
@@ -158,6 +223,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 - 🔄 **Deep Delta-Sync:** Ändert sich ein Name oder Typ in Comexio, aktualisiert ein intelligenter Abgleich *nur* die betroffenen Befehle (Delta), ohne bestehende Logikpläne zu zerstören.
 - 🛠️ **Integrierte Reparatur-Dialoge (HA Repairs):** Bei Unstimmigkeiten zwischen HA und Comexio erstellt die Integration interaktive Reparatur-Vorschläge direkt im HA-Dashboard.
 - 📴 **Offline-Extension-Erkennung:** Geht ein Comexio-Erweiterungsmodul offline, werden alle zugehörigen Entitäten und das Sub-Device automatisch aus der HA-Geräteliste entfernt. Ein Diagnose-Sensor am Hub-Device zeigt, welche Module gerade offline sind.
+- 🧩 **Funktionsplan-Verwaltung & Backups:** Comexio-Funktionspläne (Logikpläne) direkt aus HA verwalten — Merker mit Web-IO-Befehlen verdrahten, Plan-Layouts sortieren und jeden Plan auf einen automatisch erfassten Backup-Snapshot zurücksetzen (Versionierung je Plan wie in SharePoint).
 - 🔒 **Sichere Authentifizierung:** Volle Unterstützung für das moderne RSA-Login-Verfahren (v11) für administrative Aufgaben sowie Basic Auth für Standard-API-Aufrufe.
 
 ## 📦 Unterstützte Entitäten
@@ -169,7 +235,12 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `switch` | Digitale Ausgänge (Q) & Merker | Schaltet physische Relais (als Steckdose/Outlet klassifiziert) und digitale Merker. |
 | `number` | Analoge Merker | Setzt Sollwerte (Setpoints) mit automatischer Bereichsprüfung (z. B. Temp-Soll). |
 | `button` | System-Funktionen | Manueller "Smart-Sync" Abgleich und Abbruch direkt aus der HA-Geräteansicht. |
+| `select` | Funktionspläne | Listet alle Comexio-Funktionspläne; dient als Standard-Ziel für die Funktionsplan-Actions. |
 | `sensor` (Diagnose) | Integration | `Offline Extensions` — zeigt, wie viele Erweiterungsmodule gerade offline sind, und listet deren Namen als State-Attribut. |
+| `sensor` (Diagnose) | Integration | `Function Plan Backups` — Gesamtzahl der gespeicherten Plan-Snapshots, Details je Plan als State-Attribute. |
+| `sensor` (Diagnose) | Integration | `Bus Workload` — interne Comexio Bus-/CPU-Auslastung in %, unabhängig alle 10 s abgefragt. |
+| `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
+| `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
 
 ## 🚀 Installation
 
@@ -211,7 +282,7 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 Die Integration verwaltet die Schnittstelle zu Comexio komplett autonom. Das System besteht aus drei Phasen:
 
 ### 1️⃣ Periodischer Audit (Konsistenzprüfung)
-Der *Data Update Coordinator* prüft im Hintergrund regelmäßig, ob die Konfiguration in HA noch zu 100 % mit den angelegten Web-IO Befehlen in Comexio übereinstimmt. 
+Der *Data Update Coordinator* prüft im Hintergrund regelmäßig, ob die Konfiguration in HA noch zu 100 % mit den angelegten Web-IO Befehlen in Comexio übereinstimmt.
 
 ### 2️⃣ Erkennung von Abweichungen (Mismatches)
 Wenn du in Comexio Logik anpasst, erkennt HA das sofort und klassifiziert den Fehler:
@@ -237,6 +308,65 @@ Kommt das Modul wieder online, stellt ein Reload der Integration (*Einstellungen
 
 > [!NOTE]
 > Die Erkennung basiert auf dem `Identifier`-Feld der Comexio-API. Ein Online-Modul liefert eine Seriennummer (z. B. `8505-2057-2326`), ein Offline-Modul nur den Geräte-Code ohne Bindestriche (z. B. `5010`).
+
+## 📊 Busauslastungs-Überwachung
+
+Die Integration fragt die interne Comexio Bus-/CPU-Auslastung (`Bus Workload`-Sensor, in %) und den SD-Karten-Status (`SD Card Present`) unabhängig vom Haupt-Coordinator alle 10 Sekunden ab — schnell genug, um kurze Lastspitzen zu erfassen, ohne auf das reguläre Audit-Intervall zu warten.
+
+Die Integration liefert bewusst nur den Rohwert; eine "überlastet"-Schwelle oder Alarmlogik ist nicht fest einprogrammiert. Dafür sind Home Assistants eigene Bordmittel gedacht — sie behandeln Entprellung/Hysterese bereits korrekt:
+
+- **Alarm bei anhaltender Überlast** — ein `numeric_state`-Trigger mit `for:`-Dauer auf `sensor.comexio_<server>_bus_workload`:
+  ```yaml
+  trigger:
+    - trigger: numeric_state
+      entity_id: sensor.comexio_<server>_bus_workload
+      above: 80
+      for: "00:01:00"
+  action:
+    - action: notify.persistent_notification
+      data:
+        title: "Comexio Busüberlastung"
+        message: "Die Busauslastung liegt seit über einer Minute über 80 %."
+  ```
+- **Schwellwert ohne Zeitkomponente** — ein `Schwellenwert`-Helper (*Einstellungen → Geräte & Dienste → Helfer → Helfer erstellen → Schwellenwert*), der auf den Sensor zeigt, liefert einen fertigen `binary_sensor` mit eingebauter Hysterese.
+
+## 🔧 Firmware-Updates der Erweiterungen
+
+Comexio kann jedes Erweiterungsmodul am lokalen Bus auf verfügbare Firmware-Updates prüfen — warnt aber, dass dieser Check kurzzeitig die Ausgänge der Module unterbrechen kann. Die Integration fragt ihn deshalb nie nach einem festen Zeitplan ab. Stattdessen wird die bereits getrackte IO-Server-Softwareversion genutzt (`Version`-Diagnose-Sensor): Ändert sich diese Version, läuft der Erweiterungs-Firmware-Check genau einmal, beim nächsten nächtlichen Zeitfenster (04:00) — ein Update des Grundbausteins macht ein passendes Firmware-Update der Erweiterungen wahrscheinlich, damit wird das ohne unbeaufsichtigtes Risiko im Normalbetrieb erfasst.
+
+Die Ergebnisse erscheinen als je eine `update.*`-Entität pro Erweiterungsmodul (im jeweiligen Erweiterungs-Device) sowie eine für den IO-Server-Grundbaustein selbst, jeweils mit installierter/verfügbarer Firmware-Version über die HA-Standard-`update`-Entität (sichtbar in *Einstellungen → Verfügbare Updates*). Diese sind reine Anzeige — der Install-Aufruf von Comexio ist nicht angebunden, ein gefundenes Update wird weiterhin über die Comexio-Admin-Oberfläche eingespielt.
+
+Ein Diagnose-Button **„Firmware jetzt prüfen"** erzwingt die Prüfung sofort, unabhängig vom Versions-Gate (das zugrunde liegende Risiko bleibt aber bestehen — dieselbe kurze Ausgangs-Unterbrechung, vor der Comexio warnt). Damit lassen sich die `update.*`-Entitäten sofort testen, statt auf Versionswechsel und Nacht-Fenster zu warten.
+
+## 🧩 Funktionsplan-Verwaltung (Logikplan)
+
+Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwalten. Alle Actions findest du unter *Entwicklerwerkzeuge → Aktionen* (oder in Automationen); sie benötigen die Admin-Zugangsdaten (RSA). Aktive Pläne werden automatisch gestoppt, bearbeitet und wieder aktiviert.
+
+| Action | Funktion |
+| :--- | :--- |
+| `comexio.function_plan_connect` | Verdrahtet Merker mit ihren Web-IO-Befehlen im Plan (einzelne IDs, Listen oder `*` für alle). |
+| `comexio.function_plan_sort` | Sortiert alle Plan-Elemente nach Merker-ID und richtet sie exakt am Raster aus. |
+| `comexio.function_plan_visualize` | Zeigt eine Text-Übersicht aller Verbindungen und unverbundenen Elemente. |
+| `comexio.function_plan_stop` / `..._activate` | Manuelle Lifecycle-Steuerung (Stoppen / Speichern + Aktivieren). |
+| `comexio.function_plan_restore` | Setzt einen Plan auf einen gespeicherten Backup-Snapshot zurück. |
+| `comexio.function_plan_list_backups` | Liefert alle Snapshots als strukturierte Service-Response — filterbar nach Plan, Name, Backup-Typ, Slot und Alter; sortierbar nach Zeitstempel, Plan oder Slot. |
+
+📖 **[Logikplan-Vorschau — Anleitung →](FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
+
+### 🗂️ Automatische Backups & Restore
+
+Funktionspläne werden automatisch gesichert — ganz ohne Konfiguration:
+
+- **Auto-Backups:** Bei jedem Coordinator-Poll wird jeder Plan *nur bei geändertem Inhalt* (Hash-Delta) gesichert. Es bleiben die **3 neuesten Versionen je Plan** erhalten.
+- **Change-Backups:** Unmittelbar bevor die Integration einen Plan verändert (Connect, Sort, Restore, …), wird ein Sicherheits-Snapshot angelegt — die **10 neuesten je Plan**.
+- Die Snapshots liegen im `.storage`-Ordner von HA und sind damit Teil der regulären Home-Assistant-Backups. Snapshots gelöschter Pläne bleiben erhalten.
+- Der Restore (`function_plan_restore`) stellt **Struktur, Element-Positionen und die Papier-/DPI-Einstellung der Zeichenfläche** wieder her, legt vorher einen Pre-Restore-Snapshot an und verifiziert den Erfolg per Inhalts-Hash. Das Feld **Snapshot** wählt das genaue Ziel mit einem Klick (Plan + Typ + Slot + Zeitstempel in einer Option); die erweiterten Felder `fub_id`/`kind`/`slot` sind eine manuelle Alternative für Skripte und werden ignoriert, sobald `snapshot` gesetzt ist.
+- Wurde der ursprüngliche Plan **gelöscht** oder seine ID **von einem anderen Plan wiederverwendet**, legt der Restore standardmäßig einen **neuen Plan** an (`on_conflict: new_id`) — oder überschreibt mit `confirm: true` und `on_conflict: force_override` bewusst den Plan, der die ID aktuell belegt.
+- Der Diagnose-Sensor **Function Plan Backups** zeigt die Gesamtzahl der Snapshots mit Details je Plan als Attribute.
+
+### 🧱 Verwaltete Cluster-Pläne
+
+Für große Installationen können Merker/Web-IO-Paare auf automatisch verwaltete Pläne mit Namen wie `HA - Marker [1-100]` verteilt werden. Präfix und maximale Paar-Anzahl je Plan sind in den Integrations-Optionen einstellbar. Verwaltete Pläne werden in Comexio mit einem Kommentar-Element gekennzeichnet und sind so leicht erkennbar.
 
 ## 🐛 Fehlerbehebung (Troubleshooting)
 

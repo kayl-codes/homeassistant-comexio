@@ -22,13 +22,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     conf = {**entry.data, **entry.options}
     entities = []
 
-    # 1. Digital Markers
+    # 1. Digital Markers (skip ignored markers)
     if conf.get("import_markers", True):
-        # Only markers explicitly marked as digital in api.py
+        ignored_ids = coordinator.ignored_marker_ids
         entities.extend(
             ComexioMarkerSwitch(coordinator, coordinator.server_id, marker)
             for marker in coordinator.data.get("markers", [])
-            if marker["type"] == "digital"
+            if marker["type"] == "digital" and int(marker["id"]) not in ignored_ids
         )
 
     # 2. Digital Outputs (Relays) — binary and writable (not an input)
