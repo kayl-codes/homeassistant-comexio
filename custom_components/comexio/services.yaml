@@ -353,7 +353,12 @@ function_plan_list_backups:
 
 logikplan_visualize:
   name: Logikplan Visualize
-  description: Zeigt den aktuellen Zustand eines Logikplan-Plans (Verbindungen + unbeschaltete Elemente) als Benachrichtigung.
+  description: >
+    Zeigt den Zustand eines Logikplan-Plans (Verbindungen + unbeschaltete Elemente) als
+    Text-Benachrichtigung oder als SVG-Diagramm (Plan Preview Sensor). Zwei Wege, die
+    Quelle zu wählen — nur EINEN verwenden: (1) "Snapshot" — einen gespeicherten Backup
+    exakt wie erfasst darstellen, komplett offline; (2) "Plan" (live) — den aktuellen
+    Zustand des Plans in Comexio darstellen.
   fields:
     config_entry:
       name: Comexio Instanz
@@ -364,9 +369,102 @@ logikplan_visualize:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
+      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet. Wird ignoriert, wenn 'Snapshot' gesetzt ist."
       required: false
       selector:
         select:
           options: []
           custom_value: true
+    snapshot:
+      name: Snapshot (optional)
+      description: "Diesen gespeicherten Backup-Snapshot statt des Live-Plans darstellen — keine Comexio-Verbindung nötig. Überschreibt 'Plan' oben, wenn gesetzt."
+      required: false
+      advanced: true
+      selector:
+        select:
+          options: []
+    format:
+      name: Ausgabeformat (optional)
+      description: "text (Standard) = Benachrichtigung mit Verbindungen/unbeschalteten Elementen als Liste. svg = rendert ein Diagramm in Comexios Original-Layout-Positionen in den Plan Preview Sensor (entity_picture) und liefert dessen URL zurück."
+      required: false
+      default: text
+      selector:
+        select:
+          options:
+            - text
+            - svg
+
+set_value:
+  name: Set Value
+  description: >
+    Writes a raw value to a Comexio marker or IO via the Comexio API (Basic Auth).
+    Same write path the switch/number entities use — this is the backend of the plan
+    card's debug command input. Only targets known from the current Comexio
+    configuration are accepted. Failures are reported as a notification.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    target:
+      name: Target
+      description: "Marker as 'M<id>' (e.g. M107) or IO as '<Extension>#<IO>' (e.g. IOX2#Q3)."
+      required: true
+      selector:
+        text:
+    value:
+      name: Value
+      description: "Value to write — digital: 0/1, analog: any number (comma or dot decimals)."
+      required: true
+      selector:
+        text:
+
+function_plan_debug_session:
+  name: Function Plan Debug Session
+  description: >
+    Internal — called by the plan card when its debug box opens or closes. Switches how
+    often the live plan preview's wire colors are refreshed from Comexio: faster while the
+    debug box is open, background cadence otherwise. No effect without a live preview on
+    display.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    open:
+      name: Debug box open
+      description: "true = the plan card's debug box just opened (fast refresh); false = it closed (background refresh)."
+      default: false
+      selector:
+        boolean:
+
+function_plan_search:
+  name: Function Plan Search
+  description: >
+    Finds which function plans contain elements matching a text query. Searches the
+    human-readable labels of every element (markers, IOs, WebIOs, blocks, time modules,
+    constants, comments) in every live plan — same syntax as the preview card's search
+    box: plain text = case-insensitive substring, wildcards ? (one non-space character)
+    and * (anything). Results come as a notification and as a service response. When
+    exactly ONE plan matches, the 'Function Plans' selector is set to it automatically —
+    a follow-up action without a plan then targets the plan just found.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    query:
+      name: Search text
+      description: "e.g. 'M33', 'Küche', 'M22?' or 'IOX3 #*'"
+      required: true
+      selector:
+        text:

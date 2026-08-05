@@ -133,6 +133,14 @@
       },
       "statistics_cleanup": {
         "name": "Statistiken bereinigen"
+      },
+      "plan_preview": {
+        "name": "Vorschau"
+      }
+    },
+    "image": {
+      "plan_preview": {
+        "name": "Plan-Vorschau"
       }
     },
     "sensor": {
@@ -149,6 +157,9 @@
       },
       "comexio_version": {
         "name": "Comexio-Version"
+      },
+      "plan_preview": {
+        "name": "Plan-Vorschau Info"
       },
       "plan_changed": {
         "name": "Plan geändert"

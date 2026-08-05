@@ -1,5 +1,6 @@
 # Version: 0.7.5
 from typing import Any
+from urllib.parse import quote
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -57,6 +58,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioVersionSensor(coordinator, coordinator.server_id),
             ComexioPlanChangedSensor(coordinator, coordinator.server_id),
             ComexioBusLoadSensor(coordinator, coordinator.server_id),
+            ComexioPlanPreviewSensor(coordinator, coordinator.server_id),
         ]
     )
 
@@ -314,3 +316,54 @@ class ComexioBusLoadSensor(SensorEntity):
     @callback
     def _handle_bus_load_update(self) -> None:
         self.async_write_ha_state()
+
+
+class ComexioPlanPreviewSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor showing the last generated Function Plan preview (SVG) as entity_picture.
+
+    Fed by coordinator.async_generate_plan_preview, called either from the Preview button
+    (live plan) or a logikplan_visualize service call with format=svg (live or a stored
+    backup snapshot) — both paths update the same coordinator.last_plan_preview, so this
+    sensor always reflects whatever was last generated, regardless of the trigger.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:image-outline"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_plan_preview_sensor"
+        self._attr_translation_key = "plan_preview"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def entity_picture(self) -> str | None:
+        preview = self.coordinator.last_plan_preview
+        if not preview:
+            return None
+        # Cache-buster: the SVG file is overwritten in place on every new preview, so the
+        # frontend needs a changing query param to notice the update.
+        cache_buster = quote(str(preview.get("generated_at", "")), safe="")
+        return f"/local/comexio_{self.coordinator.server_id}_plan_preview.svg?v={cache_buster}"
+
+    @property
+    def native_value(self) -> str | None:
+        preview = self.coordinator.last_plan_preview
+        return preview.get("plan_name") if preview else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        preview = self.coordinator.last_plan_preview or {}
+        return {
+            "source": preview.get("source"),
+            "generated_at": preview.get("generated_at"),
+        }

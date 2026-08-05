@@ -472,6 +472,53 @@ class ComexioAPI:
             _LOGGER.exception("Unexpected error fetching live states: %s", e)
             return {}
 
+    async def get_function_plan_connection_values(self, fub_id: int) -> dict[str, list[Any]]:
+        """Fetch live per-SOURCE-ELEMENT output values for one Function Plan — Studio's own
+        "fupValueData" refresh action, the same /board/dashboard/refresh/ endpoint
+        get_live_states uses. Unlike markers/IOs/WebIOs (get_live_states, resolved to
+        pill elements), this reports values for every block-internal output (an "Oder"
+        gate, a Zeitglied, ...) that carries no marker/IO of its own — the ground truth
+        behind the Function Plan preview's Stufe-2 wire coloring (see
+        [[project-logikplan-preview]]). Returns {source_element_id: [value_per_output_row]}
+        — the dict key is the SOURCE FubElementId (not a connection/wire id: a block with
+        several outputs reports one array for all of them, indexed by output IOPos, and
+        several wires from the same output row share that one value).
+        """
+        url = f"{self._base_url}/board/dashboard/refresh/"
+        payload = {"connection": {"action": "fupValueData", "fupId": fub_id}}
+        form_data = aiohttp.FormData()
+        form_data.add_field("json", json.dumps(payload))
+
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/",
+            "User-Agent": "Mozilla/5.0",
+        }
+
+        _LOGGER.debug("Connection values request: POST %s payload=%s", url, payload)
+        try:
+            async with self.session.post(url, data=form_data, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("Connection values fetch failed (fub=%s, HTTP %s)", fub_id, resp.status)
+                    return {}
+                try:
+                    data = await resp.json(content_type=None)
+                    raw = (data.get("result") or {}).get("connection")
+                    _LOGGER.debug("Connection values raw response (fub=%s): %s", fub_id, raw)
+                    parsed = json.loads(raw) if raw else {}
+                    result = {elem_id: vals if isinstance(vals, list) else [vals] for elem_id, vals in parsed.items()}
+                    _LOGGER.debug("Connection values parsed (fub=%s): %s", fub_id, result)
+                    return result
+                except Exception:
+                    _LOGGER.exception("Failed to parse connection values response (fub=%s)", fub_id)
+                    return {}
+        except aiohttp.ClientError:
+            _LOGGER.exception("HTTP request error fetching connection values (fub=%s)", fub_id)
+            return {}
+        except Exception:
+            _LOGGER.exception("Unexpected error fetching connection values (fub=%s)", fub_id)
+            return {}
+
     def parse_config(self, conf: dict[str, Any], live_states: dict[str, Any] | None = None) -> dict[str, Any]:
         """
         Processes the raw configuration and performs a technical audit.
@@ -561,6 +608,13 @@ class ComexioAPI:
         """Return 'portrait' or 'landscape' for a Logikplan plan, defaulting to 'landscape'."""
         fub = self._fub_data.get(str(fub_id), {})
         return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
+
+    def get_fub_active(self, fub_id: int) -> bool | None:
+        """Return a Logikplan plan's active flag, or None if the plan is not known live."""
+        fub = self._fub_data.get(str(fub_id))
+        if fub is None:
+            return None
+        return bool(int(fub.get("Active") or 0))
 
     def get_fub_canvas_bounds(
         self, fub_id: int, paper_name: str | None = None, orientation: str | None = None

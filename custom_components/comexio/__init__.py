@@ -25,7 +25,7 @@ from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["sensor", "switch", "number", "button", "binary_sensor", "select", "update"]
+PLATFORMS = ["sensor", "switch", "number", "button", "binary_sensor", "select", "image", "update"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -164,6 +164,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_plan_backup_selector")
     active_unique_ids.add(f"comexio_{server_id}_bus_load_sensor")
     active_unique_ids.add(f"comexio_{server_id}_sd_card_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_plan_preview_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_plan_preview_btn")
+    active_unique_ids.add(f"comexio_{server_id}_plan_preview_image")
 
     # Extension firmware updates (update.py): one entity per known extension + BASE. Built the
     # same way as the IO entities above, since extension existence is independent of the

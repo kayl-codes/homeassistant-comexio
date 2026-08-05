@@ -163,6 +163,10 @@ CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = "function_plan_backup_retention_mon
 DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = 6
 TIMESTAMP_DISPLAY_FORMAT = "%d.%m.%Y %H:%M"
 
+# HA-bus event fired for every webhook value push that belongs to the currently rendered
+# live plan preview — consumed by the comexio-plan-card debug box (frontend/).
+EVENT_PLAN_VALUE = "comexio_plan_event"
+
 # Marker for a comment element the restore-as-new path adds to a rebuilt plan, so a user
 # opening it in Comexio Studio immediately understands why it exists and shouldn't hand-edit it.
 FUNCTION_PLAN_MANAGED_PLAN_COMMENT = "! Administrated by HomeAssistant, dont delete or rename !"

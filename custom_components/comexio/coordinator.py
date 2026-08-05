@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 from datetime import datetime, timedelta
 import logging
+import pathlib
 import re
 import socket
 from typing import Any
@@ -11,9 +12,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_time_change, async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .api import ComexioAPI
 from .const import (
@@ -39,6 +41,7 @@ from .const import (
     DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DOMAIN,
+    EVENT_PLAN_VALUE,
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
     FUNCTION_PLAN_FUB_ID_AUTO,
@@ -57,8 +60,9 @@ from .const import (
     snap_to_grid,
     webio_class_label,
 )
-from .function_plan_backup import FunctionPlanBackupManager, retention_cutoff
+from .function_plan_backup import FunctionPlanBackupManager, retention_cutoff, snapshot_label_maps
 from .function_plan_catalog import FunctionPlanCatalogManager
+from .function_plan_render import render_plan_svg
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +77,53 @@ _MANAGED_PLAN_PAPER = "A3"
 _ORIENT_LANDSCAPE = "landscape"
 _ORIENT_PORTRAIT = "portrait"
 _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
+
+# Debounce for live plan-preview refreshes: webhook bursts (e.g. a dimmer ramp) collapse
+# into one re-render at most every ~0.5 s; single value pushes still show up promptly.
+_PREVIEW_LIVE_REFRESH_DELAY = 0.5
+
+# Stufe-2 connection-value poll (see async_generate_plan_preview / _async_poll_connection_values):
+# background cadence while a live plan preview is armed but no debug session is open, and the
+# faster cadence matching the plan card's debug box (comexio_plan_event fires promptly, so the
+# wire colors should keep up while someone is actually watching the log).
+_CONNECTION_POLL_INTERVAL_NORMAL = timedelta(seconds=2)
+_CONNECTION_POLL_INTERVAL_FAST = timedelta(seconds=0.5)
+
+# Calendar-function (type 3) Freq -> sun.sun attribute providing HA's own next-occurrence
+# time for that astro event (computed by HA's sun integration from the configured location,
+# no need to reimplement astral math here). WEEKLY has no astro time and is intentionally
+# absent.
+_SUN_ATTR_BY_FREQ = {
+    "SUN_RISE": "next_rising",
+    "SUN_SET": "next_setting",
+    "DAWN": "next_dawn",
+    "DUSK": "next_dusk",
+}
+
+
+def _build_sun_times(hass: HomeAssistant) -> dict[str, str]:
+    """Pre-format sun.sun's next-occurrence attributes for the plan-preview tooltip.
+
+    Formatting (not just parsing) happens here rather than in function_plan_render.py, which is
+    deliberately HA-free (see its module docstring) — the renderer only ever sees a plain
+    {Freq: "DD.MM. HH:MM"} string dict.
+    """
+    sun_state = hass.states.get("sun.sun")
+    if sun_state is None:
+        return {}
+    sun_times: dict[str, str] = {}
+    for freq, attr in _SUN_ATTR_BY_FREQ.items():
+        raw = sun_state.attributes.get(attr)
+        parsed = dt_util.parse_datetime(raw) if raw else None
+        if parsed is not None:
+            sun_times[freq] = dt_util.as_local(parsed).strftime("%d.%m. %H:%M")
+    return sun_times
+
+
+def _write_preview_svg(path: pathlib.Path, svg_content: str) -> None:
+    """Blocking file write — always run via hass.async_add_executor_job."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(svg_content, encoding="utf-8")
 
 
 async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
@@ -120,6 +171,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id)
         self._function_plan_backup_lock: asyncio.Lock = asyncio.Lock()
         self.last_changed_plans: list[dict[str, Any]] = []
+        # Bulk snapshot of every live plan's elements/connections, refreshed each backup
+        # cycle — lets function_plan_search answer instantly instead of a fresh ~11s
+        # live fetch per plan (Comexio serializes requests server-side regardless of
+        # client-side concurrency, so per-call fetching doesn't parallelize away).
+        self.function_plan_plans: dict[int, dict] = {}
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
@@ -153,6 +209,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # R1: Track which markers/IOs received a webhook update during the last API fetch
         self._webhook_updated_markers: set[str] = set()
         self._webhook_updated_io_ids: set[str] = set()
+        self.last_plan_preview: dict[str, Any] | None = None
+        # In-memory copy of the last rendered preview SVG, served directly by the
+        # image entity (image.py) without touching the config/www file.
+        self.last_plan_preview_svg: str | None = None
+        # Live-value preview refresh (Stufe 1): plan structure of the last LIVE preview is
+        # cached so webhook pushes can re-render it with fresh values without re-fetching
+        # the plan from Comexio; a shown snapshot clears the cache (it must not be
+        # overwritten by live refreshes). Structural plan edits need a new button press.
+        self._preview_plan_cache: dict[str, Any] | None = None
+        self._preview_refresh_cancel: Any = None
+        # Stufe 2: last fetched {connection_id: value} for the armed live plan (see
+        # _async_poll_connection_values) and the timer driving that poll. Cleared/stopped
+        # whenever the live cache above is cleared or points at a different plan.
+        self._connection_values: dict[str, Any] = {}
+        self._connection_poll_cancel: Any = None
+        self._connection_poll_fast_requested: bool = False
         # Extension firmware check: {name -> raw entry} from the last successful
         # checkextension_fwupdate call (see async_start_firmware_update_check). Empty until
         # the first check actually runs, which only happens once per comexio_version change.
@@ -574,6 +646,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 return
             if not plans:
                 return
+            self.function_plan_plans = plans
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
@@ -754,16 +827,285 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.request_options_update_without_reload(new_options)
         return updated
 
+    async def async_generate_plan_preview(
+        self,
+        fub_id: int,
+        plan_name: str,
+        elements: dict[str, Any],
+        connections: dict[str, Any],
+        source: str,
+        label_metadata: dict[str, dict[str, str]] | None = None,
+    ) -> str:
+        """Render elements/connections (live plan or backup snapshot) to a preview SVG file.
+
+        Writes to config/www so the frontend can serve it under /local/. One rotating file
+        per server_id — each call overwrites the previous preview. Updates last_plan_preview
+        so the Plan Preview sensor (entity_picture) reflects whatever was last generated,
+        whether triggered by the Preview button (source='live') or a function_plan_visualize
+        service call with format=svg (source='snapshot:<kind>:<slot>'). Returns the /local/ URL.
+
+        label_metadata: a snapshot's stored labels (snapshot.get("labels"), see
+        function_plan_backup._referenced_label_metadata) — when given, overlaid onto the live
+        label maps so a historical snapshot shows the names it had at capture time rather
+        than today's (possibly since-renamed) live names. None for a live render.
+        """
+        markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(label_metadata)
+        catalog = await self.function_plan_catalog.async_get_catalog()
+        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id)
+        sun_times = _build_sun_times(self.hass)
+        # A plan switch invalidates the previous plan's connection-id values BEFORE this
+        # render — otherwise one frame could color wires from an unrelated plan whose
+        # connection ids happen to collide (the poll below only catches up afterwards).
+        plan_switched = self._preview_plan_cache is None or self._preview_plan_cache["fub_id"] != fub_id
+        if source == "live" and plan_switched:
+            self._connection_values = {}
+        svg_content = render_plan_svg(
+            elements,
+            connections,
+            catalog,
+            markers_by_id,
+            webio_by_id,
+            ios_by_id,
+            plan_name,
+            title_suffix,
+            sun_times,
+            canvas=canvas,
+            connection_values=self._connection_values if source == "live" else None,
+        )
+
+        filename = f"comexio_{self.server_id}_plan_preview.svg"
+        file_path = pathlib.Path(self.hass.config.path("www", filename))
+        await self.hass.async_add_executor_job(_write_preview_svg, file_path, svg_content)
+
+        self.last_plan_preview_svg = svg_content
+        self.last_plan_preview = {
+            "fub_id": fub_id,
+            "plan_name": plan_name,
+            "source": source,
+            "generated_at": dt_util.utcnow().isoformat(),
+        }
+        if source == "live":
+            self._update_live_preview_cache(fub_id, plan_name, elements, connections, plan_switched)
+        elif self._preview_plan_cache is not None and self._preview_plan_cache["fub_id"] != fub_id:
+            self._invalidate_stale_preview_cache()
+        self.async_set_updated_data(self.data)
+        return f"/local/{filename}"
+
+    def _resolve_preview_label_maps(self, label_metadata: dict[str, dict[str, str]] | None) -> tuple[dict, dict, dict]:
+        """Return (markers_by_id, webio_by_id, ios_by_id), overlaid with snapshot labels if given."""
+        markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
+        if label_metadata:
+            markers_by_id, webio_by_id, ios_by_id = snapshot_label_maps(
+                label_metadata, markers_by_id, webio_by_id, ios_by_id
+            )
+        return markers_by_id, webio_by_id, ios_by_id
+
+    def _build_preview_title_and_canvas(self, fub_id: int) -> tuple[str, Any]:
+        """Build the Studio-style title suffix (state + paper/DPI) and canvas bounds for a live plan.
+
+        Title suffix carries the plan's live state + paper/DPI (Studio-style header info),
+        rendered at half the plan-name size. Read from the live fub data — for snapshots
+        of deleted plans it stays empty.
+        """
+        if (active := self.api.get_fub_active(fub_id)) is None:
+            return "", None
+        paper = self.api.get_fub_paper_format(fub_id)
+        dpi = self.api.get_fub_dpi(fub_id)
+        title_suffix = f"[{'aktiv' if active else 'inaktiv'}] [{paper} | {dpi}dpi]"
+        # Paper-sized viewBox: same relative element scale for every plan of this paper
+        # format instead of blowing a nearly empty plan up to full card width.
+        canvas = self.api.get_fub_canvas_bounds(fub_id)
+        return title_suffix, canvas
+
+    def _update_live_preview_cache(
+        self,
+        fub_id: int,
+        plan_name: str,
+        elements: dict[str, Any],
+        connections: dict[str, Any],
+        plan_switched: bool,
+    ) -> None:
+        """Update the live preview cache and restart the connection poll on plan switch."""
+        # marker_ids/io_ids: which value pushes belong to THIS plan — drives the
+        # comexio_plan_event bus events for the card's debug box (type 2 = marker,
+        # type 1 = IO; ref_id semantics as in function_plan_render.resolve_element_label).
+        marker_ids: set[str] = set()
+        io_ids: set[str] = set()
+        for elem in elements.values():
+            ref = elem.get("reference") or {}
+            if ref.get("type") == 2:
+                marker_ids.add(str(ref.get("ref_id")))
+            elif ref.get("type") == 1:
+                io_ids.add(str(ref.get("ref_id")))
+        self._preview_plan_cache = {
+            "fub_id": fub_id,
+            "plan_name": plan_name,
+            "elements": elements,
+            "connections": connections,
+            "marker_ids": marker_ids,
+            "io_ids": io_ids,
+        }
+        if plan_switched:
+            self._restart_connection_poll(fast=self._connection_poll_fast_requested)
+
+    @property
+    def has_live_preview_cache(self) -> bool:
+        """Whether a live plan-preview cache is currently armed (any plan)."""
+        return self._preview_plan_cache is not None
+
+    def prime_live_preview_cache(
+        self, fub_id: int, plan_name: str, elements: dict[str, Any], connections: dict[str, Any]
+    ) -> None:
+        """Prime the live preview cache from outside a live render (button.py's snapshot-view path).
+
+        The backup selector has no "Live" entry — the preview returns to live solely via the
+        webhook-driven refresh, which needs an armed cache. No-op if a cache is already armed
+        (any plan — a foreign one is dropped by async_generate_plan_preview). Delegates to
+        _update_live_preview_cache so marker_ids/io_ids (needed by _fire_plan_event) are built
+        the same way as for a normal live render, instead of callers assembling the dict by hand.
+        """
+        if self._preview_plan_cache is not None:
+            return
+        self._update_live_preview_cache(fub_id, plan_name, elements, connections, plan_switched=True)
+
+    def _invalidate_stale_preview_cache(self) -> None:
+        """Drop the live preview cache when a snapshot of a different plan is on display.
+
+        A same-plan cache stays armed: the backup selector has no "Live" entry, so the
+        webhook refresh is the only way the preview returns to the live view after
+        sighting a snapshot.
+        """
+        self._preview_plan_cache = None
+        self._stop_connection_poll()
+
+    def schedule_plan_preview_refresh(self) -> None:
+        """Debounced re-render of the last LIVE plan preview after a value update.
+
+        Called from the webhook update paths (update_marker/update_io_by_name) so the
+        preview's pill values and red HIGH wires follow the plant in near-real-time.
+        This also repaints the live view over a displayed backup snapshot of the same
+        plan — intentional, since the backup selector has no "Live" entry. No-op while
+        no live plan cache is armed or a refresh is already scheduled; the render after
+        the debounce window reads the then-current coordinator values, so every push
+        that arrives within the window is included in that one refresh.
+        """
+        if self._preview_plan_cache is None or self._preview_refresh_cancel is not None:
+            return
+        self._preview_refresh_cancel = async_call_later(
+            self.hass, _PREVIEW_LIVE_REFRESH_DELAY, self._async_refresh_plan_preview
+        )
+
+    async def _async_refresh_plan_preview(self, _now: Any) -> None:
+        self._preview_refresh_cancel = None
+        cache = self._preview_plan_cache
+        if cache is None:
+            return
+        try:
+            await self.async_generate_plan_preview(
+                cache["fub_id"], cache["plan_name"], cache["elements"], cache["connections"], "live"
+            )
+        except Exception:
+            # Disable further refreshes of this plan; the next preview button press re-arms.
+            self._preview_plan_cache = None
+            _LOGGER.exception("[%s] Live plan preview refresh failed", self.server_id)
+
+    def _restart_connection_poll(self, fast: bool) -> None:
+        """(Re)start the Stufe-2 connection-value poll at the given cadence.
+
+        Replaces any already-running timer (a plan switch or a debug-session toggle both
+        call this) rather than layering a second one — see _CONNECTION_POLL_INTERVAL_*.
+        """
+        if self._connection_poll_cancel is not None:
+            self._connection_poll_cancel()
+        interval = _CONNECTION_POLL_INTERVAL_FAST if fast else _CONNECTION_POLL_INTERVAL_NORMAL
+        self._connection_poll_cancel = async_track_time_interval(
+            self.hass, self._async_poll_connection_values, interval
+        )
+
+    def _stop_connection_poll(self) -> None:
+        if self._connection_poll_cancel is not None:
+            self._connection_poll_cancel()
+            self._connection_poll_cancel = None
+        self._connection_values = {}
+
+    def set_debug_session_active(self, active: bool) -> None:
+        """Switch the Stufe-2 poll cadence for the plan card's debug box (function_plan_debug_session).
+
+        `active` bumps the currently-armed live plan's poll to the 0.5 s cadence matching
+        the card's webhook-debounce responsiveness (user request: wire colors should keep
+        up with the debug log while someone is actually watching it); otherwise the 2 s
+        background cadence continues. A no-op while no live plan preview is armed — the
+        next arm (async_generate_plan_preview) picks up the requested cadence itself.
+        """
+        self._connection_poll_fast_requested = active
+        if self._preview_plan_cache is not None:
+            self._restart_connection_poll(fast=active)
+
+    async def _async_poll_connection_values(self, _now: Any) -> None:
+        """Stufe 2: refresh live per-connection wire values and re-render the armed plan."""
+        cache = self._preview_plan_cache
+        if cache is None:
+            return
+        self._connection_values = await self.api.get_function_plan_connection_values(cache["fub_id"])
+        _LOGGER.debug(
+            "[%s] Connection-value poll fub=%s plan=%s -> %s",
+            self.server_id,
+            cache["fub_id"],
+            cache["plan_name"],
+            self._connection_values,
+        )
+        try:
+            await self.async_generate_plan_preview(
+                cache["fub_id"], cache["plan_name"], cache["elements"], cache["connections"], "live"
+            )
+        except Exception:
+            _LOGGER.exception("[%s] Connection-value plan preview refresh failed", self.server_id)
+
+    async def async_shutdown(self) -> None:
+        """Cancel a pending preview refresh before the coordinator shuts down."""
+        self._stop_connection_poll()
+        if self._preview_refresh_cancel is not None:
+            self._preview_refresh_cancel()
+            self._preview_refresh_cancel = None
+        await super().async_shutdown()
+
+    def _fire_plan_event(self, kind: str, ref_id: str, label: str, value: float | int | str) -> None:
+        """Publish a value push on the HA bus IF it belongs to the live plan on display.
+
+        The comexio-plan-card debug box subscribes to these events to show a timestamped
+        log of everything happening in the currently rendered plan. Gated on the preview
+        cache so an idle dashboard (no live preview armed) causes zero bus traffic.
+        """
+        cache = self._preview_plan_cache
+        if cache is None or ref_id not in cache.get(f"{kind}_ids", ()):
+            return
+        self.hass.bus.async_fire(
+            EVENT_PLAN_VALUE,
+            {
+                "server_id": self.server_id,
+                "fub_id": cache["fub_id"],
+                "plan_name": cache["plan_name"],
+                "type": kind,
+                "id": ref_id,
+                "label": label,
+                "value": value,
+            },
+        )
+
     def update_marker(self, marker_id: str | int, value: float | int | str) -> None:
         marker_id_str = str(marker_id)
         self.marker_states[marker_id_str] = value
         self._webhook_updated_markers.add(marker_id_str)  # R1: mark as received during possible fetch
+        label = f"M{marker_id_str}"
         if self.data and "markers" in self.data:
             for m in self.data["markers"]:
                 if str(m["id"]) == marker_id_str:
                     m["value"] = value
+                    label = m.get("name") or label
                     break
         self.async_set_updated_data(self.data)
+        self._fire_plan_event("marker", marker_id_str, label, value)
+        self.schedule_plan_preview_refresh()
 
     def update_io_by_name(self, ext_name: str, identifier: str, value: float | int | str) -> None:
         key = (ext_name.lower(), identifier.lower())
@@ -771,7 +1113,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.io_states[io["id"]] = value
             io["value"] = value
             self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
+            self._fire_plan_event("io", str(io["id"]), io.get("name") or f"{ext_name} {identifier}", value)
         self.async_set_updated_data(self.data)
+        self.schedule_plan_preview_refresh()
 
     async def async_load_extension_firmware(self) -> None:
         """Restore the last checked firmware snapshot from disk (called once at setup).
