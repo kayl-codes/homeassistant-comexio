@@ -683,7 +683,7 @@ hinzufügen:
 > Ressourcen-URL — nur den `?v=`-Parameter hochzuzählen wird nicht zuverlässig erkannt.
 
 Ohne diese Custom-Karte funktioniert die reine `image.*_plan_vorschau`-Entität auch auf
-einer normalen **Bild-Entität**-Karte — dabei fehlen dann aber Suche, Hover, live
+einer normalen **Bild-Entität**-Karte — dabei fehlen dann aber Suche, Hover, Live-
 Drahtfarben und die Debug-Box (das Bild selbst wird korrekt dargestellt, die
 Bild-Entität-Karte kann nur nicht damit interagieren).
 
