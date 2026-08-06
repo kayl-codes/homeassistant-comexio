@@ -309,11 +309,11 @@ KNOWN_DOMAINS = [
 def expand_ignored_marker_ids(raw: str) -> set[int]:
     """Expand an ignored_markers config string to a set of integer marker IDs.
 
-    Handles comma/semicolon/space separators, optional M/m prefix, and ranges like '8-12'.
+    Handles comma/semicolon/space/dot separators, optional M/m prefix, and ranges like '8-12'.
     Invalid tokens are silently ignored (runtime use; options_flow validates separately).
     """
     result: set[int] = set()
-    for token in raw.replace(";", ",").replace(" ", ",").split(","):
+    for token in raw.replace(";", ",").replace(" ", ",").replace(".", ",").split(","):
         stripped = token.strip().lstrip("Mm")
         if not stripped:
             continue

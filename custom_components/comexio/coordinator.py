@@ -1220,7 +1220,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         self._bus_load_fail_streak = 0
         workload = result.get("workload")
-        if isinstance(workload, bool) or not isinstance(workload, int | float):
+        if isinstance(workload, bool) or not isinstance(workload, (int, float)):
             self.bus_workload = None
         else:
             self.bus_workload = int(workload)
