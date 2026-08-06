@@ -118,7 +118,7 @@ When the extension comes back online, a full HA restart or integration reload wi
 
 ## 📊 Bus Workload Monitoring
 
-The integration polls Comexio's internal bus/CPU workload (`Bus Workload` sensor, in %) and SD-card presence (`SD Card Present`) independently of the main coordinator, every 10 seconds — fast enough to catch short spikes without waiting for the regular audit interval.
+The integration polls Comexio's internal bus/CPU workload (`Bus Workload` sensor, in %) and SD card presence (`SD Card Present`) independently of the main coordinator, every 10 seconds — fast enough to catch short spikes without waiting for the regular audit interval.
 
 The integration only exposes the raw reading; it does not hard-code an "overloaded" threshold or alerting logic. Use Home Assistant's own tools for that — they already handle debounce/hysteresis correctly:
 
@@ -336,7 +336,7 @@ Comexio kann jedes Erweiterungsmodul am lokalen Bus auf verfügbare Firmware-Upd
 
 Die Ergebnisse erscheinen als je eine `update.*`-Entität pro Erweiterungsmodul (im jeweiligen Erweiterungs-Device) sowie eine für den IO-Server-Grundbaustein selbst, jeweils mit installierter/verfügbarer Firmware-Version über die HA-Standard-`update`-Entität (sichtbar in *Einstellungen → Verfügbare Updates*). Diese sind reine Anzeige — der Install-Aufruf von Comexio ist nicht angebunden, ein gefundenes Update wird weiterhin über die Comexio-Admin-Oberfläche eingespielt.
 
-Ein Diagnose-Button **„Firmware jetzt prüfen"** erzwingt die Prüfung sofort, unabhängig vom Versions-Gate (das zugrunde liegende Risiko bleibt aber bestehen — dieselbe kurze Ausgangs-Unterbrechung, vor der Comexio warnt). Damit lassen sich die `update.*`-Entitäten sofort testen, statt auf Versionswechsel und Nacht-Fenster zu warten.
+Ein Diagnose-Button **„Firmware jetzt prüfen“** erzwingt die Prüfung sofort, unabhängig vom Versions-Gate (das zugrunde liegende Risiko bleibt aber bestehen — dieselbe kurze Ausgangs-Unterbrechung, vor der Comexio warnt). Damit lassen sich die `update.*`-Entitäten sofort testen, statt auf Versionswechsel und Nachtfenster zu warten.
 
 ## 🧩 Funktionsplan-Verwaltung (Logikplan)
 

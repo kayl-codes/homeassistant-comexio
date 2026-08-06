@@ -36,27 +36,24 @@ def _normalize_ignored_markers(raw_input: str | None) -> str:
     """Normalize and validate user input for ignored markers before saving.
 
     Accepts: comma/semicolon/space/dot separators, optional M/m prefix, ranges like '8-12'.
-    Returns sorted, deduplicated comma-separated string (e.g. '1,3,4,6,20-25').
+    Returns sorted, deduplicated comma-separated string (e.g. '1,3,4,6,20-25'). A single ID
+    already covered by a range (e.g. '1-3,2') is dropped rather than kept as a redundant entry.
     Raises vol.Invalid if any token is not a valid integer or range.
     """
     if not raw_input or not isinstance(raw_input, str):
         return ""
 
-    seen_ints: set[int] = set()
-    seen_ranges: set[tuple[int, int]] = set()
-    items: list[int | tuple[int, int]] = []
+    ints: set[int] = set()
+    ranges: set[tuple[int, int]] = set()
     invalid_tokens: list[str] = []
 
     for token, parsed in parse_ignored_marker_tokens(raw_input):
         if parsed is None:
             invalid_tokens.append(token)
         elif isinstance(parsed, tuple):
-            if parsed not in seen_ranges:
-                seen_ranges.add(parsed)
-                items.append(parsed)
-        elif parsed not in seen_ints:
-            seen_ints.add(parsed)
-            items.append(parsed)
+            ranges.add(parsed)
+        else:
+            ints.add(parsed)
 
     if invalid_tokens:
         raise vol.Invalid(
@@ -64,6 +61,9 @@ def _normalize_ignored_markers(raw_input: str | None) -> str:
             "Zahlen (z.B. '3', 'M12'), Bereiche (z.B. '8-12') oder Listen (z.B. '1, 3, 5') eingeben."
         )
 
+    ints -= {i for start, end in ranges for i in range(start, end + 1)}
+
+    items: list[int | tuple[int, int]] = [*ranges, *ints]
     items.sort(key=_ignored_marker_sort_key)
     return ",".join(_format_ignored_marker_item(item) for item in items)
 

@@ -317,22 +317,26 @@ def parse_ignored_marker_tokens(raw: str) -> Iterator[tuple[str, int | tuple[int
     expansion, `options_flow._normalize_ignored_markers` uses it for strict UI validation.
     """
     for token in raw.replace(";", ",").replace(" ", ",").replace(".", ",").split(","):
-        stripped = token.strip().lstrip("Mm")
-        if not stripped:
+        display_token = token.strip()
+        if not display_token:
             continue
-        if "-" in stripped:
-            parts = stripped.split("-", 1)
+        parse_token = display_token.lstrip("Mm")
+        if not parse_token:
+            yield display_token, None
+            continue
+        if "-" in parse_token:
+            parts = parse_token.split("-", 1)
             try:
-                start, end = int(parts[0]), int(parts[1].lstrip("Mm"))
+                start, end = int(parts[0]), int(parts[1])
             except ValueError:
-                yield stripped, None
+                yield display_token, None
                 continue
-            yield stripped, (min(start, end), max(start, end))
+            yield display_token, (min(start, end), max(start, end))
         else:
             try:
-                yield stripped, int(stripped)
+                yield display_token, int(parse_token)
             except ValueError:
-                yield stripped, None
+                yield display_token, None
 
 
 def expand_ignored_marker_ids(raw: str) -> set[int]:
