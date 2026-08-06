@@ -10,6 +10,12 @@
 //   type: custom:comexio-plan-card
 //   entity: image.system_iosrv1_plan_vorschau
 
+// Pure, `this`-independent helpers (pattern matching, timestamp formatting) live in a
+// sibling module — see comexio-plan-card-utils.js. Deployment note: this split means the
+// card now ships as TWO files that must be copied together into the same www/hacsfiles
+// folder (relative import path below), not just this one file as before.
+import { matchesPattern, fmtTs } from "./comexio-plan-card-utils.js";
+
 // Version banner: lets the user verify in the browser console WHICH build actually
 // executes — ?v= query bumps proved unreliable against the service-worker cache.
 console.info("comexio-plan-card v0.9.4 (Live-Werte Stufe 2: Debug-Session-Kadenz) loaded");
@@ -571,9 +577,9 @@ class ComexioPlanCard extends HTMLElement {
   _eventHidden(label, target) {
     return this._filterPatterns.some(
       (p) =>
-        this._matchesPattern(label, p) ||
-        (target && this._matchesPattern(target, p)) ||
-        (p.includes("#") && this._matchesPattern(label, p.replaceAll("#", " ")))
+        matchesPattern(label, p) ||
+        (target && matchesPattern(target, p)) ||
+        (p.includes("#") && matchesPattern(label, p.replaceAll("#", " ")))
     );
   }
 
@@ -643,17 +649,8 @@ class ComexioPlanCard extends HTMLElement {
     this._debugLine(`Unbekannter Befehl: ${raw} — verfügbar: /clear, /history`, "err");
   }
 
-  _fmtTs(d) {
-    // dd.MM.yyyy HH:mm:ss.fff (user-specified log timestamp format)
-    const p = (n, l = 2) => String(n).padStart(l, "0");
-    return (
-      `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ` +
-      `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
-    );
-  }
-
   _debugLine(text, cls = "", when = null) {
-    const ts = this._fmtTs(when ? new Date(when) : new Date());
+    const ts = fmtTs(when ? new Date(when) : new Date());
     this._debugLines.push({ ts, text, cls });
     if (this._debugLines.length > 200) {
       this._debugLines.splice(0, this._debugLines.length - 200);
@@ -933,72 +930,7 @@ class ComexioPlanCard extends HTMLElement {
   }
 
   _matches(label) {
-    return this._matchesPattern(label, this._pattern);
-  }
-
-  _matchesPattern(label, pattern) {
-    if (/[?*]/.test(pattern)) {
-      // Wildcards, TOKEN-ANCHORED: ? = exactly one non-space char, * = any run of
-      // non-space chars (also empty). Guards on both ends keep the match from bleeding
-      // into neighbouring id characters — "M4?" hits M40–M49 but not M4/M400, "M4*"
-      // hits M4/M40/M400…. (Mirrored in services.py _build_label_matcher.)
-      const body = pattern
-        // Collapse "**"/"***" to a single "*" first — semantically identical (both mean
-        // "any run of non-space chars"), but adjacent \S* \S* quantifiers on the same
-        // character class are super-linear on backtracking for a non-matching input.
-        .replace(/\*+/g, "*")
-        .split(/([?*])/)
-        .map((t) => this._wildcardToken(t))
-        .join("");
-      try {
-        // Trailing boundary uses a lookahead (broadly supported); the leading boundary
-        // is checked manually in _hasBoundedMatch instead of via lookbehind, which
-        // Safari/WebKit before 16.4 doesn't support.
-        const re = new RegExp(String.raw`${body}(?![\p{L}\p{N}])`, "giu");
-        return this._hasBoundedMatch(label, re);
-      } catch {
-        return false;
-      }
-    }
-    // Plain query: substring test with token guards — an alphanumeric start must not be
-    // preceded by a letter/digit and a trailing digit must not be followed by another
-    // digit, so "M4" hits M4 but not M40/M400/PWM4. Use * for loose matching.
-    const esc = this._escapeRegexLiteral(pattern);
-    const needsLeadingGuard = /^[\p{L}\p{N}]/u.test(pattern);
-    const after = /\d$/.test(pattern) ? String.raw`(?!\d)` : "";
-    try {
-      const re = new RegExp(esc + after, "giu");
-      return this._hasBoundedMatch(label, re, needsLeadingGuard);
-    } catch {
-      return false;
-    }
-  }
-
-  // Emulates a leading `(?<![\p{L}\p{N}])` lookbehind by checking the preceding character
-  // by hand instead — negative lookbehind isn't supported in Safari/WebKit before 16.4,
-  // and a regex that fails to compile there would silently disable all search matching.
-  _hasBoundedMatch(label, globalRegex, needsLeadingGuard = true) {
-    for (const m of label.matchAll(globalRegex)) {
-      const before = m.index > 0 ? label[m.index - 1] : undefined;
-      if (!needsLeadingGuard || !before || !/[\p{L}\p{N}]/u.test(before)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  _wildcardToken(t) {
-    if (t === "?") {
-      return String.raw`\S`;
-    }
-    if (t === "*") {
-      return String.raw`\S*`;
-    }
-    return this._escapeRegexLiteral(t);
-  }
-
-  _escapeRegexLiteral(t) {
-    return t.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
+    return matchesPattern(label, this._pattern);
   }
 
   _applySearch() {
