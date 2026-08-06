@@ -6,7 +6,6 @@ connects markers to their matching WebIO commands on the plan canvas, reusing ex
 canvas elements where possible and claiming free grid slots (via ._grid) for new ones.
 """
 
-import contextlib
 import logging
 import time
 
@@ -20,6 +19,7 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_X_WEBIO as _LAYOUT_X_WEBIO,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
+    expand_ignored_marker_ids,
 )
 from ._context import _ensure_comexio_login, _get_canvas_grid_dims, _plan_activation_note, _resolve_logikplan_plan
 from ._grid import _find_first_free_grid_position, _get_occupied_grid_slots
@@ -28,16 +28,8 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _parse_ignored_marker_ids(conf: dict) -> set[int]:
-    """Parse the ignored_markers option string into a set of marker IDs (invalid tokens are skipped)."""
-    ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()
-    ignored_ids: set[int] = set()
-    if ignored_raw:
-        for token in ignored_raw.replace(";", ",").split(","):
-            stripped = token.strip()
-            if stripped:
-                with contextlib.suppress(ValueError):
-                    ignored_ids.add(int(stripped))
-    return ignored_ids
+    """Parse the ignored_markers option string into a set of marker IDs (supports ranges, e.g. '8-12')."""
+    return expand_ignored_marker_ids(conf.get(CONF_IGNORED_MARKERS, ""))
 
 
 def _resolve_requested_marker_ids(
