@@ -26,6 +26,7 @@ from .const import (
     DOMAIN,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
+    parse_ignored_marker_tokens,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,10 +47,16 @@ def _normalize_ignored_markers(raw_input: str | None) -> str:
     items: list[int | tuple[int, int]] = []
     invalid_tokens: list[str] = []
 
-    for token in raw_input.replace(".", ",").replace(";", ",").replace(" ", ",").split(","):
-        stripped = token.strip().lstrip("Mm")
-        if stripped:
-            _collect_ignored_marker_token(stripped, seen_ints, seen_ranges, items, invalid_tokens)
+    for token, parsed in parse_ignored_marker_tokens(raw_input):
+        if parsed is None:
+            invalid_tokens.append(token)
+        elif isinstance(parsed, tuple):
+            if parsed not in seen_ranges:
+                seen_ranges.add(parsed)
+                items.append(parsed)
+        elif parsed not in seen_ints:
+            seen_ints.add(parsed)
+            items.append(parsed)
 
     if invalid_tokens:
         raise vol.Invalid(
@@ -59,41 +66,6 @@ def _normalize_ignored_markers(raw_input: str | None) -> str:
 
     items.sort(key=_ignored_marker_sort_key)
     return ",".join(_format_ignored_marker_item(item) for item in items)
-
-
-def _collect_ignored_marker_token(
-    stripped: str,
-    seen_ints: set[int],
-    seen_ranges: set[tuple[int, int]],
-    items: list[int | tuple[int, int]],
-    invalid_tokens: list[str],
-) -> None:
-    """Parse one normalized ignored-markers token and append it to items if new and valid."""
-    parsed = _parse_ignored_marker_token(stripped)
-    if parsed is None:
-        invalid_tokens.append(stripped)
-    elif isinstance(parsed, tuple):
-        if parsed not in seen_ranges:
-            seen_ranges.add(parsed)
-            items.append(parsed)
-    elif parsed not in seen_ints:
-        seen_ints.add(parsed)
-        items.append(parsed)
-
-
-def _parse_ignored_marker_token(stripped: str) -> int | tuple[int, int] | None:
-    """Parse one normalized token into an int or a (start, end) range; None if invalid."""
-    if "-" not in stripped:
-        try:
-            return int(stripped)
-        except ValueError:
-            return None
-    parts = stripped.split("-", 1)
-    try:
-        start, end = int(parts[0]), int(parts[1].lstrip("Mm"))
-    except ValueError:
-        return None
-    return (min(start, end), max(start, end))
 
 
 def _ignored_marker_sort_key(item: int | tuple[int, int]) -> int:

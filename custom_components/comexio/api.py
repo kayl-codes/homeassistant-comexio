@@ -51,7 +51,7 @@ class SafeDict(dict):
 
 
 LOCAL_HOSTNAME_RE = re.compile(
-    r"^(?:localhost|" r"(?:[a-zA-Z0-9_-]+\.local)|" r"(?:[a-zA-Z0-9_-]+\.lan)|" r"(?:[a-zA-Z0-9_-]+\.home))\.?$"
+    r"^(?:localhost|(?:[a-zA-Z0-9_-]+\.local)|(?:[a-zA-Z0-9_-]+\.lan)|(?:[a-zA-Z0-9_-]+\.home))\.?$"
 )
 
 # Module-level compiled patterns for get_raw_config (used on every coordinator refresh).

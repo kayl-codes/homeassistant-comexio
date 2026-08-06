@@ -1,4 +1,4 @@
-import contextlib
+from collections.abc import Iterator
 from enum import StrEnum
 import re
 
@@ -306,23 +306,46 @@ KNOWN_DOMAINS = [
 ]
 
 
-def expand_ignored_marker_ids(raw: str) -> set[int]:
-    """Expand an ignored_markers config string to a set of integer marker IDs.
+def parse_ignored_marker_tokens(raw: str) -> Iterator[tuple[str, int | tuple[int, int] | None]]:
+    """Split and parse an ignored_markers string into (token, parsed) pairs.
 
     Handles comma/semicolon/space/dot separators, optional M/m prefix, and ranges like '8-12'.
-    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    Empty tokens are skipped. `parsed` is an int for a single marker ID, a (start, end)
+    tuple for an inclusive range, or None if the token could not be parsed.
+
+    Shared low-level parser: `expand_ignored_marker_ids` below uses it for lenient runtime
+    expansion, `options_flow._normalize_ignored_markers` uses it for strict UI validation.
     """
-    result: set[int] = set()
     for token in raw.replace(";", ",").replace(" ", ",").replace(".", ",").split(","):
         stripped = token.strip().lstrip("Mm")
         if not stripped:
             continue
         if "-" in stripped:
             parts = stripped.split("-", 1)
-            with contextlib.suppress(ValueError):
+            try:
                 start, end = int(parts[0]), int(parts[1].lstrip("Mm"))
-                result.update(range(min(start, end), max(start, end) + 1))
+            except ValueError:
+                yield stripped, None
+                continue
+            yield stripped, (min(start, end), max(start, end))
         else:
-            with contextlib.suppress(ValueError):
-                result.add(int(stripped))
+            try:
+                yield stripped, int(stripped)
+            except ValueError:
+                yield stripped, None
+
+
+def expand_ignored_marker_ids(raw: str) -> set[int]:
+    """Expand an ignored_markers config string to a set of integer marker IDs.
+
+    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    """
+    result: set[int] = set()
+    for _token, parsed in parse_ignored_marker_tokens(raw):
+        if parsed is None:
+            continue
+        if isinstance(parsed, tuple):
+            result.update(range(parsed[0], parsed[1] + 1))
+        else:
+            result.add(parsed)
     return result
