@@ -184,7 +184,7 @@ def _resolve_logikplan_plan(hass: HomeAssistant, call: ServiceCall, error_title:
     domain_data = hass.data.get(DOMAIN, {})
     entry_id = call.data.get("config_entry")
     if not entry_id:
-        entries = list(domain_data.keys())
+        entries = [k for k, v in domain_data.items() if isinstance(v, ComexioCoordinator)]
         if len(entries) != 1:
             _LOGGER.error("config_entry required when multiple Comexio instances exist: %s", entries)
             persistent_notification.async_create(
@@ -192,11 +192,11 @@ def _resolve_logikplan_plan(hass: HomeAssistant, call: ServiceCall, error_title:
             )
             return None
         entry_id = entries[0]
-    if entry_id not in domain_data:
+    coordinator = domain_data.get(entry_id)
+    if not isinstance(coordinator, ComexioCoordinator):
         _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
         return None
 
-    coordinator = domain_data[entry_id]
     api = coordinator.api
     fub_id_raw = call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
     fub_id = _resolve_fub_id(str(fub_id_raw), api.fub_data, hass)
