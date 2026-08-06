@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from enum import StrEnum
 import re
 
@@ -303,3 +304,52 @@ KNOWN_DOMAINS = [
     "mshome.net",
     "internal",
 ]
+
+
+def parse_ignored_marker_tokens(raw: str) -> Iterator[tuple[str, int | tuple[int, int] | None]]:
+    """Split and parse an ignored_markers string into (token, parsed) pairs.
+
+    Handles comma/semicolon/space/dot separators, optional M/m prefix, and ranges like '8-12'.
+    Empty tokens are skipped. `parsed` is an int for a single marker ID, a (start, end)
+    tuple for an inclusive range, or None if the token could not be parsed.
+
+    Shared low-level parser: `expand_ignored_marker_ids` below uses it for lenient runtime
+    expansion, `options_flow._normalize_ignored_markers` uses it for strict UI validation.
+    """
+    for token in raw.replace(";", ",").replace(" ", ",").replace(".", ",").split(","):
+        display_token = token.strip()
+        if not display_token:
+            continue
+        parse_token = display_token.lstrip("Mm")
+        if not parse_token:
+            yield display_token, None
+            continue
+        if "-" in parse_token:
+            parts = parse_token.split("-", 1)
+            try:
+                start, end = int(parts[0]), int(parts[1])
+            except ValueError:
+                yield display_token, None
+                continue
+            yield display_token, (min(start, end), max(start, end))
+        else:
+            try:
+                yield display_token, int(parse_token)
+            except ValueError:
+                yield display_token, None
+
+
+def expand_ignored_marker_ids(raw: str) -> set[int]:
+    """Expand an ignored_markers config string to a set of integer marker IDs.
+
+    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    """
+    result: set[int] = set()
+    for _token, parsed in parse_ignored_marker_tokens(raw):
+        if parsed is None:
+            continue
+        if isinstance(parsed, tuple):
+            result.update(range(parsed[0], parsed[1] + 1))
+        else:
+            result.add(parsed)
+    return result

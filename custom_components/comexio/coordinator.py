@@ -53,6 +53,7 @@ from .const import (
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
     bus_load_signal,
+    expand_ignored_marker_ids,
     fw_update_signal,
     io_audit_key,
     io_column_rows,
@@ -1339,6 +1340,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._skip_next_listener_reload_options = None
         return options
 
+    @property
+    def ignored_marker_ids(self) -> set[int]:
+        """Configured marker IDs excluded from entity creation and Web-IO command generation.
+
+        Parses CONF_IGNORED_MARKERS from the config entry options via
+        expand_ignored_marker_ids() (comma/semicolon/space separators, optional M/m prefix,
+        ranges like '8-12'). Returns an empty set if unset.
+        """
+        ignored_raw = self.config_entry.options.get(CONF_IGNORED_MARKERS, "").strip()
+        if not ignored_raw:
+            return set()
+        return expand_ignored_marker_ids(ignored_raw)
+
     async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
         """Detect invalid/valid ignored marker IDs and manage repair issues."""
         ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()
@@ -1352,18 +1366,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         markers_by_id = {int(m["id"]): m for m in final_data.get("markers", [])}
 
-        for token in ignored_raw.replace(";", ",").split(","):
-            stripped = token.strip()
-            if not stripped:
-                continue
-            try:
-                marker_id = int(stripped)
-                if marker_id in markers_by_id:
-                    valid_ids.append(marker_id)
-                else:
-                    invalid_ids.append(marker_id)
-            except ValueError:
-                _LOGGER.warning("[%s] ignored_markers contains non-integer token: '%s'", self.server_id, stripped)
+        for marker_id in expand_ignored_marker_ids(ignored_raw):
+            if marker_id in markers_by_id:
+                valid_ids.append(marker_id)
+            else:
+                invalid_ids.append(marker_id)
+        valid_ids.sort()
+        invalid_ids.sort()
 
         # Issue 1: Invalid marker IDs
         invalid_issue_id = f"ignored_markers_invalid_{self.server_id}"

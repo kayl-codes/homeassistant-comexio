@@ -100,6 +100,7 @@
           "logikplan_plan_prefix": "Préfixe de nom des plans fonctionnels gérés",
           "logikplan_max_pairs_per_plan": "Nombre max. de paires par plan fonctionnel géré",
           "logikplan_io_extensions": "Extensions gérées comme plans de cluster IO",
+          "ignored_markers": "IDs de marqueurs à exclure de la connexion aux plans de fonction",
           "cover_keywords": "Mots-clés pour la détection des volets",
           "function_plan_backup_retention_months": "Rétention des sauvegardes orphelines"
         },
@@ -109,6 +110,7 @@
           "logikplan_plan_prefix": "Préfixe des plans de cluster créés automatiquement. Les plans seront nommés par ex. : HA - Marker [1-100].",
           "logikplan_max_pairs_per_plan": "Nombre de paires Web-IO + marqueur tenant dans un plan géré avant la création d'un nouveau plan de cluster. Pour les plans de cluster IO, cela correspond à 1 (50), 2 (100) ou 3 (150) extensions par plan.",
           "logikplan_io_extensions": "Les IO de chaque extension sélectionnée sont câblés dans un plan de cluster IO géré (par ex. HA - IO [Ext]), une colonne par extension. Commencez par une seule extension pour tester, puis ajoutez les autres.",
+          "ignored_markers": "IDs de marqueurs et plages séparés par des virgules, points-virgules, espaces ou points, avec ou sans préfixe 'M' (ex. '123, 456; 789' ou 'M123, M456' ou '8-12'). Seuls les marqueurs avec description peuvent être exclus.",
           "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)",
           "function_plan_backup_retention_months": "Les sauvegardes d'un plan supprimé directement dans Comexio sont purgées automatiquement dès qu'elles dépassent cette durée. Les sauvegardes d'un plan encore actif ne sont jamais concernées. Également disponible via l'action 'Function Plan Purge Orphaned Backups' pour un nettoyage manuel."
         }
@@ -212,6 +214,14 @@
     "extension_offline": {
       "title": "Module d'extension Comexio hors ligne ({server_id})",
       "description": "Le(s) module(s) d'extension **{extensions}** sont passés hors ligne pendant le fonctionnement. Cela peut indiquer une panne matérielle ou un problème de connexion. Si le module a été intentionnellement mis hors service, vous pouvez ignorer cette notification."
+    },
+    "ignored_markers_cleanup": {
+      "title": "Nettoyage des marqueurs ignorés ({server_id})",
+      "description": "Les marqueurs suivants sont marqués comme ignorés : {ids}. Leurs entités Home Assistant, webhooks et connexions Web-IO Comexio peuvent maintenant être supprimés. Cliquez sur 'Corriger' pour lancer le nettoyage."
+    },
+    "ignored_markers_invalid": {
+      "title": "IDs de marqueurs ignorés invalides ({server_id})",
+      "description": "Les IDs de marqueurs suivants dans la liste des marqueurs ignorés sont invalides ou sans description : {ids}. Ces marqueurs ne peuvent pas être ignorés. Veuillez les retirer de la liste ignored_markers dans les options de l'intégration."
     }
   }
 }

@@ -568,7 +568,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             pct=(pct_start + pct_end) // 2,
             step_info="Uploading configuration",
         )
-        web_io_json = api.generate_webio_json(self.server_id, class_name, self.coordinator.data, webio_class=cls)
+        web_io_json = api.generate_webio_json(
+            self.server_id,
+            class_name,
+            self.coordinator.data,
+            webio_class=cls,
+            ignored_marker_ids=self.coordinator.ignored_marker_ids,
+        )
         success, res_id = await api.upload_web_io(self.server_id, class_name, web_io_json)
         if not success:
             raise RuntimeError(f"Upload failed ({label}): {res_id}")
@@ -778,7 +784,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 "skipped_creates": 0,
                 "created_names": [
                     cmd["Name"]
-                    for cmd in ctx.api.build_webio_commands(self.server_id, self.coordinator.data, webio_class=cls)
+                    for cmd in ctx.api.build_webio_commands(
+                        self.server_id,
+                        self.coordinator.data,
+                        webio_class=cls,
+                        ignored_marker_ids=self.coordinator.ignored_marker_ids,
+                    )
                 ],
             }
 

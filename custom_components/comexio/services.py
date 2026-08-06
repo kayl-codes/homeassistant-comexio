@@ -480,9 +480,12 @@ async def _resolve_backup_identity(
     if not identities:
         return None, f"No stored backups for plan {fub_id}."
     names = ", ".join(f"'{name}'" for name, _ in identities)
-    return None, (
-        f"fub_id {fub_id} is ambiguous — {len(identities)} different plan identities share this reused ID in "  # nosec B608
-        f"the backup store ({names}). Please reselect from the Plan/Snapshot dropdown."
+    return (
+        None,
+        (
+            f"fub_id {fub_id} is ambiguous — {len(identities)} different plan identities share this reused ID in "  # nosec B608
+            f"the backup store ({names}). Please reselect from the Plan/Snapshot dropdown."
+        ),
     )
 
 
@@ -1689,7 +1692,13 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
             preview_parts = []
             for cls in WEBIO_CLASSES:
                 class_name = webio_class_name(webio_name, cls)
-                web_io_json = api.generate_webio_json(server_id, class_name, coordinator.data, webio_class=cls)
+                web_io_json = api.generate_webio_json(
+                    server_id,
+                    class_name,
+                    coordinator.data,
+                    webio_class=cls,
+                    ignored_marker_ids=coordinator.ignored_marker_ids,
+                )
                 preview_parts.append(f"**{class_name}**\n```json\n{web_io_json}\n```")
             persistent_notification.async_create(
                 hass, "\n\n".join(preview_parts), title=f"Comexio Preview ({server_id})"
@@ -1699,7 +1708,13 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
         results: list[str] = []
         for cls in WEBIO_CLASSES:
             class_name = webio_class_name(webio_name, cls)
-            web_io_json = api.generate_webio_json(server_id, class_name, coordinator.data, webio_class=cls)
+            web_io_json = api.generate_webio_json(
+                server_id,
+                class_name,
+                coordinator.data,
+                webio_class=cls,
+                ignored_marker_ids=coordinator.ignored_marker_ids,
+            )
 
             base_info = await api.get_webio_base_info(class_name)
             if base_info:
