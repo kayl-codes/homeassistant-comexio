@@ -28,7 +28,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _parse_ignored_marker_ids(conf: dict) -> set[int]:
-    """Parse the ignored_markers option string into a set of marker IDs (supports ranges, e.g. '8-12')."""
+    """Parse the ignored_markers option string into a set of marker IDs.
+
+    Delegates entirely to expand_ignored_marker_ids (see its docstring for separator/
+    whitespace/range/invalid-token handling) so this wrapper can't drift from it.
+    """
     return expand_ignored_marker_ids(conf.get(CONF_IGNORED_MARKERS, ""))
 
 
