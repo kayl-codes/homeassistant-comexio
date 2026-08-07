@@ -92,7 +92,7 @@ def _pill_parts_io(rid: str, ios_by_id: dict) -> tuple[str, str, str]:
         ext, ident = io.get("ext_name", ""), io.get("identifier", "")
         # Two non-breaking spaces between extension and IO (SVG collapses plain
         # whitespace runs); the "#" stays as Comexio's own IO marker.
-        id_text = f"{ext}  #{ident}"
+        id_text = f"{ext}  #{ident}"
         return id_text, _strip_prefix(io["name"], f"{ext} {ident}"), _fmt_value(io.get("value"))
     return "IO", f"ref={rid}", ""
 
