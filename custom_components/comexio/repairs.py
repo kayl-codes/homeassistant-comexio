@@ -66,7 +66,7 @@ class ComexioRepairFlow(RepairsFlow):
             except Exception as e:
                 _LOGGER.exception("Error in async_step_ignored_markers_invalid: %s", e)
                 raise
-        if "uninstall_cleanup" in self.issue_id:
+        if self.issue_id.startswith("uninstall_cleanup_"):
             _LOGGER.debug("Routing to async_step_uninstall_cleanup")
             return await self.async_step_uninstall_cleanup()
 

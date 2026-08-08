@@ -854,15 +854,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             dev = webio_devices.get(cls, {})
             device_id = dev.get("device_id")
             base_id = dev.get("base_id")
-            label = "Marker" if cls == WEBIO_CLASS_MARKER else "IO"
             if not device_id:
                 continue
             if not await self.api.delete_webio_device(device_id):
-                skipped[label] = "device still in use"
+                skipped[cls] = "device still in use"
                 continue
-            devices[label] = str(device_id)
+            devices[cls] = str(device_id)
             if base_id and await self.api.delete_webio_base(base_id):
-                classes[label] = str(base_id)
+                classes[cls] = str(base_id)
 
         _LOGGER.info(
             "[%s] Uninstall cleanup: plans deleted=%s failed=%s, devices=%s, classes=%s, skipped=%s",
