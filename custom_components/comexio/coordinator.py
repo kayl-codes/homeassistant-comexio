@@ -839,7 +839,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         deleted_plans: list[str] = []
         failed_plans: list[str] = []
         for plan_name, fub_id in plan_map.items():
-            if await self.api.delete_fup(int(fub_id)):
+            try:
+                fub_id_int = int(fub_id)
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "[%s] Uninstall cleanup: skipping plan %r with invalid fub_id %r",
+                    self.server_id,
+                    plan_name,
+                    fub_id,
+                )
+                failed_plans.append(plan_name)
+                continue
+            if await self.api.delete_fup(fub_id_int):
                 deleted_plans.append(plan_name)
             else:
                 failed_plans.append(plan_name)

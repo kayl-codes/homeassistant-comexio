@@ -665,9 +665,11 @@ class ComexioRepairFlow(RepairsFlow):
 
         Split out of async_step_uninstall_cleanup so the repair dialog can close
         immediately instead of blocking on multiple sequential Comexio calls. The
-        reload is mandatory here — the plans/devices/classes just deleted in Comexio
+        reload only runs on success — the plans/devices/classes deleted in Comexio
         would otherwise leave stale entities and a stale plan_map behind until the
-        next scheduled poll or manual reload.
+        next scheduled poll or manual reload. On failure we skip the reload so the
+        integration keeps running against its last-known-good state instead of
+        masking the failure behind a fresh reload.
         """
         conf = {**entry.data, **entry.options}
         notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
@@ -706,6 +708,13 @@ class ComexioRepairFlow(RepairsFlow):
                 title=f"Comexio Uninstall Cleanup ({coordinator.server_id})",
                 notification_id=notif_id,
             )
+
+        if not succeeded:
+            _LOGGER.warning(
+                "[%s] Uninstall cleanup failed — skipping reload to keep the integration on its last-known-good state.",
+                coordinator.server_id,
+            )
+            return
 
         # Give a listener-triggered reload from _persist_plan_map's options write (R2) a
         # moment to see the skip flag and return before we force our own explicit reload.
