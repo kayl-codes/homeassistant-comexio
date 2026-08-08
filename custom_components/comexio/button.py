@@ -1439,6 +1439,7 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
     """
 
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
