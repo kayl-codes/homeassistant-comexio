@@ -136,6 +136,9 @@
       },
       "plan_preview": {
         "name": "Aperçu"
+      },
+      "uninstall_cleanup": {
+        "name": "Nettoyage de désinstallation (test)"
       }
     },
     "image": {
@@ -222,6 +225,17 @@
     "ignored_markers_invalid": {
       "title": "IDs de marqueurs ignorés invalides ({server_id})",
       "description": "Les IDs de marqueurs suivants dans la liste des marqueurs ignorés sont invalides ou sans description : {ids}. Ces marqueurs ne peuvent pas être ignorés. Veuillez les retirer de la liste ignored_markers dans les options de l'intégration."
+    },
+    "uninstall_cleanup": {
+      "title": "Nettoyage de désinstallation Comexio ({server_id})",
+      "fix_flow": {
+        "step": {
+          "uninstall_cleanup": {
+            "title": "Nettoyage de désinstallation",
+            "description": "Ceci supprime tout ce que l'intégration a créé dans Comexio : **{plan_count} plan(s) de fonctions**, **{device_count} appareil(s) Web-IO**, et **{class_count} classe(s) Web-IO**.\n\n⚠️ **Cette action est irréversible.** Les plans de fonctions créés par cette intégration, y compris leur câblage, seront définitivement supprimés.\n\nVoulez-vous continuer ?"
+          }
+        }
+      }
     }
   }
 }

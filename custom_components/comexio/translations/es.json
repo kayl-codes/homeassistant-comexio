@@ -136,6 +136,9 @@
       },
       "plan_preview": {
         "name": "Vista previa"
+      },
+      "uninstall_cleanup": {
+        "name": "Limpieza de desinstalación (prueba)"
       }
     },
     "image": {
@@ -222,6 +225,17 @@
     "ignored_markers_invalid": {
       "title": "IDs de marcadores ignorados no válidos ({server_id})",
       "description": "Los siguientes IDs de marcadores en la lista de marcadores ignorados no son válidos o no tienen descripción: {ids}. Estos marcadores no se pueden ignorar. Elimínelos de la lista ignored_markers en las opciones de la integración."
+    },
+    "uninstall_cleanup": {
+      "title": "Limpieza de desinstalación de Comexio ({server_id})",
+      "fix_flow": {
+        "step": {
+          "uninstall_cleanup": {
+            "title": "Limpieza de desinstalación",
+            "description": "Esto elimina todo lo que la integración creó en Comexio: **{plan_count} plan(es) de funciones**, **{device_count} dispositivo(s) Web-IO**, y **{class_count} clase(s) Web-IO**.\n\n⚠️ **Esta acción no se puede deshacer.** Los planes de funciones creados por esta integración, incluido su cableado, se eliminarán permanentemente.\n\n¿Deseas continuar?"
+          }
+        }
+      }
     }
   }
 }

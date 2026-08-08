@@ -3,16 +3,20 @@ import asyncio
 import logging
 import re
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.repairs import RepairsFlow
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
 import voluptuous as vol
 
 from .const import (
+    CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
+    DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_RECREATE,
@@ -62,6 +66,9 @@ class ComexioRepairFlow(RepairsFlow):
             except Exception as e:
                 _LOGGER.exception("Error in async_step_ignored_markers_invalid: %s", e)
                 raise
+        if "uninstall_cleanup" in self.issue_id:
+            _LOGGER.debug("Routing to async_step_uninstall_cleanup")
+            return await self.async_step_uninstall_cleanup()
 
         _LOGGER.debug("Routing to fallback async_step_select_action")
         return await self.async_step_select_action()
@@ -601,3 +608,102 @@ class ComexioRepairFlow(RepairsFlow):
             description=description,
             data_schema=vol.Schema({vol.Required("action", default="dismiss"): vol.In(options)}),
         )
+
+    async def async_step_uninstall_cleanup(self, user_input=None):
+        """Handle the uninstall/cleanup repair flow (test button).
+
+        Tears down everything the integration created in Comexio: HA-managed Function
+        Plans, then the Web-IO device instances, then the Web-IO device classes. This
+        is destructive and not reversible, so — unlike the other fix flows — the
+        default choice is 'ignore', not 'fix'.
+        """
+        entry_id = self.issue_data.get("entry_id")
+
+        if user_input is not None:
+            action = user_input["action"]
+
+            if action == "ignore":
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                return self.async_create_entry(title="Cancelled", data={})
+
+            # action == "fix": several sequential Comexio round-trips (one per plan,
+            # device and class) can add up past the repair dialog's UI timeout — same
+            # reasoning as the sync button's press_action, which also runs non-blocking
+            # instead of being awaited inline here.
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            coordinator = self.hass.data[DOMAIN].get(entry_id)
+            if not coordinator or not entry:
+                return self.async_abort(reason="entry_not_found")
+
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            self.hass.async_create_task(self._async_run_cleanup(coordinator, entry))
+
+            return self.async_create_entry(title="Cleanup started in background", data={})
+
+        plan_count = self.issue_data.get("plan_count", 0)
+        device_count = self.issue_data.get("device_count", 0)
+        class_count = self.issue_data.get("class_count", 0)
+
+        options = {
+            "fix": f"⚠️ Delete now ({plan_count} plans, {device_count} devices, {class_count} classes)",
+            "ignore": "🔇 Cancel",
+        }
+
+        return self.async_show_form(
+            step_id="uninstall_cleanup",
+            description_placeholders={
+                "plan_count": str(plan_count),
+                "device_count": str(device_count),
+                "class_count": str(class_count),
+            },
+            data_schema=vol.Schema({vol.Required("action", default="ignore"): vol.In(options)}),
+        )
+
+    async def _async_run_cleanup(self, coordinator, entry: ConfigEntry) -> None:
+        """Background task: run the actual teardown, reload the integration so it
+        picks up a clean state, and report the result.
+
+        Split out of async_step_uninstall_cleanup so the repair dialog can close
+        immediately instead of blocking on multiple sequential Comexio calls. The
+        reload is mandatory here — the plans/devices/classes just deleted in Comexio
+        would otherwise leave stale entities and a stale plan_map behind until the
+        next scheduled poll or manual reload.
+        """
+        conf = {**entry.data, **entry.options}
+        notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
+        notif_id = f"comexio_uninstall_cleanup_{coordinator.server_id}"
+        result = None
+
+        try:
+            result = await coordinator.async_uninstall_cleanup()
+        except Exception:
+            _LOGGER.exception("[%s] Uninstall cleanup failed", coordinator.server_id)
+            if notify_enabled:
+                persistent_notification.async_create(
+                    self.hass,
+                    "The cleanup task failed unexpectedly. Check the log for details.",
+                    title=f"Comexio Uninstall Cleanup Failed ({coordinator.server_id})",
+                    notification_id=notif_id,
+                )
+
+        if result and notify_enabled:
+            msg = (
+                f"✅ **Cleanup finished**\n\n"
+                f"* Plans removed: {len(result['deleted_plans'])} (failed: {len(result['failed_plans'])})\n"
+                f"* Devices removed: {len(result['deleted_devices'])}\n"
+                f"* Classes removed: {len(result['deleted_classes'])}\n"
+                f"* Skipped (still in use): {len(result['skipped'])}\n\n"
+                f"🔄 Reloading the integration now..."
+            )
+            persistent_notification.async_create(
+                self.hass,
+                msg,
+                title=f"Comexio Uninstall Cleanup ({coordinator.server_id})",
+                notification_id=notif_id,
+            )
+
+        # Give a listener-triggered reload from _persist_plan_map's options write (R2) a
+        # moment to see the skip flag and return before we force our own explicit reload.
+        await asyncio.sleep(0.5)
+        _LOGGER.info("[%s] Reloading integration after uninstall cleanup...", coordinator.server_id)
+        await self.hass.config_entries.async_reload(entry.entry_id)

@@ -828,6 +828,59 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.request_options_update_without_reload(new_options)
         return updated
 
+    async def async_uninstall_cleanup(self) -> dict[str, Any]:
+        """Tear down everything the integration created in Comexio: HA-managed Function
+        Plans (CONF_FUNCTION_PLAN_PLAN_MAP), then the Web-IO device instances, then the
+        Web-IO device classes — in that order, since Comexio refuses to delete a device
+        or class still in use. Best-effort per phase; a failure in one plan/class does
+        not block the others, and failed plan deletions stay in plan_map for a retry.
+        """
+        plan_map = dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}))
+        deleted_plans: list[str] = []
+        failed_plans: list[str] = []
+        for plan_name, fub_id in plan_map.items():
+            if await self.api.delete_fup(int(fub_id)):
+                deleted_plans.append(plan_name)
+            else:
+                failed_plans.append(plan_name)
+        if deleted_plans:
+            await self._persist_plan_map({}, removals=set(deleted_plans))
+
+        devices: dict[str, str] = {}
+        classes: dict[str, str] = {}
+        skipped: dict[str, str] = {}
+        webio_devices = self.last_audit_results.get("webio_devices", {})
+        for cls in WEBIO_CLASSES:
+            dev = webio_devices.get(cls, {})
+            device_id = dev.get("device_id")
+            base_id = dev.get("base_id")
+            label = "Marker" if cls == WEBIO_CLASS_MARKER else "IO"
+            if not device_id:
+                continue
+            if not await self.api.delete_webio_device(device_id):
+                skipped[label] = "device still in use"
+                continue
+            devices[label] = str(device_id)
+            if base_id and await self.api.delete_webio_base(base_id):
+                classes[label] = str(base_id)
+
+        _LOGGER.info(
+            "[%s] Uninstall cleanup: plans deleted=%s failed=%s, devices=%s, classes=%s, skipped=%s",
+            self.server_id,
+            deleted_plans,
+            failed_plans,
+            devices,
+            classes,
+            skipped,
+        )
+        return {
+            "deleted_plans": deleted_plans,
+            "failed_plans": failed_plans,
+            "deleted_devices": devices,
+            "deleted_classes": classes,
+            "skipped": skipped,
+        }
+
     async def async_generate_plan_preview(
         self,
         fub_id: int,
