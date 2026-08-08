@@ -673,9 +673,11 @@ class ComexioRepairFlow(RepairsFlow):
         notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
         notif_id = f"comexio_uninstall_cleanup_{coordinator.server_id}"
         result = None
+        succeeded = False
 
         try:
             result = await coordinator.async_uninstall_cleanup()
+            succeeded = True
         except Exception:
             _LOGGER.exception("[%s] Uninstall cleanup failed", coordinator.server_id)
             if notify_enabled:
@@ -686,15 +688,18 @@ class ComexioRepairFlow(RepairsFlow):
                     notification_id=notif_id,
                 )
 
-        if result and notify_enabled:
-            msg = (
-                f"✅ **Cleanup finished**\n\n"
-                f"* Plans removed: {len(result['deleted_plans'])} (failed: {len(result['failed_plans'])})\n"
-                f"* Devices removed: {len(result['deleted_devices'])}\n"
-                f"* Classes removed: {len(result['deleted_classes'])}\n"
-                f"* Skipped (still in use): {len(result['skipped'])}\n\n"
-                f"🔄 Reloading the integration now..."
-            )
+        if succeeded and notify_enabled:
+            if result:
+                msg = (
+                    f"✅ **Cleanup finished**\n\n"
+                    f"* Plans removed: {len(result['deleted_plans'])} (failed: {len(result['failed_plans'])})\n"
+                    f"* Devices removed: {len(result['deleted_devices'])}\n"
+                    f"* Classes removed: {len(result['deleted_classes'])}\n"
+                    f"* Skipped (still in use): {len(result['skipped'])}\n\n"
+                    f"🔄 Reloading the integration now..."
+                )
+            else:
+                msg = "Cleanup finished, but returned no result data. Check the log for details."
             persistent_notification.async_create(
                 self.hass,
                 msg,

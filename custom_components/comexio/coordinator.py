@@ -849,6 +849,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         devices: dict[str, str] = {}
         classes: dict[str, str] = {}
         skipped: dict[str, str] = {}
+        # Force a fresh audit rather than trusting a poll-interval-old snapshot — devices
+        # created/removed since the last poll would otherwise be missed or acted on stale.
+        await self.async_request_refresh()
         webio_devices = self.last_audit_results.get("webio_devices", {})
         for cls in WEBIO_CLASSES:
             dev = webio_devices.get(cls, {})
