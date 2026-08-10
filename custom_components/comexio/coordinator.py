@@ -874,7 +874,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if not device_id:
                 continue
             if not await self.api.delete_webio_device(device_id):
-                skipped[cls] = "device still in use"
+                skipped[cls] = "delete_webio_device failed"
                 continue
             devices[cls] = str(device_id)
             if not base_id:
