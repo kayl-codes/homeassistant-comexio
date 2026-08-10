@@ -136,6 +136,9 @@
       },
       "plan_preview": {
         "name": "Vorschau"
+      },
+      "uninstall_cleanup": {
+        "name": "Deinstallations-Bereinigung (Test)"
       }
     },
     "image": {
@@ -225,6 +228,17 @@
     "ignored_markers_invalid": {
       "title": "Ungültige ignorierte Merker ({server_id})",
       "description": "Die folgenden Merker-IDs in der Liste ignorierter Merker sind ungültig oder haben keine Beschreibung: {ids}. Diese Merker können nicht ignoriert werden. Bitte entfernen Sie sie aus der `ignored_markers` Liste in den Integrationsoptionen."
+    },
+    "uninstall_cleanup": {
+      "title": "Comexio Deinstallations-Bereinigung ({server_id})",
+      "fix_flow": {
+        "step": {
+          "uninstall_cleanup": {
+            "title": "Deinstallations-Bereinigung",
+            "description": "Dies entfernt alles, was die Integration in Comexio angelegt hat: {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e), und {class_count} Web-IO-Klasse(n).\n\nDies kann nicht rückgängig gemacht werden. Von dieser Integration angelegte Logikpläne werden inklusive ihrer Verdrahtung endgültig gelöscht.\n\nMöchtest du fortfahren?"
+          }
+        }
+      }
     }
   }
 }

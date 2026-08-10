@@ -828,6 +828,94 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.request_options_update_without_reload(new_options)
         return updated
 
+    async def _delete_managed_plans(self, plan_map: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """Delete all HA-managed Function Plans. Returns (deleted, failed) plan names."""
+        deleted_plans: list[str] = []
+        failed_plans: list[str] = []
+        for plan_name, fub_id in plan_map.items():
+            try:
+                fub_id_int = int(fub_id)
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "[%s] Uninstall cleanup: skipping plan %r with invalid fub_id %r",
+                    self.server_id,
+                    plan_name,
+                    fub_id,
+                )
+                failed_plans.append(plan_name)
+                continue
+            if await self.api.delete_fup(fub_id_int):
+                deleted_plans.append(plan_name)
+            else:
+                failed_plans.append(plan_name)
+        return deleted_plans, failed_plans
+
+    async def _delete_webio_devices_and_classes(
+        self,
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+        """Delete all Web-IO device instances, then their classes. Returns
+        (devices, classes, failed_classes, skipped)."""
+        devices: dict[str, str] = {}
+        classes: dict[str, str] = {}
+        # Base-deletion failures are tracked separately from `skipped` so callers can tell
+        # "class deletion failed" apart from "no base was configured for this class".
+        failed_classes: dict[str, str] = {}
+        skipped: dict[str, str] = {}
+        # Force a fresh audit rather than trusting a poll-interval-old snapshot — devices
+        # created/removed since the last poll would otherwise be missed or acted on stale.
+        await self.async_request_refresh()
+        webio_devices = self.last_audit_results.get("webio_devices", {})
+        for cls in WEBIO_CLASSES:
+            dev = webio_devices.get(cls, {})
+            device_id = dev.get("device_id")
+            base_id = dev.get("base_id")
+            if not device_id:
+                continue
+            if not await self.api.delete_webio_device(device_id):
+                skipped[cls] = "delete_webio_device failed"
+                continue
+            devices[cls] = str(device_id)
+            if not base_id:
+                continue
+            if await self.api.delete_webio_base(base_id):
+                classes[cls] = str(base_id)
+            else:
+                failed_classes[cls] = "delete_webio_base failed"
+        return devices, classes, failed_classes, skipped
+
+    async def async_uninstall_cleanup(self) -> dict[str, Any]:
+        """Tear down everything the integration created in Comexio: HA-managed Function
+        Plans (CONF_FUNCTION_PLAN_PLAN_MAP), then the Web-IO device instances, then the
+        Web-IO device classes — in that order, since Comexio refuses to delete a device
+        or class still in use. Best-effort per phase; a failure in one plan/class does
+        not block the others, and failed plan deletions stay in plan_map for a retry.
+        """
+        plan_map = dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}))
+        deleted_plans, failed_plans = await self._delete_managed_plans(plan_map)
+        if deleted_plans:
+            await self._persist_plan_map({}, removals=set(deleted_plans))
+
+        devices, classes, failed_classes, skipped = await self._delete_webio_devices_and_classes()
+
+        _LOGGER.info(
+            "[%s] Uninstall cleanup: plans deleted=%s failed=%s, devices=%s, classes=%s, failed_classes=%s, skipped=%s",
+            self.server_id,
+            deleted_plans,
+            failed_plans,
+            devices,
+            classes,
+            failed_classes,
+            skipped,
+        )
+        return {
+            "deleted_plans": deleted_plans,
+            "failed_plans": failed_plans,
+            "deleted_devices": devices,
+            "deleted_classes": classes,
+            "failed_classes": failed_classes,
+            "skipped": skipped,
+        }
+
     async def async_generate_plan_preview(
         self,
         fub_id: int,

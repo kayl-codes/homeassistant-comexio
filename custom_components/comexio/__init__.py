@@ -156,6 +156,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_entity_id_fix_btn")
     active_unique_ids.add(f"comexio_{server_id}_fw_check_btn")
     active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
+    active_unique_ids.add(f"comexio_{server_id}_uninstall_cleanup_btn")
     active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
     active_unique_ids.add(f"comexio_{server_id}_logikplan_plan_selector")
     active_unique_ids.add(f"comexio_{server_id}_function_plan_backups_sensor")

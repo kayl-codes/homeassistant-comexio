@@ -136,6 +136,9 @@
       },
       "plan_preview": {
         "name": "Preview"
+      },
+      "uninstall_cleanup": {
+        "name": "Uninstall Cleanup (Test)"
       }
     },
     "image": {
@@ -222,6 +225,17 @@
     "ignored_markers_invalid": {
       "title": "Invalid ignored markers ({server_id})",
       "description": "The following marker IDs in the ignored_markers list are invalid or have no description: {ids}. These markers cannot be ignored. Please remove them from the ignored_markers list in the integration options."
+    },
+    "uninstall_cleanup": {
+      "title": "Comexio Uninstall Cleanup ({server_id})",
+      "fix_flow": {
+        "step": {
+          "uninstall_cleanup": {
+            "title": "Uninstall Cleanup",
+            "description": "This removes everything the integration created in Comexio: {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\nThis cannot be undone. Function Plans created by this integration, including their wiring, will be permanently deleted.\n\nDo you want to continue?"
+          }
+        }
+      }
     }
   }
 }

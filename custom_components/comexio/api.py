@@ -925,6 +925,40 @@ class ComexioAPI:
                 _LOGGER.error("Failed to delete Web-IO base %s (HTTP %s)", base_id, resp.status)
             return resp.status == 200
 
+    async def delete_fup(self, fub_id: int) -> bool:
+        """Delete an entire Function Plan (not just elements within it).
+
+        Same redirect-verification pattern as create_fup: the server responds with a
+        302 redirect to the plan overview, carrying 'delete=ok' in the Location header
+        on success.
+        """
+        url = f"{self._base_url}/admin/function_function_module/delete/?id={fub_id}"
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        _LOGGER.info("delete_fup: deleting Function Plan fub_id=%s", fub_id)
+        try:
+            async with self.session.get(url, headers=headers, allow_redirects=False) as resp:
+                if resp.status not in (301, 302, 303):
+                    _LOGGER.error("delete_fup: unexpected HTTP status %s for fub_id=%s", resp.status, fub_id)
+                    return False
+                redirect_location = resp.headers.get("Location", "")
+                success = "delete=ok" in redirect_location
+                if not success:
+                    _LOGGER.error(
+                        "delete_fup: redirect missing 'delete=ok' (fub_id=%s, location: %s)",
+                        fub_id,
+                        redirect_location,
+                    )
+                return success
+        except aiohttp.ClientError:
+            _LOGGER.exception("delete_fup: HTTP request error deleting fub_id=%s", fub_id)
+            return False
+        except Exception:
+            _LOGGER.exception("delete_fup: unexpected error deleting fub_id=%s", fub_id)
+            return False
+
     async def update_webio_device_ip(self, device_id: str | int, ha_address: str, webio_name: str) -> bool:
         """
         Updates the server address (IP:Port) of an existing device.

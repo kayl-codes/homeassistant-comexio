@@ -14,7 +14,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr, entity_platform, entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_platform, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -23,6 +23,7 @@ import voluptuous as vol
 from .const import (
     CONF_ENABLE_NOTIFICATIONS,
     CONF_FUNCTION_PLAN_IO_EXTENSIONS,
+    CONF_FUNCTION_PLAN_PLAN_MAP,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
     SYNC_DURATION_DELETE,
@@ -126,8 +127,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     stats_cleanup_button = ComexioStatisticsCleanupButton(coordinator, coordinator.server_id)
     fw_check_button = ComexioFirmwareCheckButton(coordinator, coordinator.server_id)
     preview_button = ComexioPlanPreviewButton(coordinator, coordinator.server_id)
+    uninstall_cleanup_button = ComexioCleanupButton(coordinator, coordinator.server_id)
     async_add_entities(
-        [sync_button, cancel_button, migration_button, stats_cleanup_button, fw_check_button, preview_button]
+        [
+            sync_button,
+            cancel_button,
+            migration_button,
+            stats_cleanup_button,
+            fw_check_button,
+            preview_button,
+            uninstall_cleanup_button,
+        ]
     )
 
     # Register the entity service.
@@ -1255,8 +1265,6 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Migrate entity_ids by removing the duplicate server_id prefix."""
-        from homeassistant.helpers import issue_registry as ir
-
         self.coordinator.async_migrate_entity_ids()
         ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
         self.coordinator.async_set_updated_data(self.coordinator.data)
@@ -1293,7 +1301,6 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Delete the orphaned statistic_ids via the recorder."""
         from homeassistant.components.recorder import get_instance
-        from homeassistant.helpers import issue_registry as ir
 
         ids = list(self.coordinator.orphaned_statistics)
         if ids and "recorder" in self.hass.config.components:
@@ -1420,4 +1427,63 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
             return
         await self.coordinator.async_generate_plan_preview(
             fub_id, plan_name, plan_data.get("elements", {}), plan_data.get("connections", {}), "live"
+        )
+
+
+class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
+    """Test button: raises a Repair issue to tear down everything the integration
+    created in Comexio (managed Function Plans, Web-IO devices, Web-IO classes).
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_uninstall_cleanup_btn"
+        self._attr_translation_key = "uninstall_cleanup"
+        self._attr_icon = "mdi:delete-sweep"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    async def async_press(self) -> None:
+        """Raise a Repair issue summarizing what would be torn down. The actual
+        deletion only runs when the user confirms it in the Repair dialog."""
+        plan_map = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        # Force a fresh audit rather than trusting a poll-interval-old snapshot — devices
+        # created/removed since the last poll would otherwise be missed or acted on stale.
+        await self.coordinator.async_request_refresh()
+        webio_devices = self.coordinator.last_audit_results.get("webio_devices", {})
+        device_count = sum(1 for dev in webio_devices.values() if dev.get("device_id"))
+        class_count = sum(1 for dev in webio_devices.values() if dev.get("base_id"))
+
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            f"uninstall_cleanup_{self.server_id}",
+            is_fixable=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="uninstall_cleanup",
+            translation_placeholders={
+                "server_id": self.server_id,
+                "plan_count": str(len(plan_map)),
+                "device_count": str(device_count),
+                "class_count": str(class_count),
+            },
+            data={
+                "entry_id": self.coordinator.config_entry.entry_id,
+                "plan_count": len(plan_map),
+                "device_count": device_count,
+                "class_count": class_count,
+            },
         )
