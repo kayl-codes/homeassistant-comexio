@@ -626,6 +626,9 @@ class ComexioRepairFlow(RepairsFlow):
                 ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
                 return self.async_create_entry(title="Cancelled", data={})
 
+            if not entry_id:
+                return self.async_abort(reason="missing_entry_id")
+
             # action == "fix": several sequential Comexio round-trips (one per plan,
             # device and class) can add up past the repair dialog's UI timeout — same
             # reasoning as the sync button's press_action, which also runs non-blocking
