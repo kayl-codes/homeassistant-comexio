@@ -680,6 +680,8 @@ class ComexioRepairFlow(RepairsFlow):
         try:
             result = await coordinator.async_uninstall_cleanup()
             succeeded = True
+        except asyncio.CancelledError:
+            raise
         except Exception:
             _LOGGER.exception("[%s] Uninstall cleanup failed", coordinator.server_id)
             if notify_enabled:
