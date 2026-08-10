@@ -828,14 +828,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.request_options_update_without_reload(new_options)
         return updated
 
-    async def async_uninstall_cleanup(self) -> dict[str, Any]:
-        """Tear down everything the integration created in Comexio: HA-managed Function
-        Plans (CONF_FUNCTION_PLAN_PLAN_MAP), then the Web-IO device instances, then the
-        Web-IO device classes — in that order, since Comexio refuses to delete a device
-        or class still in use. Best-effort per phase; a failure in one plan/class does
-        not block the others, and failed plan deletions stay in plan_map for a retry.
-        """
-        plan_map = dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}))
+    async def _delete_managed_plans(self, plan_map: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """Delete all HA-managed Function Plans. Returns (deleted, failed) plan names."""
         deleted_plans: list[str] = []
         failed_plans: list[str] = []
         for plan_name, fub_id in plan_map.items():
@@ -854,9 +848,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 deleted_plans.append(plan_name)
             else:
                 failed_plans.append(plan_name)
-        if deleted_plans:
-            await self._persist_plan_map({}, removals=set(deleted_plans))
+        return deleted_plans, failed_plans
 
+    async def _delete_webio_devices_and_classes(
+        self,
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+        """Delete all Web-IO device instances, then their classes. Returns
+        (devices, classes, failed_classes, skipped)."""
         devices: dict[str, str] = {}
         classes: dict[str, str] = {}
         # Base-deletion failures are tracked separately from `skipped` so callers can tell
@@ -883,6 +881,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 classes[cls] = str(base_id)
             else:
                 failed_classes[cls] = "delete_webio_base failed"
+        return devices, classes, failed_classes, skipped
+
+    async def async_uninstall_cleanup(self) -> dict[str, Any]:
+        """Tear down everything the integration created in Comexio: HA-managed Function
+        Plans (CONF_FUNCTION_PLAN_PLAN_MAP), then the Web-IO device instances, then the
+        Web-IO device classes — in that order, since Comexio refuses to delete a device
+        or class still in use. Best-effort per phase; a failure in one plan/class does
+        not block the others, and failed plan deletions stay in plan_map for a retry.
+        """
+        plan_map = dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}))
+        deleted_plans, failed_plans = await self._delete_managed_plans(plan_map)
+        if deleted_plans:
+            await self._persist_plan_map({}, removals=set(deleted_plans))
+
+        devices, classes, failed_classes, skipped = await self._delete_webio_devices_and_classes()
 
         _LOGGER.info(
             "[%s] Uninstall cleanup: plans deleted=%s failed=%s, devices=%s, classes=%s, failed_classes=%s, skipped=%s",
