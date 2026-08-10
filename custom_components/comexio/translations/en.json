@@ -232,7 +232,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Uninstall Cleanup",
-            "description": "This removes everything the integration created in Comexio: **{plan_count} Function Plan(s)**, **{device_count} Web-IO device(s)**, and **{class_count} Web-IO class(es)**.\n\n⚠️ **This cannot be undone.** Function Plans created by this integration, including their wiring, will be permanently deleted.\n\nDo you want to continue?"
+            "description": "This removes everything the integration created in Comexio: {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\nThis cannot be undone. Function Plans created by this integration, including their wiring, will be permanently deleted.\n\nDo you want to continue?"
           }
         }
       }

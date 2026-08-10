@@ -645,8 +645,8 @@ class ComexioRepairFlow(RepairsFlow):
         class_count = self.issue_data.get("class_count", 0)
 
         options = {
-            "fix": f"⚠️ Delete now ({plan_count} plans, {device_count} devices, {class_count} classes)",
-            "ignore": "🔇 Cancel",
+            "fix": f"Delete now ({plan_count} plans, {device_count} devices, {class_count} classes)",
+            "ignore": "Cancel",
         }
 
         return self.async_show_form(
@@ -693,12 +693,12 @@ class ComexioRepairFlow(RepairsFlow):
         if succeeded and notify_enabled:
             if result:
                 msg = (
-                    f"✅ **Cleanup finished**\n\n"
-                    f"* Plans removed: {len(result['deleted_plans'])} (failed: {len(result['failed_plans'])})\n"
-                    f"* Devices removed: {len(result['deleted_devices'])}\n"
-                    f"* Classes removed: {len(result['deleted_classes'])}\n"
-                    f"* Skipped (still in use): {len(result['skipped'])}\n\n"
-                    f"🔄 Reloading the integration now..."
+                    f"Cleanup finished\n\n"
+                    f"Plans removed: {len(result['deleted_plans'])} (failed: {len(result['failed_plans'])})\n"
+                    f"Devices removed: {len(result['deleted_devices'])}\n"
+                    f"Classes removed: {len(result['deleted_classes'])}\n"
+                    f"Skipped (still in use): {len(result['skipped'])}\n\n"
+                    f"Reloading the integration now..."
                 )
             else:
                 msg = "Cleanup finished, but returned no result data. Check the log for details."

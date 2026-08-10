@@ -235,7 +235,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Deinstallations-Bereinigung",
-            "description": "Dies entfernt alles, was die Integration in Comexio angelegt hat: **{plan_count} Logikplan/-pläne**, **{device_count} Web-IO-Gerät(e)**, und **{class_count} Web-IO-Klasse(n)**.\n\n⚠️ **Dies kann nicht rückgängig gemacht werden.** Von dieser Integration angelegte Logikpläne werden inklusive ihrer Verdrahtung endgültig gelöscht.\n\nMöchtest du fortfahren?"
+            "description": "Dies entfernt alles, was die Integration in Comexio angelegt hat: {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e), und {class_count} Web-IO-Klasse(n).\n\nDies kann nicht rückgängig gemacht werden. Von dieser Integration angelegte Logikpläne werden inklusive ihrer Verdrahtung endgültig gelöscht.\n\nMöchtest du fortfahren?"
           }
         }
       }

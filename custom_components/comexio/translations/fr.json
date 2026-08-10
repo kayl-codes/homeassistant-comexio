@@ -232,7 +232,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Nettoyage de désinstallation",
-            "description": "Ceci supprime tout ce que l'intégration a créé dans Comexio : **{plan_count} plan(s) de fonctions**, **{device_count} appareil(s) Web-IO**, et **{class_count} classe(s) Web-IO**.\n\n⚠️ **Cette action est irréversible.** Les plans de fonctions créés par cette intégration, y compris leur câblage, seront définitivement supprimés.\n\nVoulez-vous continuer ?"
+            "description": "Ceci supprime tout ce que l'intégration a créé dans Comexio : {plan_count} plan(s) de fonctions, {device_count} appareil(s) Web-IO, et {class_count} classe(s) Web-IO.\n\nCette action est irréversible. Les plans de fonctions créés par cette intégration, y compris leur câblage, seront définitivement supprimés.\n\nVoulez-vous continuer ?"
           }
         }
       }

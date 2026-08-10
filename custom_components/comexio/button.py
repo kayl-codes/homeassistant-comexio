@@ -1465,6 +1465,9 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
         from homeassistant.helpers import issue_registry as ir
 
         plan_map = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        # Force a fresh audit rather than trusting a poll-interval-old snapshot — devices
+        # created/removed since the last poll would otherwise be missed or acted on stale.
+        await self.coordinator.async_request_refresh()
         webio_devices = self.coordinator.last_audit_results.get("webio_devices", {})
         device_count = sum(1 for dev in webio_devices.values() if dev.get("device_id"))
         class_count = sum(1 for dev in webio_devices.values() if dev.get("base_id"))

@@ -232,7 +232,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Limpieza de desinstalación",
-            "description": "Esto elimina todo lo que la integración creó en Comexio: **{plan_count} plan(es) de funciones**, **{device_count} dispositivo(s) Web-IO**, y **{class_count} clase(s) Web-IO**.\n\n⚠️ **Esta acción no se puede deshacer.** Los planes de funciones creados por esta integración, incluido su cableado, se eliminarán permanentemente.\n\n¿Deseas continuar?"
+            "description": "Esto elimina todo lo que la integración creó en Comexio: {plan_count} plan(es) de funciones, {device_count} dispositivo(s) Web-IO, y {class_count} clase(s) Web-IO.\n\nEsta acción no se puede deshacer. Los planes de funciones creados por esta integración, incluido su cableado, se eliminarán permanentemente.\n\n¿Deseas continuar?"
           }
         }
       }
