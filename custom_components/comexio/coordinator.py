@@ -859,6 +859,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         devices: dict[str, str] = {}
         classes: dict[str, str] = {}
+        # Base-deletion failures are tracked separately from `skipped` so callers can tell
+        # "class deletion failed" apart from "no base was configured for this class".
+        failed_classes: dict[str, str] = {}
         skipped: dict[str, str] = {}
         # Force a fresh audit rather than trusting a poll-interval-old snapshot — devices
         # created/removed since the last poll would otherwise be missed or acted on stale.
@@ -874,16 +877,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 skipped[cls] = "device still in use"
                 continue
             devices[cls] = str(device_id)
-            if base_id and await self.api.delete_webio_base(base_id):
+            if not base_id:
+                continue
+            if await self.api.delete_webio_base(base_id):
                 classes[cls] = str(base_id)
+            else:
+                failed_classes[cls] = "delete_webio_base failed"
 
         _LOGGER.info(
-            "[%s] Uninstall cleanup: plans deleted=%s failed=%s, devices=%s, classes=%s, skipped=%s",
+            "[%s] Uninstall cleanup: plans deleted=%s failed=%s, devices=%s, classes=%s, failed_classes=%s, skipped=%s",
             self.server_id,
             deleted_plans,
             failed_plans,
             devices,
             classes,
+            failed_classes,
             skipped,
         )
         return {
@@ -891,6 +899,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "failed_plans": failed_plans,
             "deleted_devices": devices,
             "deleted_classes": classes,
+            "failed_classes": failed_classes,
             "skipped": skipped,
         }
 

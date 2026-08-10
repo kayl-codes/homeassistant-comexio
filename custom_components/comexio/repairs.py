@@ -696,7 +696,7 @@ class ComexioRepairFlow(RepairsFlow):
                     f"Cleanup finished\n\n"
                     f"Plans removed: {len(result['deleted_plans'])} (failed: {len(result['failed_plans'])})\n"
                     f"Devices removed: {len(result['deleted_devices'])}\n"
-                    f"Classes removed: {len(result['deleted_classes'])}\n"
+                    f"Classes removed: {len(result['deleted_classes'])} (failed: {len(result['failed_classes'])})\n"
                     f"Skipped (still in use): {len(result['skipped'])}\n\n"
                     f"Reloading the integration now..."
                 )

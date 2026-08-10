@@ -14,7 +14,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr, entity_platform, entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_platform, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -1265,8 +1265,6 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Migrate entity_ids by removing the duplicate server_id prefix."""
-        from homeassistant.helpers import issue_registry as ir
-
         self.coordinator.async_migrate_entity_ids()
         ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
         self.coordinator.async_set_updated_data(self.coordinator.data)
@@ -1303,7 +1301,6 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Delete the orphaned statistic_ids via the recorder."""
         from homeassistant.components.recorder import get_instance
-        from homeassistant.helpers import issue_registry as ir
 
         ids = list(self.coordinator.orphaned_statistics)
         if ids and "recorder" in self.hass.config.components:
@@ -1462,8 +1459,6 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Raise a Repair issue summarizing what would be torn down. The actual
         deletion only runs when the user confirms it in the Repair dialog."""
-        from homeassistant.helpers import issue_registry as ir
-
         plan_map = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         # Force a fresh audit rather than trusting a poll-interval-old snapshot — devices
         # created/removed since the last poll would otherwise be missed or acted on stale.
