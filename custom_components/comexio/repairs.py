@@ -338,14 +338,21 @@ class ComexioRepairFlow(RepairsFlow):
             o_c = counts.get("orphan", 0)
             i_c = counts.get("ip_mismatch", 0)
             lp_missing_c = counts.get("function_plan_missing", 0)
-            # Coordinator-computed estimate scaling with the affected plans' element counts
-            # (reactivation dominates and grows with plan size); the flat formula only
-            # serves stale issues created before the estimate was added to the issue data.
+            lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
+            # Fallback for stale issues created before the coordinator started storing an
+            # exact estimate: approximate the affected-plan count from the detail split (one
+            # finalize cost per marker-cluster plan / IO extension) instead of a flat single
+            # SYNC_DURATION_FUNCTION_PLAN_FINALIZE, which would undercount multi-plan repairs.
+            affected_plan_count = (
+                max(1, len(lp_detail.get("markers_by_plan", {})) + len(lp_detail.get("ios_by_ext", {})))
+                if lp_detail
+                else 1
+            )
             lp_missing_eta_sec = counts.get(
                 "function_plan_missing_eta_sec",
-                lp_missing_c * SYNC_DURATION_FUNCTION_PLAN_PAIR + SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+                lp_missing_c * SYNC_DURATION_FUNCTION_PLAN_PAIR
+                + SYNC_DURATION_FUNCTION_PLAN_FINALIZE * affected_plan_count,
             )
-            lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
 
             config_issues = t_c + m_c + r_c + o_c + lp_missing_c
             ha_count = placeholders.get("ha_count", "0")
