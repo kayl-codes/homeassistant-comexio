@@ -276,7 +276,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 plan_summary = await self._wire_created_pairs(ctx, created_names, gap_items)
 
                 duration = datetime.datetime.now() - start_time
-                duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
+                duration_str = f"{_mmss(duration.total_seconds())} min"
                 msg = self._build_sync_result_message(
                     added,
                     updated,
@@ -401,8 +401,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     @staticmethod
     def _build_function_plan_add_missing_message(plan_summary: list[str], duration: datetime.timedelta) -> str:
         """Compose the result notification for the standalone Function Plan wiring action."""
-        duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
         body = "\n".join(plan_summary) if plan_summary else "Nothing to do — all pairs were already wired."
+        duration_str = f"{_mmss(duration.total_seconds())} min"
         return f"✅ **Function Plan update finished**\n\n{body}\n\n⏱ Total duration: {duration_str}"
 
     def _build_sync_result_message(
