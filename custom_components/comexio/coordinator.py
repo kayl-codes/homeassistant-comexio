@@ -9,7 +9,7 @@ import socket
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
@@ -448,9 +448,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Check whether a function plan is actively selected (guards against false positives).
             # At startup the select entity is not yet in the state machine; fall back to the
             # fub_id persisted in options by async_select_option.
-            _lp_uid = f"comexio_{self.server_id}_logikplan_plan_selector"
-            _lp_eid = er.async_get(self.hass).async_get_entity_id("select", DOMAIN, _lp_uid)
-            _lp_sel = self.hass.states.get(_lp_eid) if _lp_eid else None
+            _lp_sel = self._active_plan_selector_state()
             if _lp_sel and _lp_sel.state not in ("unavailable", "unknown"):
                 has_active_plan = True
             else:
@@ -1957,6 +1955,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             translation_placeholders={"plans": plans_str},
         )
 
+    def _active_plan_selector_state(self) -> State | None:
+        """State of this server's Function Plan selector entity, or None if not registered yet."""
+        uid = f"comexio_{self.server_id}_logikplan_plan_selector"
+        entity_id = er.async_get(self.hass).async_get_entity_id("select", DOMAIN, uid)
+        return self.hass.states.get(entity_id) if entity_id else None
+
     def _function_plan_check_fub_ids(self) -> set[int]:
         """Collect the fub_ids of every managed plan relevant for the wiring audit.
 
@@ -1964,9 +1968,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         startup fallback) and every cluster plan from CONF_FUNCTION_PLAN_PLAN_MAP.
         """
         fub_ids: set[int] = set()
-        _lp_uid = f"comexio_{self.server_id}_logikplan_plan_selector"
-        _lp_eid = er.async_get(self.hass).async_get_entity_id("select", DOMAIN, _lp_uid)
-        _lp_sel = self.hass.states.get(_lp_eid) if _lp_eid else None
+        _lp_sel = self._active_plan_selector_state()
 
         if _lp_sel and _lp_sel.state not in ("unavailable", "unknown"):
             fub_id_str = next((fid for fid, fd in self.api.fub_data.items() if fd.get("Name") == _lp_sel.state), None)
