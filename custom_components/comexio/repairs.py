@@ -58,6 +58,34 @@ def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
     return lines
 
 
+def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> str:
+    """Label of the add-missing repair action, worded by gap kind.
+
+    Entirely missing cluster plans get "Add Function Plan(s)", whole extensions
+    "Add extension(s) to Function Plan"; individual missing connections
+    (partially wired plans/extensions, legacy issues) keep "Wire in Function Plan".
+    """
+    markers_by_plan = detail.get("markers_by_plan", {}) if detail else {}
+    ios_by_ext = detail.get("ios_by_ext", {}) if detail else {}
+    if not markers_by_plan and not ios_by_ext:
+        return f"🔗 Wire in Function Plan ({lp_missing_c}x{eta})"
+    parts = []
+    if markers := sum(gap for gap, _total in markers_by_plan.values()):
+        parts.append(f"{markers} markers")
+    parts.extend(f"{ext} +{gap} IOs" for ext, (gap, _total) in ios_by_ext.items())
+    detail_str = f"({', '.join(parts)},{eta})"
+    all_whole = all(gap == total for gap, total in markers_by_plan.values()) and all(
+        gap == total for gap, total in ios_by_ext.values()
+    )
+    if not all_whole:
+        return f"🔗 Wire in Function Plan {detail_str}"
+    if markers_by_plan:
+        noun = "Function Plan" if len(markers_by_plan) == 1 and not ios_by_ext else "Function Plans"
+        return f"🧩 Add {noun} {detail_str}"
+    noun = "extension" if len(ios_by_ext) == 1 else "extensions"
+    return f"🧩 Add {noun} to Function Plan {detail_str}"
+
+
 async def async_setup_entry(hass: HomeAssistant, entry):
     """Set up the repairs platform."""
     return True
@@ -467,6 +495,12 @@ class ComexioRepairFlow(RepairsFlow):
                 label = "🗑️ Waisen löschen" if is_de else "🗑️ Delete Orphans Only"
                 specific_options["delete_orphans"] = f"{label} ({counts['orphan']}x == {t})"
 
+            if lp_missing_c > 0:
+                lp_add_eta = format_time(lp_missing_eta_sec)
+                specific_options["function_plan_add_missing"] = _function_plan_option_label(
+                    lp_missing_c, lp_detail, lp_add_eta
+                )
+
             if counts.get("ip_mismatch", 0) > 0:
                 if is_de:
                     label = "🌐 HA Server-Adresse (IP:Port) aktualisieren"
@@ -482,6 +516,8 @@ class ComexioRepairFlow(RepairsFlow):
             # Always add IP duration if a mismatch exists (Delta Sync requires explicit update)
             if counts.get("ip_mismatch", 0) > 0:
                 total_sec += SYNC_DURATION_WRITE
+            if lp_missing_c > 0:
+                total_sec += lp_missing_eta_sec
 
             t_full = format_time(total_sec)
 

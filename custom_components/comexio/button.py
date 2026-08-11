@@ -155,6 +155,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                     "update_renames",
                     "delete_orphans",
                     "update_ip",
+                    "function_plan_add_missing",
                 ]
             )
         },
@@ -252,35 +253,43 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 update_status=update_status,
             )
 
-            (
-                added,
-                removed,
-                updated,
-                renamed,
-                updated_ip,
-                recreated_classes,
-                skipped_creates,
-                per_class,
-                created_names,
-            ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
+            gap_items = audit_data.get("function_plan_missing", [])
 
-            plan_summary = await self._wire_created_pairs(ctx, created_names)
+            if action == "function_plan_add_missing":
+                # Standalone action: wire pre-existing but unwired pairs only, no Web-IO sync.
+                plan_summary = await self._wire_created_pairs(ctx, [], gap_items)
+                duration = datetime.datetime.now() - start_time
+                msg = self._build_function_plan_add_missing_message(plan_summary, duration)
+            else:
+                (
+                    added,
+                    removed,
+                    updated,
+                    renamed,
+                    updated_ip,
+                    recreated_classes,
+                    skipped_creates,
+                    per_class,
+                    created_names,
+                ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
 
-            duration = datetime.datetime.now() - start_time
-            duration_str = f"{duration.seconds // 60}:{duration.seconds % 60:02d} min"
-            msg = self._build_sync_result_message(
-                added,
-                updated,
-                renamed,
-                removed,
-                recreated_classes,
-                updated_ip,
-                duration_str,
-                skipped_creates,
-                per_class,
-            )
-            if plan_summary:
-                msg += "\n\n**Function Plan:**\n" + "\n".join(plan_summary)
+                plan_summary = await self._wire_created_pairs(ctx, created_names, gap_items)
+
+                duration = datetime.datetime.now() - start_time
+                duration_str = f"{_mmss(duration.total_seconds())} min"
+                msg = self._build_sync_result_message(
+                    added,
+                    updated,
+                    renamed,
+                    removed,
+                    recreated_classes,
+                    updated_ip,
+                    duration_str,
+                    skipped_creates,
+                    per_class,
+                )
+                if plan_summary:
+                    msg += "\n\n**Function Plan:**\n" + "\n".join(plan_summary)
 
             self.coordinator.last_audit_failed = False
             update_status(msg, pct=100, step_info="Done")
@@ -388,6 +397,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             per_class,
             created_names,
         )
+
+    @staticmethod
+    def _build_function_plan_add_missing_message(plan_summary: list[str], duration: datetime.timedelta) -> str:
+        """Compose the result notification for the standalone Function Plan wiring action."""
+        body = "\n".join(plan_summary) if plan_summary else "Nothing to do — all pairs were already wired."
+        duration_str = f"{_mmss(duration.total_seconds())} min"
+        return f"✅ **Function Plan update finished**\n\n{body}\n\n⏱ Total duration: {duration_str}"
 
     def _build_sync_result_message(
         self,
@@ -823,7 +839,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     # --- MANAGED CLUSTER PLAN WIRING ---
 
-    async def _wire_created_pairs(self, ctx: _SyncContext, created_names: list[str]) -> list[str]:
+    async def _wire_created_pairs(
+        self, ctx: _SyncContext, created_names: list[str], gap_items: list[dict]
+    ) -> list[str]:
         """Wire every Web-IO command created in this run into its managed cluster plan.
 
         Marker commands are distributed across marker cluster plans (one per ID range),
@@ -831,20 +849,33 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         extensions the user opted into (CONF_FUNCTION_PLAN_IO_EXTENSIONS), and never for
         an extension that is currently offline (its hardware isn't there, so wiring it is
         pointless; the next sync picks it up once it's back).
+
+        For a full sync (or the standalone wiring-only action), pairs the audit found
+        already existing but not yet wired (gap_items) are merged in too — a Fast-Track
+        recreate never touches Function Plan wiring on its own, so pre-existing gaps must
+        still be closed here, not just pairs freshly created in this run.
         Returns per-plan summary lines for the final sync notification.
         """
-        marker_ids: list[int] = []
-        io_items: list[dict[str, str]] = []
         managed_exts = set(self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
         managed_exts -= self.coordinator.offline_extensions or set()
 
+        created_marker_ids: list[int] = []
+        created_io_refs: list[tuple[str, str]] = []
         for name in created_names:
             if (mid := _parse_marker_id_from_webio_name(name)) is not None:
-                marker_ids.append(mid)
-            elif (io_ref := _parse_io_from_webio_name(name)) is not None and io_ref[0] in managed_exts:
-                io_items.append({"ext_name": io_ref[0], "identifier": io_ref[1]})
+                created_marker_ids.append(mid)
+            elif (io_ref := _parse_io_from_webio_name(name)) is not None:
+                created_io_refs.append(io_ref)
 
-        marker_ids = list(dict.fromkeys(marker_ids))
+        if ctx.action in {"full_sync", "function_plan_add_missing"}:
+            gap_marker_ids = [item["marker_id"] for item in gap_items if "marker_id" in item]
+            gap_io_items = [item for item in gap_items if "marker_id" not in item]
+        else:
+            gap_marker_ids = []
+            gap_io_items = []
+
+        marker_ids = list(dict.fromkeys(created_marker_ids + gap_marker_ids))
+        io_items = _merge_io_items(created_io_refs, gap_io_items, managed_exts)
         if not marker_ids and not io_items:
             return []
 
@@ -1147,6 +1178,18 @@ def _parse_io_from_webio_name(name: str) -> tuple[str, str] | None:
     if len(parts) >= 4 and parts[0] == "HA" and parts[1] == "IO":
         return parts[2], parts[3]
     return None
+
+
+def _merge_io_items(created_refs: list[tuple[str, str]], gap_items: list[dict], managed_exts: set[str]) -> list[dict]:
+    """Merge freshly created IO commands (managed extensions only) with audit gap items,
+    deduplicated by (ext_name, identifier)."""
+    merged: dict[tuple[str, str], dict] = {}
+    for ext, ident in created_refs:
+        if ext in managed_exts:
+            merged[(ext, ident)] = {"ext_name": ext, "identifier": ident}
+    for item in gap_items:
+        merged.setdefault((item["ext_name"], item["identifier"]), item)
+    return list(merged.values())
 
 
 class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
