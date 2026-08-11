@@ -236,6 +236,10 @@
           }
         }
       }
+    },
+    "duplicate_plan_names": {
+      "title": "Duplicate Comexio plan names",
+      "description": "Two or more function plans share the exact same name: {plans}.\n\nComexio doesn't enforce unique plan names — only the internal plan ID actually is unique — but this integration resolves plans by name in several places (Connect, Sort, Restore, …). With duplicate names, a name-based lookup could silently target the wrong plan.\n\nYou can technically leave it like this and nothing breaks today, but it's a latent risk — especially for `function_plan_restore`, if that plan is ever deleted and needs restoring. **Recommendation: rename one of the duplicates in Comexio Studio** to remove the ambiguity for good."
     }
   }
 }

@@ -120,6 +120,13 @@ SCAN_INTERVAL_OPTIONS = ["1", "5", "10", "15", "30", "45", "60", "120", "300", "
 SYNC_DURATION_DELETE = 4
 SYNC_DURATION_WRITE = 35
 SYNC_DURATION_RECREATE = 79
+SYNC_DURATION_FUNCTION_PLAN_PAIR = 3  # fallback per-pair estimate for stale issues without an eta in their data
+SYNC_DURATION_FUNCTION_PLAN_FINALIZE = (
+    14  # PER-PLAN base: change backup, config reload, stop round-trips (measured live)
+)
+SYNC_DURATION_FUNCTION_PLAN_ELEMENT = (
+    0.45  # per element in the plan: reposition + activation compile time (measured live)
+)
 
 MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400

@@ -239,6 +239,10 @@
           }
         }
       }
+    },
+    "duplicate_plan_names": {
+      "title": "Doppelte Comexio-Plan-Namen",
+      "description": "Zwei oder mehr Funktionspläne tragen exakt denselben Namen: {plans}.\n\nComexio erzwingt keine eindeutigen Plan-Namen — nur die interne Plan-ID ist wirklich eindeutig — aber diese Integration löst Pläne an mehreren Stellen über den Namen auf (Connect, Sort, Restore, …). Bei doppelten Namen könnte eine namensbasierte Suche unbemerkt den falschen Plan treffen.\n\nDu kannst das technisch so lassen, aktuell bricht dadurch nichts — es ist aber ein latentes Risiko, besonders bei `function_plan_restore`, falls dieser Plan mal gelöscht wird und wiederhergestellt werden muss. **Empfehlung: einen der doppelten Namen in Comexio Studio umbenennen**, um die Mehrdeutigkeit dauerhaft zu beseitigen."
     }
   }
 }
