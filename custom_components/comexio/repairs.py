@@ -19,6 +19,8 @@ from .const import (
     DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
     SYNC_DURATION_DELETE,
+    SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    SYNC_DURATION_FUNCTION_PLAN_PAIR,
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
 )
@@ -28,6 +30,32 @@ _MARKER_ID_SUFFIX_RE = re.compile(r"(\d+)")
 
 ACTION_FIX = "fix"
 ACTION_IGNORE = "ignore"
+
+
+def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
+    """Summary bullets for missing Function Plan wiring, split by marker-cluster vs. IO-
+    extension gaps.
+
+    A whole cluster with nothing wired (all markers of that ID range / all IOs of that
+    extension missing) reads as "cluster plan missing/not yet created" instead of a bare
+    gap count — this also covers a managed cluster plan that was deleted directly in
+    Comexio. Issues created before the detail split carry no detail dict -> single legacy
+    line.
+    """
+    if not detail:
+        return [f"* 🔗 **Not wired in Function Plan:** {lp_missing_c}"]
+    lines = []
+    for plan_name, (gap, total) in detail.get("markers_by_plan", {}).items():
+        if gap == total:
+            lines.append(f"* 🧩 **Marker cluster plan {plan_name} missing:** all {gap} markers")
+        else:
+            lines.append(f"* 🔗 **Markers not wired in {plan_name}:** {gap} of {total}")
+    for ext, (gap, total) in detail.get("ios_by_ext", {}).items():
+        if gap == total:
+            lines.append(f"* 🧩 **Extension {ext} not yet in an IO cluster plan:** all {gap} IOs")
+        else:
+            lines.append(f"* 🧩 **Extension {ext} partially wired:** {gap} of {total} IOs missing")
+    return lines
 
 
 async def async_setup_entry(hass: HomeAssistant, entry):
@@ -309,8 +337,24 @@ class ComexioRepairFlow(RepairsFlow):
             r_c = counts.get("rename", 0)
             o_c = counts.get("orphan", 0)
             i_c = counts.get("ip_mismatch", 0)
+            lp_missing_c = counts.get("function_plan_missing", 0)
+            lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
+            # Fallback for stale issues created before the coordinator started storing an
+            # exact estimate: approximate the affected-plan count from the detail split (one
+            # finalize cost per marker-cluster plan / IO extension) instead of a flat single
+            # SYNC_DURATION_FUNCTION_PLAN_FINALIZE, which would undercount multi-plan repairs.
+            affected_plan_count = (
+                max(1, len(lp_detail.get("markers_by_plan", {})) + len(lp_detail.get("ios_by_ext", {})))
+                if lp_detail
+                else 1
+            )
+            lp_missing_eta_sec = counts.get(
+                "function_plan_missing_eta_sec",
+                lp_missing_c * SYNC_DURATION_FUNCTION_PLAN_PAIR
+                + SYNC_DURATION_FUNCTION_PLAN_FINALIZE * affected_plan_count,
+            )
 
-            config_issues = t_c + m_c + r_c + o_c
+            config_issues = t_c + m_c + r_c + o_c + lp_missing_c
             ha_count = placeholders.get("ha_count", "0")
             com_count = placeholders.get("com_count", "0")
 
@@ -332,6 +376,8 @@ class ComexioRepairFlow(RepairsFlow):
             # Always add IP duration if a mismatch exists, as it's a separate call in Delta-Sync
             if i_c > 0:
                 total_sec += SYNC_DURATION_WRITE
+            if lp_missing_c > 0:
+                total_sec += lp_missing_eta_sec
 
             # Build the dynamic summary text
             if config_issues == 0 and i_c > 0:
@@ -363,6 +409,8 @@ class ComexioRepairFlow(RepairsFlow):
                     lines.append(f"* ✏️ **{'Umbenannt' if is_de else 'Renamed'}:** {r_c}")
                 if o_c > 0:
                     lines.append(f"* 🗑️ **{'Verwaist' if is_de else 'Orphaned'}:** {o_c}")
+                if lp_missing_c > 0:
+                    lines.extend(_function_plan_gap_lines(lp_missing_c, lp_detail))
                 if i_c > 0:
                     lines.append(
                         f"* 🌐 **{'Server-Adresse' if is_de else 'Server Address'}:** "

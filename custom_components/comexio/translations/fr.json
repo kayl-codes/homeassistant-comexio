@@ -236,6 +236,10 @@
           }
         }
       }
+    },
+    "duplicate_plan_names": {
+      "title": "Noms de plan Comexio en double",
+      "description": "Deux plans de fonction ou plus portent exactement le même nom : {plans}.\n\nComexio n'impose pas de noms de plan uniques — seul l'ID interne du plan est réellement unique — mais cette intégration résout les plans par nom à plusieurs endroits (Connect, Sort, Restore, …). Avec des noms en double, une recherche par nom pourrait silencieusement cibler le mauvais plan.\n\nVous pouvez techniquement laisser tel quel, rien ne casse aujourd'hui, mais c'est un risque latent — surtout pour `function_plan_restore`, si ce plan est un jour supprimé et doit être restauré. **Recommandation : renommez l'un des doublons dans Comexio Studio** pour éliminer définitivement l'ambiguïté."
     }
   }
 }

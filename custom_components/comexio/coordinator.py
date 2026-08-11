@@ -9,8 +9,8 @@ import socket
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
@@ -27,6 +27,7 @@ from .const import (
     CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     CONF_FUNCTION_PLAN_FUB_ID,
+    CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
@@ -49,6 +50,8 @@ from .const import (
     FUNCTION_PLAN_LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
+    SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
+    SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
@@ -177,6 +180,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # live fetch per plan (Comexio serializes requests server-side regardless of
         # client-side concurrency, so per-call fetching doesn't parallelize away).
         self.function_plan_plans: dict[int, dict] = {}
+        # Set when the audit's wiring check was skipped because the bulk snapshot above
+        # wasn't loaded yet — re-run once the backup cycle has loaded it (see _audit_wired_pairs
+        # / _async_function_plan_backup_cycle).
+        self._lp_missing_recheck_pending: bool = False
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
@@ -346,6 +353,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "type": m["type"],  # Trusting the preprocessing of api.py
                 }
             # 2. HA Map: IOs
+            io_meta_by_key: dict[str, dict[str, Any]] = {}
             for io in final_data["io"]:
                 key = io_audit_key(io["ext_name"], io["identifier"])
 
@@ -354,6 +362,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 mapped_type = "digital" if io.get("is_binary") else "analog"
 
                 ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
+                io_meta_by_key[key] = io
 
             # 3. Comexio Map (Audit the counterpart on the server)
             com_map = {}
@@ -436,11 +445,35 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 }
             ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
 
+            # Check whether a function plan is actively selected (guards against false positives).
+            # At startup the select entity is not yet in the state machine; fall back to the
+            # fub_id persisted in options by async_select_option.
+            _lp_sel = self._active_plan_selector_state()
+            if _lp_sel and _lp_sel.state not in ("unavailable", "unknown"):
+                has_active_plan = True
+            else:
+                has_active_plan = self.config_entry.options.get(CONF_FUNCTION_PLAN_FUB_ID) is not None or bool(
+                    self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP)
+                )
+
+            # Wiring truth comes from the plan bulk snapshot (loadelements): the server-side
+            # WebCommandIoId survives plan deletion and is not maintained by add_element
+            # wiring, so it cannot be trusted. While the snapshot is still empty (first poll
+            # after startup/reload) the check is skipped and re-run once the backup cycle
+            # has loaded the plans.
+            # Offline extensions are exempt from the wiring check: their hardware is not
+            # present, so wiring their IOs is pointless. Once the extension comes back
+            # online the next poll flags any remaining gaps again.
+            managed_io_exts: set[str] = set(self.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
+            managed_io_exts -= self.offline_extensions or set()
+            wired_marker_webio_pairs, wired_io_webio_pairs = self._audit_wired_pairs(has_active_plan, managed_io_exts)
+
             # Compare HA entities with Comexio commands to find inconsistencies
             type_mismatches: list[dict[str, Any]] = []
             missing_items: list[dict[str, Any]] = []
             renamed_items: list[dict[str, Any]] = []
             orphans: list[dict[str, Any]] = []
+            function_plan_missing_items: list[dict[str, Any]] = []
             mismatches: set[str] = set()
 
             if ip_mismatch:
@@ -495,6 +528,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         )
                         mismatches.add(f"type_{key}")
 
+                    # Function Plan gap: command exists but is not wired directly to its
+                    # marker (M-keys) / IO (IO_-keys of managed extensions)
+                    if not is_renamed:
+                        gap_item = self._function_plan_gap_item(
+                            key,
+                            ha["name"],
+                            best_match,
+                            (wired_marker_webio_pairs, wired_io_webio_pairs),
+                            io_meta_by_key.get(key),
+                            managed_io_exts,
+                        )
+                        if gap_item:
+                            function_plan_missing_items.append(gap_item)
+                            mismatches.add(f"function_plan_missing_{key}")
+
                     # All other commands pointing to this key are duplicates -> Orphans
                     for com in com_list:
                         if com != best_match:
@@ -518,13 +566,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "ip_mismatch": ip_mismatch,
                 "ha_address": ha_address,
                 "webio_devices": webio_device_audit,
+                "function_plan_missing": function_plan_missing_items,
             }
 
             # 📈 --- AUDIT SUMMARY LOGGING ---
             if mismatches:
                 # Create a simple string representation to detect changes
                 current_summary_content = (
-                    f"{len(type_mismatches)}-{len(missing_items)}-{len(renamed_items)}-{len(orphans)}-{ip_mismatch}"
+                    f"{len(type_mismatches)}-{len(missing_items)}-{len(renamed_items)}"
+                    f"-{len(orphans)}-{ip_mismatch}-{len(function_plan_missing_items)}"
                 )
 
                 # Only log details if the audit result differs from the previous run
@@ -567,6 +617,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     for item in orphans:
                         _LOGGER.info("   -> %s", item["name"])
 
+                    if function_plan_missing_items:
+                        _LOGGER.info("🔗 Not wired in Function Plan (%d):", len(function_plan_missing_items))
+                        for item in function_plan_missing_items:
+                            _LOGGER.info("   -> %s", item["name"])
+
                     if ip_mismatch:
                         mismatched_ips = {
                             cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]
@@ -589,6 +644,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "rename": len(renamed_items),
                     "orphan": len(orphans),
                     "ip_mismatch": 1 if ip_mismatch else 0,
+                    "function_plan_missing": len(function_plan_missing_items),
+                    "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(function_plan_missing_items),
                     "all": len(mismatches),
                 }
 
@@ -608,10 +665,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         "o_count": str(len(orphans)),
                         "i_count": str(1 if ip_mismatch else 0),
                     },
-                    data={"entry_id": self.config_entry.entry_id, "counts": issue_data_counts},
+                    data={
+                        "entry_id": self.config_entry.entry_id,
+                        "counts": issue_data_counts,
+                        "function_plan_missing_detail": self._function_plan_missing_detail(
+                            function_plan_missing_items, ha_map, io_meta_by_key
+                        ),
+                    },
                 )
             else:
                 ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
+
+            self._check_duplicate_plan_names()
 
             # Function Plan backup: load all plan wirings + rotate auto backups in the background.
             # Entry-scoped task (cancelled on unload/reload) so neither startup nor the poll
@@ -648,6 +713,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if not plans:
                 return
             self.function_plan_plans = plans
+            if self._lp_missing_recheck_pending:
+                # The audit skipped the function_plan_missing check because the snapshot was
+                # not loaded yet — re-run it now that wiring data is available.
+                self._lp_missing_recheck_pending = False
+                await self.async_request_refresh()
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
@@ -1850,3 +1920,252 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 fub_id,
             )
         return stale
+
+    def _check_duplicate_plan_names(self) -> None:
+        """Warn (informational, no fix flow) if two or more LIVE plans share the same name.
+
+        Comexio does not enforce unique plan names — only fub_id is a real identity — but
+        this integration resolves plans by name in several places (function_plan_connect/
+        sort/stop/activate/restore). A name collision means those lookups could silently
+        target the wrong plan; there's nothing HA can safely auto-fix here (which of the
+        duplicates should be renamed is a Comexio-side, human decision), so this is a
+        plain heads-up rather than an actionable repair.
+        """
+        names_to_ids: dict[str, list[int]] = {}
+        for fid, fub in self.api.fub_data.items():
+            if name := fub.get("Name"):
+                names_to_ids.setdefault(name, []).append(int(fid))
+        duplicates = {name: ids for name, ids in names_to_ids.items() if len(ids) > 1}
+
+        issue_id = f"duplicate_plan_names_{self.server_id}"
+        if not duplicates:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+
+        plans_str = "; ".join(
+            f"'{name}' (fub {', '.join(str(fid) for fid in sorted(ids))})" for name, ids in sorted(duplicates.items())
+        )
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="duplicate_plan_names",
+            translation_placeholders={"plans": plans_str},
+        )
+
+    def _active_plan_selector_state(self) -> State | None:
+        """State of this server's Function Plan selector entity, or None if not registered yet."""
+        uid = f"comexio_{self.server_id}_logikplan_plan_selector"
+        entity_id = er.async_get(self.hass).async_get_entity_id("select", DOMAIN, uid)
+        return self.hass.states.get(entity_id) if entity_id else None
+
+    def _function_plan_check_fub_ids(self) -> set[int]:
+        """Collect the fub_ids of every managed plan relevant for the wiring audit.
+
+        Union of the plan selected in the selector entity (with the persisted option as
+        startup fallback) and every cluster plan from CONF_FUNCTION_PLAN_PLAN_MAP.
+        """
+        fub_ids: set[int] = set()
+        _lp_sel = self._active_plan_selector_state()
+
+        if _lp_sel and _lp_sel.state not in ("unavailable", "unknown"):
+            fub_id_str = next((fid for fid, fd in self.api.fub_data.items() if fd.get("Name") == _lp_sel.state), None)
+            if fub_id_str:
+                fub_ids.add(int(fub_id_str))
+        elif (fallback := self.config_entry.options.get(CONF_FUNCTION_PLAN_FUB_ID)) not in (
+            None,
+            FUNCTION_PLAN_FUB_ID_AUTO,
+        ):
+            # State machine not yet populated (startup timing); fall back to persisted fub_id from options
+            fub_ids.add(int(fallback))
+
+        plan_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if isinstance(plan_map, dict):
+            fub_ids.update(int(v) for v in plan_map.values())
+        return fub_ids
+
+    @staticmethod
+    def _plan_wired_pairs(plan_data: dict, source_type: str = "2") -> set[tuple[str, str]]:
+        """(source ref_id, webIoId) pairs joined by a direct connection within one plan."""
+        elem_refs: dict[str, tuple[str, str]] = {}
+        for elem_id, elem in (plan_data.get("elements") or {}).items():
+            ref = elem.get("reference") or {}
+            ref_type = str(ref.get("type"))
+            if ref_type in (source_type, "10"):
+                elem_refs[str(elem_id)] = (ref_type, str(ref.get("ref_id")))
+        pairs: set[tuple[str, str]] = set()
+        for conn in (plan_data.get("connections") or {}).values():
+            endpoint_ids = {str((conn.get("input") or {}).get("FubElementId"))}
+            outputs = conn.get("output") or []
+            if isinstance(outputs, dict):
+                outputs = list(outputs.values())
+            endpoint_ids.update(str(o.get("FubElementId")) for o in outputs)
+
+            endpoint_refs = [elem_refs[eid] for eid in endpoint_ids if eid in elem_refs]
+            source_ids = {rid for typ, rid in endpoint_refs if typ == source_type}
+            webio_ids = {rid for typ, rid in endpoint_refs if typ == "10"}
+            pairs.update((s, w) for s in source_ids for w in webio_ids)
+        return pairs
+
+    def _wired_source_webio_pairs(self, source_type: str) -> set[tuple[str, str]] | None:
+        """Return (ref_id, webIoId) pairs of source elements (marker "2" / IO "1") directly
+        wired to a WebIO element in a managed plan.
+
+        Built from the bulk snapshot of the backup cycle; returns None while that snapshot is
+        not loaded yet. A pair only counts as wired when the source element and the WebIO
+        (type-10) element are endpoints of the SAME connection — merely having the WebIO
+        ref_id appear in some unrelated connection is not enough. ref_ids are device-local and
+        the server assigns them globally increasing only "in practice", so a stray element of
+        another Web-IO device (e.g. recreated during a delete+recreate cycle) could reuse a
+        ref_id that used to belong to this device; requiring the direct edge makes such
+        collisions harmless instead of masking a real gap.
+
+        Scoped to _function_plan_check_fub_ids() (the selected plan + plan_map clusters) rather
+        than every cached plan: an unrelated plan on the server (e.g. a scratch/test copy) can
+        reference the same source and WebIO command without being wired the way the managed
+        plan is, and scanning it too would mask a real gap in the managed plan as "wired
+        elsewhere".
+        """
+        if not self.function_plan_plans:
+            return None
+        relevant_fub_ids = self._function_plan_check_fub_ids()
+        pairs: set[tuple[str, str]] = set()
+        for fub_id, plan_data in self.function_plan_plans.items():
+            if fub_id in relevant_fub_ids:
+                pairs.update(self._plan_wired_pairs(plan_data, source_type))
+        return pairs
+
+    def _audit_wired_pairs(
+        self, has_active_plan: bool, managed_io_exts: set[str]
+    ) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None]:
+        """Wired (ref_id, webIoId) pair sets for the audit: (markers, IOs).
+
+        Either set is None when its check is disabled (no active plan / no managed IO
+        extensions) or the bulk plan snapshot is not loaded yet (recheck scheduled).
+        """
+        wired_marker_pairs: set[tuple[str, str]] | None = None
+        if has_active_plan:
+            wired_marker_pairs = self._wired_source_webio_pairs("2")
+            if wired_marker_pairs is None:
+                self._lp_missing_recheck_pending = True
+        wired_io_pairs: set[tuple[str, str]] | None = None
+        if managed_io_exts:
+            wired_io_pairs = self._wired_source_webio_pairs("1")
+            if wired_io_pairs is None:
+                self._lp_missing_recheck_pending = True
+        return wired_marker_pairs, wired_io_pairs
+
+    @staticmethod
+    def _function_plan_gap_item(
+        key: str,
+        ha_name: str,
+        best_match: dict,
+        wired_pairs: tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None],
+        io_meta: dict | None,
+        managed_io_exts: set[str],
+    ) -> dict[str, Any] | None:
+        """Missing-wiring item for one audit key, or None when the pair is wired or unchecked.
+
+        wired_pairs = (marker pairs, IO pairs); a set of None means that check is disabled
+        or not yet loadable this run. Marker keys ("M<id>") are checked against the marker
+        set; IO keys only when their extension is opted into IO cluster management.
+        """
+        wired_marker_pairs, wired_io_pairs = wired_pairs
+        web_id = str(best_match.get("webIoId"))
+        if key.startswith("M"):
+            if wired_marker_pairs is not None and (key[1:], web_id) not in wired_marker_pairs:
+                return {"name": ha_name, "marker_id": int(key[1:])}
+            return None
+        if io_meta is None or io_meta["ext_name"] not in managed_io_exts or wired_io_pairs is None:
+            return None
+        if (str(io_meta["id"]), web_id) not in wired_io_pairs:
+            return {"name": ha_name, "ext_name": io_meta["ext_name"], "identifier": io_meta["identifier"]}
+        return None
+
+    def _function_plan_missing_detail(
+        self, missing_items: list[dict], ha_map: dict, io_meta_by_key: dict
+    ) -> dict[str, Any]:
+        """Split missing-wiring items into per-cluster marker gaps and per-extension IO gaps.
+
+        The repair dialog uses this to word whole-cluster gaps (cluster plan never created,
+        or deleted directly in Comexio — nothing placed/wired yet) differently from
+        individual missing connections. Mirrors ios_by_ext (ext_name -> [gap, total]) with
+        markers_by_plan (marker cluster plan name -> [gap, total]), bucketed the same way
+        the cluster plans themselves are named (_cluster_plan_name).
+        """
+        prefix = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_PREFIX, DEFAULT_FUNCTION_PLAN_PLAN_PREFIX)
+        cluster_size = int(
+            self.config_entry.options.get(
+                CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN, DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN
+            )
+        )
+        gaps_by_plan: dict[str, int] = {}
+        for item in missing_items:
+            if "marker_id" in item:
+                plan_name = self._cluster_plan_name(item["marker_id"], prefix, cluster_size)
+                gaps_by_plan[plan_name] = gaps_by_plan.get(plan_name, 0) + 1
+        totals_by_plan = dict.fromkeys(gaps_by_plan, 0)
+        for key in ha_map:
+            if key.startswith("M"):
+                plan_name = self._cluster_plan_name(int(key[1:]), prefix, cluster_size)
+                if plan_name in totals_by_plan:
+                    totals_by_plan[plan_name] += 1
+
+        gaps_by_ext: dict[str, int] = {}
+        for item in missing_items:
+            if "ext_name" in item:
+                gaps_by_ext[item["ext_name"]] = gaps_by_ext.get(item["ext_name"], 0) + 1
+        totals_by_ext = dict.fromkeys(gaps_by_ext, 0)
+        for meta in io_meta_by_key.values():
+            if meta["ext_name"] in totals_by_ext:
+                totals_by_ext[meta["ext_name"]] += 1
+        return {
+            "markers_by_plan": {name: [gaps_by_plan[name], totals_by_plan[name]] for name in sorted(gaps_by_plan)},
+            "ios_by_ext": {ext: [gaps_by_ext[ext], totals_by_ext[ext]] for ext in sorted(gaps_by_ext)},
+        }
+
+    def _function_plan_missing_eta_sec(self, missing_items: list[dict]) -> int:
+        """Estimate the duration of the add-pairs repair action in seconds.
+
+        Per affected cluster plan the finalize step dominates, and its expensive part —
+        saving positions and reactivating the plan — scales with the number of elements
+        already in that plan (activating a full plan takes ~10x longer than a small one,
+        measured live). Element counts come from the bulk snapshot cache; a plan that
+        does not exist yet only holds its new pairs (2 elements each).
+        """
+        if not missing_items:
+            return 0
+        prefix = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_PREFIX, DEFAULT_FUNCTION_PLAN_PLAN_PREFIX)
+        cluster_size = int(
+            self.config_entry.options.get(
+                CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN, DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN
+            )
+        )
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        plan_map = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
+
+        new_pairs_per_plan: dict[str, int] = {}
+        for item in missing_items:
+            if "marker_id" in item:
+                plan_name = self._cluster_plan_name(item["marker_id"], prefix, cluster_size)
+            else:
+                plan_name = self._io_cluster_plan_name_for_ext(item["ext_name"], prefix)
+            new_pairs_per_plan[plan_name] = new_pairs_per_plan.get(plan_name, 0) + 1
+
+        total = 0.0
+        for plan_name, new_pairs in new_pairs_per_plan.items():
+            plan_data = self.function_plan_plans.get(plan_map.get(plan_name, -1))
+            elements = len(plan_data.get("elements") or {}) if plan_data else 0
+            total += (
+                SYNC_DURATION_FUNCTION_PLAN_FINALIZE + (elements + 2 * new_pairs) * SYNC_DURATION_FUNCTION_PLAN_ELEMENT
+            )
+        return round(total)
+
+    def _io_cluster_plan_name_for_ext(self, ext_name: str, prefix: str) -> str:
+        """Plan name the extension belongs to (existing membership) or would get (new plan)."""
+        for members in self._io_plan_membership(prefix).values():
+            if ext_name in members:
+                return self._io_plan_name(prefix, members)
+        return self._io_plan_name(prefix, [ext_name])
