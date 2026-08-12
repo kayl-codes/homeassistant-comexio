@@ -427,14 +427,21 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         lp_fub_id: int | None = None,
     ) -> None:
         """Remove HA entities, Function Plan elements and WebIO commands for ignored markers."""
-        if not marker_ids:
-            return
 
         def _notify(msg: str) -> None:
             if notify_enabled:
                 persistent_notification.async_create(
                     self.hass, msg, title=f"Comexio Cleanup ({self.server_id})", notification_id=notif_id
                 )
+
+        if not marker_ids:
+            # Reachable via a direct press_action service call with no pending audit gap — the
+            # repair-flow UI only ever offers this action when marker_ids is non-empty. Give
+            # explicit feedback instead of silently no-op-ing, consistent with the sibling
+            # function_plan_add_missing action's "Nothing to do." fallback.
+            _notify("Nothing to clean up — no ignored markers currently have leftover entities to remove.")
+            _LOGGER.info("[%s] cleanup_entities: nothing to clean up (no marker_ids)", self.server_id)
+            return
 
         deleted_entities = self._delete_marker_entities(marker_ids)
         lp_count, webio_cmd_ids, stopped_plans, stop_failures = await self._cleanup_function_plan_plans(
