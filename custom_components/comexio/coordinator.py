@@ -8,6 +8,7 @@ import re
 import socket
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
@@ -1576,7 +1577,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
                 stale_str,
             )
-            from homeassistant.components import persistent_notification
 
             # persistent_notification has no per-user language context; use English
             notif_body = (

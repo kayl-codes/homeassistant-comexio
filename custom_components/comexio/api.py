@@ -2404,12 +2404,12 @@ class ComexioAPI:
         success = await self.logikplan_delete_elements(elem_ids_to_delete)
         if not success:
             _LOGGER.error("function_plan_cleanup_for_markers: element deletion failed")
-            await self.logikplan_run_fup(fub_id)
+            restart_after_failure_ok = await self.logikplan_run_fup(fub_id)
             return {
                 "deleted_elem_count": 0,
                 "webio_cmd_ids": [],
                 "fub_id": fub_id,
-                "plan_stopped": False,
+                "plan_stopped": not restart_after_failure_ok,
                 "plan_name": plan_name,
             }
 
