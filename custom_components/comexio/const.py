@@ -368,7 +368,7 @@ def parse_ignored_marker_tokens(raw: str) -> Iterator[tuple[str, int | tuple[int
         if "-" in parse_token:
             parts = parse_token.split("-", 1)
             try:
-                start, end = int(parts[0]), int(parts[1])
+                start, end = int(parts[0]), int(parts[1].lstrip("Mm"))
             except ValueError:
                 yield display_token, None
                 continue
