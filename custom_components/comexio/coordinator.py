@@ -1677,8 +1677,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cleanup button (which also deletes the returned entries) to avoid divergent matching
         logic between the two.
         """
-        from homeassistant.helpers import entity_registry as er
-
         ent_reg = er.async_get(self.hass)
         marker_id_by_unique_id = {f"{DOMAIN}_{self.server_id}_m{mid}".lower(): mid for mid in marker_ids}
         return {

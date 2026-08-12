@@ -541,7 +541,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             webio_cmd_ids.extend(lp.get("webio_cmd_ids", []))
             if lp.get("plan_stopped") and lp.get("fub_id") is not None:
                 stopped_plans.append((lp.get("plan_name", "?"), lp["fub_id"]))
-        return lp_count, webio_cmd_ids, stopped_plans
+        # A WebIO command could in principle be collected from more than one plan (e.g. a
+        # marker anomalously wired into multiple managed plans); dedupe before deletion so
+        # the same command isn't attempted twice.
+        return lp_count, list(dict.fromkeys(webio_cmd_ids)), stopped_plans
 
     def _build_sync_result_message(
         self,
