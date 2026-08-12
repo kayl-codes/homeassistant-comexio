@@ -178,6 +178,13 @@
             "title": "Web-IO Repair",
             "description": "{summary_text}"
           }
+        },
+        "abort": {
+          "already_in_sync": "A synchronization is already running for this Comexio instance. Please wait for it to finish before starting another one.",
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "missing_entry_id": "No config entry ID was provided with this repair issue.",
+          "missing_server_id": "The config entry is missing its server ID.",
+          "sync_failed": "The sync action failed to start. Check the Home Assistant logs for details."
         }
       }
     },
@@ -189,6 +196,13 @@
             "title": "Initial Setup",
             "description": "The required Web-IO device class(es) are missing on your Comexio server: **{missing_classes}**.\n\nWould you like to create them now?"
           }
+        },
+        "abort": {
+          "already_in_sync": "A synchronization is already running for this Comexio instance. Please wait for it to finish before starting another one.",
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "missing_entry_id": "No config entry ID was provided with this repair issue.",
+          "missing_server_id": "The config entry is missing its server ID.",
+          "sync_failed": "The sync action failed to start. Check the Home Assistant logs for details."
         }
       }
     },
