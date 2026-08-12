@@ -524,6 +524,7 @@ class ComexioAPI:
         data = {
             "markers": [],
             "io": [],
+            "io_all": [],
             "webio_commands": {},
             # Two separate Web-IO device classes on the Comexio server — see const.webio_class_name.
             "webio_devices": {cls: {"device_id": None, "device_ip": None, "base_id": None} for cls in WEBIO_CLASSES},
@@ -765,14 +766,21 @@ class ComexioAPI:
         server_alias: str,
         fub_modules: dict[str, Any],
     ) -> None:
-        """Process IOs from config."""
+        """Process IOs from config.
+
+        Inactive IOs (Active=False, e.g. an extension slot the user prepared but hasn't
+        wired up yet) get no entity/webhook — Comexio itself refuses to wire a connection
+        to an inactive IO, so there is nothing meaningful to read/write. They still get a
+        proper label in "io_all" (unfiltered) so the Function Plan preview can resolve their
+        name instead of falling back to a bare "IO ref=N".
+        """
         for ext_id, ext_content in fub_modules.get("1", {}).items():
             ext_meta = ext_content.get("extension", {})
             ext_name = ext_meta.get("Name", f"Ext{ext_id}")
             ext_offline = _is_extension_offline(ext_meta.get("Identifier", ""))
 
             for io_item in ext_content.get("inoutput", {}).values():
-                if not io_item or not io_item.get("Active"):
+                if not io_item:
                     continue
 
                 io_type_id = str(io_item.get("InOutputTypeId"))
@@ -847,23 +855,28 @@ class ComexioAPI:
             SafeDict(ServerAlias=server_alias, ExtName=ext_name, IoId=ident, IoTitle=desc or "")
         )
 
-        data["io"].append(
-            {
-                "id": str(io_item.get("Id")),
-                "ext_name": ext_name,
-                "identifier": ident,
-                "ha_name": " ".join(ha_name.split()),
-                "name": io_name,
-                "is_binary": is_binary,
-                "is_input": is_input,
-                "unit": unit,
-                "min": v_min,
-                "max": v_max,
-                "type_id_raw": type_id_raw,
-                "value": self._clean_value(io_item.get("Value", 0)),
-                "offline": ext_offline,
-            }
-        )
+        entry = {
+            "id": str(io_item.get("Id")),
+            "ext_name": ext_name,
+            "identifier": ident,
+            "ha_name": " ".join(ha_name.split()),
+            "name": io_name,
+            "is_binary": is_binary,
+            "is_input": is_input,
+            "unit": unit,
+            "min": v_min,
+            "max": v_max,
+            "type_id_raw": type_id_raw,
+            "value": self._clean_value(io_item.get("Value", 0)),
+            "offline": ext_offline,
+            # Inactive IOs get no entity/webhook (see _process_ios) but still need a label
+            # for the Function Plan preview — "io_all" carries every IO, this flag tells the
+            # renderer to grey the pill (Studio's own convention for an inactive element).
+            "inactive": not io_item.get("Active"),
+        }
+        data["io_all"].append(entry)
+        if not entry["inactive"]:
+            data["io"].append(entry)
 
     # --- WEB-IO MANAGEMENT ---
     async def get_webio_base_info(self, webio_name: str) -> tuple[str, bool] | None:
