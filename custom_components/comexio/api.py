@@ -1117,16 +1117,16 @@ class ComexioAPI:
         return commands
 
     @staticmethod
+    def _webio_data_lua(payload: str) -> str:
+        """Build the Lua `data(a)` webhook body for a Web-IO command, given its JSON payload fields."""
+        return f"function data(a)\r\n  local d = {{ {payload} }}\r\n  return json_stringify(d)\r\nend"
+
+    @staticmethod
     def _build_marker_webio_command(m: dict[str, Any], webhook_path: str) -> dict[str, Any]:
         """Build the Web-IO command dict for a single marker."""
         is_ana = m["type"] == "analog"
         safe_id = str(m["id"]).replace('"', '\\"')
-        lua = (
-            f"function data(a)\r\n"
-            f'  local d = {{ id="{safe_id}", value=a, type="marker" }}\r\n'
-            f"  return json_stringify(d)\r\n"
-            f"end"
-        )
+        lua = ComexioAPI._webio_data_lua(f'id="{safe_id}", value=a, type="marker"')
         return {
             "Name": f"HA {m['name']}",
             "TypeId": 2 if is_ana else 1,
@@ -1160,13 +1160,7 @@ class ComexioAPI:
         v_max = io_item.get("max", 100 if is_ana else 1)
         safe_ext = str(io_item["ext_name"]).replace('"', '\\"')
         safe_io_id = str(io_item["identifier"]).replace('"', '\\"')
-        lua = (
-            f"function data(a)\r\n"
-            f'  local d = {{ ext="{safe_ext}", io="{safe_io_id}", '
-            f'value=a, type="io" }}\r\n'
-            f"  return json_stringify(d)\r\n"
-            f"end"
-        )
+        lua = ComexioAPI._webio_data_lua(f'ext="{safe_ext}", io="{safe_io_id}", value=a, type="io"')
         return {
             "Name": f"HA IO {io_item['ext_name']} {io_item['identifier']}",
             "TypeId": 2 if is_ana else 1,
