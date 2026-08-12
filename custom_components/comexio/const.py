@@ -156,6 +156,16 @@ SYNC_DURATION_FUNCTION_PLAN_ELEMENT = (
 MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400
 
+# Analog markers have no configurable value range on the Comexio side, so their Web-IO
+# datapoints must not clamp. The Comexio admin UI round-trips values as wide as ±1e16
+# unchanged, but that only proves the UI's own storage tolerates it — the Web-IO push
+# mechanism itself validates Min/Max as a signed 32-bit int and silently stops sending
+# updates once either bound overflows that range (confirmed live 2026-07-26: a marker's
+# push resumed only after Min/Max were brought back within int32 bounds). Physical IOs
+# keep the authentic min/max from their Comexio type definition instead.
+WEBIO_MARKER_ANALOG_MIN = -2_147_483_648
+WEBIO_MARKER_ANALOG_MAX = 2_147_483_647
+
 DEFAULT_HOST = "192.168.1.100"
 
 # Extension firmware check: Comexio warns this call can briefly interrupt extension outputs

@@ -39,6 +39,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **Marker lookup:** Marker IDs are compared as integers when connecting plans — explicit marker lists and `*` (all) now resolve correctly.
 - **`delete_single_command`** returns `False` on failure instead of raising, so delta-sync continues with the remaining commands.
 - **Options form:** `ignored_markers` field no longer loses its stored value when reopening the options dialog.
+- **Analog marker Web-IO push stopped silently at extreme values:** The generated Web-IO command for analog markers hardcoded `Min: 0, Max: 100`; Comexio's Web-IO push mechanism validates against that range and silently stops sending updates once the live value overflows it. Analog markers have no configurable range on the Comexio side, so the command's Min/Max are now set to the full signed-32-bit span instead.
 
 ### ⚠️ Requirements & Notes
 - After updating, a **full HA restart** is required (new platform files and translation keys).
