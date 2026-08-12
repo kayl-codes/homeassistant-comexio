@@ -36,7 +36,23 @@ _SERVICES_YAML_PATH = pathlib.Path(__file__).parent.parent / "services.yaml"
 _SERVICES_YAML_LOCK = asyncio.Lock()
 
 
-def _rewrite_services_yaml_plans(plan_options: list[str]) -> None:
+def _apply_single_instance_default(content: dict, entry_ids: list[str]) -> None:
+    """Pre-fill the config_entry field in the Actions UI when exactly one Comexio instance exists.
+
+    With multiple instances the field is left without a default, forcing an explicit choice.
+    """
+    single_entry = entry_ids[0] if len(entry_ids) == 1 else None
+    for svc in content.values():
+        entry_field = (svc or {}).get("fields", {}).get("config_entry")
+        if not entry_field:
+            continue
+        if single_entry:
+            entry_field["default"] = single_entry
+        else:
+            entry_field.pop("default", None)
+
+
+def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) -> None:
     """Blocking read/modify/write of services.yaml; run via executor job only.
 
     services.yaml is rewritten (rather than deriving fub_id options purely at runtime) because HA's
@@ -54,6 +70,7 @@ def _rewrite_services_yaml_plans(plan_options: list[str]) -> None:
         fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
         if fub_field:
             fub_field["selector"] = {"select": {"options": plan_options, "custom_value": True}}
+    _apply_single_instance_default(content, entry_ids)
     _SERVICES_YAML_PATH.write_text(
         yaml.dump(content, allow_unicode=True, sort_keys=False, default_flow_style=False),
         encoding="utf-8",
@@ -69,8 +86,10 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
     from ..coordinator import ComexioCoordinator
 
     plan_labels: set[str] = set()
-    for coordinator in hass.data.get(DOMAIN, {}).values():
+    entry_ids: list[str] = []
+    for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
         if isinstance(coordinator, ComexioCoordinator):
+            entry_ids.append(entry_id)
             for fub_id, fub in coordinator.api.fub_data.items():
                 name = fub.get("Name", "")
                 if name:
@@ -83,7 +102,7 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
     plan_options = sorted(plan_labels, key=str.lower)
     try:
         async with _SERVICES_YAML_LOCK:
-            await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options)
+            await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options, entry_ids)
         _LOGGER.debug("Updated services.yaml: %d Logikplan plan options (labels) written", len(plan_options))
     except Exception as exc:  # noqa: BLE001
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
