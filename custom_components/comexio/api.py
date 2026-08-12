@@ -2416,7 +2416,14 @@ class ComexioAPI:
         cmd_id: int | None = None
         raw_cmd_id = webio_elem_ref.get("ref_id")
         if raw_cmd_id is not None:
-            cmd_id = int(raw_cmd_id)
+            try:
+                cmd_id = int(raw_cmd_id)
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "function_plan_cleanup_for_markers: malformed WebIO ref_id %r on elem=%s, skipping command",
+                    raw_cmd_id,
+                    webio_fub_elem_id,
+                )
 
         _LOGGER.debug(
             "function_plan_cleanup_for_markers: M%d → WebIO elem=%s cmd=%s",
