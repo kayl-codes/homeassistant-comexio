@@ -296,6 +296,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             final_data = {
                 "markers": parsed_data["markers"] if import_markers else [],
                 "io": parsed_data["io"] if import_ios else [],
+                "io_all": parsed_data.get("io_all", []) if import_ios else [],
                 "webio_commands": parsed_data.get("webio_commands", {}),
                 "webio_devices": parsed_data.get("webio_devices", {}),
             }
@@ -893,7 +894,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             w_id = cmd.get("webIoId")
             if w_id is not None:
                 webio_by_id[str(w_id)] = {"name": name, "analog": cmd.get("typeId") == 2}
-        ios_by_id = {str(io["id"]): io for io in data.get("io", [])}
+        # io_all (unfiltered, includes inactive IOs) so a plan wired to an inactive IO still
+        # resolves a real name/greyed state instead of falling back to "IO ref=<id>".
+        ios_by_id = {str(io["id"]): io for io in data.get("io_all", [])}
         return markers_by_id, webio_by_id, ios_by_id
 
     async def async_repoint_function_plan_fub_id(self, plan_name: str, old_fub_id: int, new_fub_id: int) -> list[str]:
