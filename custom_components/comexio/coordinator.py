@@ -917,8 +917,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for plan_data in self.function_plan_plans.values():
             for elem in (plan_data.get("elements") or {}).values():
                 ref = elem.get("reference") or {}
-                if str(ref.get("type")) == "2":
-                    referenced.add(str(ref.get("ref_id")))
+                ref_id = ref.get("ref_id")
+                if str(ref.get("type")) == "2" and ref_id is not None:
+                    referenced.add(str(ref_id))
         return referenced
 
     def function_plan_label_maps(self) -> tuple[dict, dict, dict]:
