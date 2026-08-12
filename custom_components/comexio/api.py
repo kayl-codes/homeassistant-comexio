@@ -516,7 +516,12 @@ class ComexioAPI:
             _LOGGER.exception("Unexpected error fetching connection values (fub=%s)", fub_id)
             return {}
 
-    def parse_config(self, conf: dict[str, Any], live_states: dict[str, Any] | None = None) -> dict[str, Any]:
+    def parse_config(
+        self,
+        conf: dict[str, Any],
+        live_states: dict[str, Any] | None = None,
+        referenced_markers: set[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Processes the raw configuration and performs a technical audit.
         Uses dynamic IO type mapping to determine binary vs analog states and units.
@@ -546,7 +551,7 @@ class ComexioAPI:
         self._process_device_info(conf, data, webio_name, fub_modules)
 
         # 3. Process Markers
-        self._process_markers(data, live_states, schema_marker, server_alias, fub_modules)
+        self._process_markers(data, live_states, schema_marker, server_alias, fub_modules, referenced_markers)
 
         # 4. Process IOs
         self._process_ios(data, schema_io, server_alias, fub_modules)
@@ -728,6 +733,12 @@ class ComexioAPI:
             "webioClass": webio_class,
         }
 
+    # Placeholder title for a Comexio marker with an empty label that is still wired into a
+    # plan (see _process_markers) — kept out of the entity/name comparison logic nowhere
+    # special-cased on purpose: once imported, it behaves exactly like any other marker name,
+    # so a later real rename in Comexio is picked up by the normal sync/rename detection.
+    _NO_NAME_MARKER_TITLE = "#nn"
+
     def _process_markers(
         self,
         data: dict[str, Any],
@@ -735,16 +746,30 @@ class ComexioAPI:
         schema_marker: str,
         server_alias: str,
         fub_modules: dict[str, Any],
+        referenced_marker_ids: set[str] | None = None,
     ) -> None:
-        """Process markers from config."""
+        """Process markers from config.
+
+        A marker without a Comexio label is normally excluded entirely — but one that is
+        actually wired into a function plan (referenced_marker_ids) is imported anyway with
+        a synthetic "#nn" title, so it gets a real HA entity/webhook/Web-IO command and the
+        plan preview knows its type + live value. If the marker later gets a real name in
+        Comexio, or drops out of every plan, it naturally reverts to the normal path (named
+        marker, or orphaned like any other unused marker) — no special-case cleanup needed.
+        """
+        referenced_marker_ids = referenced_marker_ids or set()
         for m in fub_modules.get("2", {}).values():
-            if not m.get("Name") or m.get("Id") is None:
+            if m.get("Id") is None:
                 continue
 
             m_id = str(m.get("Id"))
+            has_name = bool(m.get("Name"))
+            if not has_name and m_id not in referenced_marker_ids:
+                continue
+
             m_type_raw = m.get("Type", 1)
             m_type_str = "analog" if m_type_raw in [2, 3] else "digital"
-            m_title = m.get("Name", "")
+            m_title = m.get("Name") or self._NO_NAME_MARKER_TITLE
 
             ha_name = schema_marker.format_map(SafeDict(ServerAlias=server_alias, MarkerId=m_id, MarkerTitle=m_title))
 
@@ -752,7 +777,10 @@ class ComexioAPI:
                 {
                     "id": m_id,
                     "ha_name": " ".join(ha_name.split()),
-                    "name": f"M{m_id} {m.get('Name')}",
+                    "name": f"M{m_id} {m_title}",
+                    # Unnamed-but-referenced marker ("#nn"): the plan preview greys it out
+                    # like an inactive IO as a visual hint that it has no label in Comexio.
+                    "no_name": not has_name,
                     "type": m_type_str,
                     "type_raw": m_type_raw,
                     "value": self._clean_value(live_states.get(m_id, 0)),
