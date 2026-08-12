@@ -1547,7 +1547,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         all_ignored_ids = expand_ignored_marker_ids(ignored_raw)
         lp_plans = await self._load_function_plan_check_data()
-        marker_ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids)))
+        marker_ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids)).keys())
         for marker_id in sorted(all_ignored_ids):
             marker = markers_by_id.get(marker_id)
             if not marker or not marker.get("name", "").strip():
