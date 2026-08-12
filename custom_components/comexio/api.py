@@ -2300,6 +2300,133 @@ class ComexioAPI:
             return 0, 0, [f"M{marker_ref}: add_element (WebIO, webIoId={webio_ref}) failed during rebuild"]
         return 1, 1, []
 
+    async def function_plan_cleanup_for_markers(
+        self,
+        marker_ids: list[int],
+        fub_id: int | None = None,
+    ) -> dict:
+        """Remove marker + connected WebIO elements for given markers from the given Function Plan.
+
+        fub_id must be resolved by the caller (via the active plan select entity).
+
+        Returns dict with:
+          - deleted_elem_count (int): number of Function Plan elements removed
+          - webio_cmd_ids (list[int]): WebIO command IDs whose elements were deleted
+            (caller must still call delete_single_command for each)
+          - fub_id (int | None): the Function Plan ID used, None if not provided
+        """
+        if fub_id is None:
+            _LOGGER.debug("function_plan_cleanup_for_markers: no fub_id provided, skipping")
+            return {"deleted_elem_count": 0, "webio_cmd_ids": [], "fub_id": None}
+
+        plan_name = next(
+            (fd.get("Name", str(fub_id)) for fid, fd in self._fub_data.items() if int(fid) == fub_id),
+            str(fub_id),
+        )
+        plan_data = await self.logikplan_load_elements(fub_id)
+        if not plan_data:
+            _LOGGER.warning("function_plan_cleanup_for_markers: failed to load plan %s", fub_id)
+            return {"deleted_elem_count": 0, "webio_cmd_ids": [], "fub_id": fub_id}
+
+        elements = plan_data.get("elements", {})
+        connections = plan_data.get("connections", {})
+        elem_ids_to_delete: list[int] = []
+        webio_cmd_ids: list[int] = []
+
+        for marker_id in marker_ids:
+            marker_elem_id = self._find_marker_element_id(elements, marker_id)
+            if not marker_elem_id:
+                _LOGGER.debug("function_plan_cleanup_for_markers: M%d not found in plan %d", marker_id, fub_id)
+                continue
+
+            elem_ids_to_delete.append(int(marker_elem_id))
+            webio_elem_ids, cmd_ids = self._collect_connected_webio_elements(
+                marker_id, marker_elem_id, elements, connections
+            )
+            elem_ids_to_delete.extend(webio_elem_ids)
+            webio_cmd_ids.extend(cmd_ids)
+
+        if not elem_ids_to_delete:
+            _LOGGER.info("function_plan_cleanup_for_markers: no elements to delete for markers %s", marker_ids)
+            return {"deleted_elem_count": 0, "webio_cmd_ids": [], "fub_id": fub_id}
+
+        return await self._delete_plan_elements_and_restart(fub_id, elem_ids_to_delete, webio_cmd_ids, plan_name)
+
+    @staticmethod
+    def _find_marker_element_id(elements: dict[str, Any], marker_id: int) -> str | None:
+        """Return the plan-local element id of the given marker, or None if not wired into the plan."""
+        for elem_id, elem_data in elements.items():
+            ref = elem_data.get("reference", {})
+            if ref.get("type") == 2 and int(ref.get("ref_id", -1)) == marker_id:
+                return str(elem_id)
+        return None
+
+    @staticmethod
+    def _collect_connected_webio_elements(
+        marker_id: int, marker_elem_id: str, elements: dict[str, Any], connections: dict[str, Any]
+    ) -> tuple[list[int], list[int]]:
+        """Find WebIO elements wired to the given marker element. Returns (elem_ids, webio_cmd_ids)."""
+        elem_ids: list[int] = []
+        cmd_ids: list[int] = []
+        for conn_data in connections.values():
+            input_elem = conn_data.get("input", {})
+            if str(input_elem.get("FubElementId", -1)) != marker_elem_id:
+                continue
+            output_list = conn_data.get("output", [])
+            if not isinstance(output_list, list):
+                continue
+            for output_entry in output_list:
+                webio_fub_elem_id = str(output_entry.get("FubElementId", -1))
+                if webio_fub_elem_id == "-1":
+                    continue
+                elem_ids.append(int(webio_fub_elem_id))
+                # Extract the WebIO command ID from the element reference
+                webio_elem_ref = elements.get(webio_fub_elem_id, {}).get("reference", {})
+                if webio_elem_ref.get("type") == 10:
+                    cmd_id = webio_elem_ref.get("ref_id")
+                    if cmd_id is not None:
+                        cmd_ids.append(int(cmd_id))
+                _LOGGER.info(
+                    "function_plan_cleanup_for_markers: M%d → WebIO elem=%s cmd=%s",
+                    marker_id,
+                    webio_fub_elem_id,
+                    cmd_ids[-1] if cmd_ids else "?",
+                )
+        return elem_ids, cmd_ids
+
+    async def _delete_plan_elements_and_restart(
+        self, fub_id: int, elem_ids_to_delete: list[int], webio_cmd_ids: list[int], plan_name: str
+    ) -> dict:
+        """Stop the plan, delete the given elements, restart it, and build the result dict."""
+        await self.logikplan_stop_fup(fub_id)
+        success = await self.logikplan_delete_elements(elem_ids_to_delete)
+        if not success:
+            _LOGGER.error("function_plan_cleanup_for_markers: element deletion failed")
+            await self.logikplan_run_fup(fub_id)
+            return {
+                "deleted_elem_count": 0,
+                "webio_cmd_ids": [],
+                "fub_id": fub_id,
+                "plan_stopped": False,
+                "plan_name": plan_name,
+            }
+
+        restart_ok = await self.logikplan_run_fup(fub_id)
+        _LOGGER.info(
+            "function_plan_cleanup_for_markers: deleted %d elements, webio_cmd_ids=%s (plan '%s' %s)",
+            len(elem_ids_to_delete),
+            webio_cmd_ids,
+            plan_name,
+            "restarted" if restart_ok else "restart failed — left stopped",
+        )
+        return {
+            "deleted_elem_count": len(elem_ids_to_delete),
+            "webio_cmd_ids": webio_cmd_ids,
+            "fub_id": fub_id,
+            "plan_stopped": not restart_ok,
+            "plan_name": plan_name,
+        }
+
     async def set_value(
         self,
         target_type: str,

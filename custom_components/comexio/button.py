@@ -31,6 +31,7 @@ from .const import (
     SYNC_DURATION_WRITE,
     SYNC_PROGRESS_END_PCT,
     SYNC_PROGRESS_START_PCT,
+    WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
     webio_class_label,
     webio_class_name,
@@ -156,6 +157,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                     "delete_orphans",
                     "update_ip",
                     "function_plan_add_missing",
+                    "cleanup_entities",
                 ]
             )
         },
@@ -254,6 +256,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             )
 
             gap_items = audit_data.get("function_plan_missing", [])
+            cleanup_entity_ids: list[int] = audit_data.get("cleanup_entities", [])
+            lp_fub_id = self.coordinator.get_active_function_plan_fub_id()
+
+            if action == "cleanup_entities":
+                # Standalone action: remove HA entities + Function Plan wiring + WebIO commands
+                # for ignored markers that still have legacy remnants.
+                await self._handle_cleanup_entities(
+                    cleanup_entity_ids, api, dev_ids[WEBIO_CLASS_MARKER], notif_id, notify_enabled, lp_fub_id
+                )
+                return
 
             if action == "function_plan_add_missing":
                 # Standalone action: wire pre-existing but unwired pairs only, no Web-IO sync.
@@ -404,6 +416,128 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         body = "\n".join(plan_summary) if plan_summary else "Nothing to do — all pairs were already wired."
         duration_str = f"{_mmss(duration.total_seconds())} min"
         return f"✅ **Function Plan update finished**\n\n{body}\n\n⏱ Total duration: {duration_str}"
+
+    async def _handle_cleanup_entities(
+        self,
+        marker_ids: list[int],
+        api: Any,
+        dev_id: str | None,
+        notif_id: str,
+        notify_enabled: bool,
+        lp_fub_id: int | None = None,
+    ) -> None:
+        """Remove HA entities, Function Plan elements and WebIO commands for ignored markers."""
+        if not marker_ids:
+            return
+
+        def _notify(msg: str) -> None:
+            if notify_enabled:
+                persistent_notification.async_create(
+                    self.hass, msg, title=f"Comexio Cleanup ({self.server_id})", notification_id=notif_id
+                )
+
+        deleted_entities = self._delete_marker_entities(marker_ids)
+        lp_count, webio_cmd_ids, stopped_plans = await self._cleanup_function_plan_plans(api, marker_ids, lp_fub_id)
+        webio_removed, webio_failed = await self._delete_webio_commands(api, dev_id, webio_cmd_ids)
+
+        lines = self._build_cleanup_summary_lines(marker_ids, deleted_entities, lp_count, webio_removed, webio_failed)
+        lines.extend(self._notify_stopped_plans(stopped_plans))
+        _notify("\n".join(lines))
+        _LOGGER.info("[%s] cleanup_entities done: %s", self.server_id, ", ".join(lines))
+
+    def _delete_marker_entities(self, marker_ids: list[int]) -> int:
+        """Remove HA entities for the given marker ids; return the deleted-entity count."""
+        registry = er.async_get(self.hass)
+        deleted_entities = 0
+        for marker_id in marker_ids:
+            unique_id = f"{DOMAIN}_{self.server_id}_m{marker_id}".lower()
+            # list() copy is required: registry.async_remove() below mutates registry.entities
+            # mid-loop, which would otherwise raise "dictionary changed size during iteration".
+            for entity in list(registry.entities.values()):
+                if entity.unique_id and entity.unique_id == unique_id:
+                    registry.async_remove(entity.entity_id)
+                    deleted_entities += 1
+                    _LOGGER.info(
+                        "[%s] Removed entity %s for ignored marker M%d",
+                        self.server_id,
+                        entity.entity_id,
+                        marker_id,
+                    )
+        return deleted_entities
+
+    async def _delete_webio_commands(self, api: Any, dev_id: str | None, webio_cmd_ids: list[Any]) -> tuple[int, int]:
+        """Delete the given WebIO commands from dev_id; return (removed, failed) counts."""
+        webio_removed, webio_failed = 0, 0
+        if not dev_id:
+            return webio_removed, webio_failed
+        for cmd_id in webio_cmd_ids:
+            ok = await api.delete_single_command(cmd_id, dev_id)
+            if ok:
+                webio_removed += 1
+            else:
+                webio_failed += 1
+                _LOGGER.warning(
+                    "[%s] Could not delete WebIO command id=%s after Function Plan cleanup",
+                    self.server_id,
+                    cmd_id,
+                )
+        return webio_removed, webio_failed
+
+    @staticmethod
+    def _build_cleanup_summary_lines(
+        marker_ids: list[int], deleted_entities: int, lp_count: int, webio_removed: int, webio_failed: int
+    ) -> list[str]:
+        """Build the base result lines for the cleanup-entities summary notification."""
+        ids_str = ", ".join(f"M{mid}" for mid in marker_ids)
+        lines = [
+            f"✓ {deleted_entities} entities removed ({ids_str})",
+            f"✓ {lp_count} Function Plan elements removed",
+            f"✓ {webio_removed} WebIO commands deleted",
+        ]
+        if webio_failed:
+            lines.append(f"⚠️ {webio_failed} WebIO deletions failed (may still be in use)")
+        return lines
+
+    def _notify_stopped_plans(self, stopped_plans: list[tuple[str, int]]) -> list[str]:
+        """Send a dedicated notification per stopped plan; return summary lines for them."""
+        extra_lines = []
+        for plan_name_s, fub_id_s in stopped_plans:
+            extra_lines.append(
+                f"⚠️ Function Plan '{plan_name_s}' (ID {fub_id_s}) was stopped — please restart it in Comexio"
+            )
+            persistent_notification.async_create(
+                self.hass,
+                f"Function Plan **'{plan_name_s}'** (ID {fub_id_s}) was stopped during entity "
+                "cleanup and was **not** automatically restarted.\n\n"
+                "Please restart it in Comexio so that live updates "
+                "(webhooks) are sent to Home Assistant again.",
+                title=f"Comexio: Function Plan stopped ({self.server_id})",
+                notification_id=f"comexio_function_plan_stopped_{self.server_id}_{fub_id_s}",
+            )
+        return extra_lines
+
+    async def _cleanup_function_plan_plans(
+        self, api: Any, marker_ids: list[int], lp_fub_id: int | None
+    ) -> tuple[int, list[int], list[tuple[str, int]]]:
+        """Run the Function Plan cleanup for every managed plan the markers are wired in.
+
+        Returns (deleted element count, WebIO command ids to delete, stopped plans as
+        (name, fub_id) tuples).
+        """
+        plan_to_ids = await self.coordinator.resolve_marker_cleanup_plans(marker_ids, lp_fub_id)
+        lp_count = 0
+        webio_cmd_ids: list[int] = []
+        stopped_plans: list[tuple[str, int]] = []
+        for fub_id, cleanup_ids in plan_to_ids.items():
+            await self.coordinator.async_function_plan_change_backup(
+                fub_id, f"cleanup_ignored {[f'M{m}' for m in cleanup_ids]}"
+            )
+            lp = await api.function_plan_cleanup_for_markers(cleanup_ids, fub_id=fub_id)
+            lp_count += lp.get("deleted_elem_count", 0)
+            webio_cmd_ids.extend(lp.get("webio_cmd_ids", []))
+            if lp.get("plan_stopped") and lp.get("fub_id") is not None:
+                stopped_plans.append((lp.get("plan_name", "?"), lp["fub_id"]))
+        return lp_count, webio_cmd_ids, stopped_plans
 
     def _build_sync_result_message(
         self,
