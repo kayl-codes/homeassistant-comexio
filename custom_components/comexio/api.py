@@ -2393,18 +2393,30 @@ class ComexioAPI:
     def _resolve_webio_output_entry(
         marker_id: int, output_entry: dict[str, Any], elements: dict[str, Any]
     ) -> tuple[int, int | None] | None:
-        """Resolve one connection output entry to (elem_id, cmd_id | None); None if not a real element."""
+        """Resolve one connection output entry to (elem_id, cmd_id | None); None if it isn't a WebIO element.
+
+        Only reference type 10 (WebIO command) is treated as deletable here — a marker output
+        could in principle be wired to something else (another marker, a logic element, ...),
+        which must NOT be swept up into this destructive cleanup.
+        """
         webio_fub_elem_id = str(output_entry.get("FubElementId", -1))
         if webio_fub_elem_id == "-1":
             return None
 
-        # Extract the WebIO command ID from the element reference, if any
-        cmd_id: int | None = None
         webio_elem_ref = elements.get(webio_fub_elem_id, {}).get("reference", {})
-        if webio_elem_ref.get("type") == 10:
-            raw_cmd_id = webio_elem_ref.get("ref_id")
-            if raw_cmd_id is not None:
-                cmd_id = int(raw_cmd_id)
+        if webio_elem_ref.get("type") != 10:
+            _LOGGER.debug(
+                "function_plan_cleanup_for_markers: M%d → non-WebIO output elem=%s (ref.type=%s), skipping",
+                marker_id,
+                webio_fub_elem_id,
+                webio_elem_ref.get("type"),
+            )
+            return None
+
+        cmd_id: int | None = None
+        raw_cmd_id = webio_elem_ref.get("ref_id")
+        if raw_cmd_id is not None:
+            cmd_id = int(raw_cmd_id)
 
         _LOGGER.debug(
             "function_plan_cleanup_for_markers: M%d → WebIO elem=%s cmd=%s",
