@@ -1546,6 +1546,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         all_ignored_ids = expand_ignored_marker_ids(ignored_raw)
         lp_plans = await self._load_function_plan_check_data()
+        marker_ids_with_entities = self._marker_ids_with_entities(list(all_ignored_ids))
         for marker_id in sorted(all_ignored_ids):
             marker = markers_by_id.get(marker_id)
             if not marker or not marker.get("name", "").strip():
@@ -1554,7 +1555,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 continue
 
             # Marker exists and is intentionally ignored — only flag if legacy entities/links remain
-            has_entities = await self._check_marker_has_entities(marker_id)
+            has_entities = marker_id in marker_ids_with_entities
             function_plan_fub_id = self._check_marker_function_plan_link(marker_id, lp_plans)
             if function_plan_fub_id is not None:
                 affected_fub_ids.add(function_plan_fub_id)
@@ -1668,14 +1669,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
         _LOGGER.info("[%s] Entity ID migration complete: %d IDs updated", self.server_id, migrated)
         return migrated
 
-    async def _check_marker_has_entities(self, marker_id: int) -> bool:
-        """Check if marker has any entities in the registry."""
+    def _marker_ids_with_entities(self, marker_ids: list[int]) -> set[int]:
+        """Return the subset of marker_ids that still have an HA entity in the registry.
+
+        Single pass over the registry regardless of how many marker_ids are checked, instead
+        of one full registry scan per marker.
+        """
         from homeassistant.helpers import entity_registry as er
 
         ent_reg = er.async_get(self.hass)
-        unique_id = f"{DOMAIN}_{self.server_id}_m{marker_id}".lower()
-
-        return any(e.unique_id == unique_id for e in ent_reg.entities.values())
+        marker_id_by_unique_id = {f"{DOMAIN}_{self.server_id}_m{mid}".lower(): mid for mid in marker_ids}
+        return {
+            marker_id
+            for entity in ent_reg.entities.values()
+            if (marker_id := marker_id_by_unique_id.get(entity.unique_id or "")) is not None
+        }
 
     # --- MANAGED CLUSTER PLANS ---
 
@@ -2078,13 +2086,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
     @staticmethod
     def _marker_wired_in_plan(marker_id: int, plan_data: dict) -> bool:
         """Check if the marker element in this plan has an outgoing connection."""
-        marker_elem_id: str | None = None
-        for elem_id, elem_data in plan_data.get("elements", {}).items():
-            ref = elem_data.get("reference", {})
-            if ref.get("type") == 2 and int(ref.get("ref_id", -1)) == marker_id:
-                marker_elem_id = str(elem_id)
-                break
-
+        marker_elem_id = ComexioAPI._find_marker_element_id(plan_data.get("elements", {}), marker_id)
         if not marker_elem_id:
             return False
 
