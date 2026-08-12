@@ -2350,6 +2350,10 @@ class ComexioAPI:
             _LOGGER.info("function_plan_cleanup_for_markers: no elements to delete for markers %s", marker_ids)
             return {"deleted_elem_count": 0, "webio_cmd_ids": [], "fub_id": fub_id}
 
+        # A WebIO element can in principle be reached via more than one connection to the
+        # same marker; dedupe before deletion so the same element/command isn't attempted twice.
+        elem_ids_to_delete = list(dict.fromkeys(elem_ids_to_delete))
+        webio_cmd_ids = list(dict.fromkeys(webio_cmd_ids))
         return await self._delete_plan_elements_and_restart(fub_id, elem_ids_to_delete, webio_cmd_ids, plan_name)
 
     @staticmethod
@@ -2388,7 +2392,7 @@ class ComexioAPI:
                     if cmd_id is not None:
                         cmd_ids.append(int(cmd_id))
                         cmd_id_for_log = int(cmd_id)
-                _LOGGER.info(
+                _LOGGER.debug(
                     "function_plan_cleanup_for_markers: M%d → WebIO elem=%s cmd=%s",
                     marker_id,
                     webio_fub_elem_id,
