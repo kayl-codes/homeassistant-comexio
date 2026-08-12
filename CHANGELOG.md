@@ -37,6 +37,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **Entity naming:** The plan selector entity is now named "Function Plans" (was the duplicated "Logikplan Plan").
 - **Service instance detection:** Service calls without an explicit `config_entry` no longer abort silently when webhook bookkeeping entries exist alongside the coordinator.
 - **Marker lookup:** Marker IDs are compared as integers when connecting plans — explicit marker lists and `*` (all) now resolve correctly.
+- **`function_plan_connect` missing safety snapshot:** Unlike every other plan-mutating service, `function_plan_connect` never took a pre-change backup snapshot before wiring markers to their Web-IO commands — a failed or unwanted run had no rollback point. It now takes one, consistent with `function_plan_sort` and the restore path.
 - **`delete_single_command`** returns `False` on failure instead of raising, so delta-sync continues with the remaining commands.
 - **Options form:** `ignored_markers` field no longer loses its stored value when reopening the options dialog.
 - **Analog marker Web-IO push stopped silently at extreme values:** The generated Web-IO command for analog markers hardcoded `Min: 0, Max: 100`; Comexio's Web-IO push mechanism validates against that range and silently stops sending updates once the live value overflows it. Analog markers have no configurable range on the Comexio side, so the command's Min/Max are now set to the full signed-32-bit span instead.

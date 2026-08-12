@@ -300,6 +300,7 @@ async def handle_logikplan_connect_poc(hass: HomeAssistant, call: ServiceCall) -
 
     plan_info = api.fub_data.get(str(fub_id), {})
     was_active = bool(plan_info.get("Active", True))
+    await coordinator.async_function_plan_change_backup(fub_id, f"connect_poc {[f'M{m}' for m in marker_ids]}")
     if was_active:
         await api.logikplan_stop_fup(fub_id)
 
