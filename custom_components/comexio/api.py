@@ -36,6 +36,8 @@ from .const import (
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
+    WEBIO_MARKER_ANALOG_MAX,
+    WEBIO_MARKER_ANALOG_MIN,
     io_column_rows,
     io_sort_key,
     webio_class_label,
@@ -1105,89 +1107,87 @@ class ComexioAPI:
         for m in markers:
             if ignored_marker_ids and int(m["id"]) in ignored_marker_ids:
                 continue
-            is_ana = m["type"] == "analog"
-            safe_id = str(m["id"]).replace('"', '\\"')
-            lua = (
-                f"function data(a)\r\n"
-                f'  local d = {{ id="{safe_id}", value=a, type="marker" }}\r\n'
-                f"  return json_stringify(d)\r\n"
-                f"end"
-            )
-
-            commands.append(
-                {
-                    "Name": f"HA {m['name']}",
-                    "TypeId": 2 if is_ana else 1,
-                    "Min": 0,
-                    "Max": 100 if is_ana else 1,
-                    "Parameter": webhook_path,
-                    "HeaderModifier": _CONTENT_TYPE_JSON,
-                    "Data": lua,
-                    "Protocol": 0,
-                    "PostGet": 1,
-                    "WebDeviceId": 0,
-                    "Authentication": 0,
-                    "Input": 1,
-                    "ReqFreq": "",
-                    "ReplyInterpreter": "",
-                    "Port": "",
-                    "SendOnOne": 0,
-                    "Changed": 1,
-                    "BaseId": 0,
-                    "DefaultValue": "",
-                    "DefaultActive": 1,
-                    "io": [],
-                }
-            )
+            commands.append(self._build_marker_webio_command(m, webhook_path))
 
         # 2. Create Web-IO for IOs
         io_entries = parsed_data.get("io", []) if webio_class != WEBIO_CLASS_MARKER else []
         for io_item in io_entries:
-            # check data type
-            is_ana = not io_item.get("is_binary", False)
-
-            # Use the authentic min/max from the Comexio type definition
-            v_min = io_item.get("min", 0)
-            v_max = io_item.get("max", 100 if is_ana else 1)
-
-            safe_ext = str(io_item["ext_name"]).replace('"', '\\"')
-            safe_io_id = str(io_item["identifier"]).replace('"', '\\"')
-
-            lua = (
-                f"function data(a)\r\n"
-                f'  local d = {{ ext="{safe_ext}", io="{safe_io_id}", '
-                f'value=a, type="io" }}\r\n'
-                f"  return json_stringify(d)\r\n"
-                f"end"
-            )
-
-            commands.append(
-                {
-                    "Name": f"HA IO {io_item['ext_name']} {io_item['identifier']}",
-                    "TypeId": 2 if is_ana else 1,
-                    "Min": v_min,
-                    "Max": v_max,
-                    "Parameter": webhook_path,
-                    "HeaderModifier": _CONTENT_TYPE_JSON,
-                    "Data": lua,
-                    "Protocol": 0,
-                    "PostGet": 1,
-                    "WebDeviceId": 0,
-                    "Authentication": 0,
-                    "Input": 1,
-                    "ReqFreq": "",
-                    "ReplyInterpreter": "",
-                    "Port": "",
-                    "SendOnOne": 0,
-                    "Changed": 1,
-                    "BaseId": 0,
-                    "DefaultValue": "",
-                    "DefaultActive": 1,
-                    "io": [],
-                }
-            )
+            commands.append(self._build_io_webio_command(io_item, webhook_path))
 
         return commands
+
+    @staticmethod
+    def _lua_escape(value: Any) -> str:
+        """Escape a value for embedding in a double-quoted Lua string literal."""
+        return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+    @staticmethod
+    def _webio_data_lua(payload: str) -> str:
+        """Build the Lua `data(a)` webhook body for a Web-IO command, given its JSON payload fields."""
+        return f"function data(a)\r\n  local d = {{ {payload} }}\r\n  return json_stringify(d)\r\nend"
+
+    @staticmethod
+    def _webio_command(
+        *, name: str, type_id: int, min_v: int, max_v: int, data: str, webhook_path: str
+    ) -> dict[str, Any]:
+        """Build a Web-IO command dict, filling in the fields shared by markers and IOs."""
+        return {
+            "Name": name,
+            "TypeId": type_id,
+            "Min": min_v,
+            "Max": max_v,
+            "Parameter": webhook_path,
+            "HeaderModifier": _CONTENT_TYPE_JSON,
+            "Data": data,
+            "Protocol": 0,
+            "PostGet": 1,
+            "WebDeviceId": 0,
+            "Authentication": 0,
+            "Input": 1,
+            "ReqFreq": "",
+            "ReplyInterpreter": "",
+            "Port": "",
+            "SendOnOne": 0,
+            "Changed": 1,
+            "BaseId": 0,
+            "DefaultValue": "",
+            "DefaultActive": 1,
+            "io": [],
+        }
+
+    @staticmethod
+    def _build_marker_webio_command(m: dict[str, Any], webhook_path: str) -> dict[str, Any]:
+        """Build the Web-IO command dict for a single marker."""
+        is_ana = m["type"] == "analog"
+        safe_id = ComexioAPI._lua_escape(m["id"])
+        lua = ComexioAPI._webio_data_lua(f'id="{safe_id}", value=a, type="marker"')
+        return ComexioAPI._webio_command(
+            name=f"HA {m['name']}",
+            type_id=2 if is_ana else 1,
+            min_v=WEBIO_MARKER_ANALOG_MIN if is_ana else 0,
+            max_v=WEBIO_MARKER_ANALOG_MAX if is_ana else 1,
+            data=lua,
+            webhook_path=webhook_path,
+        )
+
+    @staticmethod
+    def _build_io_webio_command(io_item: dict[str, Any], webhook_path: str) -> dict[str, Any]:
+        """Build the Web-IO command dict for a single physical IO."""
+        is_ana = not io_item.get("is_binary", False)
+        # Use the authentic min/max from the Comexio type definition
+        v_min = io_item.get("min", 0)
+        v_max = io_item.get("max", 100 if is_ana else 1)
+        safe_ext = ComexioAPI._lua_escape(io_item["ext_name"])
+        safe_io_id = ComexioAPI._lua_escape(io_item["identifier"])
+        lua = ComexioAPI._webio_data_lua(f'ext="{safe_ext}", io="{safe_io_id}", value=a, type="io"')
+        return ComexioAPI._webio_command(
+            name=f"HA IO {io_item['ext_name']} {io_item['identifier']}",
+            type_id=2 if is_ana else 1,
+            min_v=v_min,
+            max_v=v_max,
+            data=lua,
+            webhook_path=webhook_path,
+        )
 
     def generate_webio_json(
         self,
