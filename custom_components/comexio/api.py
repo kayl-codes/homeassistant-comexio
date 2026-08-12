@@ -1119,7 +1119,7 @@ class ComexioAPI:
     @staticmethod
     def _lua_escape(value: Any) -> str:
         """Escape a value for embedding in a double-quoted Lua string literal."""
-        return str(value).replace('"', '\\"')
+        return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
     @staticmethod
     def _webio_data_lua(payload: str) -> str:
