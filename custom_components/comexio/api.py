@@ -1117,6 +1117,11 @@ class ComexioAPI:
         return commands
 
     @staticmethod
+    def _lua_escape(value: Any) -> str:
+        """Escape a value for embedding in a double-quoted Lua string literal."""
+        return str(value).replace('"', '\\"')
+
+    @staticmethod
     def _webio_data_lua(payload: str) -> str:
         """Build the Lua `data(a)` webhook body for a Web-IO command, given its JSON payload fields."""
         return f"function data(a)\r\n  local d = {{ {payload} }}\r\n  return json_stringify(d)\r\nend"
@@ -1154,7 +1159,7 @@ class ComexioAPI:
     def _build_marker_webio_command(m: dict[str, Any], webhook_path: str) -> dict[str, Any]:
         """Build the Web-IO command dict for a single marker."""
         is_ana = m["type"] == "analog"
-        safe_id = str(m["id"]).replace('"', '\\"')
+        safe_id = ComexioAPI._lua_escape(m["id"])
         lua = ComexioAPI._webio_data_lua(f'id="{safe_id}", value=a, type="marker"')
         return ComexioAPI._webio_command(
             name=f"HA {m['name']}",
@@ -1172,8 +1177,8 @@ class ComexioAPI:
         # Use the authentic min/max from the Comexio type definition
         v_min = io_item.get("min", 0)
         v_max = io_item.get("max", 100 if is_ana else 1)
-        safe_ext = str(io_item["ext_name"]).replace('"', '\\"')
-        safe_io_id = str(io_item["identifier"]).replace('"', '\\"')
+        safe_ext = ComexioAPI._lua_escape(io_item["ext_name"])
+        safe_io_id = ComexioAPI._lua_escape(io_item["identifier"])
         lua = ComexioAPI._webio_data_lua(f'ext="{safe_ext}", io="{safe_io_id}", value=a, type="io"')
         return ComexioAPI._webio_command(
             name=f"HA IO {io_item['ext_name']} {io_item['identifier']}",
