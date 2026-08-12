@@ -450,9 +450,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         registry = er.async_get(self.hass)
         marker_entities = self.coordinator.marker_entities_by_id(marker_ids)
         deleted_entities = 0
-        # list() copy is required: registry.async_remove() below mutates registry.entities
-        # mid-loop, which would otherwise raise "dictionary changed size during iteration".
-        for marker_id, entity in list(marker_entities.items()):
+        # marker_entities is our own dict, not the live registry.entities mapping, so
+        # registry.async_remove() below mutating the registry doesn't affect this iteration.
+        for marker_id, entity in marker_entities.items():
             registry.async_remove(entity.entity_id)
             deleted_entities += 1
             _LOGGER.info(
@@ -467,6 +467,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Delete the given WebIO commands from dev_id; return (removed, failed) counts."""
         webio_removed, webio_failed = 0, 0
         if not dev_id:
+            if webio_cmd_ids:
+                _LOGGER.debug(
+                    "[%s] Skipping deletion of %d WebIO command(s) — no marker Web-IO device instance",
+                    self.server_id,
+                    len(webio_cmd_ids),
+                )
             return webio_removed, webio_failed
         for cmd_id in webio_cmd_ids:
             ok = await api.delete_single_command(cmd_id, dev_id)
