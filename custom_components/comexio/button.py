@@ -493,6 +493,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     ) -> list[str]:
         """Build the base result lines for the cleanup-entities summary notification."""
         ids_str = ", ".join(f"M{mid}" for mid in marker_ids)
+        if deleted_entities == 0 and lp_count == 0 and webio_removed == 0 and webio_failed == 0:
+            return [f"Nothing to clean up for {ids_str} — no entities, Function Plan elements or WebIO commands found."]
         lines = [
             f"✓ {deleted_entities} entities removed ({ids_str})",
             f"✓ {lp_count} Function Plan elements removed",
