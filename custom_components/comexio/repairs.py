@@ -17,6 +17,18 @@ from .const import (
     CONF_STATISTICS_CLEANUP_IGNORED,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
+    ICON_ADD,
+    ICON_CLEANUP,
+    ICON_DELETE,
+    ICON_FIX,
+    ICON_INFO,
+    ICON_LINK,
+    ICON_MUTE,
+    ICON_NETWORK,
+    ICON_PUZZLE,
+    ICON_RENAME,
+    ICON_ROCKET,
+    ICON_SYNC,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
     SYNC_DURATION_FUNCTION_PLAN_PAIR,
@@ -42,18 +54,18 @@ def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
     line.
     """
     if not detail:
-        return [f"* 🔗 **Not wired in Function Plan:** {lp_missing_c}"]
+        return [f"* {ICON_LINK} **Not wired in Function Plan:** {lp_missing_c}"]
     lines = []
     for plan_name, (gap, total) in detail.get("markers_by_plan", {}).items():
         if gap == total:
-            lines.append(f"* 🧩 **Marker cluster plan {plan_name} missing:** all {gap} markers")
+            lines.append(f"* {ICON_PUZZLE} **Marker cluster plan {plan_name} missing:** all {gap} markers")
         else:
-            lines.append(f"* 🔗 **Markers not wired in {plan_name}:** {gap} of {total}")
+            lines.append(f"* {ICON_LINK} **Markers not wired in {plan_name}:** {gap} of {total}")
     for ext, (gap, total) in detail.get("ios_by_ext", {}).items():
         if gap == total:
-            lines.append(f"* 🧩 **Extension {ext} not yet in an IO cluster plan:** all {gap} IOs")
+            lines.append(f"* {ICON_PUZZLE} **Extension {ext} not yet in an IO cluster plan:** all {gap} IOs")
         else:
-            lines.append(f"* 🧩 **Extension {ext} partially wired:** {gap} of {total} IOs missing")
+            lines.append(f"* {ICON_PUZZLE} **Extension {ext} partially wired:** {gap} of {total} IOs missing")
     return lines
 
 
@@ -67,7 +79,7 @@ def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> st
     markers_by_plan = detail.get("markers_by_plan", {}) if detail else {}
     ios_by_ext = detail.get("ios_by_ext", {}) if detail else {}
     if not markers_by_plan and not ios_by_ext:
-        return f"🔗 Wire in Function Plan ({lp_missing_c}x{eta})"
+        return f"{ICON_LINK} Wire in Function Plan ({lp_missing_c}x{eta})"
     parts = []
     if markers := sum(gap for gap, _total in markers_by_plan.values()):
         parts.append(f"{markers} markers")
@@ -77,12 +89,12 @@ def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> st
         gap == total for gap, total in ios_by_ext.values()
     )
     if not all_whole:
-        return f"🔗 Wire in Function Plan {detail_str}"
+        return f"{ICON_LINK} Wire in Function Plan {detail_str}"
     if markers_by_plan:
         noun = "Function Plan" if len(markers_by_plan) == 1 and not ios_by_ext else "Function Plans"
-        return f"🧩 Add {noun} {detail_str}"
+        return f"{ICON_PUZZLE} Add {noun} {detail_str}"
     noun = "extension" if len(ios_by_ext) == 1 else "extensions"
-    return f"🧩 Add {noun} to Function Plan {detail_str}"
+    return f"{ICON_PUZZLE} Add {noun} to Function Plan {detail_str}"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry):
@@ -337,13 +349,13 @@ class ComexioRepairFlow(RepairsFlow):
             # Minimal options if one or both device classes are completely absent
             if is_de:
                 options = {
-                    "full_sync": "🚀 Initial Setup (fehlende Klasse(n) & Gerät(e) anlegen)",
-                    "ignore": "🔇 Nachricht ignorieren (Web-IO nicht nutzen)",
+                    "full_sync": f"{ICON_ROCKET} Initial Setup (fehlende Klasse(n) & Gerät(e) anlegen)",
+                    "ignore": f"{ICON_MUTE} Nachricht ignorieren (Web-IO nicht nutzen)",
                 }
             else:
                 options = {
-                    "full_sync": "🚀 Initial Setup (Create missing class(es) & device(s))",
-                    "ignore": "🔇 Ignore message (Do not use Web-IO)",
+                    "full_sync": f"{ICON_ROCKET} Initial Setup (Create missing class(es) & device(s))",
+                    "ignore": f"{ICON_MUTE} Ignore message (Do not use Web-IO)",
                 }
             default_action = "full_sync"
         else:
@@ -423,22 +435,23 @@ class ComexioRepairFlow(RepairsFlow):
                     header = "The analysis has detected differences:\n\n"
                 lines = []
                 if t_c > 0:
-                    lines.append(f"* 🔧 **{'Typ-Konflikte' if is_de else 'Type conflicts'}:** {t_c}")
+                    lines.append(f"* {ICON_FIX} **{'Typ-Konflikte' if is_de else 'Type conflicts'}:** {t_c}")
                 if m_c > 0:
-                    lines.append(f"* ➕ **{'Fehlend' if is_de else 'Missing'}:** {m_c}")
+                    lines.append(f"* {ICON_ADD} **{'Fehlend' if is_de else 'Missing'}:** {m_c}")
                 if r_c > 0:
-                    lines.append(f"* ✏️ **{'Umbenannt' if is_de else 'Renamed'}:** {r_c}")
+                    lines.append(f"* {ICON_RENAME} **{'Umbenannt' if is_de else 'Renamed'}:** {r_c}")
                 if o_c > 0:
-                    lines.append(f"* 🗑️ **{'Verwaist' if is_de else 'Orphaned'}:** {o_c}")
+                    lines.append(f"* {ICON_DELETE} **{'Verwaist' if is_de else 'Orphaned'}:** {o_c}")
                 if ce_c > 0:
                     lines.append(
-                        f"* 🧹 **{'Ignorierte Merker aufräumen' if is_de else 'Ignored marker cleanup'}:** {ce_c}"
+                        f"* {ICON_CLEANUP} "
+                        f"**{'Ignorierte Merker aufräumen' if is_de else 'Ignored marker cleanup'}:** {ce_c}"
                     )
                 if lp_missing_c > 0:
                     lines.extend(_function_plan_gap_lines(lp_missing_c, lp_detail))
                 if i_c > 0:
                     lines.append(
-                        f"* 🌐 **{'Server-Adresse' if is_de else 'Server Address'}:** "
+                        f"* {ICON_NETWORK} **{'Server-Adresse' if is_de else 'Server Address'}:** "
                         f"{'Falsch' if is_de else 'Incorrect'}"
                     )
 
@@ -454,14 +467,14 @@ class ComexioRepairFlow(RepairsFlow):
                 if total_sec > SYNC_DURATION_RECREATE:
                     if is_de:
                         summary += (
-                            "\n\n💡 **Hinweis:** Die Integration prüft automatisch, ob das Web-IO Gerät "
+                            f"\n\n{ICON_INFO} **Hinweis:** Die Integration prüft automatisch, ob das Web-IO Gerät "
                             "in Comexio ungenutzt ist. Falls ja, wird unabhängig von der gewählten "
                             f"Option eine **Neu-Einrichtung** durchgeführt, die in "
                             f"(~{SYNC_DURATION_RECREATE} Sek.) erledigt ist."
                         )
                     else:
                         summary += (
-                            "\n\n💡 **Note:** The integration automatically checks if the Web-IO device "
+                            f"\n\n{ICON_INFO} **Note:** The integration automatically checks if the Web-IO device "
                             "in Comexio is currently unused. If so, a **fresh setup** will be "
                             f"performed regardless of the selected option, which will be "
                             f"completed in (~{SYNC_DURATION_RECREATE} sec.)."
@@ -474,31 +487,31 @@ class ComexioRepairFlow(RepairsFlow):
 
             if counts.get("type", 0) > 0:
                 t = get_time_for_count(counts["type"])
-                label = "🔧 Typen korrigieren" if is_de else "🔧 Update Types Only"
+                label = f"{ICON_FIX} Typen korrigieren" if is_de else f"{ICON_FIX} Update Types Only"
                 specific_options["update_types"] = f"{label} ({counts['type']}x == {t})"
 
             if counts.get("missing", 0) > 0:
                 t = get_time_for_count(counts["missing"])
-                label = "➕ Fehlende anlegen" if is_de else "➕ Create Missing Only"
+                label = f"{ICON_ADD} Fehlende anlegen" if is_de else f"{ICON_ADD} Create Missing Only"
                 specific_options["create_missing"] = f"{label} ({counts['missing']}x == {t})"
 
             if counts.get("rename", 0) > 0:
                 t = get_time_for_count(counts["rename"])
-                label = "✏️ Namen aktualisieren" if is_de else "✏️ Update Names Only"
+                label = f"{ICON_RENAME} Namen aktualisieren" if is_de else f"{ICON_RENAME} Update Names Only"
                 specific_options["update_renames"] = f"{label} ({counts['rename']}x == {t})"
 
             if counts.get("orphan", 0) > 0:
                 t = get_time_for_count(counts["orphan"], is_delete=True)
-                label = "🗑️ Waisen löschen" if is_de else "🗑️ Delete Orphans Only"
+                label = f"{ICON_DELETE} Waisen löschen" if is_de else f"{ICON_DELETE} Delete Orphans Only"
                 specific_options["delete_orphans"] = f"{label} ({counts['orphan']}x == {t})"
 
             if ce_c > 0:
                 ce_del_t = get_time_for_count(ce_c, is_delete=True)
                 lp_eta = format_time(lp_c * SYNC_DURATION_FUNCTION_PLAN_PLAN) if lp_c > 0 else ""
                 label = (
-                    "🧹 Ignorierte Merker aufräumen (Entitäten + Function Plan + WebIO)"
+                    f"{ICON_CLEANUP} Ignorierte Merker aufräumen (Entitäten + Function Plan + WebIO)"
                     if is_de
-                    else "🧹 Cleanup Ignored Markers (entities + Function Plan + WebIO)"
+                    else f"{ICON_CLEANUP} Cleanup Ignored Markers (entities + Function Plan + WebIO)"
                 )
                 specific_options["cleanup_entities"] = f"{label} ({ce_c}x{ce_del_t}{lp_eta})"
 
@@ -510,9 +523,9 @@ class ComexioRepairFlow(RepairsFlow):
 
             if counts.get("ip_mismatch", 0) > 0:
                 if is_de:
-                    label = "🌐 HA Server-Adresse (IP:Port) aktualisieren"
+                    label = f"{ICON_NETWORK} HA Server-Adresse (IP:Port) aktualisieren"
                 else:
-                    label = "🌐 Update HA Server Address (IP:Port)"
+                    label = f"{ICON_NETWORK} Update HA Server Address (IP:Port)"
                 specific_options["update_ip"] = f"{label} (~{SYNC_DURATION_WRITE}s)"
 
             # Calculate Full Sync ETA
@@ -532,7 +545,7 @@ class ComexioRepairFlow(RepairsFlow):
 
             options = {}
             if len(specific_options) > 1:
-                label = f"🔄 Full Sync ({'Alles korrigieren' if is_de else 'Fix everything'}, {t_full})"
+                label = f"{ICON_SYNC} Full Sync ({'Alles korrigieren' if is_de else 'Fix everything'}, {t_full})"
                 options["full_sync"] = label
                 default_action = "full_sync"
             else:
@@ -542,7 +555,9 @@ class ComexioRepairFlow(RepairsFlow):
 
             # Fallback
             if not options:
-                label = "🔄 Full Sync (Alles korrigieren)" if is_de else "🔄 Full Sync (Fix everything)"
+                label = (
+                    f"{ICON_SYNC} Full Sync (Alles korrigieren)" if is_de else f"{ICON_SYNC} Full Sync (Fix everything)"
+                )
                 options["full_sync"] = label
                 default_action = "full_sync"
 
