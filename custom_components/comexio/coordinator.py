@@ -2062,8 +2062,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
     ) -> dict[int, list[int]]:
         """Group markers by the managed plan they are wired in, for per-plan cleanup.
 
-        A user-selected plan (preferred_fub_id) keeps the single-plan behaviour; otherwise
-        each marker is looked up in all managed plans and unwired markers are omitted.
+        A user-selected plan (preferred_fub_id) keeps the single-plan behaviour: all supplied
+        markers are grouped under it as-is, without an upfront wiring check — the per-marker
+        cleanup call itself is a no-op for any marker not actually wired there. Otherwise each
+        marker is looked up in all managed plans and unwired markers are omitted here instead.
         """
         if preferred_fub_id is not None:
             return {preferred_fub_id: list(marker_ids)}
