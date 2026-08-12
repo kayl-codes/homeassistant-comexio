@@ -443,6 +443,15 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             _LOGGER.info("[%s] cleanup_entities: nothing to clean up (no marker_ids)", self.server_id)
             return
 
+        # marker_ids comes from a possibly-stale audit snapshot; a marker could have been
+        # un-ignored in the meantime (between the audit poll and this button press). Restrict
+        # the destructive operations below to markers that are still actually ignored.
+        marker_ids = [mid for mid in marker_ids if mid in self.coordinator.ignored_marker_ids]
+        if not marker_ids:
+            _notify("Nothing to clean up — the markers flagged by the last audit are no longer ignored.")
+            _LOGGER.info("[%s] cleanup_entities: no marker_ids still ignored, skipping", self.server_id)
+            return
+
         deleted_entities = self._delete_marker_entities(marker_ids)
         lp_count, webio_cmd_ids, stopped_plans, stop_failures = await self._cleanup_function_plan_plans(
             api, marker_ids, lp_fub_id
