@@ -2380,25 +2380,39 @@ class ComexioAPI:
             if not isinstance(output_list, list):
                 continue
             for output_entry in output_list:
-                webio_fub_elem_id = str(output_entry.get("FubElementId", -1))
-                if webio_fub_elem_id == "-1":
+                resolved = ComexioAPI._resolve_webio_output_entry(marker_id, output_entry, elements)
+                if resolved is None:
                     continue
-                elem_ids.append(int(webio_fub_elem_id))
-                # Extract the WebIO command ID from the element reference
-                webio_elem_ref = elements.get(webio_fub_elem_id, {}).get("reference", {})
-                cmd_id_for_log: int | str = "?"
-                if webio_elem_ref.get("type") == 10:
-                    cmd_id = webio_elem_ref.get("ref_id")
-                    if cmd_id is not None:
-                        cmd_ids.append(int(cmd_id))
-                        cmd_id_for_log = int(cmd_id)
-                _LOGGER.debug(
-                    "function_plan_cleanup_for_markers: M%d → WebIO elem=%s cmd=%s",
-                    marker_id,
-                    webio_fub_elem_id,
-                    cmd_id_for_log,
-                )
+                elem_id, cmd_id = resolved
+                elem_ids.append(elem_id)
+                if cmd_id is not None:
+                    cmd_ids.append(cmd_id)
         return elem_ids, cmd_ids
+
+    @staticmethod
+    def _resolve_webio_output_entry(
+        marker_id: int, output_entry: dict[str, Any], elements: dict[str, Any]
+    ) -> tuple[int, int | None] | None:
+        """Resolve one connection output entry to (elem_id, cmd_id | None); None if not a real element."""
+        webio_fub_elem_id = str(output_entry.get("FubElementId", -1))
+        if webio_fub_elem_id == "-1":
+            return None
+
+        # Extract the WebIO command ID from the element reference, if any
+        cmd_id: int | None = None
+        webio_elem_ref = elements.get(webio_fub_elem_id, {}).get("reference", {})
+        if webio_elem_ref.get("type") == 10:
+            raw_cmd_id = webio_elem_ref.get("ref_id")
+            if raw_cmd_id is not None:
+                cmd_id = int(raw_cmd_id)
+
+        _LOGGER.debug(
+            "function_plan_cleanup_for_markers: M%d → WebIO elem=%s cmd=%s",
+            marker_id,
+            webio_fub_elem_id,
+            cmd_id if cmd_id is not None else "?",
+        )
+        return int(webio_fub_elem_id), cmd_id
 
     async def _delete_plan_elements_and_restart(
         self, fub_id: int, elem_ids_to_delete: list[int], webio_cmd_ids: list[int], plan_name: str
