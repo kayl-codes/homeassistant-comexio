@@ -2382,15 +2382,17 @@ class ComexioAPI:
                 elem_ids.append(int(webio_fub_elem_id))
                 # Extract the WebIO command ID from the element reference
                 webio_elem_ref = elements.get(webio_fub_elem_id, {}).get("reference", {})
+                cmd_id_for_log: int | str = "?"
                 if webio_elem_ref.get("type") == 10:
                     cmd_id = webio_elem_ref.get("ref_id")
                     if cmd_id is not None:
                         cmd_ids.append(int(cmd_id))
+                        cmd_id_for_log = int(cmd_id)
                 _LOGGER.info(
                     "function_plan_cleanup_for_markers: M%d → WebIO elem=%s cmd=%s",
                     marker_id,
                     webio_fub_elem_id,
-                    cmd_ids[-1] if cmd_ids else "?",
+                    cmd_id_for_log,
                 )
         return elem_ids, cmd_ids
 

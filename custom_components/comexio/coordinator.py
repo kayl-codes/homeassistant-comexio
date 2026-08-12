@@ -198,7 +198,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.sync_current_step: str | None = None
         self.last_audit_results: dict[str, Any] = {}
         self._cleanup_entity_ids: list[int] = []
-        self._cleanup_function_plan_plan_count: int = 0
+        self._cleanup_function_plan_count: int = 0
         self.cancel_sync: bool = False
         self.entity_id_mismatches: list[dict[str, str]] = []
         self.orphaned_statistics: list[str] = []
@@ -569,7 +569,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "ha_address": ha_address,
                 "webio_devices": webio_device_audit,
                 "cleanup_entities": self._cleanup_entity_ids,
-                "cleanup_function_plan_count": self._cleanup_function_plan_plan_count,
+                "cleanup_function_plan_count": self._cleanup_function_plan_count,
                 "function_plan_missing": function_plan_missing_items,
             }
 
@@ -653,7 +653,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "orphan": len(orphans),
                     "ip_mismatch": 1 if ip_mismatch else 0,
                     "cleanup_entities": len(self._cleanup_entity_ids),
-                    "cleanup_function_plan_count": self._cleanup_function_plan_plan_count,
+                    "cleanup_function_plan_count": self._cleanup_function_plan_count,
                     "function_plan_missing": len(function_plan_missing_items),
                     "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(function_plan_missing_items),
                     "all": len(mismatches),
@@ -1535,7 +1535,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()
         if not ignored_raw:
             self._cleanup_entity_ids = []
-            self._cleanup_function_plan_plan_count = 0
+            self._cleanup_function_plan_count = 0
             ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_cleanup_{self.server_id}")
             return
 
@@ -1592,7 +1592,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         # Store cleanup_ids for the combined sync_mismatch repair (no separate issue anymore)
         self._cleanup_entity_ids = cleanup_ids
-        self._cleanup_function_plan_plan_count = len(affected_fub_ids)
+        self._cleanup_function_plan_count = len(affected_fub_ids)
         # Remove legacy ignored_markers_cleanup issue if it still exists from an older version
         ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_cleanup_{self.server_id}")
 
