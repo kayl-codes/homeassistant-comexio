@@ -1,7 +1,6 @@
 # Version: 0.7.5
 import asyncio
 import logging
-import re
 
 from homeassistant.components import persistent_notification
 from homeassistant.components.repairs import RepairsFlow
@@ -21,12 +20,12 @@ from .const import (
     SYNC_DURATION_DELETE,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
     SYNC_DURATION_FUNCTION_PLAN_PAIR,
+    SYNC_DURATION_FUNCTION_PLAN_PLAN,
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
 )
 
 _LOGGER = logging.getLogger(__name__)
-_MARKER_ID_SUFFIX_RE = re.compile(r"(\d+)")
 
 ACTION_FIX = "fix"
 ACTION_IGNORE = "ignore"
@@ -112,16 +111,6 @@ class ComexioRepairFlow(RepairsFlow):
         if "statistics_orphaned" in self.issue_id:
             _LOGGER.debug("Routing to async_step_statistics_cleanup")
             return await self.async_step_statistics_cleanup()
-        if "ignored_markers_cleanup" in self.issue_id:
-            _LOGGER.debug("Routing to async_step_ignored_markers_cleanup")
-            return await self.async_step_ignored_markers_cleanup()
-        if "ignored_markers_invalid" in self.issue_id:
-            _LOGGER.debug("Routing to async_step_ignored_markers_invalid")
-            try:
-                return await self.async_step_ignored_markers_invalid()
-            except Exception as e:
-                _LOGGER.exception("Error in async_step_ignored_markers_invalid: %s", e)
-                raise
         if self.issue_id.startswith("uninstall_cleanup_"):
             _LOGGER.debug("Routing to async_step_uninstall_cleanup")
             return await self.async_step_uninstall_cleanup()
@@ -365,6 +354,8 @@ class ComexioRepairFlow(RepairsFlow):
             r_c = counts.get("rename", 0)
             o_c = counts.get("orphan", 0)
             i_c = counts.get("ip_mismatch", 0)
+            ce_c = counts.get("cleanup_entities", 0)
+            lp_c = counts.get("cleanup_function_plan_count", 0)
             lp_missing_c = counts.get("function_plan_missing", 0)
             lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
             # Fallback for stale issues created before the coordinator started storing an
@@ -382,7 +373,7 @@ class ComexioRepairFlow(RepairsFlow):
                 + SYNC_DURATION_FUNCTION_PLAN_FINALIZE * affected_plan_count,
             )
 
-            config_issues = t_c + m_c + r_c + o_c + lp_missing_c
+            config_issues = t_c + m_c + r_c + o_c + ce_c + lp_missing_c
             ha_count = placeholders.get("ha_count", "0")
             com_count = placeholders.get("com_count", "0")
 
@@ -399,11 +390,13 @@ class ComexioRepairFlow(RepairsFlow):
 
             # 1. Calculate Full Sync ETA first to decide on the hint visibility
             total_write = t_c + r_c + m_c
-            total_del = o_c
+            total_del = o_c + ce_c
             total_sec = (total_write * SYNC_DURATION_WRITE) + (total_del * SYNC_DURATION_DELETE)
             # Always add IP duration if a mismatch exists, as it's a separate call in Delta-Sync
             if i_c > 0:
                 total_sec += SYNC_DURATION_WRITE
+            if lp_c > 0:
+                total_sec += lp_c * SYNC_DURATION_FUNCTION_PLAN_PLAN
             if lp_missing_c > 0:
                 total_sec += lp_missing_eta_sec
 
@@ -437,6 +430,10 @@ class ComexioRepairFlow(RepairsFlow):
                     lines.append(f"* ✏️ **{'Umbenannt' if is_de else 'Renamed'}:** {r_c}")
                 if o_c > 0:
                     lines.append(f"* 🗑️ **{'Verwaist' if is_de else 'Orphaned'}:** {o_c}")
+                if ce_c > 0:
+                    lines.append(
+                        f"* 🧹 **{'Ignorierte Merker aufräumen' if is_de else 'Ignored marker cleanup'}:** {ce_c}"
+                    )
                 if lp_missing_c > 0:
                     lines.extend(_function_plan_gap_lines(lp_missing_c, lp_detail))
                 if i_c > 0:
@@ -495,6 +492,16 @@ class ComexioRepairFlow(RepairsFlow):
                 label = "🗑️ Waisen löschen" if is_de else "🗑️ Delete Orphans Only"
                 specific_options["delete_orphans"] = f"{label} ({counts['orphan']}x == {t})"
 
+            if ce_c > 0:
+                ce_del_t = get_time_for_count(ce_c, is_delete=True)
+                lp_eta = format_time(lp_c * SYNC_DURATION_FUNCTION_PLAN_PLAN) if lp_c > 0 else ""
+                label = (
+                    "🧹 Ignorierte Merker aufräumen (Entitäten + Function Plan + WebIO)"
+                    if is_de
+                    else "🧹 Cleanup Ignored Markers (entities + Function Plan + WebIO)"
+                )
+                specific_options["cleanup_entities"] = f"{label} ({ce_c}x{ce_del_t}{lp_eta})"
+
             if lp_missing_c > 0:
                 lp_add_eta = format_time(lp_missing_eta_sec)
                 specific_options["function_plan_add_missing"] = _function_plan_option_label(
@@ -510,12 +517,14 @@ class ComexioRepairFlow(RepairsFlow):
 
             # Calculate Full Sync ETA
             total_write = counts.get("type", 0) + counts.get("rename", 0) + counts.get("missing", 0)
-            total_del = counts.get("orphan", 0)
+            total_del = counts.get("orphan", 0) + ce_c
             total_sec = (total_write * SYNC_DURATION_WRITE) + (total_del * SYNC_DURATION_DELETE)
 
             # Always add IP duration if a mismatch exists (Delta Sync requires explicit update)
             if counts.get("ip_mismatch", 0) > 0:
                 total_sec += SYNC_DURATION_WRITE
+            if lp_c > 0:
+                total_sec += lp_c * SYNC_DURATION_FUNCTION_PLAN_PLAN
             if lp_missing_c > 0:
                 total_sec += lp_missing_eta_sec
 
@@ -541,156 +550,6 @@ class ComexioRepairFlow(RepairsFlow):
             step_id="select_action",
             description_placeholders=placeholders,
             data_schema=vol.Schema({vol.Required("action", default=default_action): vol.In(options)}),
-        )
-
-    async def async_step_ignored_markers_cleanup(self, user_input=None):
-        """Handle cleanup of entities for ignored markers."""
-        entry_id = self.issue_data.get("entry_id")
-        marker_ids = self.issue_data.get("ignored_marker_ids", [])
-
-        if user_input is not None:
-            return await self._async_process_ignored_markers_cleanup(entry_id, marker_ids, user_input)
-
-        return self._show_ignored_markers_cleanup_form(marker_ids)
-
-    async def _async_process_ignored_markers_cleanup(self, entry_id: str, marker_ids: list[int], user_input: dict):
-        """Handle the user's choice (cleanup/cancel) once the confirmation form was submitted."""
-        if user_input.get("action", "cancel") != "cleanup":
-            return self.async_abort(reason="user_cancelled")
-
-        coordinator = self.hass.data[DOMAIN].get(entry_id)
-        if not coordinator:
-            return self.async_abort(reason="entry_not_found")
-
-        deleted_count = self._delete_ignored_marker_entities(coordinator, marker_ids)
-
-        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-        return self.async_create_entry(
-            title=f"{deleted_count} marker entities removed",
-            data={},
-        )
-
-    def _delete_ignored_marker_entities(self, coordinator, marker_ids: list[int]) -> int:
-        """Remove HA entities for the given ignored marker IDs; return the deleted-entity count.
-
-        Comexio webhooks are registered once per config entry (not per marker), so ignoring a
-        marker never needs to touch webhook registration — only its HA entity is removed here.
-        """
-        server_id = coordinator.server_id
-        registry = er.async_get(self.hass)
-        marker_id_set = set(marker_ids)
-        prefix_base = f"{DOMAIN}_{server_id}_m".lower()
-        deleted_count = 0
-
-        # Single pass over the registry, matching the marker ID out of the unique_id suffix, instead of
-        # one full registry scan per marker. list() snapshots the values so async_remove_entity() below
-        # (which mutates registry.entities) doesn't invalidate the iterator mid-loop.
-        for entity in list(registry.entities.values()):
-            uid = (entity.unique_id or "").lower()
-            if not uid.startswith(prefix_base):
-                continue
-            match = _MARKER_ID_SUFFIX_RE.match(uid[len(prefix_base) :])
-            if not match or int(match.group(1)) not in marker_id_set:
-                continue
-            registry.async_remove(entity.entity_id)
-            deleted_count += 1
-            _LOGGER.info(
-                "[%s] Deleted entity %s for ignored marker M%s",
-                server_id,
-                entity.entity_id,
-                match.group(1),
-            )
-
-        return deleted_count
-
-    def _show_ignored_markers_cleanup_form(self, marker_ids: list[int]):
-        """Render the confirmation form listing the markers whose entities will be deleted."""
-        ids_str = ", ".join(f"M{mid}" for mid in marker_ids)
-        is_de = self.hass.config.language == "de"
-
-        if is_de:
-            description = (
-                f"Dies wird **Entitäten** für die folgenden Merker **PERMANENT** löschen: "
-                f"**{ids_str}**\n\n"
-                "Diese Aktion kann **nicht rückgängig gemacht** werden. Die Merker selbst bleiben in "
-                "Comexio bestehen, aber all ihre Home Assistant Entitäten und Verknüpfungen werden gelöscht.\n\n"
-                "**Fortfahren?**"
-            )
-        else:
-            description = (
-                f"This will **permanently delete entities** for the following markers: "
-                f"**{ids_str}**\n\n"
-                "This action **cannot be undone**. The markers themselves will remain in Comexio, but all "
-                "their Home Assistant entities and connections will be deleted.\n\n"
-                "**Continue?**"
-            )
-
-        options = {
-            "cleanup": f"🗑️ {'Ja, löschen' if is_de else 'Yes, delete'}",
-            "cancel": f"❌ {'Abbrechen' if is_de else 'Cancel'}",
-        }
-
-        return self.async_show_form(
-            step_id="ignored_markers_cleanup",
-            description=description,
-            data_schema=vol.Schema({vol.Required("action", default="cancel"): vol.In(options)}),
-        )
-
-    async def async_step_ignored_markers_invalid(self, user_input=None):
-        """Handle invalid ignored marker IDs — inform user and offer to delete issue."""
-        invalid_ids = self.issue_data.get("invalid_ids", [])
-
-        if user_input is not None:
-            action = user_input.get("action", "dismiss")
-
-            if action == "dismiss":
-                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-                return self.async_create_entry(
-                    title="Issue dismissed",
-                    data={},
-                )
-
-            return self.async_abort(reason="user_cancelled")
-
-        # Show info form
-        ids_str = ", ".join(f"M{mid}" for mid in invalid_ids) if invalid_ids else "Unknown"
-        is_de = self.hass.config.language == "de"
-
-        if is_de:
-            description = (
-                f"Die folgenden Merker-IDs in der `ignored_markers` Liste sind ungültig oder haben keine "
-                f"Beschreibung: **{ids_str}**\n\n"
-                "**Bitte entfernen Sie diese IDs aus der Comexio-Optionen:**\n"
-                "1. Öffnen Sie **Einstellungen → Geräte und Services → Comexio**\n"
-                "2. Wählen Sie den Eintrag aus\n"
-                "3. Klicken Sie auf **Optionen**\n"
-                "4. Entfernen Sie die ungültigen IDs aus dem Feld `ignored_markers`\n"
-                "5. Speichern Sie die Änderungen\n\n"
-                "Nach dem Speichern wird diese Meldung automatisch verschwinden (beim nächsten Poll oder "
-                "nach HA-Neustart)."
-            )
-        else:
-            description = (
-                f"The following marker IDs in the `ignored_markers` list are invalid or have no description: "  # nosec B608
-                f"**{ids_str}**\n\n"
-                "**Please remove these IDs from the Comexio options:**\n"
-                "1. Open **Settings → Devices & Services → Comexio**\n"
-                "2. Select the entry\n"
-                "3. Click **Options**\n"
-                "4. Remove the invalid IDs from the `ignored_markers` field\n"
-                "5. Save the changes\n\n"
-                "This issue will disappear automatically after you save (on next poll or after HA restart)."
-            )
-
-        options = {
-            "dismiss": f"✓ {'Jetzt ausblenden' if is_de else 'Dismiss now'}",
-            "cancel": f"❌ {'Später' if is_de else 'Later'}",
-        }
-
-        return self.async_show_form(
-            step_id="ignored_markers_invalid",
-            description=description,
-            data_schema=vol.Schema({vol.Required("action", default="dismiss"): vol.In(options)}),
         )
 
     async def async_step_uninstall_cleanup(self, user_input=None):

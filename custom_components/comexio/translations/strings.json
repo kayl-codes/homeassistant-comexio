@@ -218,14 +218,6 @@
       "title": "Comexio extension module offline ({server_id})",
       "description": "Extension module(s) **{extensions}** went offline during operation. This may indicate a hardware failure or connection problem. If the module was intentionally decommissioned, you can dismiss this notification."
     },
-    "ignored_markers_cleanup": {
-      "title": "Cleanup markers marked as ignored ({server_id})",
-      "description": "The following markers are marked as ignored: {ids}. Their Home Assistant entities, webhooks, and Comexio Web-IO connections can now be removed. Click 'Fix' to proceed with cleanup."
-    },
-    "ignored_markers_invalid": {
-      "title": "Invalid ignored markers ({server_id})",
-      "description": "The following marker IDs in the ignored_markers list are invalid or have no description: {ids}. These markers cannot be ignored. Please remove them from the ignored_markers list in the integration options."
-    },
     "uninstall_cleanup": {
       "title": "Comexio Uninstall Cleanup ({server_id})",
       "fix_flow": {

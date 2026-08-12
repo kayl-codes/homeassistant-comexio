@@ -218,14 +218,6 @@
       "title": "Module d'extension Comexio hors ligne ({server_id})",
       "description": "Le(s) module(s) d'extension **{extensions}** sont passés hors ligne pendant le fonctionnement. Cela peut indiquer une panne matérielle ou un problème de connexion. Si le module a été intentionnellement mis hors service, vous pouvez ignorer cette notification."
     },
-    "ignored_markers_cleanup": {
-      "title": "Nettoyage des marqueurs ignorés ({server_id})",
-      "description": "Les marqueurs suivants sont marqués comme ignorés : {ids}. Leurs entités Home Assistant, webhooks et connexions Web-IO Comexio peuvent maintenant être supprimés. Cliquez sur 'Corriger' pour lancer le nettoyage."
-    },
-    "ignored_markers_invalid": {
-      "title": "IDs de marqueurs ignorés invalides ({server_id})",
-      "description": "Les IDs de marqueurs suivants dans la liste des marqueurs ignorés sont invalides ou sans description : {ids}. Ces marqueurs ne peuvent pas être ignorés. Veuillez les retirer de la liste ignored_markers dans les options de l'intégration."
-    },
     "uninstall_cleanup": {
       "title": "Nettoyage de désinstallation Comexio ({server_id})",
       "fix_flow": {

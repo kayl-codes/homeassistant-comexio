@@ -8,6 +8,7 @@ import re
 import socket
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
@@ -197,6 +198,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.sync_progress_pct: int | None = None
         self.sync_current_step: str | None = None
         self.last_audit_results: dict[str, Any] = {}
+        self._cleanup_entity_ids: list[int] = []
+        self._cleanup_function_plan_count: int = 0
         self.cancel_sync: bool = False
         self.entity_id_mismatches: list[dict[str, str]] = []
         self.orphaned_statistics: list[str] = []
@@ -566,8 +569,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "ip_mismatch": ip_mismatch,
                 "ha_address": ha_address,
                 "webio_devices": webio_device_audit,
+                "cleanup_entities": self._cleanup_entity_ids,
+                "cleanup_function_plan_count": self._cleanup_function_plan_count,
                 "function_plan_missing": function_plan_missing_items,
             }
+
+            # Include pending entity cleanups (ignored markers with remaining HA entities) in mismatches
+            for mid in self._cleanup_entity_ids:
+                mismatches.add(f"cleanup_entity_{mid}")
 
             # 📈 --- AUDIT SUMMARY LOGGING ---
             if mismatches:
@@ -644,6 +653,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "rename": len(renamed_items),
                     "orphan": len(orphans),
                     "ip_mismatch": 1 if ip_mismatch else 0,
+                    "cleanup_entities": len(self._cleanup_entity_ids),
+                    "cleanup_function_plan_count": self._cleanup_function_plan_count,
                     "function_plan_missing": len(function_plan_missing_items),
                     "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(function_plan_missing_items),
                     "all": len(mismatches),
@@ -664,6 +675,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         "r_count": str(len(renamed_items)),
                         "o_count": str(len(orphans)),
                         "i_count": str(1 if ip_mismatch else 0),
+                        "ce_count": str(len(self._cleanup_entity_ids)),
                     },
                     data={
                         "entry_id": self.config_entry.entry_id,
@@ -1512,59 +1524,78 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return expand_ignored_marker_ids(ignored_raw)
 
     async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
-        """Detect invalid/valid ignored marker IDs and manage repair issues."""
-        ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()
-        invalid_ids: list[int] = []
-        valid_ids: list[int] = []
+        """Check ignored marker IDs and manage repair issues.
 
+        - Stale IDs (marker no longer in Comexio) are auto-removed from options + notified.
+        - Legacy IDs that still have HA entities or Function Plan links trigger a cleanup repair.
+        - IDs whose marker exists but has no entities/links are the intended normal state — no action.
+        """
+        # Clean up the legacy "invalid" issue if it still exists from a previous version
+        ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_invalid_{self.server_id}")
+
+        ignored_raw = conf.get(CONF_IGNORED_MARKERS, "").strip()
         if not ignored_raw:
-            ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_invalid_{self.server_id}")
+            self._cleanup_entity_ids = []
+            self._cleanup_function_plan_count = 0
             ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_cleanup_{self.server_id}")
             return
 
         markers_by_id = {int(m["id"]): m for m in final_data.get("markers", [])}
+        stale_ids: list[int] = []
+        cleanup_ids: list[int] = []
+        affected_fub_ids: set[int] = set()
 
-        for marker_id in expand_ignored_marker_ids(ignored_raw):
-            if marker_id in markers_by_id:
-                valid_ids.append(marker_id)
+        all_ignored_ids = expand_ignored_marker_ids(ignored_raw)
+        lp_plans = await self._load_function_plan_check_data()
+        marker_ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids)).keys())
+        for marker_id in sorted(all_ignored_ids):
+            marker = markers_by_id.get(marker_id)
+            if not marker or not marker.get("name", "").strip():
+                # Marker no longer exists in Comexio → stale, auto-remove
+                stale_ids.append(marker_id)
+                continue
+
+            # Marker exists and is intentionally ignored — only flag if legacy entities/links remain
+            has_entities = marker_id in marker_ids_with_entities
+            function_plan_fub_id = self._check_marker_function_plan_link(marker_id, lp_plans)
+            if function_plan_fub_id is not None:
+                affected_fub_ids.add(function_plan_fub_id)
+            if has_entities or function_plan_fub_id is not None:
+                cleanup_ids.append(marker_id)
+
+        # Auto-remove stale IDs from options (marker deactivated/removed in Comexio)
+        if stale_ids:
+            new_options = {**self.config_entry.options}
+            if remaining_ids := sorted(all_ignored_ids - set(stale_ids)):
+                new_options[CONF_IGNORED_MARKERS] = ",".join(str(i) for i in remaining_ids)
             else:
-                invalid_ids.append(marker_id)
-        valid_ids.sort()
-        invalid_ids.sort()
-
-        # Issue 1: Invalid marker IDs
-        invalid_issue_id = f"ignored_markers_invalid_{self.server_id}"
-        if invalid_ids:
-            invalid_ids_str = ", ".join(f"M{mid}" for mid in invalid_ids)
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                invalid_issue_id,
-                is_fixable=True,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="ignored_markers_invalid",
-                translation_placeholders={"server_id": self.server_id, "ids": invalid_ids_str},
-                data={"entry_id": self.config_entry.entry_id, "invalid_ids": invalid_ids},
+                new_options.pop(CONF_IGNORED_MARKERS, None)
+            self.request_options_update_without_reload(new_options)
+            stale_str = ", ".join(f"M{mid}" for mid in stale_ids)
+            _LOGGER.info(
+                "[%s] Auto-removed stale ignored_markers IDs (no longer in Comexio): %s",
+                self.server_id,
+                stale_str,
             )
-        else:
-            ir.async_delete_issue(self.hass, DOMAIN, invalid_issue_id)
 
-        # Issue 2: Valid marker IDs ready for cleanup
-        cleanup_issue_id = f"ignored_markers_cleanup_{self.server_id}"
-        if valid_ids:
-            valid_ids_str = ", ".join(f"M{mid}" for mid in valid_ids)
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                cleanup_issue_id,
-                is_fixable=True,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="ignored_markers_cleanup",
-                translation_placeholders={"server_id": self.server_id, "ids": valid_ids_str},
-                data={"entry_id": self.config_entry.entry_id, "ignored_marker_ids": valid_ids},
+            # persistent_notification has no per-user language context; use English
+            notif_body = (
+                f"Marker IDs **{stale_str}** were automatically removed from `ignored_markers` "
+                "because they no longer exist in Comexio. "
+                "They will be created as entities again on the next integration restart."
             )
-        else:
-            ir.async_delete_issue(self.hass, DOMAIN, cleanup_issue_id)
+            persistent_notification.async_create(
+                self.hass,
+                notif_body,
+                title=f"Comexio ({self.server_id})",
+                notification_id=f"comexio_stale_ignored_{self.server_id}",
+            )
+
+        # Store cleanup_ids for the combined sync_mismatch repair (no separate issue anymore)
+        self._cleanup_entity_ids = cleanup_ids
+        self._cleanup_function_plan_count = len(affected_fub_ids)
+        # Remove legacy ignored_markers_cleanup issue if it still exists from an older version
+        ir.async_delete_issue(self.hass, DOMAIN, f"ignored_markers_cleanup_{self.server_id}")
 
     async def async_detect_orphaned_statistics(self) -> list[str]:
         """Return statistic_ids for this integration that no longer have a matching entity.
@@ -1637,6 +1668,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.entity_id_mismatches = []
         _LOGGER.info("[%s] Entity ID migration complete: %d IDs updated", self.server_id, migrated)
         return migrated
+
+    def marker_entities_by_id(self, marker_ids: list[int]) -> dict[int, er.RegistryEntry]:
+        """Return registry entries for the given marker ids that still have an HA entity.
+
+        Single pass over the registry regardless of how many marker_ids are checked, instead
+        of one full registry scan per marker. Shared by the audit check (read-only) and the
+        cleanup button (which also deletes the returned entries) to avoid divergent matching
+        logic between the two.
+        """
+        ent_reg = er.async_get(self.hass)
+        marker_id_by_unique_id = {f"{DOMAIN}_{self.server_id}_m{mid}".lower(): mid for mid in marker_ids}
+        return {
+            marker_id: entity
+            for entity in ent_reg.entities.values()
+            if (marker_id := marker_id_by_unique_id.get((entity.unique_id or "").lower())) is not None
+        }
 
     # --- MANAGED CLUSTER PLANS ---
 
@@ -1985,6 +2032,70 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if isinstance(plan_map, dict):
             fub_ids.update(int(v) for v in plan_map.values())
         return fub_ids
+
+    async def _load_function_plan_check_data(self) -> dict[int, dict]:
+        """Load wiring data of all managed function plans for batch marker checks.
+
+        Prefers the bulk snapshot from the backup cycle; plans missing there are fetched
+        directly. Returns {fub_id: {"elements": ..., "connections": ...}}; failed plans
+        are skipped.
+        """
+        plans: dict[int, dict] = {}
+        for fub_id in self._function_plan_check_fub_ids():
+            plan_data = self.function_plan_plans.get(fub_id)
+            if plan_data is None:
+                try:
+                    plan_data = await self.api.logikplan_load_elements(fub_id)
+                except Exception:
+                    _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
+                    continue
+            if plan_data:
+                plans[fub_id] = plan_data
+        if not plans:
+            _LOGGER.debug("[%s] No function plans available for link check", self.server_id)
+        return plans
+
+    async def resolve_marker_cleanup_plans(
+        self, marker_ids: list[int], preferred_fub_id: int | None = None
+    ) -> dict[int, list[int]]:
+        """Group markers by the managed plan they are wired in, for per-plan cleanup.
+
+        A user-selected plan (preferred_fub_id) keeps the single-plan behaviour: all supplied
+        markers are grouped under it as-is, without an upfront wiring check — the per-marker
+        cleanup call itself is a no-op for any marker not actually wired there. Otherwise each
+        marker is looked up in all managed plans and unwired markers are omitted here instead.
+        """
+        if preferred_fub_id is not None:
+            return {preferred_fub_id: list(marker_ids)}
+        plans = await self._load_function_plan_check_data()
+        plan_to_ids: dict[int, list[int]] = {}
+        for marker_id in marker_ids:
+            if (fub_id := self._check_marker_function_plan_link(marker_id, plans)) is not None:
+                plan_to_ids.setdefault(fub_id, []).append(marker_id)
+        return plan_to_ids
+
+    def _check_marker_function_plan_link(self, marker_id: int, plans: dict[int, dict]) -> int | None:
+        """Check if the marker is wired in any of the pre-loaded managed plans.
+
+        Returns the fub_id of the first plan in which the marker element has a
+        WebIO connection, else None.
+        """
+        for fub_id, plan_data in plans.items():
+            if self._marker_wired_in_plan(marker_id, plan_data):
+                return fub_id
+        return None
+
+    @staticmethod
+    def _marker_wired_in_plan(marker_id: int, plan_data: dict) -> bool:
+        """Check if the marker element in this plan has an outgoing connection."""
+        marker_elem_id = ComexioAPI._find_marker_element_id(plan_data.get("elements", {}), marker_id)
+        if not marker_elem_id:
+            return False
+
+        return any(
+            str(conn_data.get("input", {}).get("FubElementId", -1)) == marker_elem_id
+            for conn_data in plan_data.get("connections", {}).values()
+        )
 
     @staticmethod
     def _plan_wired_pairs(plan_data: dict, source_type: str = "2") -> set[tuple[str, str]]:
