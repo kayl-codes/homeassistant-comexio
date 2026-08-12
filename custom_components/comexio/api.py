@@ -2450,6 +2450,7 @@ class ComexioAPI:
                 "fub_id": fub_id,
                 "plan_stopped": False,
                 "plan_name": plan_name,
+                "stop_failed": True,
             }
 
         success = await self.logikplan_delete_elements(elem_ids_to_delete)

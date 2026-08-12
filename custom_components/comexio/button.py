@@ -437,11 +437,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 )
 
         deleted_entities = self._delete_marker_entities(marker_ids)
-        lp_count, webio_cmd_ids, stopped_plans = await self._cleanup_function_plan_plans(api, marker_ids, lp_fub_id)
+        lp_count, webio_cmd_ids, stopped_plans, stop_failures = await self._cleanup_function_plan_plans(
+            api, marker_ids, lp_fub_id
+        )
         webio_removed, webio_failed = await self._delete_webio_commands(api, dev_id, webio_cmd_ids)
 
-        lines = self._build_cleanup_summary_lines(marker_ids, deleted_entities, lp_count, webio_removed, webio_failed)
+        lines = self._build_cleanup_summary_lines(
+            marker_ids, deleted_entities, lp_count, webio_removed, webio_failed, has_stop_failures=bool(stop_failures)
+        )
         lines.extend(self._notify_stopped_plans(stopped_plans))
+        lines.extend(self._build_stop_failure_lines(stop_failures))
         _notify("\n".join(lines))
         _LOGGER.info("[%s] cleanup_entities done: %s", self.server_id, ", ".join(lines))
 
@@ -489,11 +494,22 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     @staticmethod
     def _build_cleanup_summary_lines(
-        marker_ids: list[int], deleted_entities: int, lp_count: int, webio_removed: int, webio_failed: int
+        marker_ids: list[int],
+        deleted_entities: int,
+        lp_count: int,
+        webio_removed: int,
+        webio_failed: int,
+        has_stop_failures: bool = False,
     ) -> list[str]:
         """Build the base result lines for the cleanup-entities summary notification."""
         ids_str = ", ".join(f"M{mid}" for mid in marker_ids)
-        if deleted_entities == 0 and lp_count == 0 and webio_removed == 0 and webio_failed == 0:
+        if (
+            deleted_entities == 0
+            and lp_count == 0
+            and webio_removed == 0
+            and webio_failed == 0
+            and not has_stop_failures
+        ):
             return [f"Nothing to clean up for {ids_str} — no entities, Function Plan elements or WebIO commands found."]
         lines = [
             f"✓ {deleted_entities} entities removed ({ids_str})",
@@ -522,18 +538,29 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             )
         return extra_lines
 
+    @staticmethod
+    def _build_stop_failure_lines(stop_failures: list[tuple[str, int]]) -> list[str]:
+        """Build summary lines for plans that couldn't be stopped, so the failure isn't
+        silently indistinguishable from "nothing to clean up" (deleted_elem_count also 0)."""
+        return [
+            f"❌ Function Plan '{plan_name_s}' (ID {fub_id_s}) could not be stopped — "
+            "cleanup skipped for this plan, no changes were made there"
+            for plan_name_s, fub_id_s in stop_failures
+        ]
+
     async def _cleanup_function_plan_plans(
         self, api: Any, marker_ids: list[int], lp_fub_id: int | None
-    ) -> tuple[int, list[int], list[tuple[str, int]]]:
+    ) -> tuple[int, list[int], list[tuple[str, int]], list[tuple[str, int]]]:
         """Run the Function Plan cleanup for every managed plan the markers are wired in.
 
-        Returns (deleted element count, WebIO command ids to delete, stopped plans as
-        (name, fub_id) tuples).
+        Returns (deleted element count, WebIO command ids to delete, stopped plans, stop
+        failures — the latter two as (name, fub_id) tuples).
         """
         plan_to_ids = await self.coordinator.resolve_marker_cleanup_plans(marker_ids, lp_fub_id)
         lp_count = 0
         webio_cmd_ids: list[int] = []
         stopped_plans: list[tuple[str, int]] = []
+        stop_failures: list[tuple[str, int]] = []
         for fub_id, cleanup_ids in plan_to_ids.items():
             await self.coordinator.async_function_plan_change_backup(
                 fub_id, f"cleanup_ignored {[f'M{m}' for m in cleanup_ids]}"
@@ -541,12 +568,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             lp = await api.function_plan_cleanup_for_markers(cleanup_ids, fub_id=fub_id)
             lp_count += lp.get("deleted_elem_count", 0)
             webio_cmd_ids.extend(lp.get("webio_cmd_ids", []))
-            if lp.get("plan_stopped") and lp.get("fub_id") is not None:
+            if lp.get("stop_failed"):
+                stop_failures.append((lp.get("plan_name", "?"), fub_id))
+            elif lp.get("plan_stopped") and lp.get("fub_id") is not None:
                 stopped_plans.append((lp.get("plan_name", "?"), lp["fub_id"]))
         # A WebIO command could in principle be collected from more than one plan (e.g. a
         # marker anomalously wired into multiple managed plans); dedupe before deletion so
         # the same command isn't attempted twice.
-        return lp_count, list(dict.fromkeys(webio_cmd_ids)), stopped_plans
+        return lp_count, list(dict.fromkeys(webio_cmd_ids)), stopped_plans, stop_failures
 
     def _build_sync_result_message(
         self,
