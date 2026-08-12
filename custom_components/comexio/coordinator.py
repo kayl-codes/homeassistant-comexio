@@ -192,6 +192,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # wasn't loaded yet — re-run once the backup cycle has loaded it (see _audit_wired_pairs
         # / _async_function_plan_backup_cycle).
         self._lp_missing_recheck_pending: bool = False
+        # Marker IDs (type-2 element ref_ids) referenced in a plan as of the last parse_config
+        # call — an unnamed marker still needs a real entity/value if it's wired somewhere (see
+        # api._process_markers). Tracked here so a change triggers an immediate extra refresh
+        # instead of waiting for the next scheduled poll (which could be hours away with a long
+        # scan_interval).
+        self._last_referenced_marker_ids: set[str] = set()
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
@@ -284,7 +290,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             max_id = max(int(m.get("Id", 0)) for m in marker_data.values()) if marker_data else 0
 
             live_states = await self.api.get_live_states(max_id)
-            parsed_data = self.api.parse_config(raw_config, live_states)
+            # Cold start: the bulk plan snapshot isn't loaded yet (it lands after this first
+            # cycle, via the backup cycle) — fall back to the last stored auto-backup so an
+            # unnamed-but-wired marker still gets an entity on every restart, not just after
+            # the first backup cycle has run.
+            referenced_markers = self._referenced_marker_ids()
+            if referenced_markers is None:
+                referenced_markers = await self.function_plan_backup.async_referenced_marker_ids()
+            self._last_referenced_marker_ids = referenced_markers
+            parsed_data = self.api.parse_config(raw_config, live_states, referenced_markers)
 
             # async_update_from_raw_config never raises (own contract, enforced internally) —
             # no local guard needed here.
@@ -736,7 +750,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if not plans:
                 return
             self.function_plan_plans = plans
-            if self._lp_missing_recheck_pending:
+            # Re-evaluate which unlabeled markers are now referenced in a plan (see
+            # api._process_markers). Compared against the set last USED by parse_config —
+            # a no-op on every normal cycle; only an actual change (marker newly wired in,
+            # or dropped from every plan) triggers an extra refresh, so the fix isn't tied
+            # to (potentially very long) scan_interval waits. _last_referenced_marker_ids
+            # is deliberately NOT updated here: the triggered refresh does that itself,
+            # keeping the comparison anchored to what entities were actually built from.
+            new_referenced_markers = self._referenced_marker_ids() or set()
+            markers_changed = new_referenced_markers != self._last_referenced_marker_ids
+            if self._lp_missing_recheck_pending or markers_changed:
                 # The audit skipped the function_plan_missing check because the snapshot was
                 # not loaded yet — re-run it now that wiring data is available.
                 self._lp_missing_recheck_pending = False
@@ -879,6 +902,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
         except (TypeError, ValueError):
             _LOGGER.warning("[%s] Ignoring unparseable persisted function plan id %r", self.server_id, saved)
             return None
+
+    def _referenced_marker_ids(self) -> set[str] | None:
+        """Return marker IDs (type-2 element ref_ids) present in any existing plan.
+
+        Built from the bulk snapshot of the backup cycle, same as _wired_source_webio_pairs;
+        returns None while that snapshot is not loaded yet. Unlike the WebIO check this
+        does NOT require the element to participate in a connection — a marker merely
+        placed in a plan already needs its type/live value resolved in the preview.
+        """
+        if not self.function_plan_plans:
+            return None
+        referenced: set[str] = set()
+        for plan_data in self.function_plan_plans.values():
+            for elem in (plan_data.get("elements") or {}).values():
+                ref = elem.get("reference") or {}
+                ref_id = ref.get("ref_id")
+                if str(ref.get("type")) == "2" and ref_id is not None:
+                    referenced.add(str(ref_id))
+        return referenced
 
     def function_plan_label_maps(self) -> tuple[dict, dict, dict]:
         """Lookup dicts (marker/WebIO/IO id -> {"name": ..., ...}) for backup snapshot labeling.
