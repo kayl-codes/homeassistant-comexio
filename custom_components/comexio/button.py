@@ -103,8 +103,18 @@ def _plan_pair_progress(ctx: "_SyncContext", state: dict, plan_name: str, done: 
     """
     overall_done = state["done"] + done
     overall_total = max(1, state["total"])
-    elapsed = time.monotonic() - state["t0"]
-    remaining = (elapsed / overall_done) * (overall_total - overall_done) if overall_done else 0.0
+    if done != total and overall_done % 5:
+        return  # throttle notification updates to every 5th pair
+    now = time.monotonic()
+    elapsed = now - state["t0"]
+    # ETA from the rate since the last update, not the run-wide average — a fixed per-plan
+    # setup cost (backup, stop_fup, reload-wait) would otherwise skew early estimates high.
+    recent_elapsed = now - state.get("last_t", state["t0"])
+    recent_count = overall_done - state.get("last_overall", 0)
+    rate = recent_elapsed / recent_count if recent_count else (elapsed / overall_done if overall_done else 0.0)
+    remaining = rate * (overall_total - overall_done)
+    state["last_t"] = now
+    state["last_overall"] = overall_done
     ctx.update_status(
         f"**Function Plan:** `{plan_name}`\n"
         f"**Progress:** pair {overall_done} of {overall_total}\n\n---\n"
