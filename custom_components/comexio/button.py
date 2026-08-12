@@ -26,6 +26,21 @@ from .const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
+    ICON_ADD,
+    ICON_CHECK,
+    ICON_CLOCK,
+    ICON_DELETE,
+    ICON_DURATION,
+    ICON_ERROR,
+    ICON_FIX,
+    ICON_FLAG,
+    ICON_NETWORK,
+    ICON_RENAME,
+    ICON_ROCKET,
+    ICON_SUCCESS,
+    ICON_TOOLS,
+    ICON_UPLOAD,
+    ICON_WARNING,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
@@ -48,7 +63,7 @@ _PCT_PLAN_PAIRS = 60
 _PCT_PLAN_FINALIZE = 92
 
 _NOTE_ACTIVATED = ", plan activated"
-_NOTE_NOT_ACTIVATED = ", ⚠️ plan NOT activated"
+_NOTE_NOT_ACTIVATED = f", {ICON_WARNING} plan NOT activated"
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 
 
@@ -73,7 +88,7 @@ def _plan_summary_line(
     errors: list[str],
 ) -> str:
     """One '• <plan>: +n/m pairs in m:ss' line for the sync notification's Function Plan block."""
-    err_note = f", ⚠️ {len(errors)} errors" if errors else ""
+    err_note = f", {ICON_WARNING} {len(errors)} errors" if errors else ""
     return (
         f"• '{plan_name}'{' (new)' if is_fresh else ''}: +{n_added}/{n_total} {unit}"
         f" in {_mmss(time.monotonic() - t0)} min{note}{err_note}"
@@ -93,7 +108,7 @@ def _plan_pair_progress(ctx: "_SyncContext", state: dict, plan_name: str, done: 
     ctx.update_status(
         f"**Function Plan:** `{plan_name}`\n"
         f"**Progress:** pair {overall_done} of {overall_total}\n\n---\n"
-        f"🏁 **Remaining:** ~{_mmss(remaining)} min",
+        f"{ICON_FLAG} **Remaining:** ~{_mmss(remaining)} min",
         pct=_PCT_PLAN_PAIRS + int((_PCT_PLAN_FINALIZE - _PCT_PLAN_PAIRS) * (overall_done / overall_total)),
         step_info=f"Function Plan '{plan_name}': pair {done}/{total}",
     )
@@ -415,7 +430,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Compose the result notification for the standalone Function Plan wiring action."""
         body = "\n".join(plan_summary) if plan_summary else "Nothing to do — all pairs were already wired."
         duration_str = f"{_mmss(duration.total_seconds())} min"
-        return f"✅ **Function Plan update finished**\n\n{body}\n\n⏱ Total duration: {duration_str}"
+        return (
+            f"{ICON_SUCCESS} **Function Plan update finished**\n\n{body}\n\n"
+            f"{ICON_DURATION} Total duration: {duration_str}"
+        )
 
     async def _handle_cleanup_entities(
         self,
@@ -528,12 +546,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         ):
             return [f"Nothing to clean up for {ids_str} — no entities, Function Plan elements or WebIO commands found."]
         lines = [
-            f"✓ {deleted_entities} entities removed ({ids_str})",
-            f"✓ {lp_count} Function Plan elements removed",
-            f"✓ {webio_removed} WebIO commands deleted",
+            f"{ICON_CHECK} {deleted_entities} entities removed ({ids_str})",
+            f"{ICON_CHECK} {lp_count} Function Plan elements removed",
+            f"{ICON_CHECK} {webio_removed} WebIO commands deleted",
         ]
         if webio_failed:
-            lines.append(f"⚠️ {webio_failed} WebIO deletions failed (may still be in use)")
+            lines.append(f"{ICON_WARNING} {webio_failed} WebIO deletions failed (may still be in use)")
         return lines
 
     def _notify_stopped_plans(self, stopped_plans: list[tuple[str, int]]) -> list[str]:
@@ -541,7 +559,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         extra_lines = []
         for plan_name_s, fub_id_s in stopped_plans:
             extra_lines.append(
-                f"⚠️ Function Plan '{plan_name_s}' (ID {fub_id_s}) was stopped — please restart it in Comexio"
+                f"{ICON_WARNING} Function Plan '{plan_name_s}' (ID {fub_id_s}) was stopped — "
+                "please restart it in Comexio"
             )
             persistent_notification.async_create(
                 self.hass,
@@ -559,7 +578,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Build summary lines for plans that couldn't be stopped, so the failure isn't
         silently indistinguishable from "nothing to clean up" (deleted_elem_count also 0)."""
         return [
-            f"❌ Function Plan '{plan_name_s}' (ID {fub_id_s}) could not be stopped — "
+            f"{ICON_ERROR} Function Plan '{plan_name_s}' (ID {fub_id_s}) could not be stopped — "
             "cleanup skipped for this plan, no changes were made there"
             for plan_name_s, fub_id_s in stop_failures
         ]
@@ -609,29 +628,32 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         recreate_note = ""
         if recreated_classes:
             recreated_str = ", ".join(webio_class_label(c) for c in recreated_classes)
-            recreate_note = f"🚀 Recreated: {recreated_str}\n\n"
+            recreate_note = f"{ICON_ROCKET} Recreated: {recreated_str}\n\n"
 
         skip_note = ""
         if skipped_creates:
             skip_note = (
-                f"⚠️ Skipped {skipped_creates} creation(s) — Web-IO base class missing. "
+                f"{ICON_WARNING} Skipped {skipped_creates} creation(s) — Web-IO base class missing. "
                 "Run a Full Sync to recreate it.\n\n"
             )
 
         changed = added + updated + renamed + removed
         if changed == 0 and not recreated_classes and updated_ip and not skipped_creates:
             return (
-                "✅ **Comexio Server Address updated**\n\n"
+                f"{ICON_SUCCESS} **Comexio Server Address updated**\n\n"
                 f"The IP address has been successfully updated in the Web-IO device(s).\n"
-                f"⏱ Duration: {duration_str}"
+                f"{ICON_DURATION} Duration: {duration_str}"
             )
         if changed == 0 and recreated_classes and not updated_ip and not skipped_creates:
-            return f"✅ **Comexio Recreation Finished**\n\n{recreate_note}⏱ Duration: {duration_str}"
+            return (
+                f"{ICON_SUCCESS} **Comexio Recreation Finished**\n\n{recreate_note}"
+                f"{ICON_DURATION} Duration: {duration_str}"
+            )
         return (
-            f"✅ **Comexio Sync Finished**\n\n{recreate_note}{skip_note}"
+            f"{ICON_SUCCESS} **Comexio Sync Finished**\n\n{recreate_note}{skip_note}"
             f"Results: +{added}, {updated} updated, {renamed} renamed, -{removed} removed"
             + (", IP-Address updated" if updated_ip else "")
-            + f".\n{self._build_per_class_note(per_class)}⏱ Duration: {duration_str}"
+            + f".\n{self._build_per_class_note(per_class)}{ICON_DURATION} Duration: {duration_str}"
         )
 
     @staticmethod
@@ -752,9 +774,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Delete-and-recreate a Web-IO class from scratch (Fast-Track / Initial Setup)."""
         api = ctx.api
         status_msg = (
-            f"🛠️ **Initial Setup ({label})**\nCreating Web-IO class..."
+            f"{ICON_TOOLS} **Initial Setup ({label})**\nCreating Web-IO class..."
             if ctx.action == "full_sync" and not class_dev_id
-            else f"🚀 **Fast-Track active ({label})**\nHigh-speed recreation in progress..."
+            else f"{ICON_ROCKET} **Fast-Track active ({label})**\nHigh-speed recreation in progress..."
         )
         ctx.update_status(status_msg, pct=pct_start, step_info=f"Creating Web-IO class ({label})")
 
@@ -763,7 +785,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             base_id, base_deletable = base_info
             if base_deletable:
                 ctx.update_status(
-                    f"{status_msg}\n\n🗑️ Deleting old class...",
+                    f"{status_msg}\n\n{ICON_DELETE} Deleting old class...",
                     pct=pct_start + 2,
                     step_info="Deleting old class",
                 )
@@ -778,7 +800,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 )
 
         ctx.update_status(
-            f"{status_msg}\n\n📤 Uploading configuration...",
+            f"{status_msg}\n\n{ICON_UPLOAD} Uploading configuration...",
             pct=(pct_start + pct_end) // 2,
             step_info="Uploading configuration",
         )
@@ -854,7 +876,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # update device-level settings, so this is always a separate explicit call.
         if cls_effective_action in {"full_sync", "update_ip"} and dev_ip_mismatch and class_dev_id:
             ctx.update_status(
-                f"🌐 **Repair in progress ({label}):** Updating HA IP address...",
+                f"{ICON_NETWORK} **Repair in progress ({label}):** Updating HA IP address...",
                 pct=pct_end - 2,
                 step_info="Updating HA IP address",
             )
@@ -884,14 +906,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         elaps_str = f"{elaps.seconds // 60:02}:{elaps.seconds % 60:02d}"
         rem_str = f"{eta_s // 60:02}:{eta_s % 60:02d}"
         eta_t = (datetime.datetime.now() + datetime.timedelta(seconds=eta_s)).strftime("%H:%M:%S")
-        labels = {"rename": "✏️ Rename", "delete": "🗑️ Remove", "create": "➕ Add", "type": "🔧 Type-Fix"}
+        labels = {
+            "rename": f"{ICON_RENAME} Rename",
+            "delete": f"{ICON_DELETE} Remove",
+            "create": f"{ICON_ADD} Add",
+            "type": f"{ICON_FIX} Type-Fix",
+        }
         t_label = labels.get(task_type, task_type)
         prog_msg = (
             f"**Class:** {label}\n**Mode:** `{cls_effective_action}`\n"
             f"**Progress:** Step {current + 1} of {total_tasks}\n"
             f"**Current:** {t_label}: `{task_name}`\n\n---\n"
-            f"🕒 **Start:** {ctx.start_time.strftime('%H:%M:%S')} (Runtime: {elaps_str})\n"
-            f"🏁 **Done:** ~{eta_t} (Remaining: {rem_str})"
+            f"{ICON_CLOCK} **Start:** {ctx.start_time.strftime('%H:%M:%S')} (Runtime: {elaps_str})\n"
+            f"{ICON_FLAG} **Done:** ~{eta_t} (Remaining: {rem_str})"
         )
         pct_val = pct_start + int((pct_end - pct_start) * (current / total_tasks))
         ctx.update_status(
@@ -1093,7 +1120,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         plan_to_ids, created_plans = await self.coordinator.resolve_marker_clusters(marker_ids)
         if not plan_to_ids:
             _LOGGER.warning("[%s] Cluster plan wiring: no marker cluster plan available", self.server_id)
-            return ["⚠️ No marker cluster plan available — see log."], 0, 1
+            return [f"{ICON_WARNING} No marker cluster plan available — see log."], 0, 1
 
         summary: list[str] = []
         added = 0
@@ -1118,7 +1145,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         ext_plans, created_plans = await self.coordinator.resolve_io_clusters(sorted(by_ext))
         if not ext_plans:
             _LOGGER.warning("[%s] Cluster plan wiring: no IO cluster plan available", self.server_id)
-            return ["⚠️ No IO cluster plan available — see log."], 0, 1
+            return [f"{ICON_WARNING} No IO cluster plan available — see log."], 0, 1
 
         plan_exts: dict[int, list[tuple[str, int]]] = {}
         for ext, (fub_id, column) in ext_plans.items():
@@ -1206,7 +1233,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             plan_name,
         )
         return (
-            f"⚠️ fub {fub_id}: aborted — expected '{expected_name}' but plan is now '{plan_name}'",
+            f"{ICON_WARNING} fub {fub_id}: aborted — expected '{expected_name}' but plan is now '{plan_name}'",
             [],
             [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
         )
@@ -1251,7 +1278,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             self.hass, self.coordinator, ctx.api, fub_id, notify=False, was_active=was_active
         )
         sorted_ok = bool(sort_res and sort_res["success"])
-        note = f", sorted in {sort_res['duration']:.1f}s" if sorted_ok else ", ⚠️ sort failed"
+        note = f", sorted in {sort_res['duration']:.1f}s" if sorted_ok else f", {ICON_WARNING} sort failed"
         if was_active and not (sort_res and sort_res.get("activated")):
             # Sort was skipped or lost the reactivation (e.g. save_elements_pos failed) —
             # don't leave a previously active plan stopped.
@@ -1287,7 +1314,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 stale_exts,
             )
             return (
-                f"⚠️ fub {fub_id} ('{plan_name}'): aborted — no longer matches expected IO cluster for {stale_exts}",
+                f"{ICON_WARNING} fub {fub_id} ('{plan_name}'): aborted — no longer matches "
+                f"expected IO cluster for {stale_exts}",
                 [],
                 [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
             )
@@ -1455,9 +1483,9 @@ class ComexioFirmwareCheckButton(CoordinatorEntity, ButtonEntity):
         if conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS):
             if ran:
                 names = ", ".join(sorted(self.coordinator.extension_firmware))
-                msg = f"✅ Firmware check finished in {duration:.1f}s.\n\nChecked modules: {names}"
+                msg = f"{ICON_SUCCESS} Firmware check finished in {duration:.1f}s.\n\nChecked modules: {names}"
             else:
-                msg = f"⚠️ Firmware check returned no data ({duration:.1f}s) — see log for details."
+                msg = f"{ICON_WARNING} Firmware check returned no data ({duration:.1f}s) — see log for details."
             persistent_notification.async_create(
                 self.hass,
                 msg,

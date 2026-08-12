@@ -111,6 +111,30 @@ SYNC_PROGRESS_START_PCT = 5
 SYNC_PROGRESS_END_PCT = 95
 
 
+# UI icon literals — centralized so emoji usage stays consistent and easy to audit
+ICON_WARNING = "⚠️"
+ICON_FLAG = "🏁"
+ICON_SUCCESS = "✅"
+ICON_DURATION = "⏱"
+ICON_CHECK = "✓"
+ICON_ERROR = "❌"
+ICON_ROCKET = "🚀"
+ICON_TOOLS = "🛠️"
+ICON_DELETE = "🗑️"
+ICON_UPLOAD = "📤"
+ICON_NETWORK = "🌐"
+ICON_RENAME = "✏️"
+ICON_ADD = "➕"
+ICON_FIX = "🔧"
+ICON_CLOCK = "🕒"
+ICON_LINK = "🔗"
+ICON_PUZZLE = "🧩"
+ICON_MUTE = "🔇"
+ICON_CLEANUP = "🧹"
+ICON_INFO = "💡"
+ICON_SYNC = "🔄"
+ICON_INACTIVE = "➖"
+
 DEFAULT_NAME = "Comexio"
 
 SCAN_INTERVAL_DEFAULT = 15

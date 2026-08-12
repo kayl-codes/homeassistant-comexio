@@ -20,6 +20,10 @@ from homeassistant.util import dt as dt_util
 from ..const import (
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    ICON_ERROR,
+    ICON_INACTIVE,
+    ICON_SUCCESS,
+    ICON_WARNING,
     TIMESTAMP_DISPLAY_FORMAT,
 )
 from ..coordinator import ComexioCoordinator
@@ -447,34 +451,35 @@ def _restore_build_message(
     """Human-readable persistent_notification body for a restore result."""
     reactivation_note = ""
     if apply["run_ok"]:
-        run_label = "✅"
+        run_label = ICON_SUCCESS
     elif was_active:
-        run_label = "❌"
-        reactivation_note = "\n⚠️ Plan could not be re-activated — please check/activate it in Comexio."
+        run_label = ICON_ERROR
+        reactivation_note = f"\n{ICON_WARNING} Plan could not be re-activated — please check/activate it in Comexio."
     else:
         # Data payload was applied; the server merely skipped activating an inactive plan.
-        run_label = "➖ (plan inactive — activation skipped)"
+        run_label = f"{ICON_INACTIVE} (plan inactive — activation skipped)"
     paper_line = ""
     if apply["properties_changed"]:
         paper_line = (
             f"Aligned with snapshot: name '{plan_name}', paper {apply['paper']} @ {apply['dpi']} DPI, "
-            f"{apply['orientation']} — {'✅' if apply['paper_ok'] else '❌ failed, restore may look wrong'}\n"
+            f"{apply['orientation']} — "
+            f"{ICON_SUCCESS if apply['paper_ok'] else f'{ICON_ERROR} failed, restore may look wrong'}\n"
         )
     if identity_was_mismatched:
         content_line = (
-            f"Content match: {'✅' if verify['counts_match'] else '❌'} "
+            f"Content match: {ICON_SUCCESS if verify['counts_match'] else ICON_ERROR} "
             "(element IDs are always reassigned when overriding a different plan — "
             "matching counts is what matters here, not a byte-for-byte hash)\n"
         )
     else:
-        content_line = f"Hash match: {'✅' if verify['hash_match'] else '❌'} | "
+        content_line = f"Hash match: {ICON_SUCCESS if verify['hash_match'] else ICON_ERROR} | "
     return (
         f"Restore of plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] "
         f"({snapshot.get('captured_at')}): **{status}**\n"
         f"Snapshot: {verify['elem_count']} elements / {verify['conn_count']} connections → "
         f"now: {verify['fresh_elem']} / {verify['fresh_conn']}\n"
         f"{paper_line}"
-        f"{content_line}positions: {'✅' if apply['pos_ok'] else '❌'} | "
+        f"{content_line}positions: {ICON_SUCCESS if apply['pos_ok'] else ICON_ERROR} | "
         f"run_fup: {run_label}"
         f"{reactivation_note}\n"
         f"Duration: {duration:.1f}s"
@@ -544,9 +549,9 @@ async def _restore_plan_as_new(
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
     activation_line = (
-        "Activation: ✅ active"
+        f"Activation: {ICON_SUCCESS} active"
         if run_ok
-        else "Activation: ➖ not active yet (Comexio always creates new plans inactive — "
+        else f"Activation: {ICON_INACTIVE} not active yet (Comexio always creates new plans inactive — "
         "activate manually in Comexio Studio if needed)"
     )
     consumer_line = (

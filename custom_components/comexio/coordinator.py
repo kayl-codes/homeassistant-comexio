@@ -51,6 +51,13 @@ from .const import (
     FUNCTION_PLAN_LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
+    ICON_ADD,
+    ICON_DELETE,
+    ICON_FIX,
+    ICON_LINK,
+    ICON_NETWORK,
+    ICON_RENAME,
+    ICON_WARNING,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
     WEBIO_CLASS_IO,
@@ -609,25 +616,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         )
 
                     # Consolidated audit summary with details for each category
-                    _LOGGER.info("=== ⚠️ COMEXIO AUDIT SUMMARY [%s] ===", self.server_id)
-                    _LOGGER.info("🔧 Type-Mismatches (%d):", len(type_mismatches))
+                    _LOGGER.info("=== %s COMEXIO AUDIT SUMMARY [%s] ===", ICON_WARNING, self.server_id)
+                    _LOGGER.info("%s Type-Mismatches (%d):", ICON_FIX, len(type_mismatches))
                     for item in type_mismatches:
                         _LOGGER.info("   -> %s", item["name"])
 
-                    _LOGGER.info("➕ Missing Webhooks (%d):", len(missing_items))
+                    _LOGGER.info("%s Missing Webhooks (%d):", ICON_ADD, len(missing_items))
                     for item in missing_items:
                         _LOGGER.info("   -> %s", item["name"])
 
-                    _LOGGER.info("✏️ Renames (%d):", len(renamed_items))
+                    _LOGGER.info("%s Renames (%d):", ICON_RENAME, len(renamed_items))
                     for item in renamed_items:
                         _LOGGER.info("   -> %s", item["name"])
 
-                    _LOGGER.info("🗑️ Orphans (%d):", len(orphans))
+                    _LOGGER.info("%s Orphans (%d):", ICON_DELETE, len(orphans))
                     for item in orphans:
                         _LOGGER.info("   -> %s", item["name"])
 
                     if function_plan_missing_items:
-                        _LOGGER.info("🔗 Not wired in Function Plan (%d):", len(function_plan_missing_items))
+                        _LOGGER.info("%s Not wired in Function Plan (%d):", ICON_LINK, len(function_plan_missing_items))
                         for item in function_plan_missing_items:
                             _LOGGER.info("   -> %s", item["name"])
 
@@ -636,7 +643,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                             cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]
                         }
                         _LOGGER.info(
-                            "🌐 IP/Port Mismatch: Comexio expects %s, but HA is at %s", mismatched_ips, ha_address
+                            "%s IP/Port Mismatch: Comexio expects %s, but HA is at %s",
+                            ICON_NETWORK,
+                            mismatched_ips,
+                            ha_address,
                         )
 
                     _LOGGER.info("========================================")
