@@ -1546,7 +1546,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         all_ignored_ids = expand_ignored_marker_ids(ignored_raw)
         lp_plans = await self._load_function_plan_check_data()
-        marker_ids_with_entities = self._marker_ids_with_entities(list(all_ignored_ids))
+        marker_ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids)))
         for marker_id in sorted(all_ignored_ids):
             marker = markers_by_id.get(marker_id)
             if not marker or not marker.get("name", "").strip():
@@ -1669,20 +1669,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         _LOGGER.info("[%s] Entity ID migration complete: %d IDs updated", self.server_id, migrated)
         return migrated
 
-    def _marker_ids_with_entities(self, marker_ids: list[int]) -> set[int]:
-        """Return the subset of marker_ids that still have an HA entity in the registry.
+    def marker_entities_by_id(self, marker_ids: list[int]) -> dict[int, er.RegistryEntry]:
+        """Return registry entries for the given marker ids that still have an HA entity.
 
         Single pass over the registry regardless of how many marker_ids are checked, instead
-        of one full registry scan per marker.
+        of one full registry scan per marker. Shared by the audit check (read-only) and the
+        cleanup button (which also deletes the returned entries) to avoid divergent matching
+        logic between the two.
         """
         from homeassistant.helpers import entity_registry as er
 
         ent_reg = er.async_get(self.hass)
         marker_id_by_unique_id = {f"{DOMAIN}_{self.server_id}_m{mid}".lower(): mid for mid in marker_ids}
         return {
-            marker_id
+            marker_id: entity
             for entity in ent_reg.entities.values()
-            if (marker_id := marker_id_by_unique_id.get(entity.unique_id or "")) is not None
+            if (marker_id := marker_id_by_unique_id.get((entity.unique_id or "").lower())) is not None
         }
 
     # --- MANAGED CLUSTER PLANS ---

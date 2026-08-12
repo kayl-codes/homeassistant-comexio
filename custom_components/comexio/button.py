@@ -448,16 +448,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     def _delete_marker_entities(self, marker_ids: list[int]) -> int:
         """Remove HA entities for the given marker ids; return the deleted-entity count."""
         registry = er.async_get(self.hass)
-        marker_id_by_unique_id = {f"{DOMAIN}_{self.server_id}_m{mid}".lower(): mid for mid in marker_ids}
+        marker_entities = self.coordinator.marker_entities_by_id(marker_ids)
         deleted_entities = 0
-        # Single pass over the registry, matching by unique_id, instead of one full registry
-        # scan per marker. list() copy is required: registry.async_remove() below mutates
-        # registry.entities mid-loop, which would otherwise raise "dictionary changed size
-        # during iteration".
-        for entity in list(registry.entities.values()):
-            marker_id = marker_id_by_unique_id.get(entity.unique_id or "")
-            if marker_id is None:
-                continue
+        # list() copy is required: registry.async_remove() below mutates registry.entities
+        # mid-loop, which would otherwise raise "dictionary changed size during iteration".
+        for marker_id, entity in list(marker_entities.items()):
             registry.async_remove(entity.entity_id)
             deleted_entities += 1
             _LOGGER.info(
