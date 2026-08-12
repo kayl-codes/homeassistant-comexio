@@ -178,6 +178,13 @@
             "title": "Réparation Web-IO",
             "description": "{summary_text}"
           }
+        },
+        "abort": {
+          "already_in_sync": "Une synchronisation est déjà en cours pour cette instance Comexio. Veuillez attendre qu'elle se termine avant d'en démarrer une nouvelle.",
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "missing_entry_id": "Aucun identifiant d'entrée de configuration n'a été fourni pour ce problème de réparation.",
+          "missing_server_id": "L'identifiant du serveur est manquant dans l'entrée de configuration.",
+          "sync_failed": "L'action de synchronisation n'a pas pu démarrer. Consultez les journaux de Home Assistant pour plus de détails."
         }
       }
     },
@@ -189,6 +196,13 @@
             "title": "Configuration initiale",
             "description": "La/les classe(s) d'appareil Web-IO requise(s) sont introuvables sur votre serveur Comexio : **{missing_classes}**.\n\nVoulez-vous les créer maintenant ?"
           }
+        },
+        "abort": {
+          "already_in_sync": "Une synchronisation est déjà en cours pour cette instance Comexio. Veuillez attendre qu'elle se termine avant d'en démarrer une nouvelle.",
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "missing_entry_id": "Aucun identifiant d'entrée de configuration n'a été fourni pour ce problème de réparation.",
+          "missing_server_id": "L'identifiant du serveur est manquant dans l'entrée de configuration.",
+          "sync_failed": "L'action de synchronisation n'a pas pu démarrer. Consultez les journaux de Home Assistant pour plus de détails."
         }
       }
     },

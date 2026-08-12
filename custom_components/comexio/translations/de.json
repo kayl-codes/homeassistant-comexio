@@ -169,9 +169,6 @@
       }
     }
   },
-  "abort": {
-    "already_in_sync": "Synchronisierung läuft bereits. Bitte warte, bis die aktuelle Aktion abgeschlossen ist."
-  },
   "issues": {
     "sync_mismatch": {
       "title": "Comexio Web-IO nicht synchron",
@@ -181,6 +178,13 @@
             "title": "Web-IO Reparatur",
             "description": "{summary_text}"
           }
+        },
+        "abort": {
+          "already_in_sync": "Synchronisierung läuft bereits. Bitte warte, bis die aktuelle Aktion abgeschlossen ist.",
+          "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt.",
+          "missing_entry_id": "Für dieses Reparatur-Problem wurde keine Konfigurationseintrags-ID übergeben.",
+          "missing_server_id": "Dem Konfigurationseintrag fehlt die Server-ID.",
+          "sync_failed": "Die Synchronisierungsaktion konnte nicht gestartet werden. Prüfe die Home-Assistant-Protokolle für Details."
         }
       }
     },
@@ -192,6 +196,13 @@
             "title": "Initial Setup",
             "description": "Die erforderliche(n) Web-IO Geräteklasse(n) fehlen auf dem Comexio-Server: **{missing_classes}**.\n\nSollen sie jetzt angelegt werden?"
           }
+        },
+        "abort": {
+          "already_in_sync": "Synchronisierung läuft bereits. Bitte warte, bis die aktuelle Aktion abgeschlossen ist.",
+          "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt.",
+          "missing_entry_id": "Für dieses Reparatur-Problem wurde keine Konfigurationseintrags-ID übergeben.",
+          "missing_server_id": "Dem Konfigurationseintrag fehlt die Server-ID.",
+          "sync_failed": "Die Synchronisierungsaktion konnte nicht gestartet werden. Prüfe die Home-Assistant-Protokolle für Details."
         }
       }
     },

@@ -178,6 +178,13 @@
             "title": "Reparación Web-IO",
             "description": "{summary_text}"
           }
+        },
+        "abort": {
+          "already_in_sync": "Ya hay una sincronización en curso para esta instancia de Comexio. Espere a que termine antes de iniciar otra.",
+          "entry_not_found": "No se encontró la entrada de configuración asociada — es posible que se haya eliminado.",
+          "missing_entry_id": "No se proporcionó ningún ID de entrada de configuración para este problema de reparación.",
+          "missing_server_id": "A la entrada de configuración le falta el ID del servidor.",
+          "sync_failed": "No se pudo iniciar la acción de sincronización. Consulte los registros de Home Assistant para más detalles."
         }
       }
     },
@@ -189,6 +196,13 @@
             "title": "Configuración Inicial",
             "description": "Faltan la(s) clase(s) de dispositivo Web-IO requerida(s) en su servidor Comexio: **{missing_classes}**.\n\n¿Desea crearlas ahora?"
           }
+        },
+        "abort": {
+          "already_in_sync": "Ya hay una sincronización en curso para esta instancia de Comexio. Espere a que termine antes de iniciar otra.",
+          "entry_not_found": "No se encontró la entrada de configuración asociada — es posible que se haya eliminado.",
+          "missing_entry_id": "No se proporcionó ningún ID de entrada de configuración para este problema de reparación.",
+          "missing_server_id": "A la entrada de configuración le falta el ID del servidor.",
+          "sync_failed": "No se pudo iniciar la acción de sincronización. Consulte los registros de Home Assistant para más detalles."
         }
       }
     },
