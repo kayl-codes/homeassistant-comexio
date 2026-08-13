@@ -179,26 +179,28 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
     @staticmethod
     def _normalize_user_input(user_input: dict, conf: dict, errors: dict) -> None:
         """Validate and normalize user_input in-place; populate errors on failure."""
-        user_input["scan_interval"] = int(user_input["scan_interval"])
-        if CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN in user_input:
-            user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN] = int(user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN])
-        if CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS in user_input:
-            user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
-                user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
-            )
-
         # If field not in user_input, voluptuous didn't receive changes; preserve old value
         if CONF_IGNORED_MARKERS not in user_input:
-            _LOGGER.debug("ignored_markers field missing from user_input — restoring from saved options")
+            _LOGGER.warning("ignored_markers field missing from user_input — restoring from saved options")
             user_input[CONF_IGNORED_MARKERS] = conf.get(CONF_IGNORED_MARKERS, "")
 
         try:
+            user_input["scan_interval"] = int(user_input["scan_interval"])
+            if CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN in user_input:
+                user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN] = int(
+                    user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN]
+                )
+            if CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS in user_input:
+                user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
+                    user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
+                )
+
             ignored_raw = user_input.get(CONF_IGNORED_MARKERS, "").strip()
             user_input[CONF_IGNORED_MARKERS] = _normalize_ignored_markers(ignored_raw)
         except vol.Invalid as e:
             errors[CONF_IGNORED_MARKERS] = str(e)
         except Exception as e:
-            _LOGGER.exception("Unexpected error validating ignored_markers: %s", e)
+            _LOGGER.exception("Unexpected error validating options input: %s", e)
             errors[CONF_IGNORED_MARKERS] = f"Fehler bei Validierung: {e}"
 
     def _create_options_entry(self, user_input: dict):
