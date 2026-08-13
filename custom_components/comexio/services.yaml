@@ -18,42 +18,42 @@ generate_web_io:
       selector:
         boolean:
 
-logikplan_connect_poc:
-  name: Logikplan Connect POC
+function_plan_connect:
+  name: Function Plan Connect
   description: >
-    POC: Verbindet Merker mit ihren WebIO-Befehlen im angegebenen Logikplan-Plan.
-    Aktive Pläne werden automatisch gestoppt, bearbeitet und reaktiviert.
+    Wires markers to their Web-IO commands in the given function plan. Active plans
+    are automatically stopped, edited and reactivated.
   fields:
     config_entry:
-      name: Comexio Instanz
-      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
       required: false
       selector:
         config_entry:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
       required: false
       selector:
         select:
           options: []
           custom_value: true
     all_markers:
-      name: Alle Merker
-      description: "Wenn aktiviert, werden alle Merker mit einem passenden WebIO-Befehl verbunden (ignoriert marker_id)."
+      name: All markers
+      description: "When enabled, wires every marker that has a matching Web-IO command (ignores marker_id)."
       default: false
       selector:
         boolean:
     marker_id:
-      name: Merker-IDs
-      description: "Kommaseparierte Liste von Merker-IDs (z.B. 'M10,M11,42'). M-Präfix optional. '*' = alle."
+      name: Marker IDs
+      description: "Comma-separated list of marker IDs (e.g. 'M10,M11,42'). M prefix optional. '*' = all."
       default: "2"
       selector:
         text:
     canvas_format:
-      name: Blattformat (optional)
-      description: "Blattformat des Logikplans. 'Auto' = aus Planeinstellungen ermitteln (empfohlen, Standard)."
+      name: Paper format (optional)
+      description: "Paper format of the function plan. 'Auto' = determine from the plan's own settings (recommended, default)."
       default: "Auto"
       selector:
         select:
@@ -63,30 +63,30 @@ logikplan_connect_poc:
             - "A4"
             - "A3"
 
-logikplan_sort:
-  name: Logikplan Sort
+function_plan_sort:
+  name: Function Plan Sort
   description: >
-    Sortiert alle Elemente eines Logikplan-Plans nach Merker-ID und richtet sie auf exakte
-    Grid-Positionen aus. Aktive Pläne werden automatisch gestoppt, sortiert und reaktiviert.
+    Sorts all elements of a function plan by marker ID and snaps them to exact
+    grid positions. Active plans are automatically stopped, sorted and reactivated.
   fields:
     config_entry:
-      name: Comexio Instanz
-      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
       required: false
       selector:
         config_entry:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
       required: false
       selector:
         select:
           options: []
           custom_value: true
     canvas_format:
-      name: Blattformat (optional)
-      description: "Blattformat des Logikplans. 'Auto' = aus Planeinstellungen ermitteln (empfohlen, Standard)."
+      name: Paper format (optional)
+      description: "Paper format of the function plan. 'Auto' = determine from the plan's own settings (recommended, default)."
       default: "Auto"
       selector:
         select:
@@ -96,40 +96,40 @@ logikplan_sort:
             - "A4"
             - "A3"
 
-logikplan_stop:
-  name: Logikplan Stop
-  description: Hält einen Logikplan-Plan an (stop_fup). Nützlich zum manuellen Testen des Plan-Lifecycles.
+function_plan_stop:
+  name: Function Plan Stop
+  description: Stops a function plan (stop_fup). Useful for manually testing the plan lifecycle.
   fields:
     config_entry:
-      name: Comexio Instanz
-      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
       required: false
       selector:
         config_entry:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
       required: false
       selector:
         select:
           options: []
           custom_value: true
 
-logikplan_activate:
-  name: Logikplan Aktivieren
-  description: Speichert und aktiviert einen Logikplan-Plan (run_fup). Entspricht dem manuellen Speichern/Aktivieren im Comexio-UI.
+function_plan_activate:
+  name: Function Plan Activate
+  description: Saves and activates a function plan (run_fup). Equivalent to manually saving/activating in the Comexio UI.
   fields:
     config_entry:
-      name: Comexio Instanz
-      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
       required: false
       selector:
         config_entry:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
       required: false
       selector:
         select:
@@ -351,25 +351,25 @@ function_plan_list_backups:
       selector:
         boolean:
 
-logikplan_visualize:
-  name: Logikplan Visualize
+function_plan_visualize:
+  name: Function Plan Visualize
   description: >
-    Zeigt den Zustand eines Logikplan-Plans (Verbindungen + unbeschaltete Elemente) als
-    Text-Benachrichtigung oder als SVG-Diagramm (Plan Preview Sensor). Zwei Wege, die
-    Quelle zu wählen — nur EINEN verwenden: (1) "Snapshot" — einen gespeicherten Backup
-    exakt wie erfasst darstellen, komplett offline; (2) "Plan" (live) — den aktuellen
-    Zustand des Plans in Comexio darstellen.
+    Shows the state of a function plan (connections + unwired elements) as a text
+    notification or as an SVG diagram (Plan Preview sensor). Two ways to pick the
+    source — use only ONE: (1) "Snapshot" — render a stored backup exactly as
+    captured, entirely offline; (2) "Plan" (live) — render the plan's current
+    state in Comexio.
   fields:
     config_entry:
-      name: Comexio Instanz
-      description: Wähle die Comexio-Instanz aus (optional bei nur einer Instanz).
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
       required: false
       selector:
         config_entry:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Plan wählen oder leer lassen — dann wird der in der 'Function Plans'-Entität gewählte Plan verwendet. Wird ignoriert, wenn 'Snapshot' gesetzt ist."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
       required: false
       selector:
         select:
@@ -377,15 +377,15 @@ logikplan_visualize:
           custom_value: true
     snapshot:
       name: Snapshot (optional)
-      description: "Diesen gespeicherten Backup-Snapshot statt des Live-Plans darstellen — keine Comexio-Verbindung nötig. Überschreibt 'Plan' oben, wenn gesetzt."
+      description: "Render this stored backup snapshot instead of the live plan — no Comexio connection needed. Overrides 'Plan' above when set."
       required: false
       advanced: true
       selector:
         select:
           options: []
     format:
-      name: Ausgabeformat (optional)
-      description: "text (Standard) = Benachrichtigung mit Verbindungen/unbeschalteten Elementen als Liste. svg = rendert ein Diagramm in Comexios Original-Layout-Positionen in den Plan Preview Sensor (entity_picture) und liefert dessen URL zurück."
+      name: Output format (optional)
+      description: "text (default) = notification listing connections/unwired elements. svg = renders a diagram at Comexio's original layout positions into the Plan Preview sensor (entity_picture) and returns its URL."
       required: false
       default: text
       selector:

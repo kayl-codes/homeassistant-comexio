@@ -253,7 +253,7 @@ async def _search_plan_labels(
     if plan_data is None:
         if login_state["ok"] is None:
             login_state["ok"] = await api.login()
-        plan_data = await api.logikplan_load_elements(int(fid)) if login_state["ok"] else None
+        plan_data = await api.function_plan_load_elements(int(fid)) if login_state["ok"] else None
     if not plan_data:
         return None, f"{fub.get('Name', '?')} (fub {fid})"
     labels = {

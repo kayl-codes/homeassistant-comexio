@@ -49,6 +49,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 ### ⚠️ Requirements & Notes
 - After updating, a **full HA restart** is required (new platform files and translation keys).
 - Function-plan services require admin (RSA) credentials; they stop/re-activate active plans automatically during edits.
+- **Breaking: five services renamed to drop the last `logikplan_*` names:** `logikplan_connect_poc` → `function_plan_connect`, `logikplan_visualize` → `function_plan_visualize`, `logikplan_sort` → `function_plan_sort`, `logikplan_stop` → `function_plan_stop`, `logikplan_activate` → `function_plan_activate`. Automations, scripts or dashboards calling the old names must be updated to the new ones — there is no compatibility alias. Their Developer Tools > Actions descriptions and field labels are now in English (previously German only). Persisted option keys, storage keys and entity unique IDs are untouched (see `CLAUDE.md`'s terminology section) — only the callable service names changed. The service handlers' own user-facing notification text (still German-only in places) was not touched in this pass.
 
 ---
 

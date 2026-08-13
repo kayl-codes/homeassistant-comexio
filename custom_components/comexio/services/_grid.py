@@ -3,7 +3,7 @@
 
 Split out of the former monolithic services.py (Sourcery: "too large, multi-purpose") —
 pure layout math plus the managed-IO-cluster header/positioning helpers, shared by both
-the connect (logikplan_connect_poc) and plan_actions (logikplan_sort) handler modules.
+the connect (function_plan_connect_poc) and plan_actions (function_plan_sort) handler modules.
 Deliberately independent of _context.py (no service-call/notification concerns here).
 """
 
@@ -222,7 +222,7 @@ async def _resync_io_group_headers(
     headers placed.
     """
     if stale_ids := _stale_io_header_ids(plan_data):
-        await api.logikplan_delete_elements(stale_ids)
+        await api.function_plan_delete_elements(stale_ids)
     for x, y, text in header_slots:
         await api.function_plan_add_comment_element(fub_id, text, x=x, y=y)
     return len(header_slots)
@@ -242,7 +242,7 @@ async def async_resync_io_group_headers(coordinator: ComexioCoordinator, api, fu
         return 0
     _x_max, y_max = api.get_fub_canvas_bounds(fub_id)
     rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / _LAYOUT_Y_STEP))
-    plan_data = await api.logikplan_load_elements(fub_id)
+    plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
         return 0
     header_slots = _io_header_slots(coordinator, members, rows_per_col)

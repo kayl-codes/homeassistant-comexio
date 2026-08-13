@@ -22,12 +22,12 @@ from ._context import format_plan_label
 
 _LOGGER = logging.getLogger(__name__)
 
-_LOGIKPLAN_SERVICES = (
-    "logikplan_connect_poc",
-    "logikplan_sort",
-    "logikplan_stop",
-    "logikplan_activate",
-    "logikplan_visualize",
+_FUNCTION_PLAN_SERVICES = (
+    "function_plan_connect",
+    "function_plan_sort",
+    "function_plan_stop",
+    "function_plan_activate",
+    "function_plan_visualize",
 )
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent.parent / "services.yaml"
 # Serializes the two independent read-modify-write rewrites of services.yaml below
@@ -66,7 +66,7 @@ def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) 
     except (OSError, yaml.YAMLError) as exc:
         _LOGGER.warning("services.yaml missing or invalid, skipping plan option rewrite: %s", exc)
         return
-    for svc in _LOGIKPLAN_SERVICES:
+    for svc in _FUNCTION_PLAN_SERVICES:
         fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
         if fub_field:
             fub_field["selector"] = {"select": {"options": plan_options, "custom_value": True}}
@@ -168,11 +168,11 @@ def _set_yaml_field_options(
 
 
 _BACKUP_DYNAMIC_SERVICES = ("function_plan_restore", "function_plan_list_backups", "function_plan_delete_backups")
-# logikplan_visualize's fub_id dropdown stays owned by _rewrite_services_yaml_plans (plain
+# function_plan_visualize's fub_id dropdown stays owned by _rewrite_services_yaml_plans (plain
 # plan labels, not the composite fub_id:name backup identity) — only its 'snapshot' field
 # (added for the SVG-format/backup-snapshot preview, Cluster 4) is populated here, alongside
 # the three backup services above.
-_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, "logikplan_visualize")
+_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, "function_plan_visualize")
 _SERVICE_DESCRIPTIONS_CACHE_KEY = "_service_descriptions_cache"
 
 
@@ -182,8 +182,8 @@ def _update_services_yaml_backup_options(
     """Blocking read/modify/write of services.yaml's backup-related dropdowns; executor job only.
 
     Trimmed sibling of _rewrite_services_yaml_plans (which independently owns the
-    logikplan_* services' fub_id dropdown) — only touches the fub_id/snapshot fields of the
-    three backup services (plus logikplan_visualize's snapshot field), so that function is
+    function_plan_* services' fub_id dropdown) — only touches the fub_id/snapshot fields of the
+    three backup services (plus function_plan_visualize's snapshot field), so that function is
     left completely untouched.
     """
     try:

@@ -1291,7 +1291,7 @@ class ComexioAPI:
 
     # --- LOGIKPLAN (FUNCTION PLAN) ---
 
-    async def logikplan_add_element(
+    async def function_plan_add_element(
         self,
         fub_id: int,
         ref_id: int,
@@ -1330,7 +1330,7 @@ class ComexioAPI:
         async with self.session.post(url, data=payload, headers=headers) as resp:
             if resp.status != 200:
                 _LOGGER.error(
-                    "logikplan_add_element failed (HTTP %s, fub=%s, ref=%s, type=%s)",
+                    "function_plan_add_element failed (HTTP %s, fub=%s, ref=%s, type=%s)",
                     resp.status,
                     fub_id,
                     ref_id,
@@ -1342,7 +1342,7 @@ class ComexioAPI:
                 elem_id = result.get("id")
                 if elem_id is None:
                     _LOGGER.error(
-                        "logikplan_add_element: no id in response (fub=%s, ref=%s, type=%s): %s",
+                        "function_plan_add_element: no id in response (fub=%s, ref=%s, type=%s): %s",
                         fub_id,
                         ref_id,
                         element_type,
@@ -1350,7 +1350,7 @@ class ComexioAPI:
                     )
                     return None
                 _LOGGER.debug(
-                    "logikplan_add_element: fub=%s ref=%s type=%s → elem_id=%s",
+                    "function_plan_add_element: fub=%s ref=%s type=%s → elem_id=%s",
                     fub_id,
                     ref_id,
                     element_type,
@@ -1358,10 +1358,10 @@ class ComexioAPI:
                 )
                 return int(elem_id)
             except Exception:
-                _LOGGER.exception("logikplan_add_element: failed to parse response")
+                _LOGGER.exception("function_plan_add_element: failed to parse response")
                 return None
 
-    async def logikplan_save_connection(
+    async def function_plan_save_connection(
         self,
         fub_id: int,
         input_elem_id: int,
@@ -1393,7 +1393,7 @@ class ComexioAPI:
         async with self.session.post(url, data=payload, headers=headers) as resp:
             if resp.status != 200:
                 _LOGGER.error(
-                    "logikplan_save_connection failed (HTTP %s, fub=%s, %s→%s)",
+                    "function_plan_save_connection failed (HTTP %s, fub=%s, %s→%s)",
                     resp.status,
                     fub_id,
                     input_elem_id,
@@ -1404,7 +1404,7 @@ class ComexioAPI:
                 result = await resp.json(content_type=None)
                 conn_id = result.get("id")
                 _LOGGER.debug(
-                    "logikplan_save_connection: fub=%s %s→%s conn_id=%s",
+                    "function_plan_save_connection: fub=%s %s→%s conn_id=%s",
                     fub_id,
                     input_elem_id,
                     output_elem_id,
@@ -1412,10 +1412,10 @@ class ComexioAPI:
                 )
                 return int(conn_id) if conn_id is not None else None
             except Exception:
-                _LOGGER.exception("logikplan_save_connection: failed to parse response")
+                _LOGGER.exception("function_plan_save_connection: failed to parse response")
                 return None
 
-    async def logikplan_save_elements_pos(self, positions: list[tuple[int, float, float]]) -> bool:
+    async def function_plan_save_elements_pos(self, positions: list[tuple[int, float, float]]) -> bool:
         """Reposition multiple Logikplan elements in one call.
 
         positions: list of (fubElementId, x, y) tuples.
@@ -1432,21 +1432,21 @@ class ComexioAPI:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self._base_url}/admin/function_function_module/home",
         }
-        _LOGGER.info("logikplan_save_elements_pos: repositioning %d elements", len(positions))
+        _LOGGER.info("function_plan_save_elements_pos: repositioning %d elements", len(positions))
         async with self.session.post(url, data=payload, headers=headers) as resp:
             if resp.status != 200:
-                _LOGGER.error("logikplan_save_elements_pos failed (HTTP %s)", resp.status)
+                _LOGGER.error("function_plan_save_elements_pos failed (HTTP %s)", resp.status)
                 return False
             try:
                 result = await resp.json(content_type=None)
                 success = result.get("result") == 1
-                _LOGGER.info("logikplan_save_elements_pos: result=%s (raw: %s)", success, result)
+                _LOGGER.info("function_plan_save_elements_pos: result=%s (raw: %s)", success, result)
                 return success
             except Exception:
-                _LOGGER.exception("logikplan_save_elements_pos: failed to parse response")
+                _LOGGER.exception("function_plan_save_elements_pos: failed to parse response")
                 return False
 
-    async def logikplan_delete_elements(self, elem_ids: list[int]) -> bool:
+    async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:
         """Delete elements from a Logikplan plan (removes elements + their connections).
 
         elem_ids: list of fubElementId integers to delete.
@@ -1462,21 +1462,21 @@ class ComexioAPI:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self._base_url}/admin/function_function_module/home",
         }
-        _LOGGER.info("logikplan_delete_elements: %d Elemente löschen: %s", len(elem_ids), elem_ids)
+        _LOGGER.info("function_plan_delete_elements: %d Elemente löschen: %s", len(elem_ids), elem_ids)
         async with self.session.post(url, data=payload, headers=headers) as resp:
             if resp.status != 200:
-                _LOGGER.error("logikplan_delete_elements failed (HTTP %s)", resp.status)
+                _LOGGER.error("function_plan_delete_elements failed (HTTP %s)", resp.status)
                 return False
             try:
                 result = await resp.json(content_type=None)
                 success = result.get("delete") is True
-                _LOGGER.info("logikplan_delete_elements: result=%s", success)
+                _LOGGER.info("function_plan_delete_elements: result=%s", success)
                 return success
             except Exception:
-                _LOGGER.exception("logikplan_delete_elements: failed to parse response")
+                _LOGGER.exception("function_plan_delete_elements: failed to parse response")
                 return False
 
-    async def logikplan_load_elements(self, fub_id: int) -> dict | None:
+    async def function_plan_load_elements(self, fub_id: int) -> dict | None:
         """Load elements and connections for a Logikplan plan (GET loadelements).
 
         Returns dict with 'elements' and 'connections' keys, or None on failure.
@@ -1489,7 +1489,7 @@ class ComexioAPI:
         try:
             async with self.session.get(url, params={"fubid": fub_id}, headers=headers) as resp:
                 if resp.status != 200:
-                    _LOGGER.error("logikplan_load_elements failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                    _LOGGER.error("function_plan_load_elements failed (HTTP %s, fub=%s)", resp.status, fub_id)
                     return None
                 data = await resp.json(content_type=None)
                 # Comexio returns [] for empty collections instead of {}
@@ -1500,11 +1500,11 @@ class ComexioAPI:
                 elem_count = len(data.get("elements", {}))
                 conn_count = len(data.get("connections", {}))
                 _LOGGER.info(
-                    "logikplan_load_elements fub=%s: %d Elemente, %d Verbindungen", fub_id, elem_count, conn_count
+                    "function_plan_load_elements fub=%s: %d Elemente, %d Verbindungen", fub_id, elem_count, conn_count
                 )
                 return data
         except Exception:
-            _LOGGER.exception("logikplan_load_elements fub_id=%s failed", fub_id)
+            _LOGGER.exception("function_plan_load_elements fub_id=%s failed", fub_id)
             return None
 
     async def function_plan_load_all_plans(self, concurrency: int = 4) -> dict[int, dict]:
@@ -1523,7 +1523,7 @@ class ComexioAPI:
 
         async def _load_one(fid: int) -> tuple[int, dict | None]:
             async with semaphore:
-                return fid, await self.logikplan_load_elements(fid)
+                return fid, await self.function_plan_load_elements(fid)
 
         t_start = time.monotonic()
         results = await asyncio.gather(*(_load_one(fid) for fid in fub_ids))
@@ -1538,7 +1538,7 @@ class ComexioAPI:
         )
         return plans
 
-    async def logikplan_stop_fup(self, fub_id: int) -> bool:
+    async def function_plan_stop_fup(self, fub_id: int) -> bool:
         """Stop/pause a Logikplan plan (stop_fup)."""
         url = f"{self._base_url}/admin/function_function_module/stop_fup/"
         headers = {
@@ -1548,14 +1548,14 @@ class ComexioAPI:
         try:
             async with self.session.post(url, data={"id": str(fub_id)}, headers=headers) as resp:
                 if resp.status != 200:
-                    _LOGGER.error("logikplan_stop_fup failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                    _LOGGER.error("function_plan_stop_fup failed (HTTP %s, fub=%s)", resp.status, fub_id)
                     return False
                 result = await resp.json(content_type=None)
                 success = result.get("result") is True
-                _LOGGER.info("logikplan_stop_fup: fub=%s result=%s state=%s", fub_id, success, result.get("state"))
+                _LOGGER.info("function_plan_stop_fup: fub=%s result=%s state=%s", fub_id, success, result.get("state"))
                 return success
         except Exception:
-            _LOGGER.exception("logikplan_stop_fup: fub_id=%s failed", fub_id)
+            _LOGGER.exception("function_plan_stop_fup: fub_id=%s failed", fub_id)
             return False
 
     async def function_plan_add_comment_element(
@@ -1816,7 +1816,7 @@ class ComexioAPI:
         )
         return True
 
-    async def logikplan_run_fup(self, fub_id: int, plan_data: dict | None = None) -> bool:
+    async def function_plan_run_fup(self, fub_id: int, plan_data: dict | None = None) -> bool:
         """Save and activate a Logikplan plan (run_fup).
 
         By default the CURRENT state is loaded via loadelements; pass an explicit
@@ -1826,9 +1826,9 @@ class ComexioAPI:
         to indexed dict (run_fup expectation).
         """
         if plan_data is None:
-            plan_data = await self.logikplan_load_elements(fub_id)
+            plan_data = await self.function_plan_load_elements(fub_id)
         if plan_data is None:
-            _LOGGER.error("logikplan_run_fup: could not load plan %s", fub_id)
+            _LOGGER.error("function_plan_run_fup: could not load plan %s", fub_id)
             return False
 
         connections_transformed = {
@@ -1850,14 +1850,14 @@ class ComexioAPI:
                 url, data={"id": str(fub_id), "data": json.dumps(data_payload)}, headers=headers
             ) as resp:
                 if resp.status != 200:
-                    _LOGGER.error("logikplan_run_fup failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                    _LOGGER.error("function_plan_run_fup failed (HTTP %s, fub=%s)", resp.status, fub_id)
                     return False
                 result = await resp.json(content_type=None)
                 success = result.get("result") is True
-                _LOGGER.info("logikplan_run_fup: fub=%s result=%s state=%s", fub_id, success, result.get("state"))
+                _LOGGER.info("function_plan_run_fup: fub=%s result=%s state=%s", fub_id, success, result.get("state"))
                 return success
         except Exception:
-            _LOGGER.exception("logikplan_run_fup: fub_id=%s failed", fub_id)
+            _LOGGER.exception("function_plan_run_fup: fub_id=%s failed", fub_id)
             return False
 
     async def _reload_config_until_commands_ready(self, expected_names_fn: Callable[[dict], set[str]]) -> dict:
@@ -1947,7 +1947,9 @@ class ComexioAPI:
                 _LOGGER.info("function plan pair %s already wired in plan fub=%s, skipping", label, fub_id)
                 return ""
             # Orphan pair: both elements exist but the wire is missing — draw only the connection
-            conn_id = await self.logikplan_save_connection(fub_id, existing_src_elem, existing_webio_elem, conn_type)
+            conn_id = await self.function_plan_save_connection(
+                fub_id, existing_src_elem, existing_webio_elem, conn_type
+            )
             if conn_id is None:
                 return f"{label}: save_connection between existing elements failed"
             _LOGGER.info(
@@ -1960,7 +1962,7 @@ class ComexioAPI:
             )
             return None
 
-        elem_src = existing_src_elem or await self.logikplan_add_element(
+        elem_src = existing_src_elem or await self.function_plan_add_element(
             fub_id=fub_id, ref_id=src_ref_id, element_type=src_type, x=x_src, y=y
         )
         if elem_src is None:
@@ -1968,7 +1970,7 @@ class ComexioAPI:
 
         if existing_webio_elem:
             # Web-IO element already in the plan — wire the (possibly fresh) source to it
-            conn_id = await self.logikplan_save_connection(fub_id, int(elem_src), existing_webio_elem, conn_type)
+            conn_id = await self.function_plan_save_connection(fub_id, int(elem_src), existing_webio_elem, conn_type)
             if conn_id is None:
                 return f"{label}: save_connection to existing Web-IO element failed"
             return None
@@ -1982,7 +1984,7 @@ class ComexioAPI:
                 "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
             }
         }
-        elem_webio = await self.logikplan_add_element(
+        elem_webio = await self.function_plan_add_element(
             fub_id=fub_id,
             ref_id=web_ref_id,
             element_type=10,
@@ -2030,7 +2032,7 @@ class ComexioAPI:
         webio_commands = fresh_data.get("webio_commands", {})
         markers_by_id = {int(m["id"]): m for m in fresh_data.get("markers", [])}
 
-        plan_data = await self.logikplan_load_elements(fub_id)
+        plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
 
         if fresh_plan:
@@ -2137,7 +2139,7 @@ class ComexioAPI:
         ext_ios = {io["identifier"]: io for io in fresh_data.get("io", []) if io["ext_name"] == ext_name}
         rows = io_column_rows(list(ext_ios))
 
-        plan_data = await self.logikplan_load_elements(fub_id)
+        plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
 
         _, y_max = self.get_fub_canvas_bounds(fub_id)
@@ -2288,7 +2290,7 @@ class ComexioAPI:
         outputs = conn.get("output", [])
         outputs = list(outputs.values()) if isinstance(outputs, dict) else outputs
 
-        elem_marker = await self.logikplan_add_element(fub_id=fub_id, ref_id=marker_ref, element_type=2, x=mx, y=my)
+        elem_marker = await self.function_plan_add_element(fub_id=fub_id, ref_id=marker_ref, element_type=2, x=mx, y=my)
         if elem_marker is None:
             return 0, 0, [f"M{marker_ref}: add_element (Marker) failed during rebuild"]
 
@@ -2334,7 +2336,7 @@ class ComexioAPI:
                 "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
             }
         }
-        elem_webio = await self.logikplan_add_element(
+        elem_webio = await self.function_plan_add_element(
             fub_id=fub_id, ref_id=webio_ref, element_type=10, x=wx, y=wy, connection=conn_payload
         )
         if elem_webio is None:
@@ -2364,7 +2366,7 @@ class ComexioAPI:
             (fd.get("Name", str(fub_id)) for fid, fd in self._fub_data.items() if int(fid) == fub_id),
             str(fub_id),
         )
-        plan_data = await self.logikplan_load_elements(fub_id)
+        plan_data = await self.function_plan_load_elements(fub_id)
         if not plan_data:
             _LOGGER.warning("function_plan_cleanup_for_markers: failed to load plan %s", fub_id)
             return {"deleted_elem_count": 0, "webio_cmd_ids": [], "fub_id": fub_id}
@@ -2478,7 +2480,7 @@ class ComexioAPI:
         self, fub_id: int, elem_ids_to_delete: list[int], webio_cmd_ids: list[int], plan_name: str
     ) -> dict:
         """Stop the plan, delete the given elements, restart it, and build the result dict."""
-        stop_ok = await self.logikplan_stop_fup(fub_id)
+        stop_ok = await self.function_plan_stop_fup(fub_id)
         if not stop_ok:
             _LOGGER.error(
                 "function_plan_cleanup_for_markers: failed to stop plan '%s' (fub=%s), aborting cleanup",
@@ -2494,10 +2496,10 @@ class ComexioAPI:
                 "stop_failed": True,
             }
 
-        success = await self.logikplan_delete_elements(elem_ids_to_delete)
+        success = await self.function_plan_delete_elements(elem_ids_to_delete)
         if not success:
             _LOGGER.error("function_plan_cleanup_for_markers: element deletion failed")
-            restart_after_failure_ok = await self.logikplan_run_fup(fub_id)
+            restart_after_failure_ok = await self.function_plan_run_fup(fub_id)
             return {
                 "deleted_elem_count": 0,
                 "webio_cmd_ids": [],
@@ -2506,7 +2508,7 @@ class ComexioAPI:
                 "plan_name": plan_name,
             }
 
-        restart_ok = await self.logikplan_run_fup(fub_id)
+        restart_ok = await self.function_plan_run_fup(fub_id)
         _LOGGER.info(
             "function_plan_cleanup_for_markers: deleted %d elements, webio_cmd_ids=%s (plan '%s' %s)",
             len(elem_ids_to_delete),

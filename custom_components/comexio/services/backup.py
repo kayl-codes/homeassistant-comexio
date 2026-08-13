@@ -374,21 +374,21 @@ async def _restore_apply_snapshot(
     if properties_changed:
         paper_ok = await api.function_plan_update_paper(fub_id, paper, dpi, orientation, name=plan_name)
 
-    await api.logikplan_stop_fup(fub_id)
+    await api.function_plan_stop_fup(fub_id)
 
     # Restore element positions via saveelementspos (known-good mechanism from sort)
     positions = [
         (int(elem_id), elem.get("position_x", 0.0), elem.get("position_y", 0.0))
         for elem_id, elem in snapshot.get("elements", {}).items()
     ]
-    pos_ok = await api.logikplan_save_elements_pos(positions) if positions else True
+    pos_ok = await api.function_plan_save_elements_pos(positions) if positions else True
 
     # Restore structure + activate via run_fup with the snapshot payload
-    run_ok = await api.logikplan_run_fup(fub_id, plan_data=snapshot)
+    run_ok = await api.function_plan_run_fup(fub_id, plan_data=snapshot)
 
     # Preserve previous inactive state
     if run_ok and not was_active:
-        await api.logikplan_stop_fup(fub_id)
+        await api.function_plan_stop_fup(fub_id)
 
     return {
         "paper": paper,
@@ -403,7 +403,7 @@ async def _restore_apply_snapshot(
 
 async def _restore_verify(api, fub_id: int, snapshot: dict, plan_hash) -> dict:
     """Reload the plan after a restore and compare it against the snapshot (hash + counts)."""
-    fresh = await api.logikplan_load_elements(fub_id)
+    fresh = await api.function_plan_load_elements(fub_id)
     fresh_hash = plan_hash(fresh) if fresh else None
     hash_match = fresh_hash == snapshot.get("hash")
     elem_count = len(snapshot.get("elements", {}))
@@ -418,7 +418,7 @@ async def _restore_verify(api, fub_id: int, snapshot: dict, plan_hash) -> dict:
         "conn_count": conn_count,
         "fresh_elem": fresh_elem,
         "fresh_conn": fresh_conn,
-        # False when logikplan_load_elements failed post-restore (fresh is None) — a restore
+        # False when function_plan_load_elements failed post-restore (fresh is None) — a restore
         # we can't verify must never be reported as OK/PARTIAL.
         "reload_ok": fresh is not None,
     }
@@ -527,7 +527,7 @@ async def _restore_plan_as_new(
     # therefore routinely reports result=False even though the data payload IS applied — the
     # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
     # criterion here; the recreated/expected element+connection counts are.
-    run_ok = await api.logikplan_run_fup(new_fub_id)
+    run_ok = await api.function_plan_run_fup(new_fub_id)
     duration = time.monotonic() - t_start
 
     if old_id_still_live:
