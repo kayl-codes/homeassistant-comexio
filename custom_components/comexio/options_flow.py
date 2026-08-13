@@ -194,13 +194,20 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
                     user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
                 )
+        except (ValueError, TypeError) as e:
+            # Kept separate from the ignored_markers try/except below so a numeric-field
+            # error is never misattributed to errors[CONF_IGNORED_MARKERS].
+            _LOGGER.exception("Unexpected error normalizing numeric options fields: %s", e)
+            errors["base"] = f"Fehler bei Validierung: {e}"
+            return
 
+        try:
             ignored_raw = user_input.get(CONF_IGNORED_MARKERS, "").strip()
             user_input[CONF_IGNORED_MARKERS] = _normalize_ignored_markers(ignored_raw)
         except vol.Invalid as e:
             errors[CONF_IGNORED_MARKERS] = str(e)
         except Exception as e:
-            _LOGGER.exception("Unexpected error validating options input: %s", e)
+            _LOGGER.exception("Unexpected error validating ignored_markers: %s", e)
             errors[CONF_IGNORED_MARKERS] = f"Fehler bei Validierung: {e}"
 
     def _create_options_entry(self, user_input: dict):
