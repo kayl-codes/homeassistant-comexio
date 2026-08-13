@@ -24,7 +24,8 @@ from ._grid import _is_managed_cluster_plan
 
 _LOGGER = logging.getLogger(__name__)
 
-_SORT_SERVICE_NAME = "function_plan_sort"
+# Order matches FUNCTION_PLAN_SERVICE_NAMES (const.py): connect, sort, stop, activate, visualize.
+_, _SORT_SERVICE_NAME, _, _, _SVC_VISUALIZE = FUNCTION_PLAN_SERVICE_NAMES
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent.parent / "services.yaml"
 # Serializes the two independent read-modify-write rewrites of services.yaml below
 # (_update_services_yaml_plans and _refresh_service_descriptions) so a run of one can't
@@ -199,7 +200,7 @@ _BACKUP_DYNAMIC_SERVICES = ("function_plan_restore", "function_plan_list_backups
 # plan labels, not the composite fub_id:name backup identity) — only its 'snapshot' field
 # (added for the SVG-format/backup-snapshot preview, Cluster 4) is populated here, alongside
 # the three backup services above.
-_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, "function_plan_visualize")
+_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, _SVC_VISUALIZE)
 _SERVICE_DESCRIPTIONS_CACHE_KEY = "_service_descriptions_cache"
 
 
