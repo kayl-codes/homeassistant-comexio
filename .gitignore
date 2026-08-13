@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.coverage
 
 # GitHub Copilot & IDE spezifisch
 .github/copilot-instructions/
@@ -12,9 +13,11 @@ __pycache__/
 # Generated requirements (built in CI from the Pipfile)
 /requirements.txt
 /requirements_tests.txt
+/requirements_tests_only_binary_exempt.txt
 
 # Claude Code (personal/local settings — permission rules, personal paths etc.)
 .claude/
+.mcp.json
 
 # Editor / OS junk
 .DS_Store
@@ -23,3 +26,11 @@ Thumbs.db
 # Local virtual environments
 .venv/
 venv/
+
+# Local secrets (e.g. examples/verify_live.py credentials, .env.sonar token)
+.env
+.env.*
+
+# SonarScanner local cache / JVM crash dumps
+.scannerwork/
+hs_err_pid*.log
