@@ -36,7 +36,12 @@ def _build_sorted_pairs(
     elements: dict,
     connections: dict,
 ) -> tuple[list[tuple[int, int, int]], list[int]]:
-    """Return marker→WebIO pairs sorted by marker ref_id and a list of orphan element IDs."""
+    """Return marker→WebIO pairs sorted by marker ref_id and a list of orphan element IDs.
+
+    Comment/text blocks (type 14) are excluded from the orphans — they keep their
+    position and are never moved by the sort (the managed-plan comment is separately
+    re-pinned by _pinned_template_positions; any other comment on the plan is left as-is).
+    """
     elem_ref: dict[int, dict] = {
         int(eid): {
             "type": e.get("reference", {}).get("type"),
@@ -64,7 +69,11 @@ def _build_sorted_pairs(
                 pairs.append((marker_ref_id, inp_eid, out_eid))
     pairs.sort(key=lambda p: p[0])
     paired: set[int] = {eid for _, m, w in pairs for eid in (m, w)}
-    orphans = [int(eid) for eid in elements if int(eid) not in paired]
+    orphans = [
+        int(eid)
+        for eid, e in elements.items()
+        if int(eid) not in paired and str((e.get("reference") or {}).get("type")) != _COMMENT_REF_TYPE
+    ]
     return pairs, orphans
 
 
