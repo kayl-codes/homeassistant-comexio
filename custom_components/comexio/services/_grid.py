@@ -32,8 +32,8 @@ _COMMENT_REF_TYPE = "14"
 _MANAGED_COMMENT_TEXT = FUNCTION_PLAN_MANAGED_PLAN_COMMENT
 
 
-def _is_comment_ref_type(ref_type) -> bool:
-    """Whether a plan element's reference type is a comment/text block (type 14).
+def _is_comment_ref_type(ref_type: str | int | None) -> bool:
+    """Whether a plan element's reference type is a comment/text block (_COMMENT_REF_TYPE).
 
     Shared by _build_sorted_pairs and _assign_io_grid_positions so both sort paths stay
     aligned if the comment-type check ever changes.
