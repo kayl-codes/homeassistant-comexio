@@ -194,7 +194,7 @@ class ComexioAPI:
         self.io_types: dict[str, Any] = {}
         # io_input_types: TypeId → {input: bool}  (from $IOInputTypes)
         self.io_input_types: dict[str, Any] = {}
-        # Logikplan plan + paper metadata (populated by parse_config)
+        # Function plan + paper metadata (populated by parse_config)
         self._fub_data: dict[str, Any] = {}  # fub_id_str → {Id, Name, Paper, ...}
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
         self._auth_warned: bool = False
@@ -207,7 +207,7 @@ class ComexioAPI:
 
     @property
     def fub_data(self) -> dict[str, Any]:
-        """Return Logikplan plan metadata (fub_id_str → {Id, Name, Paper, ...}), populated by parse_config()."""
+        """Return function plan metadata (fub_id_str → {Id, Name, Paper, ...}), populated by parse_config()."""
         return self._fub_data
 
     def update_fub_cache_entry(self, fub_id: int | str, fub_info: dict[str, Any]) -> None:
@@ -536,7 +536,7 @@ class ComexioAPI:
         }
         live_states = live_states or {}
 
-        # Cache Logikplan plan + paper metadata for later use (e.g. auto canvas-format detection)
+        # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection)
         self._fub_data = conf.get("Fubs", {})
         self._paper_data = conf.get("Paper", {})
 
@@ -596,24 +596,24 @@ class ComexioAPI:
     }
 
     def get_fub_paper_format(self, fub_id: int) -> str:
-        """Return the paper format name (e.g. 'A4') for a Logikplan plan, defaulting to 'A4'."""
+        """Return the paper format name (e.g. 'A4') for a function plan, defaulting to 'A4'."""
         fub = self._fub_data.get(str(fub_id), {})
         paper_id = str(fub.get("Paper", ""))
         paper = self._paper_data.get(paper_id, {})
         return str(paper.get("Name", "A4"))
 
     def get_fub_dpi(self, fub_id: int) -> int:
-        """Return the configured resolution (DPI) for a Logikplan plan, defaulting to 90."""
+        """Return the configured resolution (DPI) for a function plan, defaulting to 90."""
         fub = self._fub_data.get(str(fub_id), {})
         return int(fub.get("Resolution", self._CANVAS_REF_RES))
 
     def get_fub_orientation(self, fub_id: int) -> str:
-        """Return 'portrait' or 'landscape' for a Logikplan plan, defaulting to 'landscape'."""
+        """Return 'portrait' or 'landscape' for a function plan, defaulting to 'landscape'."""
         fub = self._fub_data.get(str(fub_id), {})
         return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
 
     def get_fub_active(self, fub_id: int) -> bool | None:
-        """Return a Logikplan plan's active flag, or None if the plan is not known live."""
+        """Return a function plan's active flag, or None if the plan is not known live."""
         fub = self._fub_data.get(str(fub_id))
         if fub is None:
             return None
@@ -622,7 +622,7 @@ class ComexioAPI:
     def get_fub_canvas_bounds(
         self, fub_id: int, paper_name: str | None = None, orientation: str | None = None
     ) -> tuple[float, float]:
-        """Return estimated (x_max, y_max) canvas bounds for a Logikplan plan.
+        """Return estimated (x_max, y_max) canvas bounds for a function plan.
 
         Scales proportionally from the A4-landscape-90-DPI reference (870×720).
         DPI (Resolution) is always taken from $Fubs plan data.
@@ -1300,7 +1300,7 @@ class ComexioAPI:
         y: float = 100.0,
         connection: dict | None = None,
     ) -> int | None:
-        """Place a Marker (type=2) or WebIO (type=10) block on a Logikplan canvas.
+        """Place a Marker (type=2) or WebIO (type=10) block on a function plan canvas.
 
         Pass `connection` to wire the element in the same API call (skips saveconnection).
         For type=10 (WebIO): connection = {"0": {"id":"new","fub_id":...,"type":"binary|analog",
@@ -1416,7 +1416,7 @@ class ComexioAPI:
                 return None
 
     async def function_plan_save_elements_pos(self, positions: list[tuple[int, float, float]]) -> bool:
-        """Reposition multiple Logikplan elements in one call.
+        """Reposition multiple function plan elements in one call.
 
         positions: list of (fubElementId, x, y) tuples.
         Returns True on success.
@@ -1447,7 +1447,7 @@ class ComexioAPI:
                 return False
 
     async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:
-        """Delete elements from a Logikplan plan (removes elements + their connections).
+        """Delete elements from a function plan (removes elements + their connections).
 
         elem_ids: list of fubElementId integers to delete.
         Returns True on success.
@@ -1477,7 +1477,7 @@ class ComexioAPI:
                 return False
 
     async def function_plan_load_elements(self, fub_id: int) -> dict | None:
-        """Load elements and connections for a Logikplan plan (GET loadelements).
+        """Load elements and connections for a function plan (GET loadelements).
 
         Returns dict with 'elements' and 'connections' keys, or None on failure.
         """
@@ -1508,7 +1508,7 @@ class ComexioAPI:
             return None
 
     async def function_plan_load_all_plans(self, concurrency: int = 4) -> dict[int, dict]:
-        """Load elements and connections for ALL known Logikplan plans concurrently.
+        """Load elements and connections for ALL known function plans concurrently.
 
         Uses the fub list cached by parse_config (self._fub_data). Requests run in
         parallel, limited by a semaphore so the embedded Comexio server is not
@@ -1539,7 +1539,7 @@ class ComexioAPI:
         return plans
 
     async def function_plan_stop_fup(self, fub_id: int) -> bool:
-        """Stop/pause a Logikplan plan (stop_fup)."""
+        """Stop/pause a function plan (stop_fup)."""
         url = f"{self._base_url}/admin/function_function_module/stop_fup/"
         headers = {
             "X-Requested-With": "XMLHttpRequest",
@@ -1565,7 +1565,7 @@ class ComexioAPI:
         x: float = 100.0,
         y: float = 7.5,
     ) -> int | None:
-        """Place a text/comment block (type=14, ref_id=3) on a Logikplan canvas.
+        """Place a text/comment block (type=14, ref_id=3) on a function plan canvas.
 
         Returns the fubElementId assigned by the server, or None on failure.
         """
@@ -1640,7 +1640,7 @@ class ComexioAPI:
         orientation: str = "landscape",
         dpi: int = 90,
     ) -> int | None:
-        """Create a new Logikplan plan. Returns the new fub_id on success, None on failure.
+        """Create a new function plan. Returns the new fub_id on success, None on failure.
 
         Args:
             plan_name: Name of the new plan
@@ -1817,7 +1817,7 @@ class ComexioAPI:
         return True
 
     async def function_plan_run_fup(self, fub_id: int, plan_data: dict | None = None) -> bool:
-        """Save and activate a Logikplan plan (run_fup).
+        """Save and activate a function plan (run_fup).
 
         By default the CURRENT state is loaded via loadelements; pass an explicit
         plan_data (e.g. a backup snapshot with 'elements' and 'connections') to

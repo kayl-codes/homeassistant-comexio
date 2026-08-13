@@ -176,7 +176,7 @@ def _parse_snapshot_field(raw: str) -> tuple[int, str, int, str | None] | None:
 
 
 def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: str) -> tuple[Any, Any, int] | None:
-    """Resolve (coordinator, api, fub_id) for a Logikplan service call — without logging in.
+    """Resolve (coordinator, api, fub_id) for a function plan service call — without logging in.
 
     Handles config_entry auto-resolution (when only one Comexio instance exists) and fub_id
     resolution via `_resolve_fub_id`, notifying the user and returning None on any failure.
@@ -222,7 +222,7 @@ async def _ensure_comexio_login(hass: HomeAssistant, api, error_title: str) -> b
 async def _resolve_function_plan_context(
     hass: HomeAssistant, call: ServiceCall, error_title: str
 ) -> tuple[Any, Any, int] | None:
-    """Resolve (coordinator, api, fub_id) for a Logikplan service call and ensure the admin session is logged in."""
+    """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in."""
     ctx = _resolve_function_plan(hass, call, error_title)
     if ctx is None:
         return None

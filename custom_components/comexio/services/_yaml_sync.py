@@ -103,7 +103,7 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
     try:
         async with _SERVICES_YAML_LOCK:
             await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options, entry_ids)
-        _LOGGER.debug("Updated services.yaml: %d Logikplan plan options (labels) written", len(plan_options))
+        _LOGGER.debug("Updated services.yaml: %d function plan options (labels) written", len(plan_options))
     except Exception as exc:  # noqa: BLE001
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
 
