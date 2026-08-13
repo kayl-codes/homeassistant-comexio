@@ -108,18 +108,13 @@ def _plan_pair_progress(ctx: "_SyncContext", state: dict, plan_name: str, done: 
     if done != total and overall_done % _SYNC_PROGRESS_NOTIFY_EVERY:
         return  # throttle notification updates to every Nth pair
     now = time.monotonic()
-    elapsed = now - state["t0"]
     # ETA from the rate since the last update, not the run-wide average — a fixed per-plan
     # setup cost (backup, stop_fup, reload-wait) would otherwise skew early estimates high.
+    # "last_t"/"last_overall" default to state["t0"]/0, so the very first update already
+    # degenerates to the run-wide average on its own — no separate first-update branch needed.
     recent_elapsed = now - state.get("last_t", state["t0"])
     recent_count = overall_done - state.get("last_overall", 0)
-    if recent_count:
-        rate = recent_elapsed / recent_count
-    elif overall_done:
-        # first-ever update (no prior "last_*" state yet) — fall back to the run-wide average
-        rate = elapsed / overall_done
-    else:
-        rate = 0.0
+    rate = recent_elapsed / recent_count if recent_count else 0.0
     remaining = rate * (overall_total - overall_done)
     state["last_t"] = now
     state["last_overall"] = overall_done
