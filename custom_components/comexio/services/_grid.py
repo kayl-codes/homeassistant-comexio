@@ -3,7 +3,7 @@
 
 Split out of the former monolithic services.py (Sourcery: "too large, multi-purpose") —
 pure layout math plus the managed-IO-cluster header/positioning helpers, shared by both
-the connect (function_plan_connect_poc) and plan_actions (function_plan_sort) handler modules.
+the connect (function_plan_connect) and plan_actions (function_plan_sort) handler modules.
 Deliberately independent of _context.py (no service-call/notification concerns here).
 """
 
