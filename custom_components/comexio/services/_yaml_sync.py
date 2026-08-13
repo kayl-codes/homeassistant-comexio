@@ -85,41 +85,47 @@ def _rewrite_services_yaml_plans(
     )
 
 
-async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
-    """Rewrite fub_id select options in services.yaml with current plan labels from all active coordinators.
+def _collect_plan_options(hass: HomeAssistant) -> tuple[list[str], list[str], list[str]]:
+    """Collect sorted fub_id dropdown labels (full set + managed-only subset) and config-entry IDs.
 
     Labels use the same "<name> (ID <fid>)" format as the select entity, so duplicate
     plan names across coordinators still resolve unambiguously via _resolve_fub_id().
     """
-    from ..coordinator import ComexioCoordinator
-
     plan_labels: set[str] = set()
     sortable_plan_labels: set[str] = set()
     entry_ids: list[str] = []
     for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
-        if isinstance(coordinator, ComexioCoordinator):
-            entry_ids.append(entry_id)
-            for fub_id, fub in coordinator.api.fub_data.items():
-                name = fub.get("Name", "")
-                if not name:
-                    continue
-                label = format_plan_label(name, fub_id)
-                plan_labels.add(label)
-                if _is_managed_cluster_plan(coordinator, fub_id):
-                    sortable_plan_labels.add(label)
+        if not isinstance(coordinator, ComexioCoordinator):
+            continue
+        entry_ids.append(entry_id)
+        for fub_id, fub in coordinator.api.fub_data.items():
+            name = fub.get("Name", "")
+            if not name:
+                continue
+            label = format_plan_label(name, fub_id)
+            plan_labels.add(label)
+            if _is_managed_cluster_plan(coordinator, fub_id):
+                sortable_plan_labels.add(label)
+    return sorted(plan_labels, key=str.lower), sorted(sortable_plan_labels, key=str.lower), entry_ids
 
-    if not plan_labels:
+
+async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
+    """Rewrite fub_id select options in services.yaml with current plan labels from all active coordinators."""
+    plan_options, sortable_plan_options, entry_ids = _collect_plan_options(hass)
+    if not plan_options:
         _LOGGER.debug("_update_services_yaml_plans: no plans available, skipping")
         return
 
-    plan_options = sorted(plan_labels, key=str.lower)
-    sortable_plan_options = sorted(sortable_plan_labels, key=str.lower)
     try:
         async with _SERVICES_YAML_LOCK:
             await hass.async_add_executor_job(
                 _rewrite_services_yaml_plans, plan_options, sortable_plan_options, entry_ids
             )
-        _LOGGER.debug("Updated services.yaml: %d Logikplan plan options (labels) written", len(plan_options))
+        _LOGGER.debug(
+            "Updated services.yaml: %d Logikplan plan options (labels) written (%d sortable)",
+            len(plan_options),
+            len(sortable_plan_options),
+        )
     except Exception as exc:  # noqa: BLE001
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
 
