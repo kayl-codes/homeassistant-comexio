@@ -19,6 +19,7 @@ import yaml
 from ..const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT
 from ..coordinator import ComexioCoordinator
 from ._context import format_plan_label
+from ._grid import _is_managed_cluster_plan
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,7 +53,9 @@ def _apply_single_instance_default(content: dict, entry_ids: list[str]) -> None:
             entry_field.pop("default", None)
 
 
-def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) -> None:
+def _rewrite_services_yaml_plans(
+    plan_options: list[str], sortable_plan_options: list[str], entry_ids: list[str]
+) -> None:
     """Blocking read/modify/write of services.yaml; run via executor job only.
 
     services.yaml is rewritten (rather than deriving fub_id options purely at runtime) because HA's
@@ -60,6 +63,10 @@ def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) 
     from the YAML at service-registration time, and selectors don't support a per-call dynamic option
     list bound to live coordinator data. The select entity (select.py) is the live source of truth;
     this rewrite just keeps the YAML-declared dropdown in sync with it whenever the plan set changes.
+
+    logikplan_sort gets the managed-cluster-only subset — its runtime handler already rejects any
+    other plan via _is_managed_cluster_plan(), so offering the full list would let the picker suggest
+    a plan that's guaranteed to be refused afterward.
     """
     try:
         content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
@@ -69,7 +76,8 @@ def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) 
     for svc in _LOGIKPLAN_SERVICES:
         fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
         if fub_field:
-            fub_field["selector"] = {"select": {"options": plan_options, "custom_value": True}}
+            options = sortable_plan_options if svc == "logikplan_sort" else plan_options
+            fub_field["selector"] = {"select": {"options": options, "custom_value": True}}
     _apply_single_instance_default(content, entry_ids)
     _SERVICES_YAML_PATH.write_text(
         yaml.dump(content, allow_unicode=True, sort_keys=False, default_flow_style=False),
@@ -86,23 +94,31 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
     from ..coordinator import ComexioCoordinator
 
     plan_labels: set[str] = set()
+    sortable_plan_labels: set[str] = set()
     entry_ids: list[str] = []
     for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
         if isinstance(coordinator, ComexioCoordinator):
             entry_ids.append(entry_id)
             for fub_id, fub in coordinator.api.fub_data.items():
                 name = fub.get("Name", "")
-                if name:
-                    plan_labels.add(format_plan_label(name, fub_id))
+                if not name:
+                    continue
+                label = format_plan_label(name, fub_id)
+                plan_labels.add(label)
+                if _is_managed_cluster_plan(coordinator, fub_id):
+                    sortable_plan_labels.add(label)
 
     if not plan_labels:
         _LOGGER.debug("_update_services_yaml_plans: no plans available, skipping")
         return
 
     plan_options = sorted(plan_labels, key=str.lower)
+    sortable_plan_options = sorted(sortable_plan_labels, key=str.lower)
     try:
         async with _SERVICES_YAML_LOCK:
-            await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options, entry_ids)
+            await hass.async_add_executor_job(
+                _rewrite_services_yaml_plans, plan_options, sortable_plan_options, entry_ids
+            )
         _LOGGER.debug("Updated services.yaml: %d Logikplan plan options (labels) written", len(plan_options))
     except Exception as exc:  # noqa: BLE001
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)

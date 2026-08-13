@@ -45,6 +45,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **`delete_single_command`** returns `False` on failure instead of raising, so delta-sync continues with the remaining commands.
 - **Options form:** `ignored_markers` field no longer loses its stored value when reopening the options dialog.
 - **Analog marker Web-IO push stopped silently at extreme values:** The generated Web-IO command for analog markers hardcoded `Min: 0, Max: 100`; Comexio's Web-IO push mechanism validates against that range and silently stops sending updates once the live value overflows it. Analog markers have no configurable range on the Comexio side, so the command's Min/Max are now set to the full signed-32-bit span instead.
+- **`function_plan_sort`'s plan dropdown offered every plan, not just HA-managed ones:** The service already refuses to sort a plan it doesn't manage at runtime, but the Actions UI dropdown listed all live plans, so picking an unmanaged one always ended in a rejection notification. The dropdown now only lists HA-managed cluster plans; the other function-plan services are unaffected.
+- **`function_plan_visualize`'s text diagram mislabeled non-marker/WebIO elements:** Blocks, time modules, calendar functions, constants and comments showed as opaque `Typ{n} ref={id}` instead of their real name — the visualize handler had its own narrower labeling logic instead of the shared resolver already used by `function_plan_search` and the backup-diff viewer. Now uses the same resolver, so all element kinds get a readable label.
 
 ### ⚠️ Requirements & Notes
 - After updating, a **full HA restart** is required (new platform files and translation keys).
