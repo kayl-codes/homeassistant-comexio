@@ -36,6 +36,15 @@ There is no automated test suite. Manual testing requires a live HA + Comexio in
 - Sourcery enabled for all files except `.github/` and `tests/`
 - Cognitive complexity ≤ 15; no duplicated string literals (extract constants)
 
+## Terminology: "function plan"
+
+One concept, three historical names — the rules are:
+
+- **function plan** — the canonical English term everywhere: code identifiers (`function_plan_*` / `FUNCTION_PLAN_*` / `FunctionPlan*`), services, entity names, repair dialogs, notifications, logs, README (EN), en/fr/es translations. It matches Comexio's own FUP/FUB vocabulary (`run_fup`, `fub_id` — Funktionsplan, IEC 61131-3 Function Block Diagram).
+- **Logikplan** — the correct German *translation* only: `de.json` and the German README section. Never in English UI text or code.
+- **`logikplan_*`** (lowercase German spelling) — frozen legacy spelling of *persisted* identifiers: the five option keys in `const.py`, the `Store` storage keys (backup + catalog), and the plan-selector unique_id `comexio_{server_id}_logikplan_plan_selector`. Never rename these without migration code.
+- The former internal code name `logicplan` was fully renamed to `function_plan` (2026-07); do not reintroduce it.
+
 ## Architecture overview
 
 All integration code lives in `custom_components/comexio/`.

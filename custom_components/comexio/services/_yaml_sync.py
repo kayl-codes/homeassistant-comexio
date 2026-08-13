@@ -8,6 +8,7 @@ from the YAML at service-registration time rather than dynamically per call.
 """
 
 import asyncio
+from collections.abc import Iterator
 import logging
 import pathlib
 
@@ -19,9 +20,11 @@ import yaml
 from ..const import DOMAIN, FUNCTION_PLAN_SERVICE_NAMES, TIMESTAMP_DISPLAY_FORMAT
 from ..coordinator import ComexioCoordinator
 from ._context import format_plan_label
+from ._grid import _is_managed_cluster_plan
 
 _LOGGER = logging.getLogger(__name__)
 
+_SORT_SERVICE_NAME = "function_plan_sort"
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent.parent / "services.yaml"
 # Serializes the two independent read-modify-write rewrites of services.yaml below
 # (_update_services_yaml_plans and _refresh_service_descriptions) so a run of one can't
@@ -45,7 +48,9 @@ def _apply_single_instance_default(content: dict, entry_ids: list[str]) -> None:
             entry_field.pop("default", None)
 
 
-def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) -> None:
+def _rewrite_services_yaml_plans(
+    plan_options: list[str], sortable_plan_options: list[str], entry_ids: list[str]
+) -> None:
     """Blocking read/modify/write of services.yaml; run via executor job only.
 
     services.yaml is rewritten (rather than deriving fub_id options purely at runtime) because HA's
@@ -53,6 +58,10 @@ def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) 
     from the YAML at service-registration time, and selectors don't support a per-call dynamic option
     list bound to live coordinator data. The select entity (select.py) is the live source of truth;
     this rewrite just keeps the YAML-declared dropdown in sync with it whenever the plan set changes.
+
+    logikplan_sort gets the managed-cluster-only subset — its runtime handler already rejects any
+    other plan via _is_managed_cluster_plan(), so offering the full list would let the picker suggest
+    a plan that's guaranteed to be refused afterward.
     """
     try:
         content = yaml.safe_load(_SERVICES_YAML_PATH.read_text(encoding="utf-8")) or {}
@@ -62,7 +71,8 @@ def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) 
     for svc in FUNCTION_PLAN_SERVICE_NAMES:
         fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
         if fub_field:
-            fub_field["selector"] = {"select": {"options": plan_options, "custom_value": True}}
+            options = sortable_plan_options if svc == _SORT_SERVICE_NAME else plan_options
+            fub_field["selector"] = {"select": {"options": options, "custom_value": True}}
     _apply_single_instance_default(content, entry_ids)
     _SERVICES_YAML_PATH.write_text(
         yaml.dump(content, allow_unicode=True, sort_keys=False, default_flow_style=False),
@@ -70,33 +80,57 @@ def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) 
     )
 
 
-async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
-    """Rewrite fub_id select options in services.yaml with current plan labels from all active coordinators.
+def _iter_active_coordinators(hass: HomeAssistant) -> Iterator[tuple[str, ComexioCoordinator]]:
+    """Yield (entry_id, coordinator) for every live Comexio config entry in hass.data[DOMAIN].
+
+    Shared by every function here that needs to scan all coordinators — hass.data[DOMAIN] also
+    holds non-coordinator bookkeeping entries (webhook IDs, the cached service-description key),
+    hence the isinstance filter.
+    """
+    for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
+        if isinstance(coordinator, ComexioCoordinator):
+            yield entry_id, coordinator
+
+
+def _collect_plan_options(hass: HomeAssistant) -> tuple[list[str], list[str], list[str]]:
+    """Collect sorted fub_id dropdown labels (full set + managed-only subset) and config-entry IDs.
 
     Labels use the same "<name> (ID <fid>)" format as the select entity, so duplicate
     plan names across coordinators still resolve unambiguously via _resolve_fub_id().
     """
-    from ..coordinator import ComexioCoordinator
-
     plan_labels: set[str] = set()
+    sortable_plan_labels: set[str] = set()
     entry_ids: list[str] = []
-    for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
-        if isinstance(coordinator, ComexioCoordinator):
-            entry_ids.append(entry_id)
-            for fub_id, fub in coordinator.api.fub_data.items():
-                name = fub.get("Name", "")
-                if name:
-                    plan_labels.add(format_plan_label(name, fub_id))
+    for entry_id, coordinator in _iter_active_coordinators(hass):
+        entry_ids.append(entry_id)
+        for fub_id, fub in coordinator.api.fub_data.items():
+            name = fub.get("Name", "")
+            if not name:
+                continue
+            label = format_plan_label(name, fub_id)
+            plan_labels.add(label)
+            if _is_managed_cluster_plan(coordinator, fub_id):
+                sortable_plan_labels.add(label)
+    return sorted(plan_labels, key=str.lower), sorted(sortable_plan_labels, key=str.lower), entry_ids
 
-    if not plan_labels:
+
+async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
+    """Rewrite fub_id select options in services.yaml with current plan labels from all active coordinators."""
+    plan_options, sortable_plan_options, entry_ids = _collect_plan_options(hass)
+    if not plan_options:
         _LOGGER.debug("_update_services_yaml_plans: no plans available, skipping")
         return
 
-    plan_options = sorted(plan_labels, key=str.lower)
     try:
         async with _SERVICES_YAML_LOCK:
-            await hass.async_add_executor_job(_rewrite_services_yaml_plans, plan_options, entry_ids)
-        _LOGGER.debug("Updated services.yaml: %d function plan options (labels) written", len(plan_options))
+            await hass.async_add_executor_job(
+                _rewrite_services_yaml_plans, plan_options, sortable_plan_options, entry_ids
+            )
+        _LOGGER.debug(
+            "Updated services.yaml: %d function plan options (labels) written (%d sortable)",
+            len(plan_options),
+            len(sortable_plan_options),
+        )
     except Exception as exc:  # noqa: BLE001
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
 
@@ -213,13 +247,12 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
     """
     restore_plans: list[tuple[int, str, bool, int]] = []
     snapshot_options: list[dict] = []
-    for coordinator in hass.data.get(DOMAIN, {}).values():
-        if isinstance(coordinator, ComexioCoordinator):
-            live_fub_ids = {int(k) for k in coordinator.api.fub_data}
-            for fub_id, name, count in await coordinator.function_plan_backup.async_backed_up_plans():
-                restore_plans.append((fub_id, name, fub_id in live_fub_ids, count))
-            backups = await coordinator.function_plan_backup.async_list_backups()
-            snapshot_options.extend(_build_snapshot_options(backups))
+    for _entry_id, coordinator in _iter_active_coordinators(hass):
+        live_fub_ids = {int(k) for k in coordinator.api.fub_data}
+        for fub_id, name, count in await coordinator.function_plan_backup.async_backed_up_plans():
+            restore_plans.append((fub_id, name, fub_id in live_fub_ids, count))
+        backups = await coordinator.function_plan_backup.async_list_backups()
+        snapshot_options.extend(_build_snapshot_options(backups))
     cache_key = (tuple(restore_plans), tuple((opt["label"], opt["value"]) for opt in snapshot_options))
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get(_SERVICE_DESCRIPTIONS_CACHE_KEY) == cache_key:

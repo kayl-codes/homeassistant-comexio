@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 
 from ..coordinator import ComexioCoordinator
 from ..function_plan_backup import snapshot_label_maps
+from ..function_plan_render import resolve_element_label
 from ._context import (
     _async_get_service_context,
     _get_canvas_grid_dims,
@@ -38,22 +39,19 @@ _LOGGER = logging.getLogger(__name__)
 _TITLE_SORT_ERR = "Function Plan Sort — Fehler"
 
 
-def _element_label(elem_id: str | int, elements: dict, markers_by_id: dict, webio_by_id: dict) -> str:
-    """Human-readable label for a function plan element (marker name, WebIO command name, or type/ref fallback)."""
-    ref = elements.get(str(elem_id), {}).get("reference", {})
-    etype = ref.get("type")
-    ref_id = str(ref.get("ref_id", "?"))
-    if etype == 2:
-        marker = markers_by_id.get(ref_id)
-        return f"M{ref_id} {marker['name']}" if marker else f"M{ref_id} (unbekannt)"
-    if etype == 10:
-        webio = webio_by_id.get(ref_id)
-        return webio["name"] if webio else f"WebIO ref={ref_id}"
-    return f"Typ{etype} ref={ref_id}"
+def _label_for_id(
+    elem_id: str | int, elements: dict, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
+) -> str:
+    """Human-readable label for a function plan element referenced by id, via the shared resolver
+    (also used by function_plan_search and the backup-diff labeler) — covers markers, WebIO
+    commands, IOs, blocks, time modules, calendar functions, constants and comments instead of
+    a bare 'Typ{n} ref={ref_id}' fallback for anything past markers/WebIO.
+    """
+    return resolve_element_label(elements.get(str(elem_id), {}), catalog, markers_by_id, webio_by_id, ios_by_id)
 
 
 def _build_visualize_lines(
-    elements: dict, connections: dict, markers_by_id: dict, webio_by_id: dict
+    elements: dict, connections: dict, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
 ) -> tuple[list[str], list[str]]:
     """Build the connection lines and orphan-element lines for the function plan visualize text diagram."""
     connected_elem_ids: set[str] = set()
@@ -68,10 +66,12 @@ def _build_visualize_lines(
         for out in conn.get("output", []):
             out_id = str(out.get("FubElementId", "?"))
             inv_out = " ¬" if out.get("Inverted") else ""
-            out_parts.append(f"{_element_label(out_id, elements, markers_by_id, webio_by_id)}{inv_out}")
+            out_parts.append(
+                f"{_label_for_id(out_id, elements, catalog, markers_by_id, webio_by_id, ios_by_id)}{inv_out}"
+            )
             connected_elem_ids.add(out_id)
         conn_lines.append(
-            f"  {_element_label(inp_id, elements, markers_by_id, webio_by_id)}{inv_in} "
+            f"  {_label_for_id(inp_id, elements, catalog, markers_by_id, webio_by_id, ios_by_id)}{inv_in} "
             f"→[{conn_type}]→ {', '.join(out_parts)}"
         )
 
@@ -81,7 +81,7 @@ def _build_visualize_lines(
     ):
         if elem_id not in connected_elem_ids:
             x, y = elem.get("position_x", 0), elem.get("position_y", 0)
-            label = _element_label(elem_id, elements, markers_by_id, webio_by_id)
+            label = _label_for_id(elem_id, elements, catalog, markers_by_id, webio_by_id, ios_by_id)
             orphan_lines.append(f"  {label} (@ {x:.0f},{y:.0f})")
 
     return conn_lines, orphan_lines
@@ -193,13 +193,16 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
         )
         return {"plan_name": plan_name, "url": preview_url}
 
-    markers_by_id, webio_by_id, _ios_by_id = coordinator.function_plan_label_maps()
+    markers_by_id, webio_by_id, ios_by_id = coordinator.function_plan_label_maps()
     if label_metadata:
-        markers_by_id, webio_by_id, _ios_by_id = snapshot_label_maps(
-            label_metadata, markers_by_id, webio_by_id, _ios_by_id
+        markers_by_id, webio_by_id, ios_by_id = snapshot_label_maps(
+            label_metadata, markers_by_id, webio_by_id, ios_by_id
         )
+    catalog = await coordinator.function_plan_catalog.async_get_catalog()
 
-    conn_lines, orphan_lines = _build_visualize_lines(elements, connections, markers_by_id, webio_by_id)
+    conn_lines, orphan_lines = _build_visualize_lines(
+        elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id
+    )
 
     lines = [f"**Plan {fub_id}** ({source})"]
     if source == "live":

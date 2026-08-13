@@ -62,6 +62,8 @@ _LOGGER = logging.getLogger(__name__)
 _PCT_PLAN_PAIRS = 60
 _PCT_PLAN_FINALIZE = 92
 
+_SYNC_PROGRESS_NOTIFY_EVERY = 5  # notify every Nth pair; the plan's final pair always notifies too
+
 _NOTE_ACTIVATED = ", plan activated"
 _NOTE_NOT_ACTIVATED = f", {ICON_WARNING} plan NOT activated"
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
@@ -103,8 +105,19 @@ def _plan_pair_progress(ctx: "_SyncContext", state: dict, plan_name: str, done: 
     """
     overall_done = state["done"] + done
     overall_total = max(1, state["total"])
-    elapsed = time.monotonic() - state["t0"]
-    remaining = (elapsed / overall_done) * (overall_total - overall_done) if overall_done else 0.0
+    if done != total and overall_done % _SYNC_PROGRESS_NOTIFY_EVERY:
+        return  # throttle notification updates to every Nth pair
+    now = time.monotonic()
+    # ETA from the rate since the last update, not the run-wide average — a fixed per-plan
+    # setup cost (backup, stop_fup, reload-wait) would otherwise skew early estimates high.
+    # "last_t"/"last_overall" default to state["t0"]/0, so the very first update already
+    # degenerates to the run-wide average on its own — no separate first-update branch needed.
+    recent_elapsed = now - state.get("last_t", state["t0"])
+    recent_count = overall_done - state.get("last_overall", 0)
+    rate = recent_elapsed / recent_count if recent_count else 0.0
+    remaining = rate * (overall_total - overall_done)
+    state["last_t"] = now
+    state["last_overall"] = overall_done
     ctx.update_status(
         f"**Function Plan:** `{plan_name}`\n"
         f"**Progress:** pair {overall_done} of {overall_total}\n\n---\n"
