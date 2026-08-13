@@ -936,7 +936,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for name, cmd in data.get("webio_commands", {}).items():
             w_id = cmd.get("webIoId")
             if w_id is not None and str(w_id) not in webio_by_id:
-                webio_by_id[str(w_id)] = {"name": name, "analog": cmd.get("typeId") == 2}
+                # Same {2, "2"} check as _build_webio_name_lexicon, for consistency across
+                # both Web-IO label sources even though this one is already int-normalized.
+                webio_by_id[str(w_id)] = {"name": name, "analog": cmd.get("typeId") in {2, "2"}}
         # io_all (unfiltered, includes inactive IOs) so a plan wired to an inactive IO still
         # resolves a real name/greyed state instead of falling back to "IO ref=<id>".
         ios_by_id = {str(io["id"]): io for io in data.get("io_all", [])}
