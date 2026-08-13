@@ -1212,7 +1212,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"add_marker_pairs {[f'M{m}' for m in cluster_ids]}"
         )
-        await api.logikplan_stop_fup(fub_id)
+        await api.function_plan_stop_fup(fub_id)
         lp_added, lp_errors = await api.function_plan_add_marker_pairs(
             fub_id,
             cluster_ids,
@@ -1265,13 +1265,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             # Nothing changed (all pairs already wired) — only undo our own stop_fup.
             self._plan_finalize_status(ctx, plan_name, "restarting plan", "restarting")
             if was_active:
-                await ctx.api.logikplan_run_fup(fub_id)
+                await ctx.api.function_plan_run_fup(fub_id)
             return ""
 
         if is_fresh:
             # Fresh plan: pairs already sit at their final grid slots — skip the sort pass.
             self._plan_finalize_status(ctx, plan_name, "activating plan", "activating")
-            return _NOTE_ACTIVATED if await ctx.api.logikplan_run_fup(fub_id) else _NOTE_NOT_ACTIVATED
+            return _NOTE_ACTIVATED if await ctx.api.function_plan_run_fup(fub_id) else _NOTE_NOT_ACTIVATED
 
         return await self._sort_and_reactivate(ctx, fub_id, plan_name, was_active)
 
@@ -1295,7 +1295,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if was_active and not (sort_res and sort_res.get("activated")):
             # Sort was skipped or lost the reactivation (e.g. save_elements_pos failed) —
             # don't leave a previously active plan stopped.
-            note += _NOTE_ACTIVATED if await ctx.api.logikplan_run_fup(fub_id) else _NOTE_NOT_ACTIVATED
+            note += _NOTE_ACTIVATED if await ctx.api.function_plan_run_fup(fub_id) else _NOTE_NOT_ACTIVATED
         return note
 
     async def _add_io_pairs_to_plan(
@@ -1344,7 +1344,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"add_io_pairs {[f'{ext}:{len(by_ext[ext])}' for ext, _ in ext_cols]}"
         )
-        await api.logikplan_stop_fup(fub_id)
+        await api.function_plan_stop_fup(fub_id)
 
         added: list[str] = []
         errors: list[str] = []
@@ -1378,7 +1378,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 pct=_PCT_PLAN_FINALIZE,
                 step_info="Function Plan: activating",
             )
-            activated = await api.logikplan_run_fup(fub_id)
+            activated = await api.function_plan_run_fup(fub_id)
             if added:
                 note = _NOTE_ACTIVATED if activated else _NOTE_NOT_ACTIVATED
 
@@ -1658,7 +1658,7 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         """
         if self.coordinator.has_live_preview_cache:
             return
-        plan_data = await self.coordinator.api.logikplan_load_elements(fub_id)
+        plan_data = await self.coordinator.api.function_plan_load_elements(fub_id)
         if plan_data:
             self.coordinator.prime_live_preview_cache(
                 fub_id, plan_name, plan_data.get("elements", {}), plan_data.get("connections", {})
@@ -1693,7 +1693,7 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
             await self._async_arm_live_refresh(fub_id, plan_name)
             return
 
-        plan_data = await api.logikplan_load_elements(fub_id)
+        plan_data = await api.function_plan_load_elements(fub_id)
         if not plan_data:
             _LOGGER.warning("[%s] Plan preview: could not load plan %s", self.server_id, fub_id)
             return

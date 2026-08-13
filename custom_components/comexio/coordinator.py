@@ -841,7 +841,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         is logged loudly but must not block the operation itself."""
         try:
             if plan_data is None:
-                plan_data = await self.api.logikplan_load_elements(fub_id)
+                plan_data = await self.api.function_plan_load_elements(fub_id)
             if not plan_data:
                 _LOGGER.warning("[%s] Pre-change backup skipped: plan %s could not be loaded", self.server_id, fub_id)
                 return
@@ -2100,7 +2100,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             plan_data = self.function_plan_plans.get(fub_id)
             if plan_data is None:
                 try:
-                    plan_data = await self.api.logikplan_load_elements(fub_id)
+                    plan_data = await self.api.function_plan_load_elements(fub_id)
                 except Exception:
                     _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
                     continue

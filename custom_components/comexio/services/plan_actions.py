@@ -21,7 +21,7 @@ from ._context import (
     _parse_snapshot_field,
     _plan_activation_note,
     _resolve_backup_identity,
-    _resolve_logikplan_context,
+    _resolve_function_plan_context,
 )
 from ._grid import (
     _assign_grid_positions,
@@ -36,13 +36,13 @@ from ._grid import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_TITLE_SORT_ERR = "Logikplan Sort — Fehler"
+_TITLE_SORT_ERR = "Function Plan Sort — Fehler"
 
 
 def _label_for_id(
     elem_id: str | int, elements: dict, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
 ) -> str:
-    """Human-readable label for a Logikplan element referenced by id, via the shared resolver
+    """Human-readable label for a function plan element referenced by id, via the shared resolver
     (also used by function_plan_search and the backup-diff labeler) — covers markers, WebIO
     commands, IOs, blocks, time modules, calendar functions, constants and comments instead of
     a bare 'Typ{n} ref={ref_id}' fallback for anything past markers/WebIO.
@@ -53,7 +53,7 @@ def _label_for_id(
 def _build_visualize_lines(
     elements: dict, connections: dict, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
 ) -> tuple[list[str], list[str]]:
-    """Build the connection lines and orphan-element lines for the Logikplan visualize text diagram."""
+    """Build the connection lines and orphan-element lines for the function plan visualize text diagram."""
     connected_elem_ids: set[str] = set()
     conn_lines: list[str] = []
     for conn in sorted(connections.values(), key=lambda c: c.get("input", {}).get("FubElementId", 0)):
@@ -90,7 +90,7 @@ def _build_visualize_lines(
 async def _resolve_visualize_snapshot_source(
     hass: HomeAssistant, call: ServiceCall, snapshot_raw: str, error_title: str
 ):
-    """Resolve handle_logikplan_visualize's data source from a stored backup snapshot
+    """Resolve handle_function_plan_visualize's data source from a stored backup snapshot
     (extracted to stay under the complexity budget). Mirrors _handle_function_plan_restore's
     snapshot resolution — entirely offline, no live Comexio call needed. Returns
     (coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata),
@@ -131,16 +131,16 @@ async def _resolve_visualize_snapshot_source(
 
 
 async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall, error_title: str):
-    """Resolve handle_logikplan_visualize's data source from the live plan — the 'snapshot'
+    """Resolve handle_function_plan_visualize's data source from the live plan — the 'snapshot'
     field was not given (extracted to stay under the complexity budget). Returns
     (coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata),
     or None on any failure (a notification has already been posted).
     """
-    ctx = await _resolve_logikplan_context(hass, call, error_title)
+    ctx = await _resolve_function_plan_context(hass, call, error_title)
     if ctx is None:
         return None
     coordinator, api, fub_id = ctx
-    plan_data = await api.logikplan_load_elements(fub_id)
+    plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
         persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
         return None
@@ -157,8 +157,8 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
     )
 
 
-async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> dict | None:
-    """Service to visualize a Logikplan plan (live or a stored backup snapshot) as a text
+async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall) -> dict | None:
+    """Service to visualize a function plan (live or a stored backup snapshot) as a text
     diagram, or — format='svg' — render it to the Function Plan preview SVG and return its
     /local/ URL (used by coordinator.async_generate_plan_preview / the comexio-plan-card
     frontend, see [[project-logikplan-preview]]).
@@ -169,7 +169,7 @@ async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> 
     in the same shape as a live plan (function_plan_backup.py). Without 'snapshot', behaviour
     for the text diagram is unchanged: the live plan is loaded via the usual fub_id resolution.
     """
-    error_title = "Logikplan Visualize — Fehler"
+    error_title = "Function Plan Visualize — Fehler"
     fmt = str(call.data.get("format", "text")).strip().lower()
     snapshot_raw = call.data.get("snapshot")
 
@@ -189,7 +189,7 @@ async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> 
         persistent_notification.async_create(
             hass,
             f"Preview for '{plan_name}' updated — see the Plan Preview sensor.",
-            title=f"Logikplan Visualize — {plan_name}",
+            title=f"Function Plan Visualize — {plan_name}",
         )
         return {"plan_name": plan_name, "url": preview_url}
 
@@ -220,14 +220,14 @@ async def handle_logikplan_visualize(hass: HomeAssistant, call: ServiceCall) -> 
         lines += orphan_lines
 
     persistent_notification.async_create(
-        hass, "\n".join(lines), title=f"Logikplan Plan {fub_id} — {len(connections)} Verbindungen"
+        hass, "\n".join(lines), title=f"Function Plan {fub_id} — {len(connections)} Verbindungen"
     )
     return None
 
 
-async def handle_logikplan_sort(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Sort all Logikplan elements by marker ID, snapping every element to exact grid."""
-    ctx = await _resolve_logikplan_context(hass, call, _TITLE_SORT_ERR)
+async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Sort all function plan elements by marker ID, snapping every element to exact grid."""
+    ctx = await _resolve_function_plan_context(hass, call, _TITLE_SORT_ERR)
     if ctx is None:
         return
     coordinator, api, fub_id = ctx
@@ -276,7 +276,7 @@ async def async_sort_function_plan(
 
     canvas_label, x_max, rows_per_col, max_cols = _sort_canvas_bounds(api, fub_id, canvas_format)
 
-    plan_data = await api.logikplan_load_elements(fub_id)
+    plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
         if notify:
             persistent_notification.async_create(
@@ -289,11 +289,13 @@ async def async_sort_function_plan(
     )
     if not new_positions:
         if notify:
-            persistent_notification.async_create(hass, "Keine Elemente im Plan.", title=f"Logikplan Sort Plan {fub_id}")
+            persistent_notification.async_create(
+                hass, "Keine Elemente im Plan.", title=f"Function Plan Sort Plan {fub_id}"
+            )
         return None
 
     _LOGGER.info(
-        "Logikplan Sort: Plan %s — %d Paare, %d Einzelelemente, %d Positionen (io_plan=%s, aktiv=%s)",
+        "Function Plan Sort: Plan %s — %d Paare, %d Einzelelemente, %d Positionen (io_plan=%s, aktiv=%s)",
         fub_id,
         n_pairs,
         n_single,
@@ -314,7 +316,7 @@ async def async_sort_function_plan(
             f"Dauer: {duration:.1f}s"
         )
         persistent_notification.async_create(
-            hass, msg, title=f"Logikplan Sort Plan {fub_id} — {'OK' if success else 'Fehler'}"
+            hass, msg, title=f"Function Plan Sort Plan {fub_id} — {'OK' if success else 'Fehler'}"
         )
     return {
         "success": success,
@@ -378,51 +380,51 @@ async def _sort_apply_and_activate(
     # Pre-mutation snapshot — reuse the already-loaded plan_data (no second fetch)
     await coordinator.async_function_plan_change_backup(fub_id, "sort", plan_data=plan_data)
     if was_active:
-        await api.logikplan_stop_fup(fub_id)
+        await api.function_plan_stop_fup(fub_id)
     if header_slots:
         await _resync_io_group_headers(api, fub_id, plan_data, header_slots)
-    success = await api.logikplan_save_elements_pos(new_positions)
-    activated = await api.logikplan_run_fup(fub_id) if (success and was_active) else False
+    success = await api.function_plan_save_elements_pos(new_positions)
+    activated = await api.function_plan_run_fup(fub_id) if (success and was_active) else False
     return success, activated
 
 
-async def handle_logikplan_stop(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Stop/pause a Logikplan plan."""
-    error_title = "Logikplan Stop — Fehler"
-    ctx = await _resolve_logikplan_context(hass, call, error_title)
+async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Stop/pause a function plan."""
+    error_title = "Function Plan Stop — Fehler"
+    ctx = await _resolve_function_plan_context(hass, call, error_title)
     if ctx is None:
         return
     _coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-    _LOGGER.info("Logikplan Stop: fub_id=%s name='%s'", fub_id, plan_name)
+    _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
-    success = await api.logikplan_stop_fup(fub_id)
+    success = await api.function_plan_stop_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
         f"Plan '{plan_name}' (ID {fub_id}) gestoppt.\nDauer: {duration:.1f}s"
         if success
         else f"Stop fehlgeschlagen (Plan '{plan_name}', ID {fub_id}).\nDauer: {duration:.1f}s"
     )
-    persistent_notification.async_create(hass, msg, title=f"Logikplan Stop — {'OK' if success else 'Fehler'}")
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Stop — {'OK' if success else 'Fehler'}")
 
 
-async def handle_logikplan_activate(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Save and activate a Logikplan plan (run_fup)."""
-    error_title = "Logikplan Aktivieren — Fehler"
-    ctx = await _resolve_logikplan_context(hass, call, error_title)
+async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Save and activate a function plan (run_fup)."""
+    error_title = "Function Plan Aktivieren — Fehler"
+    ctx = await _resolve_function_plan_context(hass, call, error_title)
     if ctx is None:
         return
     _coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-    _LOGGER.info("Logikplan Aktivieren: fub_id=%s name='%s'", fub_id, plan_name)
+    _LOGGER.info("Function Plan Aktivieren: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
-    success = await api.logikplan_run_fup(fub_id)
+    success = await api.function_plan_run_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
         f"Plan '{plan_name}' (ID {fub_id}) gespeichert und aktiviert.\nDauer: {duration:.1f}s"
         if success
         else f"Aktivierung fehlgeschlagen (Plan '{plan_name}', ID {fub_id}).\nDauer: {duration:.1f}s"
     )
-    persistent_notification.async_create(hass, msg, title=f"Logikplan Aktivieren — {'OK' if success else 'Fehler'}")
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Aktivieren — {'OK' if success else 'Fehler'}")

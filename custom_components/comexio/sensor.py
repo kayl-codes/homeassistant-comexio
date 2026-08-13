@@ -322,7 +322,7 @@ class ComexioPlanPreviewSensor(CoordinatorEntity, SensorEntity):
     """Diagnostic sensor showing the last generated Function Plan preview (SVG) as entity_picture.
 
     Fed by coordinator.async_generate_plan_preview, called either from the Preview button
-    (live plan) or a logikplan_visualize service call with format=svg (live or a stored
+    (live plan) or a function_plan_visualize service call with format=svg (live or a stored
     backup snapshot) — both paths update the same coordinator.last_plan_preview, so this
     sensor always reflects whatever was last generated, regardless of the trigger.
     """

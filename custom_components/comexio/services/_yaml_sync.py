@@ -17,21 +17,21 @@ from homeassistant.helpers.service import async_set_service_schema
 from homeassistant.util import dt as dt_util
 import yaml
 
-from ..const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT
+from ..const import (
+    DOMAIN,
+    FUNCTION_PLAN_SERVICE_NAMES,
+    FUNCTION_PLAN_SERVICE_SORT,
+    FUNCTION_PLAN_SERVICE_VISUALIZE,
+    TIMESTAMP_DISPLAY_FORMAT,
+)
 from ..coordinator import ComexioCoordinator
 from ._context import format_plan_label
 from ._grid import _is_managed_cluster_plan
 
 _LOGGER = logging.getLogger(__name__)
 
-_SORT_SERVICE_NAME = "logikplan_sort"
-_LOGIKPLAN_SERVICES = (
-    "logikplan_connect_poc",
-    _SORT_SERVICE_NAME,
-    "logikplan_stop",
-    "logikplan_activate",
-    "logikplan_visualize",
-)
+_SORT_SERVICE_NAME = FUNCTION_PLAN_SERVICE_SORT
+_SVC_VISUALIZE = FUNCTION_PLAN_SERVICE_VISUALIZE
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent.parent / "services.yaml"
 # Serializes the two independent read-modify-write rewrites of services.yaml below
 # (_update_services_yaml_plans and _refresh_service_descriptions) so a run of one can't
@@ -75,7 +75,7 @@ def _rewrite_services_yaml_plans(
     except (OSError, yaml.YAMLError) as exc:
         _LOGGER.warning("services.yaml missing or invalid, skipping plan option rewrite: %s", exc)
         return
-    for svc in _LOGIKPLAN_SERVICES:
+    for svc in FUNCTION_PLAN_SERVICE_NAMES:
         fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
         if fub_field:
             options = sortable_plan_options if svc == _SORT_SERVICE_NAME else plan_options
@@ -134,7 +134,7 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
                 _rewrite_services_yaml_plans, plan_options, sortable_plan_options, entry_ids
             )
         _LOGGER.debug(
-            "Updated services.yaml: %d Logikplan plan options (labels) written (%d sortable)",
+            "Updated services.yaml: %d function plan options (labels) written (%d sortable)",
             len(plan_options),
             len(sortable_plan_options),
         )
@@ -202,11 +202,11 @@ def _set_yaml_field_options(
 
 
 _BACKUP_DYNAMIC_SERVICES = ("function_plan_restore", "function_plan_list_backups", "function_plan_delete_backups")
-# logikplan_visualize's fub_id dropdown stays owned by _rewrite_services_yaml_plans (plain
+# function_plan_visualize's fub_id dropdown stays owned by _rewrite_services_yaml_plans (plain
 # plan labels, not the composite fub_id:name backup identity) — only its 'snapshot' field
 # (added for the SVG-format/backup-snapshot preview, Cluster 4) is populated here, alongside
 # the three backup services above.
-_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, "logikplan_visualize")
+_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, _SVC_VISUALIZE)
 _SERVICE_DESCRIPTIONS_CACHE_KEY = "_service_descriptions_cache"
 
 
@@ -216,8 +216,8 @@ def _update_services_yaml_backup_options(
     """Blocking read/modify/write of services.yaml's backup-related dropdowns; executor job only.
 
     Trimmed sibling of _rewrite_services_yaml_plans (which independently owns the
-    logikplan_* services' fub_id dropdown) — only touches the fub_id/snapshot fields of the
-    three backup services (plus logikplan_visualize's snapshot field), so that function is
+    function_plan_* services' fub_id dropdown) — only touches the fub_id/snapshot fields of the
+    three backup services (plus function_plan_visualize's snapshot field), so that function is
     left completely untouched.
     """
     try:

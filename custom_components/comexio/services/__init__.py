@@ -8,9 +8,9 @@ multi-purpose") into thematic submodules:
 - `_context`  — shared instance/plan/login resolver helpers (leaf module).
 - `_grid`     — sort/grid-placement math for function plan elements (leaf module).
 - `_yaml_sync`— services.yaml dynamic-dropdown rewriting + HA schema cache refresh.
-- `connect`   — logikplan_connect_poc (marker↔WebIO wiring) handler.
-- `plan_actions` — logikplan_visualize / logikplan_sort / logikplan_stop /
-  logikplan_activate handlers (act on a single live/snapshot plan).
+- `connect`   — function_plan_connect (marker↔WebIO wiring) handler.
+- `plan_actions` — function_plan_visualize / function_plan_sort / function_plan_stop /
+  function_plan_activate handlers (act on a single live/snapshot plan).
 - `backup`    — function_plan_restore / function_plan_delete_backups /
   function_plan_purge_orphaned_backups / function_plan_list_backups handlers.
 - `misc`      — generate_web_io, set_value, function_plan_debug_session,
@@ -28,7 +28,14 @@ import logging
 
 from homeassistant.core import HomeAssistant, SupportsResponse
 
-from ..const import DOMAIN
+from ..const import (
+    DOMAIN,
+    FUNCTION_PLAN_SERVICE_ACTIVATE as _SVC_ACTIVATE,
+    FUNCTION_PLAN_SERVICE_CONNECT as _SVC_CONNECT,
+    FUNCTION_PLAN_SERVICE_SORT as _SVC_SORT,
+    FUNCTION_PLAN_SERVICE_STOP as _SVC_STOP,
+    FUNCTION_PLAN_SERVICE_VISUALIZE as _SVC_VISUALIZE,
+)
 from ._context import format_plan_label
 from ._grid import async_resync_io_group_headers
 from ._yaml_sync import _refresh_service_descriptions, _update_services_yaml_plans
@@ -38,7 +45,7 @@ from .backup import (
     _handle_function_plan_purge_orphaned_backups,
     _handle_function_plan_restore,
 )
-from .connect import handle_logikplan_connect_poc
+from .connect import handle_function_plan_connect
 from .misc import (
     _handle_function_plan_debug_session,
     _handle_function_plan_search,
@@ -47,10 +54,10 @@ from .misc import (
 )
 from .plan_actions import (
     async_sort_function_plan,
-    handle_logikplan_activate,
-    handle_logikplan_sort,
-    handle_logikplan_stop,
-    handle_logikplan_visualize,
+    handle_function_plan_activate,
+    handle_function_plan_sort,
+    handle_function_plan_stop,
+    handle_function_plan_visualize,
 )
 
 __all__ = [
@@ -74,23 +81,21 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         )
     if not hass.services.has_service(DOMAIN, "generate_web_io"):
         hass.services.async_register(DOMAIN, "generate_web_io", functools.partial(handle_generate_web_io, hass))
-    if not hass.services.has_service(DOMAIN, "logikplan_connect_poc"):
-        hass.services.async_register(
-            DOMAIN, "logikplan_connect_poc", functools.partial(handle_logikplan_connect_poc, hass)
-        )
-    if not hass.services.has_service(DOMAIN, "logikplan_visualize"):
+    if not hass.services.has_service(DOMAIN, _SVC_CONNECT):
+        hass.services.async_register(DOMAIN, _SVC_CONNECT, functools.partial(handle_function_plan_connect, hass))
+    if not hass.services.has_service(DOMAIN, _SVC_VISUALIZE):
         hass.services.async_register(
             DOMAIN,
-            "logikplan_visualize",
-            functools.partial(handle_logikplan_visualize, hass),
+            _SVC_VISUALIZE,
+            functools.partial(handle_function_plan_visualize, hass),
             supports_response=SupportsResponse.OPTIONAL,
         )
-    if not hass.services.has_service(DOMAIN, "logikplan_sort"):
-        hass.services.async_register(DOMAIN, "logikplan_sort", functools.partial(handle_logikplan_sort, hass))
-    if not hass.services.has_service(DOMAIN, "logikplan_stop"):
-        hass.services.async_register(DOMAIN, "logikplan_stop", functools.partial(handle_logikplan_stop, hass))
-    if not hass.services.has_service(DOMAIN, "logikplan_activate"):
-        hass.services.async_register(DOMAIN, "logikplan_activate", functools.partial(handle_logikplan_activate, hass))
+    if not hass.services.has_service(DOMAIN, _SVC_SORT):
+        hass.services.async_register(DOMAIN, _SVC_SORT, functools.partial(handle_function_plan_sort, hass))
+    if not hass.services.has_service(DOMAIN, _SVC_STOP):
+        hass.services.async_register(DOMAIN, _SVC_STOP, functools.partial(handle_function_plan_stop, hass))
+    if not hass.services.has_service(DOMAIN, _SVC_ACTIVATE):
+        hass.services.async_register(DOMAIN, _SVC_ACTIVATE, functools.partial(handle_function_plan_activate, hass))
     if not hass.services.has_service(DOMAIN, "function_plan_restore"):
         hass.services.async_register(
             DOMAIN, "function_plan_restore", functools.partial(_handle_function_plan_restore, hass)

@@ -205,6 +205,24 @@ CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = "function_plan_backup_retention_mon
 DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = 6
 TIMESTAMP_DISPLAY_FORMAT = "%d.%m.%Y %H:%M"
 
+# The five live-plan-state services with a services.yaml `fub_id` dropdown that needs to stay in
+# sync with the managed plan set (services/_yaml_sync.py) — single source of truth also used by
+# services/__init__.py's registration, so the two lists can't silently diverge. Named individually
+# (rather than relying on positional unpacking of FUNCTION_PLAN_SERVICE_NAMES) so a reorder can't
+# silently swap which service a consumer module thinks it's registering.
+FUNCTION_PLAN_SERVICE_CONNECT = "function_plan_connect"
+FUNCTION_PLAN_SERVICE_SORT = "function_plan_sort"
+FUNCTION_PLAN_SERVICE_STOP = "function_plan_stop"
+FUNCTION_PLAN_SERVICE_ACTIVATE = "function_plan_activate"
+FUNCTION_PLAN_SERVICE_VISUALIZE = "function_plan_visualize"
+FUNCTION_PLAN_SERVICE_NAMES = (
+    FUNCTION_PLAN_SERVICE_CONNECT,
+    FUNCTION_PLAN_SERVICE_SORT,
+    FUNCTION_PLAN_SERVICE_STOP,
+    FUNCTION_PLAN_SERVICE_ACTIVATE,
+    FUNCTION_PLAN_SERVICE_VISUALIZE,
+)
+
 # HA-bus event fired for every webhook value push that belongs to the currently rendered
 # live plan preview — consumed by the comexio-plan-card debug box (frontend/).
 EVENT_PLAN_VALUE = "comexio_plan_event"

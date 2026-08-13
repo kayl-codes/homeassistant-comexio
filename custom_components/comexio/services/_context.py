@@ -79,7 +79,7 @@ async def _async_get_service_context(
     """Resolve coordinator, api and (optionally) target fub_id for a function plan backup
     service call. Posts an English error notification and returns None on any failure.
 
-    Sibling of _resolve_logikplan_plan (kept separate rather than extended in place) since the
+    Sibling of _resolve_function_plan (kept separate rather than extended in place) since the
     backup services need to resolve WITHOUT requiring a live plan/admin login — a deleted
     plan's stored backups are still listable/restorable, and pure local-storage operations
     (delete/purge) never need a Comexio session at all.
@@ -175,8 +175,8 @@ def _parse_snapshot_field(raw: str) -> tuple[int, str, int, str | None] | None:
         return None
 
 
-def _resolve_logikplan_plan(hass: HomeAssistant, call: ServiceCall, error_title: str) -> tuple[Any, Any, int] | None:
-    """Resolve (coordinator, api, fub_id) for a Logikplan service call — without logging in.
+def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: str) -> tuple[Any, Any, int] | None:
+    """Resolve (coordinator, api, fub_id) for a function plan service call — without logging in.
 
     Handles config_entry auto-resolution (when only one Comexio instance exists) and fub_id
     resolution via `_resolve_fub_id`, notifying the user and returning None on any failure.
@@ -219,11 +219,11 @@ async def _ensure_comexio_login(hass: HomeAssistant, api, error_title: str) -> b
     return False
 
 
-async def _resolve_logikplan_context(
+async def _resolve_function_plan_context(
     hass: HomeAssistant, call: ServiceCall, error_title: str
 ) -> tuple[Any, Any, int] | None:
-    """Resolve (coordinator, api, fub_id) for a Logikplan service call and ensure the admin session is logged in."""
-    ctx = _resolve_logikplan_plan(hass, call, error_title)
+    """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in."""
+    ctx = _resolve_function_plan(hass, call, error_title)
     if ctx is None:
         return None
     _coordinator, api, _fub_id = ctx
