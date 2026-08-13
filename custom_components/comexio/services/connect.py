@@ -70,7 +70,7 @@ async def _load_connect_poc_topology(
     occupied_slots: set[tuple[int, int]] = set()
 
     if not plan_data:
-        _LOGGER.warning("Function Plan Connect: loadelements fehlgeschlagen, fahre ohne Plan-Zustand fort")
+        _LOGGER.warning("Function Plan Connect: loadelements failed, continuing without plan state")
         return existing_by_ref, connected_pairs, occupied_slots
 
     for elem_id_str, elem in plan_data.get("elements", {}).items():
@@ -85,7 +85,7 @@ async def _load_connect_poc_topology(
             if inp_id is not None and out_id is not None:
                 connected_pairs.add((int(inp_id), int(out_id)))
     occupied_slots = _get_occupied_grid_slots(plan_data.get("elements", {}), rows_per_col, max_cols)
-    _LOGGER.info("Function Plan Connect: Plan fub=%s — %d belegte Grid-Slots gefunden", fub_id, len(occupied_slots))
+    _LOGGER.info("Function Plan Connect: Plan fub=%s — %d occupied grid slots found", fub_id, len(occupied_slots))
     return existing_by_ref, connected_pairs, occupied_slots
 
 
@@ -95,15 +95,15 @@ async def _get_or_create_marker_element(
     """Reuse an existing canvas marker element, or create a new one. Returns (elem_id, error)."""
     if existing_marker_elem:
         _LOGGER.info(
-            "Function Plan Connect: M%s — Merker-Element bereits vorhanden: elem_id=%s", marker_id, existing_marker_elem
+            "Function Plan Connect: M%s — marker element already exists: elem_id=%s", marker_id, existing_marker_elem
         )
         return existing_marker_elem, None
 
-    _LOGGER.info("Function Plan Connect: M%s → add_element (Merker, x=%.1f, y=%.1f)", marker_id, x, y)
+    _LOGGER.info("Function Plan Connect: M%s → add_element (marker, x=%.1f, y=%.1f)", marker_id, x, y)
     elem_marker = await api.function_plan_add_element(fub_id=fub_id, ref_id=int(marker_id), element_type=2, x=x, y=y)
     if elem_marker is None:
-        return None, f"M{marker_id}: add_element (Merker) fehlgeschlagen"
-    _LOGGER.info("Function Plan Connect: M%s — Merker-Element angelegt: elem_id=%s", marker_id, elem_marker)
+        return None, f"M{marker_id}: add_element (marker) failed"
+    _LOGGER.info("Function Plan Connect: M%s — marker element created: elem_id=%s", marker_id, elem_marker)
     return elem_marker, None
 
 
@@ -121,15 +121,15 @@ async def _get_or_create_webio_element(
     """Reuse an existing canvas WebIO element (wiring it up if needed), or create + connect a new one."""
     if existing_webio_elem:
         _LOGGER.info(
-            "Function Plan Connect: M%s — WebIO-Element bereits vorhanden: elem_id=%s", marker_id, existing_webio_elem
+            "Function Plan Connect: M%s — WebIO element already exists: elem_id=%s", marker_id, existing_webio_elem
         )
         # Reused elements aren't connected yet (already_connected would have skipped this
         # marker otherwise), so the wire has to be drawn explicitly here.
         conn_id = await api.function_plan_save_connection(fub_id, elem_marker, existing_webio_elem, conn_type)
         if conn_id is None:
-            return None, f"M{marker_id}: save_connection (elem {elem_marker}→{existing_webio_elem}) fehlgeschlagen"
+            return None, f"M{marker_id}: save_connection (elem {elem_marker}→{existing_webio_elem}) failed"
         _LOGGER.info(
-            "Function Plan Connect: M%s — Verbindung nachgezogen: elem %s→%s (conn_id=%s)",
+            "Function Plan Connect: M%s — connection drawn: elem %s→%s (conn_id=%s)",
             marker_id,
             elem_marker,
             existing_webio_elem,
@@ -156,8 +156,8 @@ async def _get_or_create_webio_element(
         connection=conn_payload,
     )
     if elem_webio is None:
-        return None, f"M{marker_id}: add_element (WebIO, webIoId={web_ref_id}) fehlgeschlagen"
-    _LOGGER.info("Function Plan Connect: M%s — WebIO+Verbindung angelegt: elem_id=%s", marker_id, elem_webio)
+        return None, f"M{marker_id}: add_element (WebIO, webIoId={web_ref_id}) failed"
+    _LOGGER.info("Function Plan Connect: M%s — WebIO+connection created: elem_id=%s", marker_id, elem_webio)
     return elem_webio, None
 
 
@@ -180,19 +180,19 @@ async def _connect_marker_to_webio(
     Mutates `occupied_slots` in place when a new grid slot is claimed.
     """
     if not marker:
-        _LOGGER.warning("Function Plan Connect: M%s nicht gefunden", marker_id)
-        return None, None, f"M{marker_id}: nicht in Koordinator-Daten"
+        _LOGGER.warning("Function Plan Connect: M%s not found", marker_id)
+        return None, None, f"M{marker_id}: not in coordinator data"
 
     expected_cmd_name = f"HA {marker['name']}"
     webio_cmd = webio_commands.get(expected_cmd_name)
     if not webio_cmd:
-        _LOGGER.warning("Function Plan Connect: M%s — WebIO '%s' nicht gefunden", marker_id, expected_cmd_name)
-        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' nicht gefunden"
+        _LOGGER.warning("Function Plan Connect: M%s — WebIO '%s' not found", marker_id, expected_cmd_name)
+        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' not found"
 
     # ref_id for type=10 (WebIO) is the local FubModules dict-key (webIoId), not cmdId
     web_ref_id = webio_cmd.get("webIoId")
     if web_ref_id is None:
-        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' hat keine webIoId"
+        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' has no webIoId"
 
     conn_type = "binary" if marker["type"] == "digital" else "analog"
 
@@ -205,10 +205,10 @@ async def _connect_marker_to_webio(
         existing_marker_elem and existing_webio_elem and (existing_marker_elem, existing_webio_elem) in connected_pairs
     )
     if already_connected:
-        _LOGGER.info("Function Plan Connect: M%s — bereits in Plan verbunden, übersprungen", marker_id)
+        _LOGGER.info("Function Plan Connect: M%s — already connected in plan, skipped", marker_id)
         return (
             None,
-            f"M{marker_id} ({marker['name']}): bereits in Plan {fub_id} verbunden"
+            f"M{marker_id} ({marker['name']}): already connected in plan {fub_id}"
             f" (elem {existing_marker_elem}→{existing_webio_elem})",
             None,
         )
@@ -216,8 +216,8 @@ async def _connect_marker_to_webio(
     # Find first free grid slot, update occupied_slots
     free_pos = _find_first_free_grid_position(occupied_slots, rows_per_col, max_cols)
     if free_pos is None:
-        _LOGGER.warning("Function Plan Connect: Canvas %s voll bei M%s", canvas_format, marker_id)
-        return None, None, f"M{marker_id}: Canvas {canvas_format} voll ({max_cols} Spalten × {rows_per_col} Zeilen)"
+        _LOGGER.warning("Function Plan Connect: Canvas %s full at M%s", canvas_format, marker_id)
+        return None, None, f"M{marker_id}: Canvas {canvas_format} full ({max_cols} columns × {rows_per_col} rows)"
 
     col, row_in_col = free_pos
     occupied_slots.add((col, row_in_col))
@@ -225,7 +225,7 @@ async def _connect_marker_to_webio(
     x_marker_cur = _LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH
     x_webio_cur = _LAYOUT_X_WEBIO + col * _LAYOUT_COLUMN_WIDTH
     if row_in_col == 0 and col > 0:
-        _LOGGER.info("Function Plan Connect: Spalte %d beginnt bei x=%.1f", col, x_marker_cur)
+        _LOGGER.info("Function Plan Connect: column %d starts at x=%.1f", col, x_marker_cur)
 
     elem_marker, err = await _get_or_create_marker_element(
         api, fub_id, marker_id, existing_marker_elem, x_marker_cur, y_new
@@ -258,23 +258,23 @@ def _build_connect_poc_summary(
     """Build the final notification message + title for a function_plan_connect run."""
     lines: list[str] = []
     if results:
-        lines += [f"**{len(results)} verbunden:**"] + [f"- {r}" for r in results]
+        lines += [f"**{len(results)} connected:**"] + [f"- {r}" for r in results]
     if skipped:
-        lines += [f"\n**{len(skipped)} bereits verbunden (übersprungen):**"] + [f"- {s}" for s in skipped]
+        lines += [f"\n**{len(skipped)} already connected (skipped):**"] + [f"- {s}" for s in skipped]
     if errors:
-        lines += [f"\n**{len(errors)} Fehler:**"] + [f"- {e}" for e in errors]
+        lines += [f"\n**{len(errors)} errors:**"] + [f"- {e}" for e in errors]
 
     act_note = _plan_activation_note(was_active, activated, has_changes=bool(results), fub_id=fub_id)
     lines.append(f"\n{act_note}")
-    lines.append(f"Dauer: {duration:.1f}s")
+    lines.append(f"Duration: {duration:.1f}s")
 
-    title = f"Function Plan Connect — {len(results)} OK / {len(skipped)} Skip / {len(errors)} Fehler"
+    title = f"Function Plan Connect — {len(results)} OK / {len(skipped)} Skip / {len(errors)} Errors"
     return "\n".join(lines), title
 
 
 async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -> None:
     """POC: Connect markers (comma-separated list or all) to their WebIO commands."""
-    error_title = "Function Plan Connect — Fehler"
+    error_title = "Function Plan Connect — Error"
     ctx = _resolve_function_plan(hass, call, error_title)
     if ctx is None:
         return
@@ -290,11 +290,11 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
     marker_ids, invalid_tokens = _resolve_requested_marker_ids(raw_input, all_markers, markers_by_id, ignored_ids)
     if invalid_tokens:
         persistent_notification.async_create(
-            hass, f"Ungültige Merker-IDs (keine Ganzzahlen): {', '.join(invalid_tokens)}.", title=error_title
+            hass, f"Invalid marker IDs (not integers): {', '.join(invalid_tokens)}.", title=error_title
         )
         return
     if not marker_ids:
-        persistent_notification.async_create(hass, "Keine gültigen Merker-IDs angegeben.", title=error_title)
+        persistent_notification.async_create(hass, "No valid marker IDs given.", title=error_title)
         return
 
     if not await _ensure_comexio_login(hass, api, error_title):
@@ -306,7 +306,7 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
     if was_active:
         await api.function_plan_stop_fup(fub_id)
 
-    # Canvas-Grenzen und Spalten-Layout — DPI+Ausrichtung immer aus Plan-Daten
+    # Canvas bounds and column layout — DPI+orientation always from plan data
     canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
     canvas_format, x_max, y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
     _LOGGER.info(
@@ -317,7 +317,7 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
         fub_id,
     )
     _LOGGER.info(
-        "Function Plan Connect: Canvas %s (%.0f×%.0f) → %d Zeilen/Spalte, %d Spalten",
+        "Function Plan Connect: Canvas %s (%.0f×%.0f) → %d rows/column, %d columns",
         canvas_format,
         x_max,
         y_max,
@@ -330,7 +330,7 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
         api, fub_id, rows_per_col, max_cols
     )
 
-    _LOGGER.info("Function Plan Connect: fub_id=%s, %d Merker zu verarbeiten: %s", fub_id, len(marker_ids), marker_ids)
+    _LOGGER.info("Function Plan Connect: fub_id=%s, %d markers to process: %s", fub_id, len(marker_ids), marker_ids)
     t_start = time.monotonic()
     results: list[str] = []
     errors: list[str] = []
