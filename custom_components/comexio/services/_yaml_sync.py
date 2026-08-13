@@ -8,6 +8,7 @@ from the YAML at service-registration time rather than dynamically per call.
 """
 
 import asyncio
+from collections.abc import Iterator
 import logging
 import pathlib
 
@@ -23,9 +24,10 @@ from ._grid import _is_managed_cluster_plan
 
 _LOGGER = logging.getLogger(__name__)
 
+_SORT_SERVICE_NAME = "logikplan_sort"
 _LOGIKPLAN_SERVICES = (
     "logikplan_connect_poc",
-    "logikplan_sort",
+    _SORT_SERVICE_NAME,
     "logikplan_stop",
     "logikplan_activate",
     "logikplan_visualize",
@@ -76,13 +78,25 @@ def _rewrite_services_yaml_plans(
     for svc in _LOGIKPLAN_SERVICES:
         fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
         if fub_field:
-            options = sortable_plan_options if svc == "logikplan_sort" else plan_options
+            options = sortable_plan_options if svc == _SORT_SERVICE_NAME else plan_options
             fub_field["selector"] = {"select": {"options": options, "custom_value": True}}
     _apply_single_instance_default(content, entry_ids)
     _SERVICES_YAML_PATH.write_text(
         yaml.dump(content, allow_unicode=True, sort_keys=False, default_flow_style=False),
         encoding="utf-8",
     )
+
+
+def _iter_active_coordinators(hass: HomeAssistant) -> Iterator[tuple[str, ComexioCoordinator]]:
+    """Yield (entry_id, coordinator) for every live Comexio config entry in hass.data[DOMAIN].
+
+    Shared by every function here that needs to scan all coordinators — hass.data[DOMAIN] also
+    holds non-coordinator bookkeeping entries (webhook IDs, the cached service-description key),
+    hence the isinstance filter.
+    """
+    for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
+        if isinstance(coordinator, ComexioCoordinator):
+            yield entry_id, coordinator
 
 
 def _collect_plan_options(hass: HomeAssistant) -> tuple[list[str], list[str], list[str]]:
@@ -94,9 +108,7 @@ def _collect_plan_options(hass: HomeAssistant) -> tuple[list[str], list[str], li
     plan_labels: set[str] = set()
     sortable_plan_labels: set[str] = set()
     entry_ids: list[str] = []
-    for entry_id, coordinator in hass.data.get(DOMAIN, {}).items():
-        if not isinstance(coordinator, ComexioCoordinator):
-            continue
+    for entry_id, coordinator in _iter_active_coordinators(hass):
         entry_ids.append(entry_id)
         for fub_id, fub in coordinator.api.fub_data.items():
             name = fub.get("Name", "")
@@ -242,13 +254,12 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
     """
     restore_plans: list[tuple[int, str, bool, int]] = []
     snapshot_options: list[dict] = []
-    for coordinator in hass.data.get(DOMAIN, {}).values():
-        if isinstance(coordinator, ComexioCoordinator):
-            live_fub_ids = {int(k) for k in coordinator.api.fub_data}
-            for fub_id, name, count in await coordinator.function_plan_backup.async_backed_up_plans():
-                restore_plans.append((fub_id, name, fub_id in live_fub_ids, count))
-            backups = await coordinator.function_plan_backup.async_list_backups()
-            snapshot_options.extend(_build_snapshot_options(backups))
+    for _entry_id, coordinator in _iter_active_coordinators(hass):
+        live_fub_ids = {int(k) for k in coordinator.api.fub_data}
+        for fub_id, name, count in await coordinator.function_plan_backup.async_backed_up_plans():
+            restore_plans.append((fub_id, name, fub_id in live_fub_ids, count))
+        backups = await coordinator.function_plan_backup.async_list_backups()
+        snapshot_options.extend(_build_snapshot_options(backups))
     cache_key = (tuple(restore_plans), tuple((opt["label"], opt["value"]) for opt in snapshot_options))
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get(_SERVICE_DESCRIPTIONS_CACHE_KEY) == cache_key:
