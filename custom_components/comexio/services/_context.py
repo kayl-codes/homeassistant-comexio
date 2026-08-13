@@ -233,7 +233,7 @@ async def _resolve_function_plan_context(
 
 
 def _plan_activation_note(was_active: bool, activated: bool, has_changes: bool, fub_id: int) -> str:
-    """Build the status note describing what happened to plan activation after a sync/sort action."""
+    """Build the status note describing what happened to plan activation after plan-changing operations."""
     if not was_active:
         if has_changes:
             return "Plan was inactive — changes saved, plan remains inactive."
