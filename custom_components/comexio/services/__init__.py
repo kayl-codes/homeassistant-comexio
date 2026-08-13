@@ -28,7 +28,7 @@ import logging
 
 from homeassistant.core import HomeAssistant, SupportsResponse
 
-from ..const import DOMAIN
+from ..const import DOMAIN, FUNCTION_PLAN_SERVICE_NAMES
 from ._context import format_plan_label
 from ._grid import async_resync_io_group_headers
 from ._yaml_sync import _refresh_service_descriptions, _update_services_yaml_plans
@@ -62,6 +62,14 @@ __all__ = [
 
 _LOGGER = logging.getLogger(__name__)
 
+(
+    _SVC_CONNECT,
+    _SVC_SORT,
+    _SVC_STOP,
+    _SVC_ACTIVATE,
+    _SVC_VISUALIZE,
+) = FUNCTION_PLAN_SERVICE_NAMES
+
 
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Register additional services for the Comexio integration."""
@@ -74,25 +82,21 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         )
     if not hass.services.has_service(DOMAIN, "generate_web_io"):
         hass.services.async_register(DOMAIN, "generate_web_io", functools.partial(handle_generate_web_io, hass))
-    if not hass.services.has_service(DOMAIN, "function_plan_connect"):
-        hass.services.async_register(
-            DOMAIN, "function_plan_connect", functools.partial(handle_function_plan_connect, hass)
-        )
-    if not hass.services.has_service(DOMAIN, "function_plan_visualize"):
+    if not hass.services.has_service(DOMAIN, _SVC_CONNECT):
+        hass.services.async_register(DOMAIN, _SVC_CONNECT, functools.partial(handle_function_plan_connect, hass))
+    if not hass.services.has_service(DOMAIN, _SVC_VISUALIZE):
         hass.services.async_register(
             DOMAIN,
-            "function_plan_visualize",
+            _SVC_VISUALIZE,
             functools.partial(handle_function_plan_visualize, hass),
             supports_response=SupportsResponse.OPTIONAL,
         )
-    if not hass.services.has_service(DOMAIN, "function_plan_sort"):
-        hass.services.async_register(DOMAIN, "function_plan_sort", functools.partial(handle_function_plan_sort, hass))
-    if not hass.services.has_service(DOMAIN, "function_plan_stop"):
-        hass.services.async_register(DOMAIN, "function_plan_stop", functools.partial(handle_function_plan_stop, hass))
-    if not hass.services.has_service(DOMAIN, "function_plan_activate"):
-        hass.services.async_register(
-            DOMAIN, "function_plan_activate", functools.partial(handle_function_plan_activate, hass)
-        )
+    if not hass.services.has_service(DOMAIN, _SVC_SORT):
+        hass.services.async_register(DOMAIN, _SVC_SORT, functools.partial(handle_function_plan_sort, hass))
+    if not hass.services.has_service(DOMAIN, _SVC_STOP):
+        hass.services.async_register(DOMAIN, _SVC_STOP, functools.partial(handle_function_plan_stop, hass))
+    if not hass.services.has_service(DOMAIN, _SVC_ACTIVATE):
+        hass.services.async_register(DOMAIN, _SVC_ACTIVATE, functools.partial(handle_function_plan_activate, hass))
     if not hass.services.has_service(DOMAIN, "function_plan_restore"):
         hass.services.async_register(
             DOMAIN, "function_plan_restore", functools.partial(_handle_function_plan_restore, hass)

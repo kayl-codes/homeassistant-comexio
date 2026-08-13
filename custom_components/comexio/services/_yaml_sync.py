@@ -16,19 +16,12 @@ from homeassistant.helpers.service import async_set_service_schema
 from homeassistant.util import dt as dt_util
 import yaml
 
-from ..const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT
+from ..const import DOMAIN, FUNCTION_PLAN_SERVICE_NAMES, TIMESTAMP_DISPLAY_FORMAT
 from ..coordinator import ComexioCoordinator
 from ._context import format_plan_label
 
 _LOGGER = logging.getLogger(__name__)
 
-_FUNCTION_PLAN_SERVICES = (
-    "function_plan_connect",
-    "function_plan_sort",
-    "function_plan_stop",
-    "function_plan_activate",
-    "function_plan_visualize",
-)
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent.parent / "services.yaml"
 # Serializes the two independent read-modify-write rewrites of services.yaml below
 # (_update_services_yaml_plans and _refresh_service_descriptions) so a run of one can't
@@ -66,7 +59,7 @@ def _rewrite_services_yaml_plans(plan_options: list[str], entry_ids: list[str]) 
     except (OSError, yaml.YAMLError) as exc:
         _LOGGER.warning("services.yaml missing or invalid, skipping plan option rewrite: %s", exc)
         return
-    for svc in _FUNCTION_PLAN_SERVICES:
+    for svc in FUNCTION_PLAN_SERVICE_NAMES:
         fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
         if fub_field:
             fub_field["selector"] = {"select": {"options": plan_options, "custom_value": True}}
