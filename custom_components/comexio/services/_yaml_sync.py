@@ -17,15 +17,21 @@ from homeassistant.helpers.service import async_set_service_schema
 from homeassistant.util import dt as dt_util
 import yaml
 
-from ..const import DOMAIN, FUNCTION_PLAN_SERVICE_NAMES, TIMESTAMP_DISPLAY_FORMAT
+from ..const import (
+    DOMAIN,
+    FUNCTION_PLAN_SERVICE_NAMES,
+    FUNCTION_PLAN_SERVICE_SORT,
+    FUNCTION_PLAN_SERVICE_VISUALIZE,
+    TIMESTAMP_DISPLAY_FORMAT,
+)
 from ..coordinator import ComexioCoordinator
 from ._context import format_plan_label
 from ._grid import _is_managed_cluster_plan
 
 _LOGGER = logging.getLogger(__name__)
 
-# Order matches FUNCTION_PLAN_SERVICE_NAMES (const.py): connect, sort, stop, activate, visualize.
-_, _SORT_SERVICE_NAME, _, _, _SVC_VISUALIZE = FUNCTION_PLAN_SERVICE_NAMES
+_SORT_SERVICE_NAME = FUNCTION_PLAN_SERVICE_SORT
+_SVC_VISUALIZE = FUNCTION_PLAN_SERVICE_VISUALIZE
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent.parent / "services.yaml"
 # Serializes the two independent read-modify-write rewrites of services.yaml below
 # (_update_services_yaml_plans and _refresh_service_descriptions) so a run of one can't

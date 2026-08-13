@@ -28,7 +28,14 @@ import logging
 
 from homeassistant.core import HomeAssistant, SupportsResponse
 
-from ..const import DOMAIN, FUNCTION_PLAN_SERVICE_NAMES
+from ..const import (
+    DOMAIN,
+    FUNCTION_PLAN_SERVICE_ACTIVATE as _SVC_ACTIVATE,
+    FUNCTION_PLAN_SERVICE_CONNECT as _SVC_CONNECT,
+    FUNCTION_PLAN_SERVICE_SORT as _SVC_SORT,
+    FUNCTION_PLAN_SERVICE_STOP as _SVC_STOP,
+    FUNCTION_PLAN_SERVICE_VISUALIZE as _SVC_VISUALIZE,
+)
 from ._context import format_plan_label
 from ._grid import async_resync_io_group_headers
 from ._yaml_sync import _refresh_service_descriptions, _update_services_yaml_plans
@@ -61,14 +68,6 @@ __all__ = [
 ]
 
 _LOGGER = logging.getLogger(__name__)
-
-(
-    _SVC_CONNECT,
-    _SVC_SORT,
-    _SVC_STOP,
-    _SVC_ACTIVATE,
-    _SVC_VISUALIZE,
-) = FUNCTION_PLAN_SERVICE_NAMES
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
