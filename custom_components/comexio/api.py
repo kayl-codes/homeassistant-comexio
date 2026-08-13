@@ -531,6 +531,7 @@ class ComexioAPI:
             "io": [],
             "io_all": [],
             "webio_commands": {},
+            "webio_names": {},
             # Two separate Web-IO device classes on the Comexio server — see const.webio_class_name.
             "webio_devices": {cls: {"device_id": None, "device_ip": None, "base_id": None} for cls in WEBIO_CLASSES},
         }
@@ -691,6 +692,8 @@ class ComexioAPI:
                 ", ".join(webio_class_label(c) for c in missing_classes),
             )
 
+        self._build_webio_name_lexicon(data, fub_10)
+
     def _assign_webio_device_id(
         self,
         web_devices: dict[str, Any],
@@ -715,6 +718,31 @@ class ComexioAPI:
             dev_info["base_id"] = str(raw_base_id) if raw_base_id is not None else None
             return target_dev_id
         return None
+
+    def _build_webio_name_lexicon(self, data: dict[str, Any], fub_10: dict[str, Any]) -> None:
+        """Build the webio_names label lexicon over ALL Web-IO classes (read-only, for Function Plan rendering).
+
+        Plans may wire commands of foreign Web-IO devices, whose names are otherwise unknown to
+        HA. Names mirror Comexio Studio's pill labels: '{deviceId}. {commandName}' (e.g.
+        '16. R1 SZ Rollo % IST') — Studio does NOT include the device name in the pill (verified
+        against the Netzteil plan). Kept separate from webio_commands on purpose — that dict
+        drives the sync/audit logic and must only ever contain HA's own class.
+        """
+        groups = fub_10.items() if isinstance(fub_10, dict) else enumerate(fub_10 or [])
+        for dev_id, dev_commands in groups:
+            prefix = f"{dev_id}. "
+            # Comexio serializes gap-free id groups as JSON arrays instead of objects
+            # (same quirk as $FubModules groups) — the array index then IS the webIoId.
+            items = dev_commands.items() if isinstance(dev_commands, dict) else enumerate(dev_commands or [])
+            for w_id, w_obj in items:
+                if not isinstance(w_obj, dict):
+                    continue
+                name = w_obj.get("Name")
+                if name:
+                    data["webio_names"][str(w_id)] = {
+                        "name": f"{prefix}{name}",
+                        "analog": w_obj.get("TypeId") in {2, "2"},
+                    }
 
     def _add_webhook_command(self, data: dict[str, Any], w_id: str, w_obj: dict[str, Any], webio_class: str) -> None:
         """Add a webhook command to data."""

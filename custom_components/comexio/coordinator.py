@@ -312,6 +312,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "io": parsed_data["io"] if import_ios else [],
                 "io_all": parsed_data.get("io_all", []) if import_ios else [],
                 "webio_commands": parsed_data.get("webio_commands", {}),
+                "webio_names": parsed_data.get("webio_names", {}),
                 "webio_devices": parsed_data.get("webio_devices", {}),
             }
 
@@ -925,16 +926,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def function_plan_label_maps(self) -> tuple[dict, dict, dict]:
         """Lookup dicts (marker/WebIO/IO id -> {"name": ..., ...}) for backup snapshot labeling.
 
-        webio_by_id is built from the live webio_commands map (HA-managed Web-IO classes
-        only) — a WebIO block wired into a plan from an unrelated, non-HA-managed Comexio
-        device falls back to the generic "WebIO ref=<id>" label in resolve_element_label.
+        webio_by_id is primarily webio_names (ALL Web-IO classes, labelled Studio-style as
+        '{deviceId}. {name}', so foreign commands wired into plans get real labels);
+        HA's own webio_commands only fill ids missing from it (e.g. stale poll).
         """
         data = self.data or {}
         markers_by_id = {str(m["id"]): m for m in data.get("markers", [])}
-        webio_by_id: dict[str, Any] = {}
+        webio_by_id: dict[str, Any] = dict(data.get("webio_names", {}))
         for name, cmd in data.get("webio_commands", {}).items():
             w_id = cmd.get("webIoId")
-            if w_id is not None:
+            if w_id is not None and str(w_id) not in webio_by_id:
                 webio_by_id[str(w_id)] = {"name": name, "analog": cmd.get("typeId") == 2}
         # io_all (unfiltered, includes inactive IOs) so a plan wired to an inactive IO still
         # resolves a real name/greyed state instead of falling back to "IO ref=<id>".
