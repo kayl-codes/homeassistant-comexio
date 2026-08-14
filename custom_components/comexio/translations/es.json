@@ -115,6 +115,9 @@
           "function_plan_backup_retention_months": "Las copias de seguridad de un plan eliminado directamente en Comexio se purgan automáticamente en cuanto son más antiguas que este período. Las copias de un plan aún activo nunca se ven afectadas. También disponible como la acción 'Function Plan Purge Orphaned Backups' para una limpieza manual."
         }
       }
+    },
+    "error": {
+      "invalid_number": "Introduzca un número entero válido."
     }
   },
   "entity": {

@@ -115,6 +115,9 @@
           "function_plan_backup_retention_months": "Les sauvegardes d'un plan supprimé directement dans Comexio sont purgées automatiquement dès qu'elles dépassent cette durée. Les sauvegardes d'un plan encore actif ne sont jamais concernées. Également disponible via l'action 'Function Plan Purge Orphaned Backups' pour un nettoyage manuel."
         }
       }
+    },
+    "error": {
+      "invalid_number": "Veuillez saisir un nombre entier valide."
     }
   },
   "entity": {
