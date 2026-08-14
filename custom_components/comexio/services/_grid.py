@@ -32,11 +32,25 @@ _COMMENT_REF_TYPE = "14"
 _MANAGED_COMMENT_TEXT = FUNCTION_PLAN_MANAGED_PLAN_COMMENT
 
 
+def _is_comment_ref_type(ref_type: str | int | None) -> bool:
+    """Whether a plan element's reference type is a comment/text block (_COMMENT_REF_TYPE).
+
+    Shared by _build_sorted_pairs and _assign_io_grid_positions so both sort paths stay
+    aligned if the comment-type check ever changes.
+    """
+    return str(ref_type) == _COMMENT_REF_TYPE
+
+
 def _build_sorted_pairs(
     elements: dict,
     connections: dict,
 ) -> tuple[list[tuple[int, int, int]], list[int]]:
-    """Return marker→WebIO pairs sorted by marker ref_id and a list of orphan element IDs."""
+    """Return marker→WebIO pairs sorted by marker ref_id and a list of orphan element IDs.
+
+    Comment/text blocks (type 14) are excluded from the orphans — they keep their
+    position and are never moved by the sort (the managed-plan comment is separately
+    re-pinned by _pinned_template_positions; any other comment on the plan is left as-is).
+    """
     elem_ref: dict[int, dict] = {
         int(eid): {
             "type": e.get("reference", {}).get("type"),
@@ -64,7 +78,7 @@ def _build_sorted_pairs(
                 pairs.append((marker_ref_id, inp_eid, out_eid))
     pairs.sort(key=lambda p: p[0])
     paired: set[int] = {eid for _, m, w in pairs for eid in (m, w)}
-    orphans = [int(eid) for eid in elements if int(eid) not in paired]
+    orphans = [eid for eid, ref in elem_ref.items() if eid not in paired and not _is_comment_ref_type(ref["type"])]
     return pairs, orphans
 
 
@@ -204,7 +218,7 @@ def _stale_io_header_ids(plan_data: dict) -> list[int]:
     return [
         int(eid)
         for eid, elem in (plan_data.get("elements") or {}).items()
-        if str((elem.get("reference") or {}).get("type")) == _COMMENT_REF_TYPE
+        if _is_comment_ref_type((elem.get("reference") or {}).get("type"))
         and (elem.get("name") or "").strip() != _MANAGED_COMMENT_TEXT
     ]
 
@@ -319,7 +333,7 @@ def _assign_io_grid_positions(
     leftovers = [
         int(eid)
         for eid, e in elements.items()
-        if int(eid) not in positions and str((e.get("reference") or {}).get("type")) != _COMMENT_REF_TYPE
+        if int(eid) not in positions and not _is_comment_ref_type((e.get("reference") or {}).get("type"))
     ]
     return [(eid, x, y) for eid, (x, y) in positions.items()], pair_count, leftovers
 
@@ -352,7 +366,7 @@ def _pinned_template_positions(plan_data: dict, x_max: float) -> list[tuple[int,
     return [
         (int(eid), snap_to_grid(x_max / 2), _LAYOUT_COMMENT_Y)
         for eid, elem in (plan_data.get("elements") or {}).items()
-        if str((elem.get("reference") or {}).get("type")) == _COMMENT_REF_TYPE
+        if _is_comment_ref_type((elem.get("reference") or {}).get("type"))
         and (elem.get("name") or "").strip() == _MANAGED_COMMENT_TEXT
     ]
 
