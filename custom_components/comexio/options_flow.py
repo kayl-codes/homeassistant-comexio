@@ -184,16 +184,15 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             _LOGGER.warning("ignored_markers field missing from user_input — restoring from saved options")
             user_input[CONF_IGNORED_MARKERS] = conf.get(CONF_IGNORED_MARKERS, "")
 
+        numeric_option_keys = (
+            "scan_interval",
+            CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
+            CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+        )
         try:
-            user_input["scan_interval"] = int(user_input["scan_interval"])
-            if CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN in user_input:
-                user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN] = int(
-                    user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN]
-                )
-            if CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS in user_input:
-                user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
-                    user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
-                )
+            for key in numeric_option_keys:
+                if key in user_input:
+                    user_input[key] = int(user_input[key])
         except (ValueError, TypeError) as e:
             # Kept separate from the ignored_markers try/except below so a numeric-field
             # error is never misattributed to errors[CONF_IGNORED_MARKERS].
