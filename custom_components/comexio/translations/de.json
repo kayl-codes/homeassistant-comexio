@@ -115,6 +115,9 @@
           "function_plan_backup_retention_months": "Backup-Schnappschüsse eines Plans, der direkt in Comexio gelöscht wurde, werden automatisch geräumt, sobald sie älter als diese Frist sind. Backups eines noch existierenden Plans sind davon nie betroffen. Steht auch als Action 'Function Plan Purge Orphaned Backups' für eine manuelle Bereinigung zur Verfügung."
         }
       }
+    },
+    "error": {
+      "invalid_number": "Bitte eine gültige Ganzzahl eingeben."
     }
   },
   "entity": {

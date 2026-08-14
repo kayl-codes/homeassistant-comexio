@@ -115,6 +115,9 @@
           "function_plan_backup_retention_months": "Backup snapshots of a plan that was deleted directly in Comexio are purged automatically once they are older than this. A live plan's backups are never affected. Also available as the 'Function Plan Purge Orphaned Backups' action for an on-demand cleanup."
         }
       }
+    },
+    "error": {
+      "invalid_number": "Please enter a valid whole number."
     }
   },
   "entity": {

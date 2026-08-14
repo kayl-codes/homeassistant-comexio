@@ -179,18 +179,29 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
     @staticmethod
     def _normalize_user_input(user_input: dict, conf: dict, errors: dict) -> None:
         """Validate and normalize user_input in-place; populate errors on failure."""
-        user_input["scan_interval"] = int(user_input["scan_interval"])
-        if CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN in user_input:
-            user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN] = int(user_input[CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN])
-        if CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS in user_input:
-            user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS] = int(
-                user_input[CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS]
-            )
-
         # If field not in user_input, voluptuous didn't receive changes; preserve old value
         if CONF_IGNORED_MARKERS not in user_input:
-            _LOGGER.debug("ignored_markers field missing from user_input — restoring from saved options")
+            _LOGGER.warning("ignored_markers field missing from user_input — restoring from saved options")
             user_input[CONF_IGNORED_MARKERS] = conf.get(CONF_IGNORED_MARKERS, "")
+
+        numeric_option_keys = (
+            "scan_interval",
+            CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
+            CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+        )
+        for key in numeric_option_keys:
+            if key not in user_input:
+                continue
+            try:
+                user_input[key] = int(user_input[key])
+            except (ValueError, TypeError) as e:
+                # Kept separate from the ignored_markers try/except below so a numeric-field
+                # error is never misattributed to errors[CONF_IGNORED_MARKERS].
+                # Logged at debug only: an expected user-input validation failure, the
+                # translated form error below already tells the user what to fix.
+                _LOGGER.debug("Invalid numeric option %s=%r: %s", key, user_input[key], e)
+                errors["base"] = "invalid_number"
+                return
 
         try:
             ignored_raw = user_input.get(CONF_IGNORED_MARKERS, "").strip()
