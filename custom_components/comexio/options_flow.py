@@ -197,9 +197,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         except (ValueError, TypeError) as e:
             # Kept separate from the ignored_markers try/except below so a numeric-field
             # error is never misattributed to errors[CONF_IGNORED_MARKERS].
-            # warning (not .exception): this is an expected user-input validation failure,
-            # not an unexpected internal error — no traceback needed, same as vol.Invalid below.
-            _LOGGER.warning("Invalid numeric options input: %s", e)
+            # Not logged: an expected user-input validation failure, same treatment as
+            # vol.Invalid below — the form's inline error already tells the user.
             errors["base"] = f"Fehler bei Validierung: {e}"
             return
 
