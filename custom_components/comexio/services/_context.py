@@ -62,7 +62,7 @@ def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:
 def _available_plans_str(fub_data: dict) -> str:
     """Return human-readable list of available plans from fub_data."""
     if not fub_data:
-        return "keine Pläne geladen — Integration neu laden"
+        return "no plans loaded — reload the integration"
     return ", ".join(
         f"'{fub.get('Name', '?')}' (ID {fid})" for fid, fub in sorted(fub_data.items(), key=lambda x: int(x[0]))
     )
@@ -203,7 +203,7 @@ def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: 
     if fub_id is None:
         persistent_notification.async_create(
             hass,
-            f"Plan '{fub_id_raw}' nicht gefunden.\nVerfügbar: {_available_plans_str(api.fub_data)}",
+            f"Plan '{fub_id_raw}' not found.\nAvailable: {_available_plans_str(api.fub_data)}",
             title=error_title,
         )
         return None
@@ -215,7 +215,7 @@ async def _ensure_comexio_login(hass: HomeAssistant, api, error_title: str) -> b
     """Log in to the Comexio admin session, notifying the user on failure."""
     if await api.login():
         return True
-    persistent_notification.async_create(hass, "Comexio Admin-Login fehlgeschlagen.", title=error_title)
+    persistent_notification.async_create(hass, "Comexio admin login failed.", title=error_title)
     return False
 
 
@@ -233,14 +233,14 @@ async def _resolve_function_plan_context(
 
 
 def _plan_activation_note(was_active: bool, activated: bool, has_changes: bool, fub_id: int) -> str:
-    """Build the German status note describing what happened to plan activation after a sync/sort action."""
+    """Build the status note describing what happened to plan activation after plan-changing operations."""
     if not was_active:
         if has_changes:
-            return "Plan war inaktiv — Änderungen gespeichert, Plan bleibt inaktiv."
-        return f"Plan fub_id={fub_id} — keine neuen Verbindungen, Plan unverändert."
+            return "Plan was inactive — changes saved, plan remains inactive."
+        return f"Plan fub_id={fub_id} — no new connections, plan unchanged."
     if activated:
-        return "Plan gespeichert und aktiviert." if has_changes else "Plan unverändert, weiterhin aktiv."
-    return "Plan-Aktivierung fehlgeschlagen — bitte manuell im Comexio-UI speichern."
+        return "Plan saved and activated." if has_changes else "Plan unchanged, still active."
+    return "Plan activation failed — please save manually in the Comexio UI."
 
 
 def _get_canvas_grid_dims(api, fub_id: int, canvas_format_raw: str) -> tuple[str, float, float, int, int]:

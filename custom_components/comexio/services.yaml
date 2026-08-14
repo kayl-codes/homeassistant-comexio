@@ -2,18 +2,18 @@
 # NOTE: fub_id options are populated at runtime by _update_services_yaml_plans on integration load.
 generate_web_io:
   name: Web-IO Export / Upload
-  description: Erzeugt ein JSON für den Comexio-Import oder lädt die Geräteklasse direkt auf den Server hoch.
+  description: Generates a JSON for Comexio import, or uploads the device class directly to the server.
   fields:
     config_entry:
-      name: Comexio Instanz
-      description: Wähle die Comexio-Instanz aus, für die die Aktion ausgeführt werden soll.
+      name: Comexio instance
+      description: Select the Comexio instance the action should run for.
       required: true
       selector:
         config_entry:
           integration: comexio
     upload:
-      name: Direkt hochladen
-      description: Falls aktiviert, wird die Geräteklasse direkt an Comexio gesendet und dort überschrieben.
+      name: Upload directly
+      description: If enabled, the device class is sent directly to Comexio and overwritten there.
       default: false
       selector:
         boolean:

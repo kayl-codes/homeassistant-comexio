@@ -36,7 +36,7 @@ from ._grid import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_TITLE_SORT_ERR = "Function Plan Sort — Fehler"
+_TITLE_SORT_ERR = "Function Plan Sort — Error"
 
 
 def _label_for_id(
@@ -142,7 +142,7 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
     coordinator, api, fub_id = ctx
     plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
-        persistent_notification.async_create(hass, f"Plan {fub_id} konnte nicht geladen werden.", title=error_title)
+        persistent_notification.async_create(hass, f"Plan {fub_id} could not be loaded.", title=error_title)
         return None
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     return (
@@ -169,7 +169,7 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
     in the same shape as a live plan (function_plan_backup.py). Without 'snapshot', behaviour
     for the text diagram is unchanged: the live plan is loaded via the usual fub_id resolution.
     """
-    error_title = "Function Plan Visualize — Fehler"
+    error_title = "Function Plan Visualize — Error"
     fmt = str(call.data.get("format", "text")).strip().lower()
     snapshot_raw = call.data.get("snapshot")
 
@@ -210,17 +210,17 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
         x_max, y_max = api.get_fub_canvas_bounds(fub_id)
         lines[0] += f" — {paper_fmt}, Canvas {x_max:.0f}×{y_max:.0f}"
     lines += [
-        f"{len(elements)} Elemente, {len(connections)} Verbindungen",
+        f"{len(elements)} elements, {len(connections)} connections",
         "",
-        f"**Verbindungen ({len(connections)}):**",
+        f"**Connections ({len(connections)}):**",
     ]
-    lines += conn_lines or ["  (keine)"]
+    lines += conn_lines or ["  (none)"]
     if orphan_lines:
-        lines += ["", f"**Nicht verbundene Elemente ({len(orphan_lines)}):**"]
+        lines += ["", f"**Unconnected elements ({len(orphan_lines)}):**"]
         lines += orphan_lines
 
     persistent_notification.async_create(
-        hass, "\n".join(lines), title=f"Function Plan {fub_id} — {len(connections)} Verbindungen"
+        hass, "\n".join(lines), title=f"Function Plan {fub_id} — {len(connections)} connections"
     )
     return None
 
@@ -235,9 +235,9 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
         plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
         persistent_notification.async_create(
             hass,
-            f"Plan '{plan_name}' (ID {fub_id}) ist kein HA-verwalteter Cluster-Plan. "
-            "Sort schreibt jede Elementposition neu — auf einem handgebauten Comexio-Plan "
-            "würde das dessen Layout zerstören.",
+            f"Plan '{plan_name}' (ID {fub_id}) is not an HA-managed cluster plan. "
+            "Sort rewrites every element position — on a hand-built Comexio plan "
+            "this would destroy its layout.",
             title=_TITLE_SORT_ERR,
         )
         return
@@ -279,9 +279,7 @@ async def async_sort_function_plan(
     plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
         if notify:
-            persistent_notification.async_create(
-                hass, f"Plan {fub_id} konnte nicht geladen werden.", title=_TITLE_SORT_ERR
-            )
+            persistent_notification.async_create(hass, f"Plan {fub_id} could not be loaded.", title=_TITLE_SORT_ERR)
         return None
 
     new_positions, n_pairs, n_single, sort_line, header_slots, io_members = _sort_compute_positions(
@@ -290,12 +288,12 @@ async def async_sort_function_plan(
     if not new_positions:
         if notify:
             persistent_notification.async_create(
-                hass, "Keine Elemente im Plan.", title=f"Function Plan Sort Plan {fub_id}"
+                hass, "No elements in plan.", title=f"Function Plan Sort Plan {fub_id}"
             )
         return None
 
     _LOGGER.info(
-        "Function Plan Sort: Plan %s — %d Paare, %d Einzelelemente, %d Positionen (io_plan=%s, aktiv=%s)",
+        "Function Plan Sort: Plan %s — %d pairs, %d single elements, %d positions (io_plan=%s, active=%s)",
         fub_id,
         n_pairs,
         n_single,
@@ -310,13 +308,13 @@ async def async_sort_function_plan(
     act_note = _plan_activation_note(was_active, activated, has_changes=True, fub_id=fub_id)
     if notify:
         msg = (
-            f"Sortierung {'erfolgreich' if success else 'fehlgeschlagen'}: {sort_line}\n"
-            f"Canvas {canvas_label}: {max_cols} Spalten × {rows_per_col} Zeilen.\n"
+            f"Sort {'succeeded' if success else 'failed'}: {sort_line}\n"
+            f"Canvas {canvas_label}: {max_cols} columns × {rows_per_col} rows.\n"
             f"{act_note}\n"
-            f"Dauer: {duration:.1f}s"
+            f"Duration: {duration:.1f}s"
         )
         persistent_notification.async_create(
-            hass, msg, title=f"Function Plan Sort Plan {fub_id} — {'OK' if success else 'Fehler'}"
+            hass, msg, title=f"Function Plan Sort Plan {fub_id} — {'OK' if success else 'Error'}"
         )
     return {
         "success": success,
@@ -355,15 +353,15 @@ def _sort_compute_positions(
         n_single = len(leftovers)
         header_slots = _io_header_slots(coordinator, io_members, rows_per_col)
         sort_line = (
-            f"{n_pairs} IO-Paare im Erweiterungs-Raster [{','.join(io_members)}] wiederhergestellt"
-            f" + {n_single} weitere Elemente rechts daneben geparkt + {len(header_slots)} Blockköpfe."
+            f"{n_pairs} IO pairs restored in the extension grid [{','.join(io_members)}]"
+            f" + {n_single} further elements parked to the right + {len(header_slots)} block headers."
         )
     else:
         pairs, orphans = _build_sorted_pairs(plan_data.get("elements", {}), plan_data.get("connections", {}))
         orphans = [eid for eid in orphans if eid not in pinned_ids]
         new_positions = _assign_grid_positions(pairs, orphans, rows_per_col, max_cols) + pinned
         n_pairs, n_single = len(pairs), len(orphans)
-        sort_line = f"{n_pairs} Paare nach Merker-ID geordnet + {n_single} Einzelelemente."
+        sort_line = f"{n_pairs} pairs sorted by marker ID + {n_single} single elements."
     return new_positions, n_pairs, n_single, sort_line, header_slots, io_members
 
 
@@ -390,7 +388,7 @@ async def _sort_apply_and_activate(
 
 async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> None:
     """Stop/pause a function plan."""
-    error_title = "Function Plan Stop — Fehler"
+    error_title = "Function Plan Stop — Error"
     ctx = await _resolve_function_plan_context(hass, call, error_title)
     if ctx is None:
         return
@@ -402,29 +400,29 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
     success = await api.function_plan_stop_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
-        f"Plan '{plan_name}' (ID {fub_id}) gestoppt.\nDauer: {duration:.1f}s"
+        f"Plan '{plan_name}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
         if success
-        else f"Stop fehlgeschlagen (Plan '{plan_name}', ID {fub_id}).\nDauer: {duration:.1f}s"
+        else f"Stop failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
-    persistent_notification.async_create(hass, msg, title=f"Function Plan Stop — {'OK' if success else 'Fehler'}")
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Stop — {'OK' if success else 'Error'}")
 
 
 async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) -> None:
     """Save and activate a function plan (run_fup)."""
-    error_title = "Function Plan Aktivieren — Fehler"
+    error_title = "Function Plan Activate — Error"
     ctx = await _resolve_function_plan_context(hass, call, error_title)
     if ctx is None:
         return
     _coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-    _LOGGER.info("Function Plan Aktivieren: fub_id=%s name='%s'", fub_id, plan_name)
+    _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
     success = await api.function_plan_run_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
-        f"Plan '{plan_name}' (ID {fub_id}) gespeichert und aktiviert.\nDauer: {duration:.1f}s"
+        f"Plan '{plan_name}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"
         if success
-        else f"Aktivierung fehlgeschlagen (Plan '{plan_name}', ID {fub_id}).\nDauer: {duration:.1f}s"
+        else f"Activation failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
-    persistent_notification.async_create(hass, msg, title=f"Function Plan Aktivieren — {'OK' if success else 'Fehler'}")
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Activate — {'OK' if success else 'Error'}")
