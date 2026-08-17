@@ -36,19 +36,6 @@ _FALLBACK_DPI = 90
 _FALLBACK_ORIENTATION = "landscape"
 
 
-def plan_hash(plan_data: dict[str, Any]) -> str:
-    """Return a canonical SHA-256 over elements + connections (incl. positions)."""
-    canonical = json.dumps(
-        {
-            "elements": plan_data.get("elements", {}),
-            "connections": plan_data.get("connections", {}),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
 # reference.type values with a globally stable ref_id (survives Comexio renumbering the
 # plan-local FubElementId): 1=IO, 2=marker, 10=WebIO, 4=time module. Everything else (block
 # instances, constants, comments) has no such global identity — fubBase blocks in particular
@@ -164,6 +151,32 @@ def _connection_wires(snapshot: dict[str, Any]) -> set[tuple[Any, ...]]:
         outputs = outputs.values() if isinstance(outputs, dict) else outputs
         wires.update((src, _endpoint(out)) for out in outputs)
     return wires
+
+
+def _canonical_plan_content(plan_data: dict[str, Any]) -> dict[str, list]:
+    """Renumbering-tolerant content of a plan for plan_hash(): every element keyed by its own
+    stable identity (see _element_identity) instead of Comexio's raw, renumberable
+    FubElementId, plus every wire keyed by its endpoints' stable identities (see
+    _connection_wires) instead of the raw connection dict.
+    """
+    elements = plan_data.get("elements", {})
+    return {
+        "elements": sorted((_element_identity(elem) for elem in elements.values()), key=str),
+        "wires": sorted(_connection_wires(plan_data), key=str),
+    }
+
+
+def plan_hash(plan_data: dict[str, Any]) -> str:
+    """Return a canonical, renumbering-tolerant SHA-256 over a plan's elements + wiring.
+
+    Hashed over each element/wire's stable identity (see _canonical_plan_content), not
+    Comexio's raw FubElementIds — those get renumbered wholesale by some Comexio-side sync
+    operations without the wiring itself actually changing (see diff_snapshots for the
+    confirmed 2026-07-13 case), which would otherwise make async_auto_backup treat such a
+    sync as a real content change on every single run.
+    """
+    canonical = json.dumps(_canonical_plan_content(plan_data), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def diff_snapshots(newer: dict[str, Any], older: dict[str, Any]) -> dict[str, Any]:
