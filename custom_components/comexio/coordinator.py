@@ -768,20 +768,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
-            # Managed cluster plans are fully auto-generated/regenerable by
-            # resolve_marker_clusters / resolve_io_clusters — auto-backing them up on every
-            # poll-detected hash change (they mutate on every sync) would burn storage slots
-            # on content that is reproducible on demand. Pre-mutation change-backups still
-            # cover them, so an accidental Comexio-side edit stays recoverable.
-            prefix = self._function_plan_prefix()
-            backup_plans = {
-                fid: pd
-                for fid, pd in plans.items()
-                if not self._is_managed_cluster_plan_name(str(fub_data.get(str(fid), {}).get("Name", "")), prefix)
-            }
             try:
                 self.last_changed_plans = await self.function_plan_backup.async_auto_backup(
-                    backup_plans,
+                    plans,
                     fub_data,
                     plan_format,
                     self.api.comexio_version,
@@ -1859,17 +1848,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not m:
             return None
         return [p.strip() for p in m.group(1).split(",") if p.strip()]
-
-    @classmethod
-    def _is_managed_cluster_plan_name(cls, plan_name: str, prefix: str) -> bool:
-        """True for a name matching either managed cluster scheme (Marker or IO cluster).
-
-        Matched by name rather than plan_map membership so a cluster plan orphaned from
-        plan_map (e.g. after a stale-prune) is still recognized as auto-generated content.
-        """
-        if cls._io_plan_members(plan_name, prefix) is not None:
-            return True
-        return bool(re.fullmatch(re.escape(prefix) + r" - Marker \[\d+-\d+\]", plan_name))
 
     @staticmethod
     def _io_plan_name(prefix: str, members: list[str]) -> str:
