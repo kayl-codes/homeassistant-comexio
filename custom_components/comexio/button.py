@@ -1649,21 +1649,6 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         entries = self.coordinator.function_plan_backup.plan_backups_for_identity_sync(fub_id, plan_name)
         return next(((e["kind"], e["slot"]) for e in entries if format_backup_label(e) == state.state), None)
 
-    async def _async_arm_live_refresh(self, fub_id: int, plan_name: str) -> None:
-        """Fetch live elements (if needed) and hand them to the coordinator to prime its live cache.
-
-        Right after startup or a plan change no live render has filled the cache yet, so fetch
-        the live elements once here; coordinator.prime_live_preview_cache() is a no-op if a cache
-        is already armed.
-        """
-        if self.coordinator.has_live_preview_cache:
-            return
-        plan_data = await self.coordinator.api.function_plan_load_elements(fub_id)
-        if plan_data:
-            self.coordinator.prime_live_preview_cache(
-                fub_id, plan_name, plan_data.get("elements", {}), plan_data.get("connections", {})
-            )
-
     async def async_press(self) -> None:
         """Render the active plan into the Plan Preview sensor — live, or a chosen backup snapshot."""
         api = self.coordinator.api
@@ -1690,7 +1675,6 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
                 f"snapshot:{kind}:{slot}",
                 snapshot.get("labels"),
             )
-            await self._async_arm_live_refresh(fub_id, plan_name)
             return
 
         plan_data = await api.function_plan_load_elements(fub_id)
