@@ -81,6 +81,32 @@ def _element_identity(elem: dict[str, Any]) -> tuple[Any, Any, float | None, flo
     return (etype, ref_id, elem.get("position_x"), elem.get("position_y"), elem.get("name"))
 
 
+def build_source_id_translation(snapshot_elements: dict[str, Any], live_elements: dict[str, Any]) -> dict[str, str]:
+    """Map each stable-identity element's id in `snapshot_elements` to its id in `live_elements`.
+
+    A stored backup's local FubElementIds can be renumbered on the live plan by a later
+    Comexio-side sync (see _element_identity) even though nothing wired to that element
+    actually changed. This lets a live per-connection value lookup (keyed by the LIVE plan's
+    ids, see api.get_function_plan_connection_values / function_plan_render_wiring._render_net)
+    still be applied while rendering a frozen snapshot whose ids may have since shifted —
+    used by coordinator.async_generate_plan_preview to keep a displayed backup's wiring/values
+    live without swapping its structure back to the current live plan. Only covers the
+    _STABLE_REF_TYPES kinds (IO/marker/WebIO/time module); a block instance, constant or
+    comment has no cross-snapshot identity to match on and is simply left untranslated.
+    """
+    live_by_identity = {
+        _element_identity(elem): elem_id
+        for elem_id, elem in live_elements.items()
+        if elem.get("reference", {}).get("type") in _STABLE_REF_TYPES
+    }
+    return {
+        elem_id: live_by_identity[identity]
+        for elem_id, elem in snapshot_elements.items()
+        if elem.get("reference", {}).get("type") in _STABLE_REF_TYPES
+        and (identity := _element_identity(elem)) in live_by_identity
+    }
+
+
 def _strip_position(identity: tuple[Any, ...]) -> tuple[Any, ...]:
     """Position-agnostic form of an element identity, used to pair up moved connections."""
     etype, ref_id, _pos_x, _pos_y, name = identity
