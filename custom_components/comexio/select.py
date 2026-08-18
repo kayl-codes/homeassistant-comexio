@@ -25,6 +25,10 @@ _LOGGER = logging.getLogger(__name__)
 # handle, since plan names aren't unique in Comexio.
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
+# Explicit choice in the backup selector for "show the live plan, not a stored snapshot".
+# Cannot collide with format_backup_label()'s "<kind>[<slot>] — <timestamp>" shape.
+LIVE_BACKUP_OPTION = "Live"
+
 
 def _fub_id_from_label(option: str) -> int | None:
     """Parse the fub_id back out of a plan select-option label."""
@@ -122,12 +126,14 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
     live plan, so a backup can be visually sighted before deciding whether to restore it.
     Purely an in-memory preview/targeting control — no entry.options persistence, since it is
     an ephemeral viewing choice, not a lasting configuration value. Without an explicit user
-    choice the selector defaults to the newest auto backup (auto[0]) of the active plan;
-    a 'Function Plans' plan change discards the explicit choice and falls back to that default,
-    so a stale backup choice can never be silently applied to a newly-selected, unrelated plan.
-    There is deliberately no "Live" entry: the preview returns to the live view on its own via
-    the webhook-driven refresh (coordinator.schedule_plan_preview_refresh), so the dropdown
-    only picks which stored snapshot to sight.
+    choice the selector defaults to LIVE_BACKUP_OPTION; a 'Function Plans' plan change discards
+    the explicit choice and falls back to that same default, so a stale backup choice can never
+    be silently applied to a newly-selected, unrelated plan.
+    Picking a stored snapshot freezes the preview's wiring/elements at that snapshot while its
+    per-connection values keep following the live plan (see button.py's _active_backup_choice
+    and coordinator.prime_snapshot_preview_cache) — it does NOT silently drift back to the live
+    plan's wiring on the next webhook push. LIVE_BACKUP_OPTION is the only way back to the fully
+    live view.
     """
 
     _attr_has_entity_name = True
@@ -179,17 +185,16 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
         if plan_name is None:
             return []
         entries = self.coordinator.function_plan_backup.plan_backups_for_identity_sync(fub_id, plan_name)
-        return [format_backup_label(e) for e in entries]
+        return [LIVE_BACKUP_OPTION, *(format_backup_label(e) for e in entries)]
 
     @property
     def current_option(self) -> str | None:
         options = self.options
         if self._selected in options:
             return self._selected
-        # Default: newest auto backup of the active plan (slot 0 = newest per kind, see
-        # plan_backups_for_identity_sync). Matched via label prefix — the visible label is
-        # the lookup key. Without a match the state stays unknown.
-        return next((o for o in options if o.startswith("auto[0]")), None)
+        # Default: the live plan, not a stored snapshot — a snapshot is only ever shown after
+        # an explicit user choice.
+        return LIVE_BACKUP_OPTION if LIVE_BACKUP_OPTION in options else None
 
     async def async_select_option(self, option: str) -> None:
         self._selected = option

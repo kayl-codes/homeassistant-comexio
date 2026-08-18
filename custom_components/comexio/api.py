@@ -24,6 +24,7 @@ from multidict import MultiDict
 
 # Mandatory DOMAIN import for Audit logic
 from .const import (
+    COMEXIO_HTTP_TIMEOUT_SEC,
     FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH,
     FUNCTION_PLAN_LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_X_WEBIO,
@@ -182,11 +183,19 @@ class ComexioAPI:
 
         # Dedicated cookie management for Comexio session persistence.
         # unsafe=True is only enabled if the target host is a local address.
-        session_kwargs = {}
-        if _is_local_address(self.host):
-            session_kwargs["cookie_jar"] = aiohttp.CookieJar(unsafe=True)
+        # Explicit timeout: without it, a stalled Comexio response (e.g. mid-firmware-update)
+        # can hang a caller indefinitely instead of surfacing as a catchable error — this
+        # previously wedged the Function Plan backup cycle's lock forever, silently stopping
+        # all future backups.
+        self.session: aiohttp.ClientSession = async_create_clientsession(hass, **self._build_session_kwargs())
 
-        self.session: aiohttp.ClientSession = async_create_clientsession(hass, **session_kwargs)
+        # Second, independently logged-in session used exclusively by the Function Plan
+        # preview's Stufe-2 connection-value poll (see coordinator._async_poll_connection_values).
+        # Own cookie jar/connection so that poll can never queue behind (or be queued behind
+        # by) the main coordinator's own requests on the shared session — see
+        # [[project-logikplan-preview]] on why a stuck live-poll starved the whole coordinator.
+        # Created lazily on first use, not here — most setups never open the preview.
+        self._preview_session: aiohttp.ClientSession | None = None
 
         # Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
         self.comexio_version: str | None = None
@@ -199,6 +208,31 @@ class ComexioAPI:
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
         self._auth_warned: bool = False
         self._login_warned: bool = False
+
+    def _build_session_kwargs(self) -> dict[str, Any]:
+        """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
+        session_kwargs: dict[str, Any] = {"timeout": aiohttp.ClientTimeout(total=COMEXIO_HTTP_TIMEOUT_SEC)}
+        if _is_local_address(self.host):
+            session_kwargs["cookie_jar"] = aiohttp.CookieJar(unsafe=True)
+        return session_kwargs
+
+    async def ensure_preview_session(self) -> aiohttp.ClientSession | None:
+        """Lazily create + log in the dedicated Stufe-2 preview session, reused after that.
+
+        Returns None if the login fails — the caller falls back to the main session for that
+        one poll tick rather than blocking the preview on a retry loop; the next tick tries
+        the dedicated session again from scratch (a fresh session, since a stale/rejected
+        cookie jar wouldn't fix itself).
+        """
+        if self._preview_session is not None:
+            return self._preview_session
+        session = async_create_clientsession(self.hass, **self._build_session_kwargs())
+        if not await self.login(session=session):
+            _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
+            await session.close()
+            return None
+        self._preview_session = session
+        return session
 
     @property
     def _base_url(self) -> str:
@@ -297,8 +331,13 @@ class ComexioAPI:
             _LOGGER.exception("RSA Block encryption failed")
             raise
 
-    async def login(self) -> bool:
-        """Performs the RSA login procedure for admin access."""
+    async def login(self, session: aiohttp.ClientSession | None = None) -> bool:
+        """Performs the RSA login procedure for admin access.
+
+        session: defaults to the main session; pass the dedicated preview session
+        (see ensure_preview_session) to log that one in independently instead.
+        """
+        sess = session if session is not None else self.session
         if not _is_local_address(self.host) and not self._login_warned:
             _LOGGER.warning(
                 "Logging into Comexio over plain HTTP on a non-local address (%s). "
@@ -310,9 +349,9 @@ class ComexioAPI:
         _LOGGER.debug("Starting v11 RSA login procedure for host: %s", self.host)
         url = f"{self._base_url}/board/home/login/"
 
-        self.session.cookie_jar.update_cookies({"comexio-client-time": str(int(time.time()))})
+        sess.cookie_jar.update_cookies({"comexio-client-time": str(int(time.time()))})
         try:
-            async with self.session.post(url, data={"login_keys": "true"}) as resp:
+            async with sess.post(url, data={"login_keys": "true"}) as resp:
                 keys = await resp.json(content_type=None)
 
             salt_str = base64.b64decode(keys["salt"]).decode("iso-8859-1")
@@ -333,8 +372,8 @@ class ComexioAPI:
             )
 
             async with (
-                self.session.post(url, data=payload, headers={"Referer": url}) as resp,
-                self.session.get(f"{self._base_url}/admin/") as v_resp,
+                sess.post(url, data=payload, headers={"Referer": url}) as resp,
+                sess.get(f"{self._base_url}/admin/") as v_resp,
             ):
                 html = await v_resp.text()
                 if "Anmeldung" not in html and html != "":
@@ -469,7 +508,9 @@ class ComexioAPI:
             _LOGGER.exception("Unexpected error fetching live states: %s", e)
             return {}
 
-    async def get_function_plan_connection_values(self, fub_id: int) -> dict[str, list[Any]]:
+    async def get_function_plan_connection_values(
+        self, fub_id: int, session: aiohttp.ClientSession | None = None
+    ) -> dict[str, list[Any]]:
         """Fetch live per-SOURCE-ELEMENT output values for one Function Plan — Studio's own
         "fupValueData" refresh action, the same /board/dashboard/refresh/ endpoint
         get_live_states uses. Unlike markers/IOs/WebIOs (get_live_states, resolved to
@@ -480,7 +521,13 @@ class ComexioAPI:
         — the dict key is the SOURCE FubElementId (not a connection/wire id: a block with
         several outputs reports one array for all of them, indexed by output IOPos, and
         several wires from the same output row share that one value).
+
+        session: defaults to the main session; the Stufe-2 poll passes its own dedicated,
+        independently logged-in session (see ensure_preview_session) so this high-frequency
+        call can never queue behind — or block — the main coordinator poll on a shared
+        connection.
         """
+        sess = session if session is not None else self.session
         url = f"{self._base_url}/board/dashboard/refresh/"
         payload = {"connection": {"action": "fupValueData", "fupId": fub_id}}
         form_data = aiohttp.FormData()
@@ -494,7 +541,7 @@ class ComexioAPI:
 
         _LOGGER.debug("Connection values request: POST %s payload=%s", url, payload)
         try:
-            async with self.session.post(url, data=form_data, headers=headers) as resp:
+            async with sess.post(url, data=form_data, headers=headers) as resp:
                 if resp.status != 200:
                     _LOGGER.error("Connection values fetch failed (fub=%s, HTTP %s)", fub_id, resp.status)
                     return {}
@@ -1545,6 +1592,7 @@ class ComexioAPI:
         """
         fub_ids = [int(fid) for fid in self._fub_data]
         if not fub_ids:
+            _LOGGER.warning("function_plan_load_all_plans: self._fub_data is empty — nothing to load")
             return {}
 
         semaphore = asyncio.Semaphore(concurrency)
@@ -2658,4 +2706,16 @@ class ComexioAPI:
         return payload.get("data", [])
 
     async def close(self) -> None:
-        """No-op: session lifecycle is managed by async_create_clientsession."""
+        """Close the main session and the dedicated preview session, if one was ever opened.
+
+        The main session is created during config entry setup, so async_create_clientsession
+        already registers it for auto-cleanup on entry unload/HA shutdown. The preview session
+        (see ensure_preview_session) is created lazily at runtime, outside that setup context,
+        so it only gets HA's homeassistant_stop cleanup — not entry-unload cleanup. Closing both
+        explicitly here (already called from async_unload_entry and the setup-failure path)
+        avoids leaking the preview session's connection across integration reloads.
+        """
+        await self.session.close()
+        if self._preview_session is not None:
+            await self._preview_session.close()
+            self._preview_session = None

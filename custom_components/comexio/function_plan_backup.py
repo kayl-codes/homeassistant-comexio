@@ -36,19 +36,6 @@ _FALLBACK_DPI = 90
 _FALLBACK_ORIENTATION = "landscape"
 
 
-def plan_hash(plan_data: dict[str, Any]) -> str:
-    """Return a canonical SHA-256 over elements + connections (incl. positions)."""
-    canonical = json.dumps(
-        {
-            "elements": plan_data.get("elements", {}),
-            "connections": plan_data.get("connections", {}),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
 # reference.type values with a globally stable ref_id (survives Comexio renumbering the
 # plan-local FubElementId): 1=IO, 2=marker, 10=WebIO, 4=time module. Everything else (block
 # instances, constants, comments) has no such global identity — fubBase blocks in particular
@@ -79,6 +66,32 @@ def _element_identity(elem: dict[str, Any]) -> tuple[Any, Any, float | None, flo
     if etype in _STABLE_REF_TYPES:
         return (etype, ref_id, None, None, None)
     return (etype, ref_id, elem.get("position_x"), elem.get("position_y"), elem.get("name"))
+
+
+def build_source_id_translation(snapshot_elements: dict[str, Any], live_elements: dict[str, Any]) -> dict[str, str]:
+    """Map each stable-identity element's id in `snapshot_elements` to its id in `live_elements`.
+
+    A stored backup's local FubElementIds can be renumbered on the live plan by a later
+    Comexio-side sync (see _element_identity) even though nothing wired to that element
+    actually changed. This lets a live per-connection value lookup (keyed by the LIVE plan's
+    ids, see api.get_function_plan_connection_values / function_plan_render_wiring._render_net)
+    still be applied while rendering a frozen snapshot whose ids may have since shifted —
+    used by coordinator.async_generate_plan_preview to keep a displayed backup's wiring/values
+    live without swapping its structure back to the current live plan. Only covers the
+    _STABLE_REF_TYPES kinds (IO/marker/WebIO/time module); a block instance, constant or
+    comment has no cross-snapshot identity to match on and is simply left untranslated.
+    """
+    live_by_identity = {
+        _element_identity(elem): elem_id
+        for elem_id, elem in live_elements.items()
+        if elem.get("reference", {}).get("type") in _STABLE_REF_TYPES
+    }
+    return {
+        elem_id: live_by_identity[identity]
+        for elem_id, elem in snapshot_elements.items()
+        if elem.get("reference", {}).get("type") in _STABLE_REF_TYPES
+        and (identity := _element_identity(elem)) in live_by_identity
+    }
 
 
 def _strip_position(identity: tuple[Any, ...]) -> tuple[Any, ...]:
@@ -138,6 +151,32 @@ def _connection_wires(snapshot: dict[str, Any]) -> set[tuple[Any, ...]]:
         outputs = outputs.values() if isinstance(outputs, dict) else outputs
         wires.update((src, _endpoint(out)) for out in outputs)
     return wires
+
+
+def _canonical_plan_content(plan_data: dict[str, Any]) -> dict[str, list]:
+    """Renumbering-tolerant content of a plan for plan_hash(): every element keyed by its own
+    stable identity (see _element_identity) instead of Comexio's raw, renumberable
+    FubElementId, plus every wire keyed by its endpoints' stable identities (see
+    _connection_wires) instead of the raw connection dict.
+    """
+    elements = plan_data.get("elements", {})
+    return {
+        "elements": sorted((_element_identity(elem) for elem in elements.values()), key=str),
+        "wires": sorted(_connection_wires(plan_data), key=str),
+    }
+
+
+def plan_hash(plan_data: dict[str, Any]) -> str:
+    """Return a canonical, renumbering-tolerant SHA-256 over a plan's elements + wiring.
+
+    Hashed over each element/wire's stable identity (see _canonical_plan_content), not
+    Comexio's raw FubElementIds — those get renumbered wholesale by some Comexio-side sync
+    operations without the wiring itself actually changing (see diff_snapshots for the
+    confirmed 2026-07-13 case), which would otherwise make async_auto_backup treat such a
+    sync as a real content change on every single run.
+    """
+    canonical = json.dumps(_canonical_plan_content(plan_data), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def diff_snapshots(newer: dict[str, Any], older: dict[str, Any]) -> dict[str, Any]:

@@ -444,6 +444,33 @@ function_plan_debug_session:
       selector:
         boolean:
 
+function_plan_preview_extend:
+  name: Function Plan Preview Extend
+  description: >
+    Internal — called by the plan card's debug box `/extend <minutes>` command. Extends
+    how long the currently displayed live plan preview keeps polling Comexio for wire
+    values before auto-stopping (default 15 minutes, to avoid a forgotten open tab
+    polling forever). Applies only to the plan preview currently on display, in memory
+    only — the next plan you open resets to the 15-minute default. No effect without a
+    live preview on display.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    minutes:
+      name: Minutes
+      description: New auto-stop window in minutes, counted from now (1-1440).
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 1440
+          mode: box
+
 function_plan_search:
   name: Function Plan Search
   description: >

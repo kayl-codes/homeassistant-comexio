@@ -1,4 +1,4 @@
-// Version: 0.9.4
+// Version: 0.9.7
 // Comexio function plan preview card — renders the plan-preview SVG INLINE (not via <img>).
 //
 // Why inline: an SVG inside an <img> is static — no :hover rules, no <title> tooltips,
@@ -18,7 +18,7 @@ import { matchesPattern, fmtTs } from "./comexio-plan-card-utils.js";
 
 // Version banner: lets the user verify in the browser console WHICH build actually
 // executes — ?v= query bumps proved unreliable against the service-worker cache.
-console.info("comexio-plan-card v0.9.4 (Live-Werte Stufe 2: Debug-Session-Kadenz) loaded");
+console.info("comexio-plan-card v0.9.7 (Auto-Stop-Meldung im Log, ! als eigene Hilfe-Zeile) loaded");
 
 // Seed filter for a card whose filter was never touched (localStorage key absent):
 // hides the periodically chattering analog inputs. A deliberately cleared filter
@@ -188,9 +188,39 @@ class ComexioPlanCard extends HTMLElement {
         .plan svg.searching circle { opacity: 0.25; }
         .plan g.node-g.search-hit rect { stroke: #f0c000; stroke-width: 3; }
         .plan g.node-g.search-hit text.node-comment { fill: #f0c000; }
+
+        /* Help dialog: native <dialog> renders in the top layer, so it always sits
+           above the plan/debug box regardless of the card's own stacking context. */
+        .help-dialog {
+          border: 1px solid var(--divider-color, #888); border-radius: 8px; padding: 16px;
+          width: min(640px, 92vw); max-height: 80vh; overflow-y: auto;
+          background: var(--card-background-color, #fff); color: var(--primary-text-color, inherit);
+          font: inherit;
+        }
+        .help-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+        .help-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .help-head h3 { margin: 0; font-size: 1.1em; }
+        .help-close {
+          background: none; border: none; padding: 2px; margin: 0; cursor: pointer;
+          color: var(--secondary-text-color, #888); line-height: 0;
+        }
+        .help-close:hover { color: var(--primary-text-color, #000); }
+        .help-dialog table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+        .help-dialog th, .help-dialog td {
+          text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--divider-color, #ddd);
+          vertical-align: top;
+        }
+        .help-dialog th { color: var(--secondary-text-color, #888); font-weight: 600; }
+        .help-dialog td:first-child { white-space: nowrap; }
+        .help-dialog code {
+          font-family: var(--code-font-family, monospace); background: rgba(128, 128, 128, 0.15);
+          padding: 0 3px; border-radius: 3px;
+        }
+        .help-dialog em { color: var(--secondary-text-color, #888); font-style: normal; font-size: 0.9em; }
       </style>
       <ha-card>
         <div class="toolbar">
+          <button class="help-toggle" title="Hilfe: Bedienung der Karte" aria-label="Hilfe anzeigen"><ha-icon icon="mdi:help-circle-outline"></ha-icon></button>
           <input type="search" placeholder="Suche… (z. B. M14, M1?, IOX3 #*) — Enter: alle Pläne durchsuchen" aria-label="Suche im Plan">
           <span class="hits"></span>
           <button class="zoom-out" title="Verkleinern" aria-label="Verkleinern"><ha-icon icon="mdi:magnify-minus-outline"></ha-icon></button>
@@ -216,7 +246,49 @@ class ComexioPlanCard extends HTMLElement {
                  aria-label="Debug-Befehl">
           <div class="debug-sug" hidden></div>
         </div>
-      </ha-card>`;
+      </ha-card>
+      <dialog class="help-dialog">
+        <div class="help-head">
+          <h3>Bedienung der Plan-Vorschau</h3>
+          <button class="help-close" title="Schließen" aria-label="Schließen"><ha-icon icon="mdi:close"></ha-icon></button>
+        </div>
+        <table>
+          <thead><tr><th>Aktion</th><th>Wirkung</th></tr></thead>
+          <tbody>
+            <tr><td>Suche tippen</td><td>Hebt passende Elemente hervor (gelber Rahmen), der Rest wird abgedunkelt. Platzhalter: <code>?</code> = ein Zeichen, <code>*</code> = beliebig viele (z. B. <code>M1?</code>, <code>IOX3#*</code>).</td></tr>
+            <tr><td>Enter in der Suche</td><td>Durchsucht alle Pläne. Bei genau einem Treffer wird der Plan automatisch ausgewählt.</td></tr>
+            <tr><td>Hover über Element</td><td>Zeigt den vollen Namen als Tooltip.</td></tr>
+            <tr><td>Hover über Draht</td><td>Hebt das gesamte elektrische Netz (alle Äste) gelb hervor.</td></tr>
+            <tr><td>Lupe − / +</td><td>Zoom verkleinern / vergrößern.</td></tr>
+            <tr><td>Klick auf %-Anzeige</td><td>Setzt den Zoom auf 100&nbsp;% zurück.</td></tr>
+            <tr><td>Konsolen-Symbol</td><td>Blendet die Debug-Box ein/aus.</td></tr>
+            <tr><td>Klick auf Element <em>(Debug-Box offen)</em></td><td>Übernimmt die Adresse des Elements ins Befehlsfeld.</td></tr>
+            <tr><td>Doppelklick, digital + beschreibbar <em>(Debug-Box offen)</em></td><td>Schaltet den Wert sofort um (0 ↔ 1).</td></tr>
+            <tr><td>Doppelklick, analog + beschreibbar <em>(Debug-Box offen)</em></td><td>Füllt das Befehlsfeld mit <code>Ziel=</code> vor, Wert selbst eintippen.</td></tr>
+            <tr><td>Doppelklick auf Eingang <em>(Debug-Box offen)</em></td><td>Keine Wirkung — Eingänge sind nur lesbar.</td></tr>
+            <tr><td>Strg+Klick auf Element <em>(Debug-Box offen)</em></td><td>Fügt das Signal dem Log-Ausblendfilter hinzu.</td></tr>
+            <tr><td>Befehlsfeld: <code>Ziel=Wert</code></td><td>Schreibt den Wert, z. B. <code>M107=1</code> oder <code>IOX2#Q3=0,5</code>.</td></tr>
+            <tr><td>Befehlsfeld: <code>!</code> am Ende</td><td>Erzwingt das Schreiben von einem Merker oder IO, auch wenn es nicht im angezeigten Plan vorhanden ist, z. B. <code>M107=1!</code>.</td></tr>
+            <tr><td>Befehlsfeld: ↑ / ↓</td><td>Blättert durch die Befehls-Historie.</td></tr>
+            <tr><td>Befehlsfeld: Tab / Enter bei Vorschlag</td><td>Übernimmt den markierten Autocomplete-Vorschlag.</td></tr>
+            <tr><td>Befehlsfeld: <code>/clear</code>, <code>/history</code></td><td>Leert das Log bzw. zeigt die Befehls-Historie im Log an.</td></tr>
+            <tr><td>Befehlsfeld: <code>/extend &lt;Minuten&gt;</code></td><td>Verlängert den Live-Poll dieser Vorschau (Standard: automatischer Stopp nach 15 Minuten) einmalig auf die angegebene Dauer — gilt nur für diese Sitzung, nicht gespeichert.</td></tr>
+            <tr><td>Filter-Eingabe (Trichter-Symbol)</td><td>Blendet passende Signale aus dem Log aus — Komma-getrennt, gleiche Platzhalter-Syntax wie die Suche.</td></tr>
+            <tr><td>Pause-Symbol</td><td>Hält das Live-Logging an bzw. setzt es fort (verworfene Ereignisse werden nicht nachgeliefert).</td></tr>
+            <tr><td>Radiergummi-Symbol</td><td>Leert das Log.</td></tr>
+            <tr><td>Griff über dem Log ziehen</td><td>Ändert die Höhe der Log-Box.</td></tr>
+          </tbody>
+        </table>
+      </dialog>`;
+    this._helpDialog = root.querySelector(".help-dialog");
+    root.querySelector(".help-toggle").addEventListener("click", () => this._helpDialog.showModal());
+    root.querySelector(".help-close").addEventListener("click", () => this._helpDialog.close());
+    // Click on the backdrop (event target is the <dialog> itself, not a descendant) closes it too.
+    this._helpDialog.addEventListener("click", (ev) => {
+      if (ev.target === this._helpDialog) {
+        this._helpDialog.close();
+      }
+    });
     this._input = root.querySelector("input");
     this._hitsEl = root.querySelector(".hits");
     this._zoomLabel = root.querySelector(".zoom-label");
@@ -601,6 +673,12 @@ class ComexioPlanCard extends HTMLElement {
       return; // pause button active — drop the event
     }
     const d = ev.data || {};
+    if (d.type === "system") {
+      // Backend status line (e.g. auto-stop), not a signal value — always shown, never
+      // subject to the exclude filter below.
+      this._debugLine(d.message, "cmd", ev.time_fired);
+      return;
+    }
     const label = d.label ?? `${d.type} ${d.id}`;
     const target = d.type === "marker" ? `M${d.id}` : this._labelToTarget.get(label) || null;
     if (this._eventHidden(label, target)) {
@@ -646,7 +724,42 @@ class ComexioPlanCard extends HTMLElement {
       }
       return;
     }
-    this._debugLine(`Unbekannter Befehl: ${raw} — verfügbar: /clear, /history`, "err");
+    const extendMatch = cmd.match(/^extend\s+(\d+)$/);
+    if (extendMatch) {
+      this._runExtendCommand(Number(extendMatch[1]));
+      return;
+    }
+    this._debugLine(`Unbekannter Befehl: ${raw} — verfügbar: /clear, /history, /extend <Minuten>`, "err");
+  }
+
+  // Extends the live preview's auto-stop window (default 15 min) for this arm only — not
+  // persisted, resets to the default the next time a plan is opened. See coordinator's
+  // set_preview_auto_stop_extension / the function_plan_preview_extend service.
+  async _runExtendCommand(minutes) {
+    if (minutes < 1 || minutes > 1440) {
+      this._debugLine(`✗ /extend ${minutes}: Bitte eine Minutenanzahl zwischen 1 und 1440 angeben`, "err");
+      return;
+    }
+    if (!this._hass) {
+      return;
+    }
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "call_service",
+        domain: "comexio",
+        service: "function_plan_preview_extend",
+        service_data: { minutes },
+        return_response: true,
+      });
+      const r = result?.response;
+      if (r?.success === false) {
+        this._debugLine(`✗ /extend ${minutes}: ${r.error || "fehlgeschlagen"}`, "err");
+      } else {
+        this._debugLine(`✓ Live-Poll bleibt jetzt ${minutes} Minuten aktiv`, "cmd");
+      }
+    } catch (err) {
+      this._debugLine(`✗ /extend ${minutes}: ${err?.message || err}`, "err");
+    }
   }
 
   _debugLine(text, cls = "", when = null) {
