@@ -140,6 +140,15 @@ DEFAULT_NAME = "Comexio"
 SCAN_INTERVAL_DEFAULT = 15
 SCAN_INTERVAL_OPTIONS = ["1", "5", "10", "15", "30", "45", "60", "120", "300", "600", "1440"]
 
+# Per-request HTTP timeout for all Comexio API calls (seconds). Without this, a stalled
+# response hangs the calling coroutine indefinitely instead of failing fast.
+COMEXIO_HTTP_TIMEOUT_SEC = 30
+# Outer safety net around the whole Function Plan backup cycle (bulk load + auto-backup +
+# paper backfill + purge): guarantees the cycle's lock is released even if some step hangs
+# in a way COMEXIO_HTTP_TIMEOUT_SEC doesn't cover, so a stuck cycle can't permanently block
+# every future backup attempt.
+FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC = 300
+
 # Operation durations for progress calculation (seconds)
 SYNC_DURATION_DELETE = 4
 SYNC_DURATION_WRITE = 35

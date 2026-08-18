@@ -14,7 +14,8 @@ multi-purpose") into thematic submodules:
 - `backup`    — function_plan_restore / function_plan_delete_backups /
   function_plan_purge_orphaned_backups / function_plan_list_backups handlers.
 - `misc`      — generate_web_io, set_value, function_plan_debug_session,
-  function_plan_search — handlers that don't share enough with the above groups.
+  function_plan_preview_extend, function_plan_search — handlers that don't share enough
+  with the above groups.
 
 This module is imported as `from .services import ...` from outside the package (e.g.
 `__init__.py`, `button.py`, `select.py`) exactly as it was when services.py was a single
@@ -48,6 +49,7 @@ from .backup import (
 from .connect import handle_function_plan_connect
 from .misc import (
     _handle_function_plan_debug_session,
+    _handle_function_plan_preview_extend,
     _handle_function_plan_search,
     _handle_set_value,
     handle_generate_web_io,
@@ -120,6 +122,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     if not hass.services.has_service(DOMAIN, "function_plan_debug_session"):
         hass.services.async_register(
             DOMAIN, "function_plan_debug_session", functools.partial(_handle_function_plan_debug_session, hass)
+        )
+    if not hass.services.has_service(DOMAIN, "function_plan_preview_extend"):
+        hass.services.async_register(
+            DOMAIN,
+            "function_plan_preview_extend",
+            functools.partial(_handle_function_plan_preview_extend, hass),
+            supports_response=SupportsResponse.OPTIONAL,
         )
     if not hass.services.has_service(DOMAIN, "function_plan_search"):
         hass.services.async_register(

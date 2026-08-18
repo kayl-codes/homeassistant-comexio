@@ -26,7 +26,9 @@ _LOGGER = logging.getLogger(__name__)
 
 _TITLE_SET_VALUE_ERR = "Set Value — Error"
 _TITLE_DEBUG_SESSION_ERR = "Function Plan Debug Session — Error"
+_TITLE_PREVIEW_EXTEND_ERR = "Function Plan Preview Extend — Error"
 _TITLE_SEARCH_ERR = "Function Plan Search — Error"
+_INSTANCE_NOT_RESOLVED_ERR = "Comexio instance not resolved."
 
 # Command syntax accepted by the set_value service (and the plan card's debug input):
 # "M107" (marker) or "IOX2#Q3" (extension#identifier).
@@ -228,6 +230,40 @@ async def _handle_function_plan_debug_session(hass: HomeAssistant, call: Service
     coordinator.set_debug_session_active(active)
 
 
+_PREVIEW_EXTEND_MIN_MINUTES = 1
+_PREVIEW_EXTEND_MAX_MINUTES = 1440  # 24h — the longest window a user asked to watch for
+
+
+async def _handle_function_plan_preview_extend(hass: HomeAssistant, call: ServiceCall) -> dict:
+    """Extend the currently armed preview's Stufe-2 auto-stop window (debug box `/extend <n>`).
+
+    In-memory only, for this arm alone — see coordinator.set_preview_auto_stop_extension.
+    No fub_id/entity targeting, same single-instance resolution as function_plan_debug_session.
+    """
+    ctx = await _async_get_service_context(hass, call, _TITLE_PREVIEW_EXTEND_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
+    coordinator, _api, _fub_id = ctx
+
+    raw_minutes = call.data.get("minutes")
+    try:
+        minutes = int(raw_minutes)
+    except (TypeError, ValueError):
+        error = f"Invalid minutes value '{raw_minutes}' — expected a whole number."
+        _LOGGER.info("Function Plan Preview Extend: minutes='%s' error='%s'", raw_minutes, error)
+        return {"success": False, "error": error}
+    if not _PREVIEW_EXTEND_MIN_MINUTES <= minutes <= _PREVIEW_EXTEND_MAX_MINUTES:
+        error = f"minutes must be between {_PREVIEW_EXTEND_MIN_MINUTES} and {_PREVIEW_EXTEND_MAX_MINUTES}."
+        _LOGGER.info("Function Plan Preview Extend: minutes=%s error='%s'", minutes, error)
+        return {"success": False, "error": error}
+
+    extended = coordinator.set_preview_auto_stop_extension(minutes)
+    _LOGGER.info("Function Plan Preview Extend: minutes=%s extended=%s", minutes, extended)
+    if not extended:
+        return {"success": False, "error": "No live plan preview is currently armed."}
+    return {"success": True, "minutes": minutes}
+
+
 async def _search_plan_labels(
     coordinator: ComexioCoordinator,
     api: Any,
@@ -365,7 +401,7 @@ async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | No
     """
     ctx = await _async_get_service_context(hass, call, _TITLE_SET_VALUE_ERR, resolve_plan=False, do_login=False)
     if ctx is None:
-        return {"success": False, "error": "Comexio instance not resolved."}
+        return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
     coordinator, api, _fub_id = ctx
 
     target = str(call.data.get("target", "")).strip()

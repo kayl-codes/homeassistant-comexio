@@ -46,6 +46,7 @@ from .const import (
     EVENT_PLAN_VALUE,
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
+    FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC,
     FUNCTION_PLAN_FUB_ID_AUTO,
     FUNCTION_PLAN_LAYOUT_COMMENT_Y,
     FUNCTION_PLAN_LAYOUT_Y_START,
@@ -105,6 +106,13 @@ _PREVIEW_LIVE_REFRESH_DELAY = 0.5
 # wire colors should keep up while someone is actually watching the log).
 _CONNECTION_POLL_INTERVAL_NORMAL = timedelta(seconds=2)
 _CONNECTION_POLL_INTERVAL_FAST = timedelta(seconds=0.5)
+_CONNECTION_POLL_MAX_FAILURES = 5
+
+# Stufe-2 poll auto-stop: a live plan preview left open (e.g. a forgotten browser tab)
+# would otherwise poll forever — disarm it after this many minutes by default. The plan
+# card's debug box can extend this once per arm, in memory only (function_plan_preview_extend),
+# for someone deliberately watching a phenomenon over a longer window.
+_PREVIEW_AUTO_STOP_DEFAULT_MINUTES = 15
 
 # Calendar-function (type 3) Freq -> sun.sun attribute providing HA's own next-occurrence
 # time for that astro event (computed by HA's sun integration from the configured location,
@@ -277,6 +285,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._connection_values: dict[str, Any] = {}
         self._connection_poll_cancel: Any = None
         self._connection_poll_fast_requested: bool = False
+        # Consecutive fetch failures for the poll above (e.g. transient ServerDisconnectedError).
+        # Disarms the preview after _CONNECTION_POLL_MAX_FAILURES instead of retrying forever at
+        # full cadence with no backoff — a past incident hammered Comexio's serialized endpoint
+        # hard enough to starve the main coordinator poll and the Function-Plan auto-backup cycle.
+        self._connection_poll_fail_count: int = 0
+        # Auto-stop timer for the armed preview (see _PREVIEW_AUTO_STOP_DEFAULT_MINUTES) and
+        # the in-memory-only extension requested via the debug box, reset to the default on
+        # every new arm (a fresh plan view never inherits a previous session's extension).
+        self._preview_auto_stop_cancel: Any = None
+        self._preview_auto_stop_minutes: int = _PREVIEW_AUTO_STOP_DEFAULT_MINUTES
         # Extension firmware check: {name -> raw entry} from the last successful
         # checkextension_fwupdate call (see async_start_firmware_update_check). Empty until
         # the first check actually runs, which only happens once per comexio_version change.
@@ -750,11 +768,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # while a previous cycle is still running, instead of creating one just to have it
             # return immediately on the lock check.
             if not self._function_plan_backup_lock.locked():
+                _LOGGER.debug("[%s] Function Plan backup cycle: spawning background task", self.server_id)
                 self.config_entry.async_create_background_task(
                     self.hass,
                     self._async_function_plan_backup_cycle(),
                     name=f"comexio_{self.server_id}_function_plan_backup",
                 )
+            else:
+                _LOGGER.warning("[%s] Function Plan backup cycle: NOT spawned — lock already held", self.server_id)
 
             return final_data
 
@@ -767,6 +788,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self._function_plan_backup_lock.locked():
             _LOGGER.debug("[%s] Function Plan backup cycle skipped: previous run still in progress", self.server_id)
             return
+        try:
+            async with asyncio.timeout(FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC):
+                await self._async_function_plan_backup_cycle_locked()
+        except TimeoutError:
+            _LOGGER.warning(
+                "[%s] Function Plan backup cycle aborted after %ss — lock released, will retry next poll",
+                self.server_id,
+                FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC,
+            )
+
+    async def _async_function_plan_backup_cycle_locked(self) -> None:
+        """Body of the backup cycle, bounded by the outer timeout in the caller."""
         async with self._function_plan_backup_lock:
             # Reset up front so a failed/empty cycle never leaves a stale result from a
             # previous poll behind — ComexioPlanChangedSensor must reflect *this* cycle only.
@@ -777,6 +810,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.exception("[%s] Function Plan bulk load failed — keeping previous snapshot", self.server_id)
                 return
             if not plans:
+                _LOGGER.warning(
+                    "[%s] Function Plan backup cycle: bulk load returned no plans — skipping this cycle",
+                    self.server_id,
+                )
                 return
             self.function_plan_plans = plans
             # Re-evaluate which unlabeled markers are now referenced in a plan (see
@@ -1234,6 +1271,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         if plan_switched:
             self._restart_connection_poll(fast=self._connection_poll_fast_requested)
+            self._preview_auto_stop_minutes = _PREVIEW_AUTO_STOP_DEFAULT_MINUTES
+            self._restart_preview_auto_stop()
 
     def _update_snapshot_preview_cache(
         self,
@@ -1269,6 +1308,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         if not already_armed:
             self._restart_connection_poll(fast=self._connection_poll_fast_requested)
+            self._preview_auto_stop_minutes = _PREVIEW_AUTO_STOP_DEFAULT_MINUTES
+            self._restart_preview_auto_stop()
 
     def schedule_plan_preview_refresh(self) -> None:
         """Debounced re-render of the currently armed plan preview after a value update.
@@ -1333,7 +1374,47 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self._connection_poll_cancel is not None:
             self._connection_poll_cancel()
             self._connection_poll_cancel = None
+        if self._preview_auto_stop_cancel is not None:
+            self._preview_auto_stop_cancel()
+            self._preview_auto_stop_cancel = None
         self._connection_values = {}
+
+    def _restart_preview_auto_stop(self) -> None:
+        """(Re)arm the auto-stop timer at the currently requested duration.
+
+        Called on every genuine (re-)arm of the preview (see _update_live_preview_cache /
+        _update_snapshot_preview_cache) — always resets to _PREVIEW_AUTO_STOP_DEFAULT_MINUTES
+        first; function_plan_preview_extend then bumps _preview_auto_stop_minutes and calls
+        this again for the SAME arm, without touching the default for the next one.
+        """
+        if self._preview_auto_stop_cancel is not None:
+            self._preview_auto_stop_cancel()
+        self._preview_auto_stop_cancel = async_call_later(
+            self.hass, self._preview_auto_stop_minutes * 60, self._async_auto_stop_preview
+        )
+
+    async def _async_auto_stop_preview(self, _now: Any) -> None:
+        """Disarm a preview left open past its auto-stop window — see _PREVIEW_AUTO_STOP_DEFAULT_MINUTES."""
+        self._preview_auto_stop_cancel = None
+        _LOGGER.info(
+            "[%s] Function Plan preview auto-stopped after %s min of inactivity-unaware runtime",
+            self.server_id,
+            self._preview_auto_stop_minutes,
+        )
+        self._preview_plan_cache = None
+        self._stop_connection_poll()
+
+    def set_preview_auto_stop_extension(self, minutes: int) -> bool:
+        """Extend the CURRENT arm's auto-stop window (function_plan_preview_extend service).
+
+        In-memory only, for this arm alone — the next plan view resets to the default (see
+        _restart_preview_auto_stop). No-op (returns False) while nothing is armed.
+        """
+        if self._preview_plan_cache is None:
+            return False
+        self._preview_auto_stop_minutes = minutes
+        self._restart_preview_auto_stop()
+        return True
 
     def set_debug_session_active(self, active: bool) -> None:
         """Switch the Stufe-2 poll cadence for the plan card's debug box (function_plan_debug_session).
@@ -1354,7 +1435,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cache = self._preview_plan_cache
         if cache is None:
             return
-        self._connection_values = await self.api.get_function_plan_connection_values(cache["fub_id"])
+        try:
+            preview_session = await self.api.ensure_preview_session()
+            self._connection_values = await self.api.get_function_plan_connection_values(
+                cache["fub_id"], session=preview_session
+            )
+        except Exception:
+            self._connection_poll_fail_count += 1
+            if self._connection_poll_fail_count >= _CONNECTION_POLL_MAX_FAILURES:
+                _LOGGER.exception(
+                    "[%s] Connection-value poll failed %s times in a row — disarming plan preview "
+                    "(re-open the preview to retry)",
+                    self.server_id,
+                    self._connection_poll_fail_count,
+                )
+                self._preview_plan_cache = None
+                self._stop_connection_poll()
+                self._connection_poll_fail_count = 0
+            else:
+                _LOGGER.warning(
+                    "[%s] Connection-value poll failed (%s/%s), will retry next cycle",
+                    self.server_id,
+                    self._connection_poll_fail_count,
+                    _CONNECTION_POLL_MAX_FAILURES,
+                )
+            return
+        self._connection_poll_fail_count = 0
         _LOGGER.debug(
             "[%s] Connection-value poll fub=%s plan=%s -> %s",
             self.server_id,
