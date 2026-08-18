@@ -2706,4 +2706,16 @@ class ComexioAPI:
         return payload.get("data", [])
 
     async def close(self) -> None:
-        """No-op: session lifecycle is managed by async_create_clientsession."""
+        """Close the main session and the dedicated preview session, if one was ever opened.
+
+        The main session is created during config entry setup, so async_create_clientsession
+        already registers it for auto-cleanup on entry unload/HA shutdown. The preview session
+        (see ensure_preview_session) is created lazily at runtime, outside that setup context,
+        so it only gets HA's homeassistant_stop cleanup — not entry-unload cleanup. Closing both
+        explicitly here (already called from async_unload_entry and the setup-failure path)
+        avoids leaking the preview session's connection across integration reloads.
+        """
+        await self.session.close()
+        if self._preview_session is not None:
+            await self._preview_session.close()
+            self._preview_session = None

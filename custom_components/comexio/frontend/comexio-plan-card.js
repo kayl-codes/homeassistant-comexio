@@ -1,4 +1,4 @@
-// Version: 0.9.6
+// Version: 0.9.7
 // Comexio function plan preview card — renders the plan-preview SVG INLINE (not via <img>).
 //
 // Why inline: an SVG inside an <img> is static — no :hover rules, no <title> tooltips,
@@ -18,7 +18,7 @@ import { matchesPattern, fmtTs } from "./comexio-plan-card-utils.js";
 
 // Version banner: lets the user verify in the browser console WHICH build actually
 // executes — ?v= query bumps proved unreliable against the service-worker cache.
-console.info("comexio-plan-card v0.9.6 (Debug-Box: /extend Live-Poll-Verlängerung) loaded");
+console.info("comexio-plan-card v0.9.7 (Auto-Stop-Meldung im Log, ! als eigene Hilfe-Zeile) loaded");
 
 // Seed filter for a card whose filter was never touched (localStorage key absent):
 // hides the periodically chattering analog inputs. A deliberately cleared filter
@@ -267,7 +267,8 @@ class ComexioPlanCard extends HTMLElement {
             <tr><td>Doppelklick, analog + beschreibbar <em>(Debug-Box offen)</em></td><td>Füllt das Befehlsfeld mit <code>Ziel=</code> vor, Wert selbst eintippen.</td></tr>
             <tr><td>Doppelklick auf Eingang <em>(Debug-Box offen)</em></td><td>Keine Wirkung — Eingänge sind nur lesbar.</td></tr>
             <tr><td>Strg+Klick auf Element <em>(Debug-Box offen)</em></td><td>Fügt das Signal dem Log-Ausblendfilter hinzu.</td></tr>
-            <tr><td>Befehlsfeld: <code>Ziel=Wert</code></td><td>Schreibt den Wert, z. B. <code>M107=1</code> oder <code>IOX2#Q3=0,5</code>. Ein <code>!</code> am Ende erzwingt das Schreiben auch außerhalb des angezeigten Plans.</td></tr>
+            <tr><td>Befehlsfeld: <code>Ziel=Wert</code></td><td>Schreibt den Wert, z. B. <code>M107=1</code> oder <code>IOX2#Q3=0,5</code>.</td></tr>
+            <tr><td>Befehlsfeld: <code>!</code> am Ende</td><td>Erzwingt das Schreiben von einem Merker oder IO, auch wenn es nicht im angezeigten Plan vorhanden ist, z. B. <code>M107=1!</code>.</td></tr>
             <tr><td>Befehlsfeld: ↑ / ↓</td><td>Blättert durch die Befehls-Historie.</td></tr>
             <tr><td>Befehlsfeld: Tab / Enter bei Vorschlag</td><td>Übernimmt den markierten Autocomplete-Vorschlag.</td></tr>
             <tr><td>Befehlsfeld: <code>/clear</code>, <code>/history</code></td><td>Leert das Log bzw. zeigt die Befehls-Historie im Log an.</td></tr>
@@ -672,6 +673,12 @@ class ComexioPlanCard extends HTMLElement {
       return; // pause button active — drop the event
     }
     const d = ev.data || {};
+    if (d.type === "system") {
+      // Backend status line (e.g. auto-stop), not a signal value — always shown, never
+      // subject to the exclude filter below.
+      this._debugLine(d.message, "cmd", ev.time_fired);
+      return;
+    }
     const label = d.label ?? `${d.type} ${d.id}`;
     const target = d.type === "marker" ? `M${d.id}` : this._labelToTarget.get(label) || null;
     if (this._eventHidden(label, target)) {

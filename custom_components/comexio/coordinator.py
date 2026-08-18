@@ -1401,6 +1401,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.server_id,
             self._preview_auto_stop_minutes,
         )
+        self._fire_plan_system_event(
+            f"Live-Poll nach {self._preview_auto_stop_minutes} Minuten automatisch gestoppt — "
+            "Plan erneut öffnen, um ihn fortzusetzen"
+        )
         self._preview_plan_cache = None
         self._stop_connection_poll()
 
@@ -1480,6 +1484,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._preview_refresh_cancel()
             self._preview_refresh_cancel = None
         await super().async_shutdown()
+
+    def _fire_plan_system_event(self, message: str) -> None:
+        """Publish a card-only status line (not a signal value) — see _fire_plan_event.
+
+        Unlike _fire_plan_event, not gated on the preview cache: callers (e.g. the auto-stop
+        timer) may need to announce a state change made just as the cache is torn down.
+        """
+        self.hass.bus.async_fire(EVENT_PLAN_VALUE, {"server_id": self.server_id, "type": "system", "message": message})
 
     def _fire_plan_event(self, kind: str, ref_id: str, label: str, value: float | int | str) -> None:
         """Publish a value push on the HA bus IF it belongs to the live plan on display.
