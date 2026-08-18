@@ -1456,6 +1456,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self._preview_plan_cache = None
                 self._stop_connection_poll()
                 self._connection_poll_fail_count = 0
+                self._fire_plan_system_event(
+                    f"Live-Poll nach {_CONNECTION_POLL_MAX_FAILURES} fehlgeschlagenen Versuchen "
+                    "gestoppt — Plan erneut öffnen, um ihn fortzusetzen"
+                )
             else:
                 _LOGGER.warning(
                     "[%s] Connection-value poll failed (%s/%s), will retry next cycle",

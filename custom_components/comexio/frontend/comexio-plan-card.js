@@ -736,6 +736,10 @@ class ComexioPlanCard extends HTMLElement {
   // persisted, resets to the default the next time a plan is opened. See coordinator's
   // set_preview_auto_stop_extension / the function_plan_preview_extend service.
   async _runExtendCommand(minutes) {
+    if (minutes < 1 || minutes > 1440) {
+      this._debugLine(`✗ /extend ${minutes}: Bitte eine Minutenanzahl zwischen 1 und 1440 angeben`, "err");
+      return;
+    }
     if (!this._hass) {
       return;
     }
