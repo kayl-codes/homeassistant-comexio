@@ -11,7 +11,7 @@ from typing import Any
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State
-from homeassistant.helpers import entity_registry as er, issue_registry as ir
+from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
@@ -308,6 +308,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.extension_firmware: dict[str, dict[str, Any]] = {}
         self._last_checked_fw_version: str | None = None
         self._firmware_store: Store = Store(hass, 1, f"{DOMAIN}_extension_firmware_{self.server_id}")
+        # Extension identity registry: {serial -> {"name": ext_name}}. Lets a Comexio-side
+        # extension rename be detected (same stable serial, different name) and migrated in
+        # place instead of being treated as a deleted+recreated extension. See
+        # async_detect_and_migrate_extension_renames.
+        self.extension_registry: dict[str, dict[str, str]] = {}
+        self._extension_registry_store: Store = Store(hass, 1, f"{DOMAIN}_extension_registry_{self.server_id}")
         # Bus workload monitoring: latest reading from the independent fast poll
         # (see async_start_bus_load_poll / _async_bus_load_tick). None until the first tick.
         self.bus_workload: int | None = None
@@ -364,6 +370,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "webio_commands": parsed_data.get("webio_commands", {}),
                 "webio_names": parsed_data.get("webio_names", {}),
                 "webio_devices": parsed_data.get("webio_devices", {}),
+                "extensions": parsed_data.get("extensions", {}),
             }
 
             # R1: Merge API snapshot with any webhook values that arrived during the fetch.
@@ -1620,6 +1627,80 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         self.extension_firmware = stored.get("extension_firmware", {})
         self._last_checked_fw_version = stored.get("last_checked_fw_version")
+
+    async def async_load_extension_registry(self) -> None:
+        """Restore the last known extension serial->name registry (called once at setup).
+
+        Without this, every HA restart would forget which name was last seen for a given
+        extension serial, and a Comexio-side rename that happened while HA was offline could
+        never be detected as a rename (see async_detect_and_migrate_extension_renames).
+        """
+        stored = await self._extension_registry_store.async_load()
+        if not stored:
+            return
+        self.extension_registry = stored.get("extensions", {})
+
+    async def async_detect_and_migrate_extension_renames(self) -> list[dict[str, str]]:
+        """Detect Comexio-side extension renames via their stable serial and migrate in place.
+
+        Must run after the first refresh (self.data["extensions"] populated) and before the
+        orphan-cleanup in __init__.py builds its active-unique-ids set, so migrated entities
+        already carry their new unique_id/device identifiers when cleanup compares against it.
+        Extensions currently offline are skipped: their serial's format changes (see
+        api._is_extension_offline) when a module drops offline, which would make it
+        indistinguishable from an unrelated serial.
+        """
+        renames: list[dict[str, str]] = []
+        dirty = False
+
+        for meta in self.data.get("extensions", {}).values():
+            serial = meta.get("serial", "")
+            new_name = meta.get("name", "")
+            if not serial or "-" not in serial:
+                continue
+
+            known = self.extension_registry.get(serial)
+            if known is None:
+                self.extension_registry[serial] = {"name": new_name}
+                dirty = True
+            elif known["name"] != new_name:
+                old_name = known["name"]
+                self._migrate_extension_entities(old_name, new_name)
+                self.extension_registry[serial]["name"] = new_name
+                dirty = True
+                renames.append({"old_name": old_name, "new_name": new_name})
+
+        if dirty:
+            await self._extension_registry_store.async_save({"extensions": self.extension_registry})
+
+        return renames
+
+    def _migrate_extension_entities(self, old_name: str, new_name: str) -> None:
+        """Rewrite unique_id/device identifiers for one renamed extension, in place."""
+        ent_reg = er.async_get(self.hass)
+        server_slug = self.server_id.lower()
+        old_prefix = f"comexio_{server_slug}_{old_name.lower()}_"
+        for entity_entry in er.async_entries_for_config_entry(ent_reg, self.config_entry.entry_id):
+            if not entity_entry.unique_id.startswith(old_prefix):
+                continue
+            suffix = entity_entry.unique_id[len(old_prefix) :]
+            new_uid = f"comexio_{server_slug}_{new_name.lower()}_{suffix}"
+            if not ent_reg.async_get_entity_id(entity_entry.domain, DOMAIN, new_uid):
+                ent_reg.async_update_entity(entity_entry.entity_id, new_unique_id=new_uid)
+
+        dev_reg = dr.async_get(self.hass)
+        old_device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{server_slug}_{old_name}".lower())})
+        if old_device:
+            dev_reg.async_update_device(
+                old_device.id,
+                new_identifiers={(DOMAIN, f"{server_slug}_{new_name}".lower())},
+                name=f"{self.server_id} {new_name}",
+            )
+
+        # Keep the firmware cache under the new name so update.* doesn't briefly show
+        # "Unknown" until the next nightly firmware check re-populates it.
+        if old_name in self.extension_firmware:
+            self.extension_firmware[new_name] = self.extension_firmware.pop(old_name)
 
     def async_start_firmware_update_check(self):
         """Start the nightly firmware-check gate; returns the cancel callback.

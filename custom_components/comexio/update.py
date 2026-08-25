@@ -8,15 +8,19 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, fw_update_signal
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, fw_update_signal
 from .coordinator import ComexioCoordinator
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up the extension firmware update entities (BASE + one per known extension)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    conf = {**entry.data, **entry.options}
 
-    ext_names = sorted({io["ext_name"] for io in coordinator.data.get("io", [])})
+    include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
+    ext_names = sorted(
+        {io["ext_name"] for io in coordinator.data.get("io", []) if not io.get("offline") or include_offline}
+    )
     entities: list[UpdateEntity] = [ComexioBaseFirmwareUpdate(coordinator, coordinator.server_id)]
     entities.extend(
         ComexioExtensionFirmwareUpdate(coordinator, coordinator.server_id, ext_name) for ext_name in ext_names

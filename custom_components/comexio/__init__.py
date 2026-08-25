@@ -74,6 +74,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # so update.* entities (update.py) don't start at Unknown after every restart.
     await coordinator.async_load_extension_firmware()
 
+    # Restore the last known extension serial->name registry, then migrate any entity/device
+    # whose extension was renamed in Comexio since the last setup. Must run before the entity
+    # cleanup below, which would otherwise treat the old (pre-rename) unique_ids as orphaned
+    # and delete them instead of letting them be renamed in place.
+    await coordinator.async_load_extension_registry()
+    renamed_extensions = await coordinator.async_detect_and_migrate_extension_renames()
+    for renamed in renamed_extensions:
+        _LOGGER.info(
+            "[%s] Comexio extension renamed: '%s' -> '%s' — migrated HA entities/device in place",
+            server_id,
+            renamed["old_name"],
+            renamed["new_name"],
+        )
+
     # ---------------------------
     # Explicit Device Registration
     # ---------------------------
@@ -179,7 +193,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # same way as the IO entities above, since extension existence is independent of the
     # firmware check ever having run — entities just stay "unknown" until the first check.
     active_unique_ids.add(f"comexio_{server_id}_base_firmware_update")
-    for ext_name in {io["ext_name"] for io in coordinator.data.get("io", [])}:
+    for ext_name in {
+        io["ext_name"] for io in coordinator.data.get("io", []) if not io.get("offline") or include_offline
+    }:
         active_unique_ids.add(f"comexio_{server_id}_{ext_name}_firmware_update".lower())
 
     # Build expected-platform map so that entities which migrated to a different
