@@ -621,8 +621,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         api: Any, plan_data: dict, cleanup_ids: list[int]
     ) -> tuple[list[int], list[int]]:
         """For each marker in cleanup_ids, collect its wired WebIO ids in this plan — or,
-        if it has no WebIO counterpart at all, its element id for direct deletion (see
-        _delete_unwired_marker_elements).
+        if it has no wiring at all, its element id for direct deletion (see
+        _delete_unwired_marker_elements). A marker wired to something OTHER than a WebIO
+        (a timer, logic block, etc.) is left untouched entirely: it still participates in
+        plan logic unrelated to this ignored-marker Web-IO cleanup, so it's neither queued
+        for unwiring (nothing WebIO-related to unwire) nor for deletion (would break that
+        other wiring).
         """
         webio_ids: list[int] = []
         unwired_marker_elem_ids: list[int] = []
@@ -633,7 +637,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             marker_webio_ids = api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data)
             if marker_webio_ids:
                 webio_ids.extend(marker_webio_ids)
-            else:
+            elif not api._element_has_any_wiring(marker_elem_id, plan_data):
                 unwired_marker_elem_ids.append(int(marker_elem_id))
         return webio_ids, unwired_marker_elem_ids
 

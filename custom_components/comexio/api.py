@@ -2532,6 +2532,20 @@ class ComexioAPI:
         return [str(o.get("FubElementId")) for o in outputs if isinstance(o, dict)]
 
     @staticmethod
+    def _element_has_any_wiring(elem_id: str, plan_data: dict) -> bool:
+        """True if elem_id is a source (input) or sink (output) of any connection in this plan.
+
+        Broader than a WebIO-specific check — used to tell "not wired to a WebIO" apart from
+        "not wired at all", since only the latter is safe to delete outright.
+        """
+        for conn_data in plan_data.get("connections", {}).values():
+            if str(conn_data.get("input", {}).get("FubElementId", -1)) == elem_id:
+                return True
+            if elem_id in ComexioAPI._connection_output_ids(conn_data):
+                return True
+        return False
+
+    @staticmethod
     def _find_wired_webio_ids_for_marker(marker_id: int, marker_elem_id: str, plan_data: dict) -> list[int]:
         """Return the webIoIds of all WebIO elements directly wired to the given marker element."""
         elements = plan_data.get("elements", {})
