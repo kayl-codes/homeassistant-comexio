@@ -1,6 +1,6 @@
 # Version: 0.8.3
 """Simplified signal-flow diagram for a Function Plan: labeled boxes + arrows arranged in
-topological column order (input -> logic -> output) — deliberately NOT the detailed Comexio
+topological row order, top to bottom (input -> logic -> output) — deliberately NOT the detailed Comexio
 pill/block styling (pins, port rows, ID boxes, obstacle-avoiding wire routing) that
 render_plan_svg uses; an earlier version reused that drawing code and just looked like "the
 same diagram again" instead of a flow chart (user feedback, 2026-08). Only the topological
@@ -30,8 +30,8 @@ _BOX_H = 32.0 * _FONT_SCALE
 _BOX_MIN_W = 70.0 * _FONT_SCALE
 _CHAR_W = 6.2 * _FONT_SCALE  # approx text width per character at _FONT_SIZE — sizes boxes to their label
 _FONT_SIZE = 11.0 * _FONT_SCALE
-_H_GAP = 90.0  # horizontal gap between columns
-_V_GAP = 40.0  # vertical gap between stacked boxes in the same column
+_H_GAP = 90.0  # horizontal gap between boxes within the same row/layer
+_V_GAP = 40.0  # vertical gap between stacked rows/layers
 _MARGIN = 25.0
 _MAX_LABEL_LEN = 22
 

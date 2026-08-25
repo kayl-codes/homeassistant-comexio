@@ -434,7 +434,7 @@ function_plan_flow_diagram:
   name: Function Plan Flow Diagram
   description: >
     Renders a plan as a signal-flow diagram: elements arranged by topological order
-    (input -> logic -> output, left to right) instead of their physical Comexio Studio
+    (input -> logic -> output, top to bottom) instead of their physical Comexio Studio
     position. Elements with no wiring at all are left out. Never scheduled
     automatically. Result comes back as a service response only (the SVG itself) — no
     notification — meant to be shown in a popup by the Plan Preview card. Two ways to

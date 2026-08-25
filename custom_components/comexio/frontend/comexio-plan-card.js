@@ -679,7 +679,15 @@ class ComexioPlanCard extends HTMLElement {
     this._analysisInFlight = true;
     // Claim the shared dialog for THIS card instance — a later _highlightFinding() looks up
     // elements in THIS instance's own plan SVG, so "whoever opened it last" must own it.
+    // dialog._analysisGeneration is bumped on every claim: if a second card claims the dialog
+    // before this card's service call resolves, the stale response below (and any later flow
+    // diagram load, see _loadFlowDiagram) is detected by generation mismatch and dropped instead
+    // of overwriting the now-current owner's findings/flow (two mounted cards racing their
+    // Analyse buttons, reported 2026-08-25).
     const dialog = _ensureSharedAnalysisDialog();
+    const generation = (dialog._analysisGeneration || 0) + 1;
+    dialog._analysisGeneration = generation;
+    this._analysisGeneration = generation;
     dialog._owner = this;
     this._analysisDialog = dialog;
     this._analysisSummaryEl = dialog.querySelector(".analysis-summary");
@@ -713,10 +721,15 @@ class ComexioPlanCard extends HTMLElement {
         return_response: true,
       });
       console.debug("comexio-plan-card: _runAnalysis result", result);
+      if (dialog._analysisGeneration !== generation) {
+        return; // a later Analyse click (this card or another) has since taken over the dialog
+      }
       this._renderAnalysis(result?.response);
     } catch (err) {
       console.warn("comexio-plan-card: plan analysis failed", err);
-      this._analysisSummaryEl.textContent = "Analyse fehlgeschlagen.";
+      if (dialog._analysisGeneration === generation) {
+        this._analysisSummaryEl.textContent = "Analyse fehlgeschlagen.";
+      }
     } finally {
       this._analysisInFlight = false;
     }
@@ -798,6 +811,11 @@ class ComexioPlanCard extends HTMLElement {
   // dialog open; see _runAnalysis for the _flowLoaded reset on re-open.
   async _loadFlowDiagram() {
     this._flowLoaded = true; // set before the await — a second tab click while in flight is a no-op
+    // Captured at call time: only this card was _owner (see _onAnalysisTabSwitch), but the
+    // dialog can still be reclaimed by another card's Analyse click before this resolves — same
+    // generation guard as _runAnalysis, checked against the shared dialog before touching it.
+    const dialog = this._analysisDialog;
+    const generation = this._analysisGeneration;
     try {
       const result = await this._hass.connection.sendMessagePromise({
         type: "call_service",
@@ -807,6 +825,9 @@ class ComexioPlanCard extends HTMLElement {
         return_response: true,
       });
       console.debug("comexio-plan-card: _loadFlowDiagram result", result);
+      if (dialog._analysisGeneration !== generation) {
+        return;
+      }
       const data = result?.response;
       if (!data || data.error || !data.svg) {
         this._flowContainerEl.textContent = data?.error || "Kein Ergebnis erhalten.";
@@ -820,7 +841,9 @@ class ComexioPlanCard extends HTMLElement {
       this._enhanceFlowDiagram();
     } catch (err) {
       console.warn("comexio-plan-card: flow diagram failed", err);
-      this._flowContainerEl.textContent = "Flussdiagramm konnte nicht geladen werden.";
+      if (dialog._analysisGeneration === generation) {
+        this._flowContainerEl.textContent = "Flussdiagramm konnte nicht geladen werden.";
+      }
     }
   }
 
