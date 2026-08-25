@@ -55,6 +55,10 @@ class SafeDict(dict):
 
 LOCAL_HOSTNAME_RE = re.compile(r"^(?:localhost|[a-zA-Z0-9_-]+\.local|[a-zA-Z0-9_-]+\.lan|[a-zA-Z0-9_-]+\.home)\.?$")
 
+# Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
+FUNCTION_PLAN_COMMENT_TYPE = 14
+FUNCTION_PLAN_CONSTANT_TYPE = 16
+
 # Module-level compiled patterns for get_raw_config (used on every coordinator refresh).
 # $ioTypes = legacy (pre-v11); $IOTypesBinary = v11+ replacement with identical structure.
 _IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
@@ -208,6 +212,9 @@ class ComexioAPI:
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
         self._auth_warned: bool = False
         self._login_warned: bool = False
+        # Set by login() on failure so callers (setup) can tell a transient connection
+        # problem (retry) apart from a genuine credential rejection (needs reauth).
+        self.last_login_error: str | None = None
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -378,10 +385,13 @@ class ComexioAPI:
                 html = await v_resp.text()
                 if "Anmeldung" not in html and html != "":
                     _LOGGER.info("Successfully logged into Comexio Admin interface")
+                    self.last_login_error = None
                     return True
+            self.last_login_error = "rejected"
             return False
         except (aiohttp.ClientError, ValueError, KeyError) as e:
             _LOGGER.exception("Critical error during Comexio login: %s", e)
+            self.last_login_error = "connection"
             return False
 
     async def get_raw_config(self) -> dict[str, Any]:
@@ -549,7 +559,23 @@ class ComexioAPI:
                     data = await resp.json(content_type=None)
                     raw = (data.get("result") or {}).get("connection")
                     _LOGGER.debug("Connection values raw response (fub=%s): %s", fub_id, raw)
+                    # Comexio returns the plain-text sentinel "0:not_found" (not JSON) instead
+                    # of a value dict when the plan isn't currently running — confirmed live
+                    # 2026-08-22: an active plan (fub=1) returns a real JSON dict every poll,
+                    # an inactive one (freshly restored/stopped plans included) always returns
+                    # this sentinel. Expected/frequent, not a parse failure — the old code
+                    # logged a full ERROR-level exception for it on every 2s poll tick.
+                    if isinstance(raw, str) and raw and not raw.lstrip().startswith(("{", "[")):
+                        _LOGGER.debug("Connection values: no live data for fub=%s (plan not active: %s)", fub_id, raw)
+                        return {}
                     parsed = json.loads(raw) if raw else {}
+                    # Same PHP array/object ambiguity as function_plan_load_elements: an
+                    # associative array is serialized as a JSON list whenever its keys are
+                    # exactly 0..N-1 in order — meaning the list position IS the real source
+                    # FubElementId, not a guess (a small/quiet plan's element ids can easily
+                    # land on that sequential shape, e.g. fub=19 with 0 connections -> "[]").
+                    if isinstance(parsed, list):
+                        parsed = {str(i): vals for i, vals in enumerate(parsed)}
                     result = {elem_id: vals if isinstance(vals, list) else [vals] for elem_id, vals in parsed.items()}
                     _LOGGER.debug("Connection values parsed (fub=%s): %s", fub_id, result)
                     return result
@@ -1375,12 +1401,14 @@ class ComexioAPI:
         y: float = 100.0,
         connection: dict | None = None,
     ) -> int | None:
-        """Place a Marker (type=2) or WebIO (type=10) block on a function plan canvas.
+        """Place a Marker, WebIO, IO, or catalog function block on a plan canvas.
 
         Pass `connection` to wire the element in the same API call (skips saveconnection).
         For type=10 (WebIO): connection = {"0": {"id":"new","fub_id":...,"type":"binary|analog",
           "input":{"element":"<marker_elem_id>","pos":"0","inverted":false},
           "output":{"0":{"element":"new","pos":"0","inverted":false}}}}
+        Comment (type=14) and Constant (type=16) blocks aren't backed by a catalog ref_id —
+        use function_plan_add_comment_element / function_plan_add_constant_element instead.
 
         Returns the fubElementId assigned by the server, or None on failure.
         """
@@ -1440,23 +1468,37 @@ class ComexioAPI:
         self,
         fub_id: int,
         input_elem_id: int,
-        output_elem_id: int,
+        outputs: list[tuple[int, int, bool]],
         value_type: str = "binary",
+        input_pos: int = 0,
+        input_inverted: bool = False,
     ) -> int | None:
-        """Draw a wire from input_elem (Marker/IO source) to output_elem (WebIO destination).
+        """Draw a wire (or fan-out) from input_elem (source) to one or more output elements.
 
         value_type: "binary" for digital, "analog" for analog.
+        input_pos: source output-port index, for elements with more than one port — 0 for
+        single-port elements.
+        outputs: (output_elem_id, output_pos, output_inverted) per sink. Comexio models a
+        fan-out as ONE connection record with multiple "output" entries, not as several
+        independent connections from the same source pin — sending them separately caused
+        both wires to silently vanish for IO/Constant sources (confirmed live 2026-08-22 on a
+        restored copy of a real plan; catalog function-block sources tolerated it, IO/Constant
+        sources did not), so every sink for a given source must be sent in a single call.
         Returns the connection ID assigned by the server, or None on failure.
         """
         url = f"{self._base_url}/admin/function_function_module/saveconnection/"
         timestamp = _js_timestamp()
+        output_dict = {
+            str(i): {"element": str(dst), "pos": str(pos), "inverted": inverted}
+            for i, (dst, pos, inverted) in enumerate(outputs)
+        }
         conn_json = json.dumps(
             {
                 "id": "new",
                 "fub_id": fub_id,
-                "input": {"element": str(input_elem_id), "pos": "0", "inverted": False},
+                "input": {"element": str(input_elem_id), "pos": str(input_pos), "inverted": input_inverted},
                 "type": value_type,
-                "output": {"0": {"element": str(output_elem_id), "pos": "0", "inverted": False}},
+                "output": output_dict,
             },
             separators=(",", ":"),
         )
@@ -1465,6 +1507,7 @@ class ComexioAPI:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self._base_url}/admin/function_function_module/home",
         }
+        dst_ids = [dst for dst, _pos, _inv in outputs]
         async with self.session.post(url, data=payload, headers=headers) as resp:
             if resp.status != 200:
                 _LOGGER.error(
@@ -1472,7 +1515,7 @@ class ComexioAPI:
                     resp.status,
                     fub_id,
                     input_elem_id,
-                    output_elem_id,
+                    dst_ids,
                 )
                 return None
             try:
@@ -1482,7 +1525,7 @@ class ComexioAPI:
                     "function_plan_save_connection: fub=%s %s→%s conn_id=%s",
                     fub_id,
                     input_elem_id,
-                    output_elem_id,
+                    dst_ids,
                     conn_id,
                 )
                 return int(conn_id) if conn_id is not None else None
@@ -1551,6 +1594,11 @@ class ComexioAPI:
                 _LOGGER.exception("function_plan_delete_elements: failed to parse response")
                 return False
 
+    @staticmethod
+    def _keyed_by_list_position(items: list[dict[str, Any]]) -> dict[str, Any]:
+        """Re-key a list-shaped loadelements collection back into an {id: item} dict."""
+        return {str(item.get("id", i)): item for i, item in enumerate(items)}
+
     async def function_plan_load_elements(self, fub_id: int) -> dict | None:
         """Load elements and connections for a function plan (GET loadelements).
 
@@ -1567,11 +1615,21 @@ class ComexioAPI:
                     _LOGGER.error("function_plan_load_elements failed (HTTP %s, fub=%s)", resp.status, fub_id)
                     return None
                 data = await resp.json(content_type=None)
-                # Comexio returns [] for empty collections instead of {}
-                if isinstance(data.get("elements"), list):
-                    data["elements"] = {}
-                if isinstance(data.get("connections"), list):
-                    data["connections"] = {}
+                # Comexio's PHP backend serializes an associative array as a JSON array
+                # (not object) whenever its keys happen to be sequential integers from 0 —
+                # a shape coincidence, not a signal that the collection is empty. A small,
+                # rarely-edited plan's connection ids can easily stay sequential, so treating
+                # "is a list" as "is empty" (the old assumption here) silently discarded real
+                # elements/connections. Re-key by each item's own "id" when present (elements
+                # carry one); connections don't, so fall back to the list position.
+                elements = data.get("elements")
+                data["elements"] = (
+                    self._keyed_by_list_position(elements) if isinstance(elements, list) else (elements or {})
+                )
+                connections = data.get("connections")
+                data["connections"] = (
+                    self._keyed_by_list_position(connections) if isinstance(connections, list) else (connections or {})
+                )
                 elem_count = len(data.get("elements", {}))
                 conn_count = len(data.get("connections", {}))
                 _LOGGER.info(
@@ -1679,6 +1737,55 @@ class ComexioAPI:
         # properties dialog, saved via a separate endpoint.
         await self._function_plan_set_comment_width(int(elem_id), text)
         return elem_id
+
+    async def function_plan_add_constant_element(
+        self,
+        fub_id: int,
+        value: str,
+        x: float = 100.0,
+        y: float = 100.0,
+    ) -> int | None:
+        """Place a Constant block (type=16) on a function plan canvas.
+
+        The server always normalizes a saved Constant's reference.ref_id back to 0 (see
+        function_plan_catalog.py's docstring — $FubModules["16"] is empty, nothing to
+        reference), but the *create* call itself rejects ref_id="0" with
+        {"error": "data faulty"} — confirmed live 2026-08-22 via a throwaway test plan.
+        Any positive placeholder (ref_id="1") is accepted and gets normalized away.
+
+        Returns the fubElementId assigned by the server, or None on failure.
+        """
+        url = f"{self._base_url}/admin/function_function_module/add_element/"
+        timestamp = _js_timestamp()
+        payload = {
+            "fubid": str(fub_id),
+            "name": value,
+            "ref_id": "1",
+            "type": "16",
+            "id": "undefined",
+            "x": str(x),
+            "y": str(y),
+            "timestamp": timestamp,
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        async with self.session.post(url, data=payload, headers=headers) as resp:
+            if resp.status != 200:
+                _LOGGER.error("function_plan_add_constant_element failed (HTTP %s, fub=%s)", resp.status, fub_id)
+                return None
+            try:
+                result = await resp.json(content_type=None)
+                elem_id = result.get("id")
+                if elem_id is None:
+                    _LOGGER.error("function_plan_add_constant_element: no id in response (fub=%s): %s", fub_id, result)
+                    return None
+                _LOGGER.debug("function_plan_add_constant_element: fub=%s → elem_id=%s", fub_id, elem_id)
+                return int(elem_id)
+            except Exception:
+                _LOGGER.exception("function_plan_add_constant_element: failed to parse response")
+                return None
 
     async def _function_plan_set_comment_width(self, elem_id: int, text: str, width: int = 5) -> bool:
         """Set a comment element's text width via savefupcommentelement (5 = 'Sehr Breit')."""
@@ -2024,7 +2131,7 @@ class ComexioAPI:
                 return ""
             # Orphan pair: both elements exist but the wire is missing — draw only the connection
             conn_id = await self.function_plan_save_connection(
-                fub_id, existing_src_elem, existing_webio_elem, conn_type
+                fub_id, existing_src_elem, [(existing_webio_elem, 0, False)], conn_type
             )
             if conn_id is None:
                 return f"{label}: save_connection between existing elements failed"
@@ -2046,7 +2153,9 @@ class ComexioAPI:
 
         if existing_webio_elem:
             # Web-IO element already in the plan — wire the (possibly fresh) source to it
-            conn_id = await self.function_plan_save_connection(fub_id, int(elem_src), existing_webio_elem, conn_type)
+            conn_id = await self.function_plan_save_connection(
+                fub_id, int(elem_src), [(existing_webio_elem, 0, False)], conn_type
+            )
             if conn_id is None:
                 return f"{label}: save_connection to existing Web-IO element failed"
             return None
@@ -2295,185 +2404,115 @@ class ComexioAPI:
     async def function_plan_rebuild_plan_from_snapshot(
         self, fub_id: int, snapshot: dict[str, Any]
     ) -> tuple[int, int, list[str]]:
-        """Recreate a snapshot's elements and connections on a freshly created (empty) plan.
+        """Recreate every element and connection from a snapshot on a freshly created (empty) plan.
 
-        Snapshot element IDs are plan-local and meaningless on a new plan, so every
-        connected Marker+WebIO pair is recreated via add_element with the connection
-        inlined, using each element's own reference (ref_id) and original position.
-        Comment blocks (type=14) are recreated with the fixed managed-plan text —
-        Comexio does not expose the original comment text via loadelements, so custom
-        wording on non-managed plans is lost. Any element not part of a Marker→WebIO
-        connection is skipped (best-effort restore; managed plans never have such orphans).
+        Snapshot element IDs are plan-local and meaningless on a new plan: pass 1 (re)creates
+        every element regardless of type (Marker, WebIO, IO, any catalog function block,
+        Comment, Constant), building an old-id -> new-id map; pass 2 redraws every connection
+        using that map with its original port positions/polarity (see
+        function_plan_catalog.py for why Constants need special handling: their value lives
+        in the element's own "name" field, ref_id is always 0).
 
         Returns (elements_created, connections_created, warnings).
         """
         elements = snapshot.get("elements", {})
         connections = snapshot.get("connections", {})
 
-        elements_created, warnings = await self._rebuild_comment_elements(fub_id, elements)
+        id_map, warnings = await self._rebuild_all_elements(fub_id, elements)
         connections_created = 0
         for conn_id, conn in connections.items():
-            e_delta, c_delta, conn_warnings = await self._rebuild_one_connection(fub_id, conn_id, conn, elements)
-            elements_created += e_delta
+            c_delta, conn_warnings = await self._rebuild_one_connection(fub_id, conn_id, conn, id_map)
             connections_created += c_delta
             warnings.extend(conn_warnings)
 
         _LOGGER.info(
             "function_plan_rebuild_plan_from_snapshot: fub=%s elements=%d connections=%d warnings=%d",
             fub_id,
-            elements_created,
+            len(id_map),
             connections_created,
             len(warnings),
         )
-        return elements_created, connections_created, warnings
+        return len(id_map), connections_created, warnings
 
-    async def _rebuild_comment_elements(self, fub_id: int, elements: dict[str, Any]) -> tuple[int, list[str]]:
-        """Recreate every comment-block (type=14) element from a snapshot. Returns (created, warnings)."""
-        created = 0
+    async def _rebuild_all_elements(self, fub_id: int, elements: dict[str, Any]) -> tuple[dict[str, int], list[str]]:
+        """(Re)create every snapshot element on a fresh plan. Returns ({old_id: new_id}, warnings)."""
+        id_map: dict[str, int] = {}
         warnings: list[str] = []
-        for elem in elements.values():
-            if elem.get("reference", {}).get("type") != 14:
-                continue
+        for old_id, elem in elements.items():
+            ref = elem.get("reference", {})
+            elem_type = ref.get("type")
+            ref_id = ref.get("ref_id", 0)
             x, y = elem.get("position_x", 0.0), elem.get("position_y", 0.0)
-            if (
-                await self.function_plan_add_comment_element(fub_id, FUNCTION_PLAN_MANAGED_PLAN_COMMENT, x=x, y=y)
-                is None
-            ):
-                warnings.append("comment element failed to recreate")
+            if elem_type == FUNCTION_PLAN_COMMENT_TYPE:
+                text = (elem.get("name") or "").strip() or FUNCTION_PLAN_MANAGED_PLAN_COMMENT
+                new_id = await self.function_plan_add_comment_element(fub_id, text, x=x, y=y)
+            elif elem_type == FUNCTION_PLAN_CONSTANT_TYPE:
+                new_id = await self.function_plan_add_constant_element(fub_id, elem.get("name", "0"), x=x, y=y)
             else:
-                created += 1
-        return created, warnings
+                new_id = await self.function_plan_add_element(
+                    fub_id=fub_id, ref_id=ref_id, element_type=elem_type, x=x, y=y
+                )
+            if new_id is None:
+                warnings.append(f"element {old_id} (type={elem_type}, ref_id={ref_id}) failed to recreate")
+                continue
+            id_map[old_id] = new_id
+        return id_map, warnings
 
     async def _rebuild_one_connection(
-        self, fub_id: int, conn_id: str, conn: dict[str, Any], elements: dict[str, Any]
-    ) -> tuple[int, int, list[str]]:
-        """Recreate one snapshot connection (Marker -> one or more WebIO outputs).
+        self, fub_id: int, conn_id: str, conn: dict[str, Any], id_map: dict[str, int]
+    ) -> tuple[int, list[str]]:
+        """Recreate one snapshot connection (one source -> one or more sinks) via the id_map.
 
-        The marker element is created once and its new id is reused across every WebIO
-        output below, so a single marker fanning out to multiple outputs keeps that
-        fan-out topology on rebuild instead of duplicating the marker per output.
+        Comexio's own semantics: "input" is the source element, "output" is the list of
+        sink elements it fans out to (see project memory project_logikplan_api.md). All sinks
+        for one source MUST be sent in a single saveconnection call — sending them as
+        separate calls silently drops every wire from that source when it's an IO or Constant
+        element (confirmed live 2026-08-22; catalog function-block sources tolerated the
+        split, IO/Constant sources did not).
 
-        Returns (elements_created, connections_created, warnings).
+        Returns (connections_created, warnings) — created is 0 or 1 (one API call per entry).
         """
-        inp_eid = conn.get("input", {}).get("FubElementId")
-        marker_elem = elements.get(str(inp_eid))
-        if not marker_elem or marker_elem.get("reference", {}).get("type") != 2:
-            return 0, 0, [f"connection {conn_id}: input element {inp_eid} is not a marker — skipped"]
-        marker_ref = marker_elem["reference"]["ref_id"]
-        mx, my = marker_elem.get("position_x", 0.0), marker_elem.get("position_y", 0.0)
+        inp = conn.get("input", {})
+        old_src = str(inp.get("FubElementId"))
+        new_src = id_map.get(old_src)
+        if new_src is None:
+            return 0, [f"connection {conn_id}: source element {old_src} was not recreated — skipped"]
         conn_type = "analog" if conn.get("type") in (1, "analog") else "binary"
 
-        outputs = conn.get("output", [])
-        outputs = list(outputs.values()) if isinstance(outputs, dict) else outputs
+        raw_outputs = conn.get("output", [])
+        raw_outputs = list(raw_outputs.values()) if isinstance(raw_outputs, dict) else raw_outputs
 
-        elem_marker = await self.function_plan_add_element(fub_id=fub_id, ref_id=marker_ref, element_type=2, x=mx, y=my)
-        if elem_marker is None:
-            return 0, 0, [f"M{marker_ref}: add_element (Marker) failed during rebuild"]
-
-        elements_created = 1
-        connections_created = 0
         warnings: list[str] = []
-        for out in outputs:
-            e_delta, c_delta, out_warnings = await self._rebuild_one_connection_output(
-                fub_id, conn_id, out, elements, elem_marker, marker_ref, conn_type
-            )
-            elements_created += e_delta
-            connections_created += c_delta
-            warnings.extend(out_warnings)
-        return elements_created, connections_created, warnings
-
-    async def _rebuild_one_connection_output(
-        self,
-        fub_id: int,
-        conn_id: str,
-        out: dict[str, Any],
-        elements: dict[str, Any],
-        elem_marker: int,
-        marker_ref: int,
-        conn_type: str,
-    ) -> tuple[int, int, list[str]]:
-        """Recreate one Marker->WebIO edge of a snapshot connection, reusing the already-created marker.
-
-        Returns (elements_created, connections_created, warnings).
-        """
-        out_eid = out.get("FubElementId")
-        webio_elem = elements.get(str(out_eid))
-        if not webio_elem or webio_elem.get("reference", {}).get("type") != 10:
-            return 0, 0, [f"connection {conn_id}: output element {out_eid} is not a WebIO block — skipped"]
-        webio_ref = webio_elem["reference"]["ref_id"]
-        wx, wy = webio_elem.get("position_x", 0.0), webio_elem.get("position_y", 0.0)
-
-        conn_payload = {
-            "0": {
-                "id": "new",
-                "fub_id": fub_id,
-                "type": conn_type,
-                "input": {"element": str(elem_marker), "pos": "0", "inverted": False},
-                "output": {"0": {"element": "new", "pos": "0", "inverted": False}},
-            }
-        }
-        elem_webio = await self.function_plan_add_element(
-            fub_id=fub_id, ref_id=webio_ref, element_type=10, x=wx, y=wy, connection=conn_payload
-        )
-        if elem_webio is None:
-            return 0, 0, [f"M{marker_ref}: add_element (WebIO, webIoId={webio_ref}) failed during rebuild"]
-        return 1, 1, []
-
-    async def function_plan_cleanup_for_markers(
-        self,
-        marker_ids: list[int],
-        fub_id: int | None = None,
-    ) -> dict:
-        """Remove marker + connected WebIO elements for given markers from the given Function Plan.
-
-        fub_id must be resolved by the caller (via the active plan select entity).
-
-        Returns dict with:
-          - deleted_elem_count (int): number of Function Plan elements removed
-          - webio_cmd_ids (list[int]): WebIO command IDs whose elements were deleted
-            (caller must still call delete_single_command for each)
-          - fub_id (int | None): the Function Plan ID used, None if not provided
-        """
-        if fub_id is None:
-            _LOGGER.debug("function_plan_cleanup_for_markers: no fub_id provided, skipping")
-            return {"deleted_elem_count": 0, "webio_cmd_ids": [], "fub_id": None}
-
-        plan_name = next(
-            (fd.get("Name", str(fub_id)) for fid, fd in self._fub_data.items() if int(fid) == fub_id),
-            str(fub_id),
-        )
-        plan_data = await self.function_plan_load_elements(fub_id)
-        if not plan_data:
-            _LOGGER.warning("function_plan_cleanup_for_markers: failed to load plan %s", fub_id)
-            return {"deleted_elem_count": 0, "webio_cmd_ids": [], "fub_id": fub_id}
-
-        elements = plan_data.get("elements", {})
-        connections = plan_data.get("connections", {})
-        elem_ids_to_delete: list[int] = []
-        webio_cmd_ids: list[int] = []
-
-        for marker_id in marker_ids:
-            marker_elem_id = self._find_marker_element_id(elements, marker_id)
-            if not marker_elem_id:
-                _LOGGER.debug("function_plan_cleanup_for_markers: M%d not found in plan %d", marker_id, fub_id)
+        outputs: list[tuple[int, int, bool]] = []
+        for out in raw_outputs:
+            old_dst = str(out.get("FubElementId"))
+            new_dst = id_map.get(old_dst)
+            if new_dst is None:
+                warnings.append(f"connection {conn_id}: sink element {old_dst} was not recreated — skipped")
                 continue
+            outputs.append((new_dst, out.get("IOPos", 0), out.get("Inverted", False)))
 
-            elem_ids_to_delete.append(int(marker_elem_id))
-            webio_elem_ids, cmd_ids = self._collect_connected_webio_elements(
-                marker_id, marker_elem_id, elements, connections
-            )
-            elem_ids_to_delete.extend(webio_elem_ids)
-            webio_cmd_ids.extend(cmd_ids)
+        if not outputs:
+            return 0, warnings
 
-        if not elem_ids_to_delete:
-            _LOGGER.info("function_plan_cleanup_for_markers: no elements to delete for markers %s", marker_ids)
-            return {"deleted_elem_count": 0, "webio_cmd_ids": [], "fub_id": fub_id}
+        result = await self.function_plan_save_connection(
+            fub_id,
+            new_src,
+            outputs,
+            conn_type,
+            input_pos=inp.get("IOPos", 0),
+            input_inverted=inp.get("Inverted", False),
+        )
+        if result is None:
+            warnings.append(f"connection {conn_id}: {old_src}->{[o[0] for o in outputs]} save_connection failed")
+            return 0, warnings
+        return 1, warnings
 
-        # A WebIO element can in principle be reached via more than one connection to the
-        # same marker; dedupe before deletion so the same element/command isn't attempted twice.
-        elem_ids_to_delete = list(dict.fromkeys(elem_ids_to_delete))
-        webio_cmd_ids = list(dict.fromkeys(webio_cmd_ids))
-        return await self._delete_plan_elements_and_restart(fub_id, elem_ids_to_delete, webio_cmd_ids, plan_name)
+    def function_plan_name(self, fub_id: int) -> str:
+        """Display name of a Function Plan for logging/reporting; falls back to the id."""
+        return next(
+            (fd.get("Name", str(fub_id)) for fid, fd in self._fub_data.items() if int(fid) == fub_id), str(fub_id)
+        )
 
     @staticmethod
     def _find_marker_element_id(elements: dict[str, Any], marker_id: int) -> str | None:
@@ -2485,72 +2524,68 @@ class ComexioAPI:
         return None
 
     @staticmethod
-    def _collect_connected_webio_elements(
-        marker_id: int, marker_elem_id: str, elements: dict[str, Any], connections: dict[str, Any]
-    ) -> tuple[list[int], list[int]]:
-        """Find WebIO elements wired to the given marker element. Returns (elem_ids, webio_cmd_ids)."""
-        elem_ids: list[int] = []
-        cmd_ids: list[int] = []
-        for conn_data in connections.values():
+    def _connection_output_ids(conn_data: dict[str, Any]) -> list[str]:
+        """Normalize a connection's output endpoints (server may serialize as dict or list)."""
+        outputs = conn_data.get("output") or []
+        if isinstance(outputs, dict):
+            outputs = list(outputs.values())
+        return [str(o.get("FubElementId")) for o in outputs if isinstance(o, dict)]
+
+    @staticmethod
+    def _find_wired_webio_ids_for_marker(marker_id: int, marker_elem_id: str, plan_data: dict) -> list[int]:
+        """Return the webIoIds of all WebIO elements directly wired to the given marker element."""
+        elements = plan_data.get("elements", {})
+        webio_ids: list[int] = []
+        for conn_data in plan_data.get("connections", {}).values():
             input_elem = conn_data.get("input", {})
             if str(input_elem.get("FubElementId", -1)) != marker_elem_id:
                 continue
-            output_list = conn_data.get("output", [])
-            if not isinstance(output_list, list):
-                continue
-            for output_entry in output_list:
-                resolved = ComexioAPI._resolve_webio_output_entry(marker_id, output_entry, elements)
-                if resolved is None:
+            for out_elem_id in ComexioAPI._connection_output_ids(conn_data):
+                ref = elements.get(out_elem_id, {}).get("reference", {})
+                if ref.get("type") != 10:
                     continue
-                elem_id, cmd_id = resolved
-                elem_ids.append(elem_id)
-                if cmd_id is not None:
-                    cmd_ids.append(cmd_id)
-        return elem_ids, cmd_ids
+                raw_ref_id = ref.get("ref_id")
+                if raw_ref_id is None:
+                    continue
+                try:
+                    webio_ids.append(int(raw_ref_id))
+                except (TypeError, ValueError):
+                    _LOGGER.warning(
+                        "_find_wired_webio_ids_for_marker: malformed WebIO ref_id %r on elem=%s (M%d)",
+                        raw_ref_id,
+                        out_elem_id,
+                        marker_id,
+                    )
+        return webio_ids
 
     @staticmethod
-    def _resolve_webio_output_entry(
-        marker_id: int, output_entry: dict[str, Any], elements: dict[str, Any]
-    ) -> tuple[int, int | None] | None:
-        """Resolve one connection output entry to (elem_id, cmd_id | None); None if it isn't a WebIO element.
+    def _find_webio_wiring(webio_id: int, plan_data: dict) -> list[int] | None:
+        """Return [webio_elem_id, connected_source_elem_id] if webio_id is wired in this plan.
 
-        Only reference type 10 (WebIO command) is treated as deletable here — a marker output
-        could in principle be wired to something else (another marker, a logic element, ...),
-        which must NOT be swept up into this destructive cleanup.
+        The source element is whatever is wired to the WebIO element's input side (marker or
+        raw IO — the type doesn't matter here, it's simply the other end of the same wire).
+        Returns None if this webIoId has no element in the plan, or the element isn't wired.
         """
-        webio_fub_elem_id = str(output_entry.get("FubElementId", -1))
-        if webio_fub_elem_id == "-1":
-            return None
-
-        webio_elem_ref = elements.get(webio_fub_elem_id, {}).get("reference", {})
-        if webio_elem_ref.get("type") != 10:
-            _LOGGER.debug(
-                "function_plan_cleanup_for_markers: M%d → non-WebIO output elem=%s (ref.type=%s), skipping",
-                marker_id,
-                webio_fub_elem_id,
-                webio_elem_ref.get("type"),
-            )
-            return None
-
-        cmd_id: int | None = None
-        raw_cmd_id = webio_elem_ref.get("ref_id")
-        if raw_cmd_id is not None:
-            try:
-                cmd_id = int(raw_cmd_id)
-            except (TypeError, ValueError):
-                _LOGGER.warning(
-                    "function_plan_cleanup_for_markers: malformed WebIO ref_id %r on elem=%s, skipping command",
-                    raw_cmd_id,
-                    webio_fub_elem_id,
-                )
-
-        _LOGGER.debug(
-            "function_plan_cleanup_for_markers: M%d → WebIO elem=%s cmd=%s",
-            marker_id,
-            webio_fub_elem_id,
-            cmd_id if cmd_id is not None else "?",
+        elements = plan_data.get("elements", {})
+        webio_elem_id = next(
+            (
+                eid
+                for eid, elem in elements.items()
+                if elem.get("reference", {}).get("type") == 10
+                and str(elem.get("reference", {}).get("ref_id")) == str(webio_id)
+            ),
+            None,
         )
-        return int(webio_fub_elem_id), cmd_id
+        if webio_elem_id is None:
+            return None
+        for conn_data in plan_data.get("connections", {}).values():
+            if webio_elem_id not in ComexioAPI._connection_output_ids(conn_data):
+                continue
+            input_elem_id = conn_data.get("input", {}).get("FubElementId")
+            if input_elem_id is None:
+                continue
+            return [int(webio_elem_id), int(input_elem_id)]
+        return None
 
     async def _delete_plan_elements_and_restart(
         self, fub_id: int, elem_ids_to_delete: list[int], webio_cmd_ids: list[int], plan_name: str
@@ -2559,7 +2594,7 @@ class ComexioAPI:
         stop_ok = await self.function_plan_stop_fup(fub_id)
         if not stop_ok:
             _LOGGER.error(
-                "function_plan_cleanup_for_markers: failed to stop plan '%s' (fub=%s), aborting cleanup",
+                "_delete_plan_elements_and_restart: failed to stop plan '%s' (fub=%s), aborting cleanup",
                 plan_name,
                 fub_id,
             )
@@ -2574,7 +2609,7 @@ class ComexioAPI:
 
         success = await self.function_plan_delete_elements(elem_ids_to_delete)
         if not success:
-            _LOGGER.error("function_plan_cleanup_for_markers: element deletion failed")
+            _LOGGER.error("_delete_plan_elements_and_restart: element deletion failed")
             restart_after_failure_ok = await self.function_plan_run_fup(fub_id)
             return {
                 "deleted_elem_count": 0,
@@ -2586,7 +2621,7 @@ class ComexioAPI:
 
         restart_ok = await self.function_plan_run_fup(fub_id)
         _LOGGER.info(
-            "function_plan_cleanup_for_markers: deleted %d elements, webio_cmd_ids=%s (plan '%s' %s)",
+            "_delete_plan_elements_and_restart: deleted %d elements, webio_cmd_ids=%s (plan '%s' %s)",
             len(elem_ids_to_delete),
             webio_cmd_ids,
             plan_name,

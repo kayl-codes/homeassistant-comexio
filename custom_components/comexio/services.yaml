@@ -207,6 +207,31 @@ function_plan_restore:
       default: false
       selector:
         boolean:
+    as_copy:
+      name: Restore as copy
+      description: >
+        Restore the snapshot as a brand-new, independent plan instead of overwriting the
+        live plan — the source plan and its backup history are left untouched. Requires
+        'new_plan_name'. Ignores on_conflict/confirm (the source plan is never touched).
+      default: false
+      advanced: true
+      selector:
+        boolean:
+    new_plan_name:
+      name: Name for the copy
+      description: "Required when 'Restore as copy' is enabled — must not already be in use by a live plan."
+      required: false
+      advanced: true
+      selector:
+        text:
+    auto_start:
+      name: Auto-start after restore
+      description: >
+        Start/activate the plan after restoring it (default). Disabled: the snapshot's
+        structure is still fully restored, but the plan is left stopped afterward.
+      default: true
+      selector:
+        boolean:
 
 function_plan_delete_backups:
   name: Function Plan Delete Backups

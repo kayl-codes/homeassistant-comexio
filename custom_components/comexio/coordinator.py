@@ -258,6 +258,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.cover_keywords: list[str] = []
         # R4: Lock to prevent concurrent sync runs
         self._sync_lock: asyncio.Lock = asyncio.Lock()
+        # Lock to prevent two function_plan_restore calls racing on the same (or a different)
+        # plan — a second restore reading live state mid-first-restore would act on a
+        # half-applied snapshot. No per-plan granularity: only one restore anywhere, anytime.
+        self._restore_lock: asyncio.Lock = asyncio.Lock()
         # R2: Suppress update_listener reload when an internal write (sync, ignored-marker
         # cleanup, plan_map persist, ...) triggers a reload of its own. Stores the exact
         # options snapshot just written rather than a bare bool, so a listener run only skips
@@ -418,8 +422,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             com_commands = final_data["webio_commands"]
 
             # 1. HA Map: Markers
+            # Ignored markers are intentionally excluded from the Web-IO/Function Plan sync
+            # (see CONF_IGNORED_MARKERS) — leaving them in would make the audit report them as
+            # permanently "missing" and let Full Sync / create_missing actually create and wire
+            # Web-IO commands for markers the user explicitly opted out of.
+            ignored_marker_ids = self.ignored_marker_ids
             ha_map = {}
             for m in final_data["markers"]:
+                if int(m["id"]) in ignored_marker_ids:
+                    continue
                 ha_map[f"M{m['id']}"] = {
                     "name": f"HA {m['name']}",
                     "type": m["type"],  # Trusting the preprocessing of api.py
@@ -462,6 +473,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         "type": mapped_type,
                         "id": cmd_id,
                         "webio_class": info.get("webioClass"),
+                        "webIoId": info.get("webIoId"),
                     }
                 )
 
@@ -498,7 +510,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.last_audit_failed = False
 
             # Prepare payload map for future delta updates via button/repairs
-            payload_map = {cmd["Name"]: cmd for cmd in self.api.build_webio_commands(self.server_id, final_data)}
+            payload_map = {
+                cmd["Name"]: cmd
+                for cmd in self.api.build_webio_commands(self.server_id, final_data, None, ignored_marker_ids)
+            }
 
             # --- IP/Port Audit --- (checked independently per Web-IO class — marker and IO
             # devices can in theory drift out of sync with each other)
@@ -619,7 +634,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     for com in com_list:
                         if com != best_match:
                             orphans.append(
-                                {"id": com["id"], "name": com["name"], "webio_class": com.get("webio_class")}
+                                {
+                                    "id": com["id"],
+                                    "name": com["name"],
+                                    "webio_class": com.get("webio_class"),
+                                    "webIoId": com.get("webIoId"),
+                                }
                             )
                             mismatches.add(f"orphan_{com['id']}")
 
@@ -627,8 +647,38 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for key, com_list in com_map.items():
                 if key not in ha_map:
                     for com in com_list:
-                        orphans.append({"id": com["id"], "name": com["name"], "webio_class": com.get("webio_class")})
+                        orphans.append(
+                            {
+                                "id": com["id"],
+                                "name": com["name"],
+                                "webio_class": com.get("webio_class"),
+                                "webIoId": com.get("webIoId"),
+                            }
+                        )
                         mismatches.add(f"orphan_{com['id']}")
+
+            # Function Plan debris: marker/IO elements left in a managed plan after their
+            # WebIO counterpart was removed (e.g. directly in Comexio Studio) without also
+            # removing the wired source element — invisible to every check above since those
+            # all pivot on webio_commands/ha_map, never the raw plan elements themselves.
+            markers_by_id = {str(m["id"]): m["name"] for m in final_data["markers"]}
+            # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
+            # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
+            # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
+            io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
+            function_plan_dangling_items: list[dict[str, Any]] = []
+            if has_active_plan:
+                for rid in self._dangling_source_ids("2", wired_marker_webio_pairs):
+                    function_plan_dangling_items.append(
+                        {"name": markers_by_id.get(rid, f"M{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_MARKER}
+                    )
+                    mismatches.add(f"function_plan_dangling_M{rid}")
+            if managed_io_exts:
+                for rid in self._dangling_source_ids("1", wired_io_webio_pairs):
+                    io = io_by_id.get(rid)
+                    name = f"{io['ext_name']} {io['identifier']}" if io else f"IO#{rid}"
+                    function_plan_dangling_items.append({"name": name, "ref_id": rid, "webio_class": WEBIO_CLASS_IO})
+                    mismatches.add(f"function_plan_dangling_IO{rid}")
 
             self.last_audit_results = {
                 "type": type_mismatches,
@@ -641,6 +691,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "cleanup_entities": self._cleanup_entity_ids,
                 "cleanup_function_plan_count": self._cleanup_function_plan_count,
                 "function_plan_missing": function_plan_missing_items,
+                "function_plan_dangling": function_plan_dangling_items,
             }
 
             # Include pending entity cleanups (ignored markers with remaining HA entities) in mismatches
@@ -653,6 +704,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 current_summary_content = (
                     f"{len(type_mismatches)}-{len(missing_items)}-{len(renamed_items)}"
                     f"-{len(orphans)}-{ip_mismatch}-{len(function_plan_missing_items)}"
+                    f"-{len(function_plan_dangling_items)}"
                 )
 
                 # Only log details if the audit result differs from the previous run
@@ -662,7 +714,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     # Consolidated warning for the Home Assistant log overview
                     _LOGGER.warning(
                         "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
-                        "Renames:%d, Orphans:%d, IP:%d)",
+                        "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d)",
                         self.server_id,
                         len(mismatches),
                         len(type_mismatches),
@@ -670,6 +722,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         len(renamed_items),
                         len(orphans),
                         1 if ip_mismatch else 0,
+                        len(function_plan_dangling_items),
                     )
                     if ip_mismatch:
                         mismatched = {cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]}
@@ -698,6 +751,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     if function_plan_missing_items:
                         _LOGGER.info("%s Not wired in Function Plan (%d):", ICON_LINK, len(function_plan_missing_items))
                         for item in function_plan_missing_items:
+                            _LOGGER.info("   -> %s", item["name"])
+
+                    if function_plan_dangling_items:
+                        _LOGGER.info("%s Function Plan debris (%d):", ICON_DELETE, len(function_plan_dangling_items))
+                        for item in function_plan_dangling_items:
                             _LOGGER.info("   -> %s", item["name"])
 
                     if ip_mismatch:
@@ -729,6 +787,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "cleanup_function_plan_count": self._cleanup_function_plan_count,
                     "function_plan_missing": len(function_plan_missing_items),
                     "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(function_plan_missing_items),
+                    "function_plan_dangling": len(function_plan_dangling_items),
                     "all": len(mismatches),
                 }
 
@@ -1805,6 +1864,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         all_ignored_ids = expand_ignored_marker_ids(ignored_raw)
         lp_plans = await self._load_function_plan_check_data()
         marker_ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids)).keys())
+        _LOGGER.debug(
+            "[%s] async_check_ignored_markers: ignored=%s, plans_loaded=%s",
+            self.server_id,
+            sorted(all_ignored_ids),
+            sorted(lp_plans.keys()),
+        )
         for marker_id in sorted(all_ignored_ids):
             marker = markers_by_id.get(marker_id)
             if not marker or not marker.get("name", "").strip():
@@ -1815,6 +1880,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Marker exists and is intentionally ignored — only flag if legacy entities/links remain
             has_entities = marker_id in marker_ids_with_entities
             function_plan_fub_id = self._check_marker_function_plan_link(marker_id, lp_plans)
+            _LOGGER.debug(
+                "[%s] ignored marker M%s: has_entities=%s, function_plan_fub_id=%s",
+                self.server_id,
+                marker_id,
+                has_entities,
+                function_plan_fub_id,
+            )
             if function_plan_fub_id is not None:
                 affected_fub_ids.add(function_plan_fub_id)
             if has_entities or function_plan_fub_id is not None:
@@ -2320,6 +2392,95 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 plan_to_ids.setdefault(fub_id, []).append(marker_id)
         return plan_to_ids
 
+    async def unwire_webio_commands(self, webio_ids: list[int], preferred_fub_id: int | None = None) -> dict[str, Any]:
+        """Remove Function-Plan wiring for the given webIoIds and resolve their real cmdIds.
+
+        For each webio_id: locates its WebIO element + connected source element (marker or
+        IO) across managed plans (or just preferred_fub_id if given), deletes both, restarts
+        the plan. The real Web-IO command id is resolved from self.data["webio_commands"]
+        (webIoId -> cmdId) — never guessed from a plan element's ref_id, which IS the
+        webIoId, not the WebCommandId (see project-logikplan-api memory).
+
+        Returns {"deleted_elem_count": int, "cmd_ids": list[int], "stopped_plans": [...],
+        "stop_failures": [...], "touched_fub_ids": list[int]}. cmd_ids only includes commands
+        actually found wired and successfully unwired; the caller is responsible for deleting
+        each via api.delete_single_command afterwards. touched_fub_ids lists plans that had at
+        least one element successfully removed — useful for a caller that wants to re-sort the
+        plan afterwards (deletion opens a gap in the grid that a sort would close).
+        """
+        webio_id_to_cmd_id = {
+            str(cmd["webIoId"]): cmd.get("cmdId")
+            for cmd in (self.data or {}).get("webio_commands", {}).values()
+            if cmd.get("webIoId") is not None
+        }
+
+        if preferred_fub_id is not None:
+            plan_data = await self.api.function_plan_load_elements(preferred_fub_id)
+            plans = {preferred_fub_id: plan_data} if plan_data else {}
+            plan_to_ids: dict[int, list[int]] = {preferred_fub_id: list(webio_ids)} if plan_data else {}
+        else:
+            plans = await self._load_function_plan_check_data()
+            plan_to_ids = {}
+            for webio_id in webio_ids:
+                for fub_id, plan_data in plans.items():
+                    if self.api._find_webio_wiring(webio_id, plan_data) is not None:
+                        plan_to_ids.setdefault(fub_id, []).append(webio_id)
+                        break
+
+        deleted_elem_count = 0
+        cmd_ids: list[int] = []
+        stopped_plans: list[tuple[str, int]] = []
+        stop_failures: list[tuple[str, int]] = []
+        touched_fub_ids: list[int] = []
+
+        for fub_id, ids in plan_to_ids.items():
+            plan_data = plans.get(fub_id)
+            if not plan_data:
+                continue
+            elem_ids: list[int] = []
+            found_webio_ids: list[int] = []
+            for webio_id in ids:
+                pair = self.api._find_webio_wiring(webio_id, plan_data)
+                if pair is None:
+                    continue
+                elem_ids.extend(pair)
+                found_webio_ids.append(webio_id)
+            if not elem_ids:
+                continue
+            elem_ids = list(dict.fromkeys(elem_ids))
+            result = await self.api._delete_plan_elements_and_restart(
+                fub_id, elem_ids, found_webio_ids, self.api.function_plan_name(fub_id)
+            )
+            if result.get("deleted_elem_count", 0) > 0:
+                deleted_elem_count += result["deleted_elem_count"]
+                touched_fub_ids.append(fub_id)
+            if result.get("stop_failed"):
+                stop_failures.append((result.get("plan_name", "?"), fub_id))
+            elif result.get("plan_stopped") and result.get("fub_id") is not None:
+                stopped_plans.append((result.get("plan_name", "?"), result["fub_id"]))
+
+            # webio_cmd_ids echoes back only the ids actually unwired (empty on failure) —
+            # resolving cmdIds only for those avoids deleting a command whose plan element
+            # deletion never actually succeeded.
+            for webio_id in result.get("webio_cmd_ids", []):
+                cmd_id = webio_id_to_cmd_id.get(str(webio_id))
+                if cmd_id is not None:
+                    cmd_ids.append(cmd_id)
+                else:
+                    _LOGGER.warning(
+                        "[%s] unwire_webio_commands: no cmdId found for webIoId=%s, skipping command deletion",
+                        self.server_id,
+                        webio_id,
+                    )
+
+        return {
+            "deleted_elem_count": deleted_elem_count,
+            "cmd_ids": list(dict.fromkeys(cmd_ids)),
+            "stopped_plans": stopped_plans,
+            "stop_failures": stop_failures,
+            "touched_fub_ids": list(dict.fromkeys(touched_fub_ids)),
+        }
+
     def _check_marker_function_plan_link(self, marker_id: int, plans: dict[int, dict]) -> int | None:
         """Check if the marker is wired in any of the pre-loaded managed plans.
 
@@ -2334,14 +2495,45 @@ class ComexioCoordinator(DataUpdateCoordinator):
     @staticmethod
     def _marker_wired_in_plan(marker_id: int, plan_data: dict) -> bool:
         """Check if the marker element in this plan has an outgoing connection."""
+        all_matches = [
+            elem_id
+            for elem_id, elem_data in plan_data.get("elements", {}).items()
+            if (ref := elem_data.get("reference", {})).get("type") == 2 and int(ref.get("ref_id", -1)) == marker_id
+        ]
+        if len(all_matches) > 1:
+            _LOGGER.debug("_marker_wired_in_plan: M%s has MULTIPLE elements in this plan: %s", marker_id, all_matches)
         marker_elem_id = ComexioAPI._find_marker_element_id(plan_data.get("elements", {}), marker_id)
         if not marker_elem_id:
+            _LOGGER.debug("_marker_wired_in_plan: M%s not found as an element in this plan", marker_id)
             return False
 
-        return any(
-            str(conn_data.get("input", {}).get("FubElementId", -1)) == marker_elem_id
+        # DEBUG: dump every connection touching ANY of the matched marker elements, in either role
+        for conn_id, conn_data in plan_data.get("connections", {}).items():
+            in_id = str(conn_data.get("input", {}).get("FubElementId", -1))
+            out_ids = ComexioAPI._connection_output_ids(conn_data)
+            if in_id in all_matches or any(oid in all_matches for oid in out_ids):
+                _LOGGER.debug(
+                    "_marker_wired_in_plan: M%s conn=%s touches a marker element (input=%s, outputs=%s, raw=%s)",
+                    marker_id,
+                    conn_id,
+                    in_id,
+                    out_ids,
+                    conn_data,
+                )
+
+        input_ids = [
+            str(conn_data.get("input", {}).get("FubElementId", -1))
             for conn_data in plan_data.get("connections", {}).values()
+        ]
+        wired = marker_elem_id in input_ids
+        _LOGGER.debug(
+            "_marker_wired_in_plan: M%s -> elem_id=%s (all_matches=%s), wired=%s",
+            marker_id,
+            marker_elem_id,
+            all_matches,
+            wired,
         )
+        return wired
 
     @staticmethod
     def _plan_wired_pairs(plan_data: dict, source_type: str = "2") -> set[tuple[str, str]]:
@@ -2413,6 +2605,53 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if wired_io_pairs is None:
                 self._lp_missing_recheck_pending = True
         return wired_marker_pairs, wired_io_pairs
+
+    def _dangling_source_ids(self, source_type: str, wired_pairs: set[tuple[str, str]] | None) -> set[str]:
+        """ref_ids of marker ("2") / IO ("1") elements present in a managed plan but never
+        paired with a WebIO element there — Function-Plan debris left behind when a Web-IO
+        command/element was removed (e.g. directly in Comexio Studio) without also removing
+        its wired source element. A plain set-difference against the wired-pairs set
+        _audit_wired_pairs already computed this cycle — no extra connection scan needed,
+        only one more pass over the already-loaded element maps.
+        """
+        if wired_pairs is None or not self.function_plan_plans:
+            return set()
+        relevant_fub_ids = self._function_plan_check_fub_ids()
+        present_ids = {
+            str((elem.get("reference") or {}).get("ref_id"))
+            for fub_id, plan_data in self.function_plan_plans.items()
+            if fub_id in relevant_fub_ids
+            for elem in (plan_data.get("elements") or {}).values()
+            if str((elem.get("reference") or {}).get("type")) == source_type
+        }
+        return present_ids - {rid for rid, _ in wired_pairs}
+
+    async def delete_dangling_plan_elements(self, source_type: str, ref_ids: list[str]) -> dict[str, Any]:
+        """Delete Function-Plan marker/IO elements left behind after their WebIO counterpart
+        was already removed — the debris _dangling_source_ids detects every audit cycle.
+
+        Unlike unwire_webio_commands, there is no Web-IO command to resolve/delete here (it's
+        already gone); this is a plain element delete + plan restart. Returns
+        {"deleted_elem_count": int, "touched_fub_ids": list[int]}.
+        """
+        plans = await self._load_function_plan_check_data()
+        plan_to_elem_ids: dict[int, list[int]] = {}
+        for fub_id, plan_data in plans.items():
+            for elem_id, elem in (plan_data.get("elements") or {}).items():
+                ref = elem.get("reference") or {}
+                if str(ref.get("type")) == source_type and str(ref.get("ref_id")) in ref_ids:
+                    plan_to_elem_ids.setdefault(fub_id, []).append(int(elem_id))
+
+        deleted_elem_count = 0
+        touched_fub_ids: list[int] = []
+        for fub_id, elem_ids in plan_to_elem_ids.items():
+            result = await self.api._delete_plan_elements_and_restart(
+                fub_id, elem_ids, [], self.api.function_plan_name(fub_id)
+            )
+            if result.get("deleted_elem_count", 0) > 0:
+                deleted_elem_count += result["deleted_elem_count"]
+                touched_fub_ids.append(fub_id)
+        return {"deleted_elem_count": deleted_elem_count, "touched_fub_ids": touched_fub_ids}
 
     @staticmethod
     def _function_plan_gap_item(

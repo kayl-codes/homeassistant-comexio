@@ -26,6 +26,8 @@ from .const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
+    FUNCTION_PLAN_SERVICE_ACTIVATE,
+    FUNCTION_PLAN_SERVICE_STOP,
     ICON_ADD,
     ICON_CHECK,
     ICON_CLOCK,
@@ -157,6 +159,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     fw_check_button = ComexioFirmwareCheckButton(coordinator, coordinator.server_id)
     preview_button = ComexioPlanPreviewButton(coordinator, coordinator.server_id)
     uninstall_cleanup_button = ComexioCleanupButton(coordinator, coordinator.server_id)
+    plan_toggle_button = ComexioPlanToggleButton(coordinator, coordinator.server_id)
     async_add_entities(
         [
             sync_button,
@@ -166,6 +169,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             fw_check_button,
             preview_button,
             uninstall_cleanup_button,
+            plan_toggle_button,
         ]
     )
 
@@ -311,6 +315,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     skipped_creates,
                     per_class,
                     created_names,
+                    debris_removed,
                 ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
 
                 plan_summary = await self._wire_created_pairs(ctx, created_names, gap_items)
@@ -327,9 +332,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     duration_str,
                     skipped_creates,
                     per_class,
+                    debris_removed,
                 )
                 if plan_summary:
                     msg += "\n\n**Function Plan:**\n" + "\n".join(plan_summary)
+
+            if self.coordinator.cancel_sync:
+                # cancel_sync only stops further work (delta tasks / cluster-plan wiring loop) —
+                # whatever already ran before the flag was set is real and reported above as-is.
+                # This banner is the only signal the user gets that the run is a partial result,
+                # not the full requested action.
+                msg = f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
 
             self.coordinator.last_audit_failed = False
             update_status(msg, pct=100, step_info="Done")
@@ -365,21 +378,25 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def _sync_all_classes(
         self, ctx: _SyncContext, audit_data: dict[str, Any], dev_ids: dict[str, str | None]
-    ) -> tuple[int, int, int, int, bool, list[str], int, dict[str, dict[str, int]], list[str]]:
+    ) -> tuple[int, int, int, int, bool, list[str], int, dict[str, dict[str, int]], list[str], int]:
         """Run `_sync_class` for every Web-IO class and aggregate the results.
 
         The trailing element is the flat list of Web-IO command names created in this run
-        (across all classes) — the input of the managed cluster plan wiring pass.
+        (across all classes) — the input of the managed cluster plan wiring pass. The final
+        element is the total count of Function Plan debris elements removed (dangling plan
+        elements + orphan-unwiring), a separate concern from the Web-IO command counters.
         """
         missing_items = audit_data.get("missing", [])
         renamed_items = audit_data.get("rename", [])
         type_mismatches = audit_data.get("type", [])
         orphans = audit_data.get("orphan", [])
+        dangling_items = audit_data.get("function_plan_dangling", [])
 
         added, removed, updated, renamed = 0, 0, 0, 0
         updated_ip = False
         recreated_classes: list[str] = []
         skipped_creates = 0
+        debris_removed = 0
         per_class: dict[str, dict[str, int]] = {}
         created_names: list[str] = []
         # Split the shared progress span evenly across however many classes exist,
@@ -403,6 +420,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 _items_of_class(renamed_items, cls),
                 _items_of_class(type_mismatches, cls),
                 _items_of_class(orphans, cls),
+                _items_of_class(dangling_items, cls),
                 ctx.webio_devices_audit.get(cls, {}).get("ip_mismatch", False),
                 pct_start,
                 pct_end,
@@ -413,6 +431,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             renamed += cls_result["renamed"]
             updated_ip = updated_ip or cls_result["updated_ip"]
             skipped_creates += cls_result["skipped_creates"]
+            debris_removed += cls_result["debris_removed"]
             created_names.extend(cls_result.get("created_names", []))
             if cls_result["recreated"]:
                 recreated_classes.append(cls)
@@ -436,6 +455,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             skipped_creates,
             per_class,
             created_names,
+            debris_removed,
         )
 
     @staticmethod
@@ -613,13 +633,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             await self.coordinator.async_function_plan_change_backup(
                 fub_id, f"cleanup_ignored {[f'M{m}' for m in cleanup_ids]}"
             )
-            lp = await api.function_plan_cleanup_for_markers(cleanup_ids, fub_id=fub_id)
-            lp_count += lp.get("deleted_elem_count", 0)
-            webio_cmd_ids.extend(lp.get("webio_cmd_ids", []))
-            if lp.get("stop_failed"):
-                stop_failures.append((lp.get("plan_name", "?"), fub_id))
-            elif lp.get("plan_stopped") and lp.get("fub_id") is not None:
-                stopped_plans.append((lp.get("plan_name", "?"), lp["fub_id"]))
+            # Resolve which WebIO commands are actually wired to these markers in this plan,
+            # then hand off to the same unwire mechanism the orphan-delete sync path uses —
+            # it owns the webIoId -> real cmdId resolution, so callers never have to guess it
+            # out of a plan element's ref_id (that field IS the webIoId, not the WebCommandId).
+            plan_data = await api.function_plan_load_elements(fub_id)
+            webio_ids: list[int] = []
+            if plan_data:
+                for marker_id in cleanup_ids:
+                    marker_elem_id = api._find_marker_element_id(plan_data.get("elements", {}), marker_id)
+                    if marker_elem_id:
+                        webio_ids.extend(api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data))
+            if not webio_ids:
+                continue
+            unwired = await self.coordinator.unwire_webio_commands(webio_ids, preferred_fub_id=fub_id)
+            lp_count += unwired["deleted_elem_count"]
+            webio_cmd_ids.extend(unwired["cmd_ids"])
+            stopped_plans.extend(unwired["stopped_plans"])
+            stop_failures.extend(unwired["stop_failures"])
         # A WebIO command could in principle be collected from more than one plan (e.g. a
         # marker anomalously wired into multiple managed plans); dedupe before deletion so
         # the same command isn't attempted twice.
@@ -636,6 +667,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         duration_str: str,
         skipped_creates: int = 0,
         per_class: dict[str, dict[str, int]] | None = None,
+        debris_removed: int = 0,
     ) -> str:
         """Compose the final sync-result notification text."""
         recreate_note = ""
@@ -650,20 +682,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 "Run a Full Sync to recreate it.\n\n"
             )
 
+        debris_note = ""
+        if debris_removed:
+            debris_note = f"{ICON_CHECK} {debris_removed} Function Plan debris element(s) removed\n\n"
+
         changed = added + updated + renamed + removed
         if changed == 0 and not recreated_classes and updated_ip and not skipped_creates:
             return (
-                f"{ICON_SUCCESS} **Comexio Server Address updated**\n\n"
+                f"{ICON_SUCCESS} **Comexio Server Address updated**\n\n{debris_note}"
                 f"The IP address has been successfully updated in the Web-IO device(s).\n"
                 f"{ICON_DURATION} Duration: {duration_str}"
             )
         if changed == 0 and recreated_classes and not updated_ip and not skipped_creates:
             return (
-                f"{ICON_SUCCESS} **Comexio Recreation Finished**\n\n{recreate_note}"
+                f"{ICON_SUCCESS} **Comexio Recreation Finished**\n\n{recreate_note}{debris_note}"
                 f"{ICON_DURATION} Duration: {duration_str}"
             )
         return (
-            f"{ICON_SUCCESS} **Comexio Sync Finished**\n\n{recreate_note}{skip_note}"
+            f"{ICON_SUCCESS} **Comexio Sync Finished**\n\n{recreate_note}{skip_note}{debris_note}"
             f"Results: +{added}, {updated} updated, {renamed} renamed, -{removed} removed"
             + (", IP-Address updated" if updated_ip else "")
             + f".\n{self._build_per_class_note(per_class)}{ICON_DURATION} Duration: {duration_str}"
@@ -842,6 +878,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_renamed: list[dict],
         cls_types: list[dict],
         cls_orphans: list[dict],
+        cls_dangling: list[dict],
         dev_ip_mismatch: bool,
         pct_start: int,
         pct_end: int,
@@ -881,7 +918,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             self._report_delta_progress, ctx, tasks_to_do, total_tasks, label, cls_effective_action, pct_start, pct_end
         )
 
-        result = await self._execute_delta_tasks(ctx, class_dev_id, base_id, tasks_to_do, on_progress)
+        # Function Plan debris (cls_dangling) rides along with the same actions that already
+        # remove Web-IO commands — no dedicated repair-dialog action for it.
+        cls_dangling_to_delete = cls_dangling if cls_effective_action in {"full_sync", "delete_orphans"} else []
+        result = await self._execute_delta_tasks(
+            ctx, cls, class_dev_id, base_id, tasks_to_do, cls_dangling_to_delete, on_progress
+        )
         result["updated_ip"] = False
         result["skipped_creates"] = skipped_creates
 
@@ -963,15 +1005,58 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     async def _execute_delta_tasks(
         self,
         ctx: _SyncContext,
+        cls: str,
         class_dev_id: str | None,
         base_id: str | None,
         tasks_to_do: list[dict],
+        cls_dangling: list[dict],
         on_progress: Callable[[int, str, str], None],
     ) -> dict[str, int]:
         """Run the collected delta-sync tasks against the Comexio API, in order."""
         api = ctx.api
         dev_reg = dr.async_get(self.hass)
-        result: dict[str, Any] = {"added": 0, "removed": 0, "updated": 0, "renamed": 0, "created_names": []}
+        result: dict[str, Any] = {
+            "added": 0,
+            "removed": 0,
+            "updated": 0,
+            "renamed": 0,
+            "created_names": [],
+            "debris_removed": 0,
+        }
+
+        # Unwire any Function-Plan element still connected to an orphan before deleting its
+        # Web-IO command, unconditionally — not just when Comexio's delete call happens to
+        # refuse it (it doesn't reliably refuse, which is how orphaned plan elements were
+        # left dangling before). Batched once for the whole run, not per task.
+        delete_webio_ids = [
+            int(t["item"]["webIoId"])
+            for t in tasks_to_do
+            if t["type"] == "delete" and t["item"].get("webIoId") is not None
+        ]
+        resort_fub_ids: set[int] = set()
+        if delete_webio_ids and not getattr(self.coordinator, "cancel_sync", False):
+            unwired = await self.coordinator.unwire_webio_commands(delete_webio_ids)
+            resort_fub_ids.update(unwired["touched_fub_ids"])
+            result["debris_removed"] += unwired["deleted_elem_count"]
+
+        # Function Plan debris (marker/IO elements whose WebIO counterpart was already
+        # removed elsewhere, e.g. directly in Comexio Studio) has no command to unwire —
+        # just delete the leftover element(s) directly.
+        source_type = "2" if cls == WEBIO_CLASS_MARKER else "1"
+        dangling_ref_ids = [i["ref_id"] for i in cls_dangling]
+        if dangling_ref_ids and not getattr(self.coordinator, "cancel_sync", False):
+            cleaned = await self.coordinator.delete_dangling_plan_elements(source_type, dangling_ref_ids)
+            resort_fub_ids.update(cleaned["touched_fub_ids"])
+            result["debris_removed"] += cleaned["deleted_elem_count"]
+
+        # Deleting an element opens a gap in the plan's grid; re-sort to close it. Safe to
+        # call directly (no is-managed-plan guard) because both cleanup calls above only ever
+        # touch plans from _load_function_plan_check_data(), which is already scoped to
+        # managed cluster plans. was_active=True because each cleanup's own restart already
+        # brought the plan back up by this point.
+        for fub_id in resort_fub_ids:
+            await async_sort_function_plan(self.hass, self.coordinator, api, fub_id, notify=False, was_active=True)
+
         for idx, task in enumerate(tasks_to_do):
             if getattr(self.coordinator, "cancel_sync", False):
                 break
@@ -1005,6 +1090,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_renamed: list[dict],
         cls_types: list[dict],
         cls_orphans: list[dict],
+        cls_dangling: list[dict],
         dev_ip_mismatch: bool,
         pct_start: int,
         pct_end: int,
@@ -1036,6 +1122,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 "updated_ip": False,
                 "recreated": True,
                 "skipped_creates": 0,
+                "debris_removed": 0,
                 "created_names": [
                     cmd["Name"]
                     for cmd in ctx.api.build_webio_commands(
@@ -1058,6 +1145,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             cls_renamed,
             cls_types,
             cls_orphans,
+            cls_dangling,
             dev_ip_mismatch,
             pct_start,
             pct_end,
@@ -1139,6 +1227,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         added = 0
         errors = 0
         for fub_id, cluster_ids in plan_to_ids.items():
+            if getattr(self.coordinator, "cancel_sync", False):
+                break
             line, lp_added, lp_errors = await self._add_pairs_to_plan(
                 ctx, fub_id, sorted(cluster_ids), fub_id in created_plans, progress_state
             )
@@ -1168,6 +1258,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         added = 0
         errors = 0
         for fub_id, ext_cols in plan_exts.items():
+            if getattr(self.coordinator, "cancel_sync", False):
+                break
             line, lp_added, lp_errors = await self._add_io_pairs_to_plan(
                 ctx, fub_id, sorted(ext_cols, key=lambda t: t[1]), by_ext, fub_id in created_plans, progress_state
             )
@@ -1743,3 +1835,85 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
                 "class_count": class_count,
             },
         )
+
+
+class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
+    """Start/stop toggle for the currently selected 'Function Plans' plan.
+
+    The icon always shows the OPPOSITE of the plan's current activation state — mdi:pause
+    while it's running (press to stop it), mdi:play while it's stopped (press to start it).
+    A thin UI wrapper around the existing function_plan_stop/function_plan_activate services,
+    so notification/logging/duration reporting stays in one place instead of being duplicated.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Function Plan Toggle"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_function_plan_toggle_btn"
+        # Set for the duration of async_press so the icon can show an in-flight state —
+        # the stop/activate service call + raw_config refresh below take a few seconds, during
+        # which the icon would otherwise still show the pre-press (now stale) state.
+        self._pending = False
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    def _selected_fub_id(self) -> int | None:
+        return self.coordinator.get_active_function_plan_fub_id()
+
+    def _selected_plan_active(self) -> bool | None:
+        """True/False for the selected plan's live Active flag, None if nothing is selected."""
+        fub_id = self._selected_fub_id()
+        if fub_id is None:
+            return None
+        return self.coordinator.api.get_fub_active(fub_id)
+
+    @property
+    def icon(self) -> str:
+        if self._pending:
+            return "mdi:progress-clock"
+        return "mdi:play" if self._selected_plan_active() is False else "mdi:pause"
+
+    @property
+    def available(self) -> bool:
+        """Grayed out with no plan selected — there's nothing to toggle."""
+        return self._selected_fub_id() is not None
+
+    async def async_press(self) -> None:
+        fub_id = self._selected_fub_id()
+        if fub_id is None:
+            return
+        service = (
+            FUNCTION_PLAN_SERVICE_ACTIVATE if self._selected_plan_active() is False else FUNCTION_PLAN_SERVICE_STOP
+        )
+        self._pending = True
+        self.async_write_ha_state()
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                service,
+                {"config_entry": self.coordinator.config_entry.entry_id, "fub_id": fub_id},
+                blocking=True,
+            )
+            # Reflect the actual resulting state right away — the selected plan's Active flag
+            # otherwise wouldn't update until the next poll cycle, leaving both this button's
+            # icon and the 'Function Plans' dropdown's inactive marker stale for a whole
+            # scan_interval.
+            api = self.coordinator.api
+            raw_config = await api.get_raw_config()
+            live_fub = raw_config.get("Fubs", {}).get(str(fub_id))
+            if live_fub is not None:
+                api.update_fub_cache_entry(fub_id, live_fub)
+        finally:
+            self._pending = False
+            self.coordinator.async_update_listeners()

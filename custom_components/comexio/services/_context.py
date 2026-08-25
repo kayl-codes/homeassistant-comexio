@@ -101,11 +101,14 @@ async def _async_get_service_context(
     fub_id: int | None = None
     if resolve_plan:
         explicit_fub_id = call.data.get("fub_id")
-        fub_id_raw = explicit_fub_id or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
-        fub_id = _resolve_fub_id(str(fub_id_raw), api.fub_data, hass)
+        fub_id = (
+            _resolve_fub_id(str(explicit_fub_id), api.fub_data, hass)
+            if explicit_fub_id
+            else coordinator.get_active_function_plan_fub_id()
+        )
         if fub_id is None:
             reason = (
-                f"Plan '{fub_id_raw}' not found."
+                f"Plan '{explicit_fub_id}' not found."
                 if explicit_fub_id
                 else "No plan selected — the 'Function Plans' selector is empty. "
                 "Please specify the plan (fub_id) explicitly."
@@ -198,12 +201,21 @@ def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: 
         return None
 
     api = coordinator.api
-    fub_id_raw = call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector"
-    fub_id = _resolve_fub_id(str(fub_id_raw), api.fub_data, hass)
+    fub_id_raw = call.data.get("fub_id")
+    if fub_id_raw:
+        fub_id = _resolve_fub_id(str(fub_id_raw), api.fub_data, hass)
+    else:
+        fub_id = coordinator.get_active_function_plan_fub_id()
     if fub_id is None:
+        reason = (
+            f"Plan '{fub_id_raw}' not found."
+            if fub_id_raw
+            else "No plan selected — the 'Function Plans' selector is empty. "
+            "Please specify the plan (fub_id) explicitly."
+        )
         persistent_notification.async_create(
             hass,
-            f"Plan '{fub_id_raw}' not found.\nAvailable: {_available_plans_str(api.fub_data)}",
+            f"{reason}\nAvailable: {_available_plans_str(api.fub_data)}",
             title=error_title,
         )
         return None
