@@ -940,6 +940,29 @@ cards:
   Beim Öffnen der Debug-Box schaltet der Live-Werte-Abruf zusätzlich auf ein
   schnelleres Intervall um (0,5 s statt der üblichen 2 s) — für unmittelbareres
   Feedback während des aktiven Debuggens.
+- **Plan-Analyse (experimentell)** — ein Popup (Werkzeugleisten-Icon) mit zwei Reitern:
+  - **Befunde** — führt `function_plan_analyze` aus, einen rein lesenden
+    Verdrahtungs-Check, der wahrscheinliche Fehler meldet (widersprüchliche Schreiber,
+    unverdrahtete Set/Reset-Pins, tote Ausgänge, verdächtige Doppel-Verdrahtung) und
+    zusätzlich das erkannte "virtueller Taster"-Selbstrücksetz-Muster als unbedenklich
+    ausweist statt als Fehlalarm. Klick auf einen Befund springt zum Element und hebt
+    es im Diagramm hervor.
+  - **Flussdiagramm** — führt `function_plan_flow_diagram` aus und ordnet denselben Plan
+    nach Signalfluss an (Eingang → Logik → Ausgang) statt nach physischer Position in
+    Comexio Studio; Draht-Hover-Hervorhebung (inkl. Verzweigungspunkten) funktioniert wie
+    im Hauptdiagramm.
+
+  Beide Reiter funktionieren auch mit einem gespeicherten Snapshot, vollständig offline.
+  Da dieses Popup eigene Service-Aufrufe auslöst, kann pro Plan immer nur eine Karte das
+  Analyse-Popup offen haben — eine zweite Karte übernimmt es sauber, statt dass die
+  Ergebnisse der ersten Karte durchsickern.
+- **Auto-Stop + Verlängern** — der Live-Werte-Abruf einer offenen Vorschau stoppt
+  automatisch nach 15 Minuten (z. B. bei einem vergessenen Browser-Tab), statt endlos
+  weiterzulaufen. Der Debug-Box-Befehl `/extend <Minuten>` (nutzt
+  `function_plan_preview_extend`) verlängert das Zeitfenster der aktuellen Sitzung bei
+  Bedarf.
+- **Hilfe-Dialog** — das Hilfe-Icon in der Werkzeugleiste öffnet eine kurze Referenz aller
+  in diesem Abschnitt beschriebenen Bedienelemente direkt in der Karte.
 
 ---
 
@@ -951,8 +974,11 @@ Verfügbar unter **Entwicklerwerkzeuge → Aktionen**:
 |---|---|
 | `comexio.function_plan_visualize` | Rendert einen Plan (oder einen gespeicherten Snapshot) als SVG in die Plan-Vorschau-Bildentität — oder liefert eine Text-Übersicht der Verbindungen und unverbundenen Elemente. |
 | `comexio.function_plan_search` | Findet, welche Pläne Elemente enthalten, die zu einem Suchtext passen — gleiche Syntax wie die Suchleiste der Karte. Wählt den Plan automatisch aus, wenn genau ein Treffer gefunden wird. |
+| `comexio.function_plan_analyze` | *Experimentell.* Rein lesender Verdrahtungs-Check für einen Live-Plan oder Snapshot; Backend des Befunde-Reiters im Plan-Analyse-Popup. |
+| `comexio.function_plan_flow_diagram` | *Experimentell.* Rendert einen Live-Plan oder Snapshot als Signalfluss-Diagramm (Eingang → Logik → Ausgang); Backend des Flussdiagramm-Reiters im Plan-Analyse-Popup. |
 | `comexio.set_value` | Schreibt einen Rohwert auf einen Merker oder eine IO — das Backend des Eingabefelds der Debug-Box. |
 | `comexio.function_plan_debug_session` | Intern — wird automatisch von der Karte aufgerufen, wenn deren Debug-Box geöffnet oder geschlossen wird. Nicht für manuelle Nutzung gedacht. |
+| `comexio.function_plan_preview_extend` | Intern — wird automatisch vom Debug-Box-Befehl `/extend <Minuten>` aufgerufen. Nicht für manuelle Nutzung gedacht. |
 
 ---
 
