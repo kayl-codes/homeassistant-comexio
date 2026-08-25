@@ -137,6 +137,26 @@ cards:
 
   Opening the debug box also switches the live-value poll to a faster cadence
   (0.5 s instead of the normal 2 s) for snappier feedback while actively debugging.
+- **Plan Analysis (experimental)** — a popup (toolbar icon) with two tabs:
+  - **Findings** — runs `function_plan_analyze`, a read-only wiring health-check that flags
+    likely mistakes (conflicting writers, unwired Set/Reset pins, dead outputs, suspicious
+    double-wiring) and also reports the recognized "virtual button" self-reset idiom as a
+    benign pattern rather than a false alarm. Click a finding to jump to and highlight the
+    element on the diagram.
+  - **Flow Diagram** — runs `function_plan_flow_diagram`, laying the same plan out by signal
+    flow (input → logic → output) instead of its physical Comexio Studio position; wire
+    hover-highlighting (including fan-out junction dots) works the same as on the main
+    diagram.
+
+  Both tabs work against a stored snapshot too, entirely offline. Since this popup issues its
+  own service calls, only one card's Analyse popup can be open per plan at a time — a second
+  card claiming it takes over cleanly instead of the first card's results leaking through.
+- **Auto-stop + extend** — a live preview's background wire-value poll automatically stops
+  after 15 minutes if left open (e.g. a forgotten browser tab), instead of polling forever. The
+  debug box's `/extend <minutes>` command (backed by `function_plan_preview_extend`) extends the
+  current session's window on demand.
+- **Help dialog** — the toolbar's help icon opens a short reference of every control described
+  in this section, directly inside the card.
 
 ---
 
@@ -148,8 +168,11 @@ Available under **Developer Tools → Actions**:
 |---|---|
 | `comexio.function_plan_visualize` | Renders a plan (or a stored snapshot) as SVG into the Plan Preview image entity — or returns a text summary of connections and unconnected elements. |
 | `comexio.function_plan_search` | Finds which plans contain elements matching a search text — same syntax as the card's search bar. Auto-selects the plan when exactly one match is found. |
+| `comexio.function_plan_analyze` | *Experimental.* Read-only wiring health-check for a live plan or stored snapshot; backs the Plan Analysis popup's Findings tab. |
+| `comexio.function_plan_flow_diagram` | *Experimental.* Renders a live plan or stored snapshot as a signal-flow diagram (input → logic → output); backs the Plan Analysis popup's Flow Diagram tab. |
 | `comexio.set_value` | Writes a raw value to a marker or IO — the backend of the debug box's input field. |
 | `comexio.function_plan_debug_session` | Internal — called automatically by the card when its debug box opens or closes. Not meant for manual use. |
+| `comexio.function_plan_preview_extend` | Internal — called automatically by the debug box's `/extend <minutes>` command. Not meant for manual use. |
 
 ---
 
@@ -162,14 +185,13 @@ For reference, this is the **current** content of
 ```yaml
 # Version: 0.3.3
 # NOTE: fub_id options are populated at runtime by _update_services_yaml_plans on integration load.
-# The function_plan_restore dropdown lists only plans that have backup snapshots.
 generate_web_io:
   name: Web-IO Export / Upload
-  description: Generates a JSON for the Comexio import or uploads the device class directly to the server.
+  description: Generates a JSON for Comexio import, or uploads the device class directly to the server.
   fields:
     config_entry:
       name: Comexio instance
-      description: Select the Comexio instance to run the action for.
+      description: Select the Comexio instance the action should run for.
       required: true
       selector:
         config_entry:
@@ -184,8 +206,8 @@ generate_web_io:
 function_plan_connect:
   name: Function Plan Connect
   description: >
-    Connects markers to their WebIO commands in the given function plan.
-    Active plans are stopped, edited and re-activated automatically.
+    Wires markers to their Web-IO commands in the given function plan. Active plans
+    are automatically stopped, edited and reactivated.
   fields:
     config_entry:
       name: Comexio instance
@@ -196,7 +218,7 @@ function_plan_connect:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan or leave empty — then the plan selected in the 'Function Plans' entity is used."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
       required: false
       selector:
         select:
@@ -204,19 +226,19 @@ function_plan_connect:
           custom_value: true
     all_markers:
       name: All markers
-      description: "If enabled, all markers with a matching WebIO command are connected (marker_id is ignored)."
+      description: "When enabled, wires every marker that has a matching Web-IO command (ignores marker_id)."
       default: false
       selector:
         boolean:
     marker_id:
       name: Marker IDs
-      description: "Comma-separated list of marker IDs (e.g. 'M10,M11,42'). The M prefix is optional. '*' = all."
+      description: "Comma-separated list of marker IDs (e.g. 'M10,M11,42'). M prefix optional. '*' = all."
       default: "2"
       selector:
         text:
     canvas_format:
       name: Paper format (optional)
-      description: "Paper format of the function plan. 'Auto' = read from the plan settings (recommended, default)."
+      description: "Paper format of the function plan. 'Auto' = determine from the plan's own settings (recommended, default)."
       default: "Auto"
       selector:
         select:
@@ -230,9 +252,7 @@ function_plan_sort:
   name: Function Plan Sort
   description: >
     Sorts all elements of a function plan by marker ID and snaps them to exact
-    grid positions. HA-managed IO cluster plans are restored to their
-    extension-column grid instead. Active plans are stopped, sorted and
-    re-activated automatically.
+    grid positions. Active plans are automatically stopped, sorted and reactivated.
   fields:
     config_entry:
       name: Comexio instance
@@ -243,7 +263,7 @@ function_plan_sort:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan or leave empty — then the plan selected in the 'Function Plans' entity is used."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
       required: false
       selector:
         select:
@@ -251,7 +271,7 @@ function_plan_sort:
           custom_value: true
     canvas_format:
       name: Paper format (optional)
-      description: "Paper format of the function plan. 'Auto' = read from the plan settings (recommended, default)."
+      description: "Paper format of the function plan. 'Auto' = determine from the plan's own settings (recommended, default)."
       default: "Auto"
       selector:
         select:
@@ -274,7 +294,7 @@ function_plan_stop:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan or leave empty — then the plan selected in the 'Function Plans' entity is used."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
       required: false
       selector:
         select:
@@ -283,7 +303,7 @@ function_plan_stop:
 
 function_plan_activate:
   name: Function Plan Activate
-  description: Saves and activates a function plan (run_fup). Equivalent to saving/activating manually in the Comexio UI.
+  description: Saves and activates a function plan (run_fup). Equivalent to manually saving/activating in the Comexio UI.
   fields:
     config_entry:
       name: Comexio instance
@@ -294,7 +314,7 @@ function_plan_activate:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan or leave empty — then the plan selected in the 'Function Plans' entity is used."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
       required: false
       selector:
         select:
@@ -308,7 +328,6 @@ function_plan_restore:
     Two ways to pick the target — use ONE, not both: (1) "Snapshot" (recommended) — pick
     the exact snapshot directly; (2) Advanced: Plan + Backup type + Version manually
     (e.g. for scripting). Setting "Snapshot" makes the advanced fields ignored.
-    Details: https://github.com/kayl-codes/homeassistant-comexio/blob/master/README.md
   fields:
     config_entry:
       name: Comexio instance
@@ -373,6 +392,31 @@ function_plan_restore:
       default: false
       selector:
         boolean:
+    as_copy:
+      name: Restore as copy
+      description: >
+        Restore the snapshot as a brand-new, independent plan instead of overwriting the
+        live plan — the source plan and its backup history are left untouched. Requires
+        'new_plan_name'. Ignores on_conflict/confirm (the source plan is never touched).
+      default: false
+      advanced: true
+      selector:
+        boolean:
+    new_plan_name:
+      name: Name for the copy
+      description: "Required when 'Restore as copy' is enabled — must not already be in use by a live plan."
+      required: false
+      advanced: true
+      selector:
+        text:
+    auto_start:
+      name: Auto-start after restore
+      description: >
+        Start/activate the plan after restoring it (default). Disabled: the snapshot's
+        structure is still fully restored, but the plan is left stopped afterward.
+      default: true
+      selector:
+        boolean:
 
 function_plan_delete_backups:
   name: Function Plan Delete Backups
@@ -408,6 +452,31 @@ function_plan_delete_backups:
     confirm:
       name: Confirm deletion
       description: "Must be enabled — otherwise nothing is deleted."
+      required: true
+      default: false
+      selector:
+        boolean:
+
+function_plan_purge_orphaned_backups:
+  name: Function Plan Purge Orphaned Backups
+  description: >
+    Deletes backup snapshots (auto and change) of plans that no longer exist live in Comexio
+    (deleted directly in Comexio Studio) and whose newest snapshot is older than the
+    configured retention period (Options → Function Plan, default 6 months). A live plan's
+    backups are never touched, no matter how old. Runs automatically on the periodic backup
+    cycle too — this service is normally only needed to force an out-of-schedule cleanup.
+    Requires "confirm".
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    confirm:
+      name: Confirm purge
+      description: "Must be enabled — otherwise nothing is purged."
       required: true
       default: false
       selector:
@@ -495,10 +564,11 @@ function_plan_list_backups:
 function_plan_visualize:
   name: Function Plan Visualize
   description: >
-    Shows a function plan's connections + unconnected elements, either as a text notification
-    or as an SVG diagram (Plan Preview sensor). Two ways to pick the source — use ONE, not
-    both: (1) "Snapshot" — visualize a stored backup exactly as it was captured, entirely
-    offline; (2) "Plan" (live) — visualize the plan's current state in Comexio.
+    Shows the state of a function plan (connections + unwired elements) as a text
+    notification or as an SVG diagram (Plan Preview sensor). Two ways to pick the
+    source — use only ONE: (1) "Snapshot" — render a stored backup exactly as
+    captured, entirely offline; (2) "Plan" (live) — render the plan's current
+    state in Comexio.
   fields:
     config_entry:
       name: Comexio instance
@@ -509,7 +579,7 @@ function_plan_visualize:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan or leave empty — then the plan selected in the 'Function Plans' entity is used. Ignored whenever 'Snapshot' is set."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
       required: false
       selector:
         select:
@@ -517,7 +587,7 @@ function_plan_visualize:
           custom_value: true
     snapshot:
       name: Snapshot (optional)
-      description: "Visualize this exact stored backup instead of the live plan — no Comexio connection needed. Overrides 'Plan' above when set."
+      description: "Render this stored backup snapshot instead of the live plan — no Comexio connection needed. Overrides 'Plan' above when set."
       required: false
       advanced: true
       selector:
@@ -525,7 +595,7 @@ function_plan_visualize:
           options: []
     format:
       name: Output format (optional)
-      description: "text (default) = notification with connections/unconnected elements as a list. svg = renders a diagram at Comexio's original layout positions into the Plan Preview sensor (entity_picture) and returns its URL."
+      description: "text (default) = notification listing connections/unwired elements. svg = renders a diagram at Comexio's original layout positions into the Plan Preview sensor (entity_picture) and returns its URL."
       required: false
       default: text
       selector:
@@ -534,16 +604,17 @@ function_plan_visualize:
             - text
             - svg
 
-function_plan_search:
-  name: Function Plan Search
+function_plan_analyze:
+  name: Function Plan Analyze
   description: >
-    Finds which function plans contain elements matching a text query. Searches the
-    human-readable labels of every element (markers, IOs, WebIOs, blocks, time modules,
-    constants, comments) in every live plan — same syntax as the preview card's search
-    box: plain text = case-insensitive substring, wildcards ? (one non-space character)
-    and * (anything). Results come as a notification and as a service response. When
-    exactly ONE plan matches, the 'Function Plans' selector is set to it automatically —
-    a follow-up action without a plan then targets the plan just found.
+    Manual, read-only "plan health check": looks for likely wiring mistakes (conflicting
+    writers, unwired Set/Reset pins, dead outputs, suspicious double-wiring) and also
+    reports recognized benign patterns (the "virtueller Taster" self-reset idiom). Never
+    scheduled automatically. Result comes back as a service response only — no
+    notification — meant to be shown in a popup by the Plan Preview card. Two ways to
+    pick the source — use only ONE: (1) "Snapshot" — analyze a stored backup exactly as
+    captured, entirely offline; (2) "Plan" (live) — analyze the plan's current state in
+    Comexio.
   fields:
     config_entry:
       name: Comexio instance
@@ -552,12 +623,58 @@ function_plan_search:
       selector:
         config_entry:
           integration: comexio
-    query:
-      name: Search text
-      description: "e.g. 'M33', 'Küche', 'M22?' or 'IOX3 #*'"
-      required: true
+    fub_id:
+      name: Plan (optional)
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
+      required: false
       selector:
-        text:
+        select:
+          options: []
+          custom_value: true
+    snapshot:
+      name: Snapshot (optional)
+      description: "Analyze this stored backup snapshot instead of the live plan — no Comexio connection needed. Overrides 'Plan' above when set."
+      required: false
+      advanced: true
+      selector:
+        select:
+          options: []
+
+function_plan_flow_diagram:
+  name: Function Plan Flow Diagram
+  description: >
+    Renders a plan as a signal-flow diagram: elements arranged by topological order
+    (input -> logic -> output, top to bottom) instead of their physical Comexio Studio
+    position. Elements with no wiring at all are left out. Never scheduled
+    automatically. Result comes back as a service response only (the SVG itself) — no
+    notification — meant to be shown in a popup by the Plan Preview card. Two ways to
+    pick the source — use only ONE: (1) "Snapshot" — render a stored backup exactly as
+    captured, entirely offline; (2) "Plan" (live) — render the plan's current state in
+    Comexio.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional)
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
+      required: false
+      selector:
+        select:
+          options: []
+          custom_value: true
+    snapshot:
+      name: Snapshot (optional)
+      description: "Render this stored backup snapshot instead of the live plan — no Comexio connection needed. Overrides 'Plan' above when set."
+      required: false
+      advanced: true
+      selector:
+        select:
+          options: []
 
 set_value:
   name: Set Value
@@ -608,6 +725,58 @@ function_plan_debug_session:
       default: false
       selector:
         boolean:
+
+function_plan_preview_extend:
+  name: Function Plan Preview Extend
+  description: >
+    Internal — called by the plan card's debug box `/extend <minutes>` command. Extends
+    how long the currently displayed live plan preview keeps polling Comexio for wire
+    values before auto-stopping (default 15 minutes, to avoid a forgotten open tab
+    polling forever). Applies only to the plan preview currently on display, in memory
+    only — the next plan you open resets to the 15-minute default. No effect without a
+    live preview on display.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    minutes:
+      name: Minutes
+      description: New auto-stop window in minutes, counted from now (1-1440).
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 1440
+          mode: box
+
+function_plan_search:
+  name: Function Plan Search
+  description: >
+    Finds which function plans contain elements matching a text query. Searches the
+    human-readable labels of every element (markers, IOs, WebIOs, blocks, time modules,
+    constants, comments) in every live plan — same syntax as the preview card's search
+    box: plain text = case-insensitive substring, wildcards ? (one non-space character)
+    and * (anything). Results come as a notification and as a service response. When
+    exactly ONE plan matches, the 'Function Plans' selector is set to it automatically —
+    a follow-up action without a plan then targets the plan just found.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    query:
+      name: Search text
+      description: "e.g. 'M33', 'Küche', 'M22?' or 'IOX3 #*'"
+      required: true
+      selector:
+        text:
 ```
 
 ---
