@@ -1,4 +1,4 @@
-# Version: 0.8.4
+# Version: 0.8.5
 """Renders a Function Plan (elements + connections) as a labelled diagram.
 
 Pure functions only — no Comexio API calls, no HA dependencies. Works identically for a
@@ -51,10 +51,13 @@ from html import escape
 from typing import Any
 
 from .function_plan_render_constants import _FONT_SIZE, _MARGIN, _STYLE
-from .function_plan_render_geometry import _bounding_box, _build_geometries
+from .function_plan_render_geometry import _bounding_box, _build_geometries, _fit_to_bounding_box
 from .function_plan_render_labels import resolve_element_label
+from .function_plan_render_selfreset import detect_self_reset_elements
 from .function_plan_render_svg import _render_nodes
 from .function_plan_render_wiring import _render_edges
+
+_SELF_RESET_NOTE = "⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster"
 
 __all__ = ["render_plan_svg", "resolve_element_label"]
 
@@ -95,24 +98,22 @@ def render_plan_svg(
     time (or a deleted/recreated plan) and would color wires from unrelated data.
     """
     geos = _build_geometries(elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id)
-    min_x, min_y, max_x, max_y = _bounding_box(geos)
     if canvas:
         # Paper mode: absolute coordinates, canvas grows only if content overflows the paper.
+        _min_x, _min_y, max_x, max_y = _bounding_box(geos)
         width = max(canvas[0], max_x + _MARGIN)
         height = max(canvas[1], max_y + _MARGIN) + 34  # extra headroom for the title
         for geo in geos.values():
             geo["y"] += 34
     else:
-        width = max_x - min_x + 2 * _MARGIN
-        height = max_y - min_y + 2 * _MARGIN + 34  # extra headroom for the title
-        for geo in geos.values():
-            geo["x"] += _MARGIN - min_x
-            geo["y"] += _MARGIN + 34 - min_y
+        width, height = _fit_to_bounding_box(geos)
 
     labels = {
         elem_id: resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id, sun_times)
         for elem_id, elem in elements.items()
     }
+    for elem_id in detect_self_reset_elements(elements, connections, catalog):
+        labels[elem_id] = f"{labels[elem_id]}\n{_SELF_RESET_NOTE}"
 
     parts: list[str] = [
         # Inline max-width caps browser upscaling at 1:1 Studio units no matter how the SVG

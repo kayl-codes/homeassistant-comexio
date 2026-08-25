@@ -1,4 +1,4 @@
-# Version: 0.7.6
+# Version: 0.7.7
 """Comexio integration services package.
 
 Registration entry point (async_setup_services) for all `comexio.*` Home Assistant
@@ -26,13 +26,16 @@ surface (`async_setup_services`, `async_resync_io_group_headers`,
 
 import functools
 import logging
+from typing import Any
 
 from homeassistant.core import HomeAssistant, SupportsResponse
 
 from ..const import (
     DOMAIN,
     FUNCTION_PLAN_SERVICE_ACTIVATE as _SVC_ACTIVATE,
+    FUNCTION_PLAN_SERVICE_ANALYZE as _SVC_ANALYZE,
     FUNCTION_PLAN_SERVICE_CONNECT as _SVC_CONNECT,
+    FUNCTION_PLAN_SERVICE_FLOW_DIAGRAM as _SVC_FLOW_DIAGRAM,
     FUNCTION_PLAN_SERVICE_SORT as _SVC_SORT,
     FUNCTION_PLAN_SERVICE_STOP as _SVC_STOP,
     FUNCTION_PLAN_SERVICE_VISUALIZE as _SVC_VISUALIZE,
@@ -40,6 +43,7 @@ from ..const import (
 from ._context import format_plan_label
 from ._grid import async_resync_io_group_headers
 from ._yaml_sync import _refresh_service_descriptions, _update_services_yaml_plans
+from .analyze import _handle_function_plan_analyze
 from .backup import (
     _handle_function_plan_delete_backups,
     _handle_function_plan_list_backups,
@@ -47,6 +51,7 @@ from .backup import (
     _handle_function_plan_restore,
 )
 from .connect import handle_function_plan_connect
+from .flow_diagram import _handle_function_plan_flow_diagram
 from .misc import (
     _handle_function_plan_debug_session,
     _handle_function_plan_preview_extend,
@@ -72,71 +77,35 @@ __all__ = [
 _LOGGER = logging.getLogger(__name__)
 
 
+# (service name, handler, supports_response) — data-driven so async_setup_services stays a
+# flat loop instead of one "if not has_service: register(...)" block per service (that grew
+# past the cognitive-complexity budget once the service count reached the mid-teens).
+_SIMPLE_SERVICES: tuple[tuple[str, Any, SupportsResponse | None], ...] = (
+    ("set_value", _handle_set_value, SupportsResponse.OPTIONAL),
+    ("generate_web_io", handle_generate_web_io, None),
+    (_SVC_CONNECT, handle_function_plan_connect, None),
+    (_SVC_VISUALIZE, handle_function_plan_visualize, SupportsResponse.OPTIONAL),
+    (_SVC_ANALYZE, _handle_function_plan_analyze, SupportsResponse.OPTIONAL),
+    (_SVC_FLOW_DIAGRAM, _handle_function_plan_flow_diagram, SupportsResponse.OPTIONAL),
+    (_SVC_SORT, handle_function_plan_sort, None),
+    (_SVC_STOP, handle_function_plan_stop, None),
+    (_SVC_ACTIVATE, handle_function_plan_activate, None),
+    ("function_plan_restore", _handle_function_plan_restore, None),
+    ("function_plan_delete_backups", _handle_function_plan_delete_backups, None),
+    ("function_plan_purge_orphaned_backups", _handle_function_plan_purge_orphaned_backups, None),
+    ("function_plan_list_backups", _handle_function_plan_list_backups, SupportsResponse.ONLY),
+    ("function_plan_debug_session", _handle_function_plan_debug_session, None),
+    ("function_plan_preview_extend", _handle_function_plan_preview_extend, SupportsResponse.OPTIONAL),
+    ("function_plan_search", _handle_function_plan_search, SupportsResponse.OPTIONAL),
+)
+
+
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Register additional services for the Comexio integration."""
-    if not hass.services.has_service(DOMAIN, "set_value"):
-        hass.services.async_register(
-            DOMAIN,
-            "set_value",
-            functools.partial(_handle_set_value, hass),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    if not hass.services.has_service(DOMAIN, "generate_web_io"):
-        hass.services.async_register(DOMAIN, "generate_web_io", functools.partial(handle_generate_web_io, hass))
-    if not hass.services.has_service(DOMAIN, _SVC_CONNECT):
-        hass.services.async_register(DOMAIN, _SVC_CONNECT, functools.partial(handle_function_plan_connect, hass))
-    if not hass.services.has_service(DOMAIN, _SVC_VISUALIZE):
-        hass.services.async_register(
-            DOMAIN,
-            _SVC_VISUALIZE,
-            functools.partial(handle_function_plan_visualize, hass),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    if not hass.services.has_service(DOMAIN, _SVC_SORT):
-        hass.services.async_register(DOMAIN, _SVC_SORT, functools.partial(handle_function_plan_sort, hass))
-    if not hass.services.has_service(DOMAIN, _SVC_STOP):
-        hass.services.async_register(DOMAIN, _SVC_STOP, functools.partial(handle_function_plan_stop, hass))
-    if not hass.services.has_service(DOMAIN, _SVC_ACTIVATE):
-        hass.services.async_register(DOMAIN, _SVC_ACTIVATE, functools.partial(handle_function_plan_activate, hass))
-    if not hass.services.has_service(DOMAIN, "function_plan_restore"):
-        hass.services.async_register(
-            DOMAIN, "function_plan_restore", functools.partial(_handle_function_plan_restore, hass)
-        )
-    if not hass.services.has_service(DOMAIN, "function_plan_delete_backups"):
-        hass.services.async_register(
-            DOMAIN, "function_plan_delete_backups", functools.partial(_handle_function_plan_delete_backups, hass)
-        )
-    if not hass.services.has_service(DOMAIN, "function_plan_purge_orphaned_backups"):
-        hass.services.async_register(
-            DOMAIN,
-            "function_plan_purge_orphaned_backups",
-            functools.partial(_handle_function_plan_purge_orphaned_backups, hass),
-        )
-    if not hass.services.has_service(DOMAIN, "function_plan_list_backups"):
-        hass.services.async_register(
-            DOMAIN,
-            "function_plan_list_backups",
-            functools.partial(_handle_function_plan_list_backups, hass),
-            supports_response=SupportsResponse.ONLY,
-        )
-    if not hass.services.has_service(DOMAIN, "function_plan_debug_session"):
-        hass.services.async_register(
-            DOMAIN, "function_plan_debug_session", functools.partial(_handle_function_plan_debug_session, hass)
-        )
-    if not hass.services.has_service(DOMAIN, "function_plan_preview_extend"):
-        hass.services.async_register(
-            DOMAIN,
-            "function_plan_preview_extend",
-            functools.partial(_handle_function_plan_preview_extend, hass),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
-    if not hass.services.has_service(DOMAIN, "function_plan_search"):
-        hass.services.async_register(
-            DOMAIN,
-            "function_plan_search",
-            functools.partial(_handle_function_plan_search, hass),
-            supports_response=SupportsResponse.OPTIONAL,
-        )
+    for name, handler, supports_response in _SIMPLE_SERVICES:
+        if not hass.services.has_service(DOMAIN, name):
+            kwargs = {} if supports_response is None else {"supports_response": supports_response}
+            hass.services.async_register(DOMAIN, name, functools.partial(handler, hass), **kwargs)
 
     await _update_services_yaml_plans(hass)
 

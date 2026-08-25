@@ -1,4 +1,4 @@
-# Version: 0.8.4
+# Version: 0.8.5
 """Node/pill/block/comment SVG markup for the Function Plan renderer.
 
 Split out of function_plan_render.py (2026-08). Consumes the geo dicts built by
@@ -189,12 +189,15 @@ def _render_one_node(parts: list[str], elem_id: str, geo: dict[str, Any], label:
     """Render one plan element's <g> wrapper + interior (see _render_nodes)."""
     # Group each element so a frontend card can address it as ONE unit (hover
     # highlight, search); data-label carries the full, untruncated label text.
+    # data-eid is the plan element's own FubElementId — lets the card jump straight to a
+    # specific element (e.g. from a function_plan_analyze finding) without depending on
+    # label text, which can be ambiguous (two elements can share the same label).
     # node-g-inactive greys the WHOLE group (ID box, texts, pins) via _STYLE.
     # Markers/IOs additionally carry their set_value address + type/state as
     # data-* attributes — the card's debug box builds click-to-fill,
     # autocomplete and plan-local validation from exactly these.
     g_class = "node-g node-g-inactive" if geo.get("inactive") else "node-g"
-    attrs = ""
+    attrs = f' data-eid="{escape(elem_id)}"'
     if target := geo.get("target"):
         value_raw = geo.get("value_raw")
         attrs = (

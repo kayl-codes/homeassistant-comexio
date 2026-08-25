@@ -1,4 +1,4 @@
-# Version: 0.7.6
+# Version: 0.7.7
 """services.yaml dynamic-dropdown rewriting + HA live schema cache refresh.
 
 Split out of the former monolithic services.py (Sourcery: "too large, multi-purpose") —
@@ -19,6 +19,8 @@ import yaml
 
 from ..const import (
     DOMAIN,
+    FUNCTION_PLAN_SERVICE_ANALYZE,
+    FUNCTION_PLAN_SERVICE_FLOW_DIAGRAM,
     FUNCTION_PLAN_SERVICE_NAMES,
     FUNCTION_PLAN_SERVICE_SORT,
     FUNCTION_PLAN_SERVICE_VISUALIZE,
@@ -32,6 +34,8 @@ _LOGGER = logging.getLogger(__name__)
 
 _SORT_SERVICE_NAME = FUNCTION_PLAN_SERVICE_SORT
 _SVC_VISUALIZE = FUNCTION_PLAN_SERVICE_VISUALIZE
+_SVC_ANALYZE = FUNCTION_PLAN_SERVICE_ANALYZE
+_SVC_FLOW_DIAGRAM = FUNCTION_PLAN_SERVICE_FLOW_DIAGRAM
 _SERVICES_YAML_PATH = pathlib.Path(__file__).parent.parent / "services.yaml"
 # Serializes the two independent read-modify-write rewrites of services.yaml below
 # (_update_services_yaml_plans and _refresh_service_descriptions) so a run of one can't
@@ -202,11 +206,12 @@ def _set_yaml_field_options(
 
 
 _BACKUP_DYNAMIC_SERVICES = ("function_plan_restore", "function_plan_list_backups", "function_plan_delete_backups")
-# function_plan_visualize's fub_id dropdown stays owned by _rewrite_services_yaml_plans (plain
-# plan labels, not the composite fub_id:name backup identity) — only its 'snapshot' field
-# (added for the SVG-format/backup-snapshot preview, Cluster 4) is populated here, alongside
-# the three backup services above.
-_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, _SVC_VISUALIZE)
+# function_plan_visualize/function_plan_analyze/function_plan_flow_diagram's fub_id dropdown
+# stays owned by _rewrite_services_yaml_plans (plain plan labels, not the composite fub_id:name
+# backup identity) — only their 'snapshot' field (added for the SVG-format/backup-snapshot
+# preview, Cluster 4; analyze and flow_diagram reuse the same snapshot resolution) is populated
+# here, alongside the three backup services above.
+_SNAPSHOT_DYNAMIC_SERVICES = (*_BACKUP_DYNAMIC_SERVICES, _SVC_VISUALIZE, _SVC_ANALYZE, _SVC_FLOW_DIAGRAM)
 _SERVICE_DESCRIPTIONS_CACHE_KEY = "_service_descriptions_cache"
 
 

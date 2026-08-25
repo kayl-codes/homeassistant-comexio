@@ -394,6 +394,78 @@ function_plan_visualize:
             - text
             - svg
 
+function_plan_analyze:
+  name: Function Plan Analyze
+  description: >
+    Manual, read-only "plan health check": looks for likely wiring mistakes (conflicting
+    writers, unwired Set/Reset pins, dead outputs, suspicious double-wiring) and also
+    reports recognized benign patterns (the "virtueller Taster" self-reset idiom). Never
+    scheduled automatically. Result comes back as a service response only — no
+    notification — meant to be shown in a popup by the Plan Preview card. Two ways to
+    pick the source — use only ONE: (1) "Snapshot" — analyze a stored backup exactly as
+    captured, entirely offline; (2) "Plan" (live) — analyze the plan's current state in
+    Comexio.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional)
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
+      required: false
+      selector:
+        select:
+          options: []
+          custom_value: true
+    snapshot:
+      name: Snapshot (optional)
+      description: "Analyze this stored backup snapshot instead of the live plan — no Comexio connection needed. Overrides 'Plan' above when set."
+      required: false
+      advanced: true
+      selector:
+        select:
+          options: []
+
+function_plan_flow_diagram:
+  name: Function Plan Flow Diagram
+  description: >
+    Renders a plan as a signal-flow diagram: elements arranged by topological order
+    (input -> logic -> output, left to right) instead of their physical Comexio Studio
+    position. Elements with no wiring at all are left out. Never scheduled
+    automatically. Result comes back as a service response only (the SVG itself) — no
+    notification — meant to be shown in a popup by the Plan Preview card. Two ways to
+    pick the source — use only ONE: (1) "Snapshot" — render a stored backup exactly as
+    captured, entirely offline; (2) "Plan" (live) — render the plan's current state in
+    Comexio.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Plan (optional)
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
+      required: false
+      selector:
+        select:
+          options: []
+          custom_value: true
+    snapshot:
+      name: Snapshot (optional)
+      description: "Render this stored backup snapshot instead of the live plan — no Comexio connection needed. Overrides 'Plan' above when set."
+      required: false
+      advanced: true
+      selector:
+        select:
+          options: []
+
 set_value:
   name: Set Value
   description: >
