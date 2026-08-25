@@ -436,10 +436,9 @@ async def _restore_apply_snapshot(
     # wiring (e.g. during a grid re-sort) without touching connections or hash-relevant
     # structure — but its stale ID surviving in the run_fup payload crashes the ENTIRE call
     # (Comexio returns HTTP 500 for any element ID it no longer recognizes), silently failing
-    # the whole restore rather than just the comment. Recreate any such comments first —
-    # unlike the restore-as-new path's fresh-plan rebuild, the live plan here already carries
-    # the real structure, so this only ever has to patch individual missing elements.
-    run_fup_snapshot, recovered_comments, comment_warnings = await _recover_missing_comments(api, fub_id, snapshot)
+    # the whole restore rather than just the comment. Strip any such stale IDs from the
+    # payload first — but DON'T recreate the comments yet (see _recreate_missing_comments).
+    run_fup_snapshot, missing_comments, load_warning = await _sanitize_missing_comments(api, fub_id, snapshot)
 
     # run_fup(plan_data=...) is Comexio's ONLY mechanism for applying a structural snapshot
     # onto a live plan — it cannot be skipped just because the user doesn't want the plan
@@ -450,6 +449,14 @@ async def _restore_apply_snapshot(
     # Preserve previous inactive state, or leave it stopped when the user opted out of auto-start
     if run_ok and (not was_active or not auto_start):
         await api.function_plan_stop_fup(fub_id)
+
+    # Recreate missing comments only AFTER run_fup: run_fup treats its plan_data argument as
+    # the plan's complete state, so a comment created before that call — and necessarily
+    # absent from run_fup_snapshot, since its stale ID had to be stripped to avoid the crash
+    # above — would be wiped out again by the call itself.
+    recovered_comments, comment_warnings = await _recreate_missing_comments(api, fub_id, missing_comments)
+    if load_warning:
+        comment_warnings = [load_warning, *comment_warnings]
 
     return {
         "paper": paper,
@@ -464,20 +471,19 @@ async def _restore_apply_snapshot(
     }
 
 
-async def _recover_missing_comments(api, fub_id: int, snapshot: dict) -> tuple[dict, int, list[str]]:
-    """Recreate snapshot comment blocks (type=14) that no longer exist on the live plan.
+async def _sanitize_missing_comments(api, fub_id: int, snapshot: dict) -> tuple[dict, dict[str, dict], str | None]:
+    """Identify snapshot comment blocks (type=14) that no longer exist on the live plan.
 
-    See the call site in _restore_apply_snapshot for why this has to run before run_fup.
-    The original text IS recoverable here (unlike restore-as-new): a comment element carries
-    its text in its own "name" field, and function_plan_load_elements exposes that field —
-    it's the element's positional/ID metadata that's snapshot-local, not its text.
+    See the call site in _restore_apply_snapshot for why the run_fup payload must have these
+    stripped out, and why recreating them has to happen AFTER run_fup rather than here.
 
-    Returns (snapshot with recovered comment IDs stripped from "elements", recovered count,
-    warnings — e.g. a comment that failed to recreate, which run_fup would then still choke on).
+    Returns (snapshot with those elements stripped from "elements", the stripped elements
+    keyed by their stale snapshot ID, an optional warning if the live plan couldn't be
+    reloaded to check for missing elements at all).
     """
     current = await api.function_plan_load_elements(fub_id)
     if current is None:
-        return snapshot, 0, ["could not reload the live plan to check for missing elements"]
+        return snapshot, {}, "could not reload the live plan to check for missing elements"
 
     current_ids = set(current.get("elements", {}))
     missing_comments = {
@@ -486,8 +492,23 @@ async def _recover_missing_comments(api, fub_id: int, snapshot: dict) -> tuple[d
         if eid not in current_ids and (elem.get("reference") or {}).get("type") == 14
     }
     if not missing_comments:
-        return snapshot, 0, []
+        return snapshot, {}, None
 
+    sanitized_elements = {
+        eid: elem for eid, elem in snapshot.get("elements", {}).items() if eid not in missing_comments
+    }
+    return {**snapshot, "elements": sanitized_elements}, missing_comments, None
+
+
+async def _recreate_missing_comments(api, fub_id: int, missing_comments: dict[str, dict]) -> tuple[int, list[str]]:
+    """Recreate the comment blocks identified by _sanitize_missing_comments.
+
+    The original text IS recoverable here (unlike restore-as-new): a comment element carries
+    its text in its own "name" field, and function_plan_load_elements exposes that field —
+    it's the element's positional/ID metadata that's snapshot-local, not its text.
+
+    Returns (recovered count, warnings — e.g. a comment that failed to recreate).
+    """
     recovered = 0
     warnings: list[str] = []
     for eid, elem in missing_comments.items():
@@ -497,11 +518,7 @@ async def _recover_missing_comments(api, fub_id: int, snapshot: dict) -> tuple[d
             warnings.append(f"comment element {eid} ('{text}') failed to recreate")
         else:
             recovered += 1
-
-    sanitized_elements = {
-        eid: elem for eid, elem in snapshot.get("elements", {}).items() if eid not in missing_comments
-    }
-    return {**snapshot, "elements": sanitized_elements}, recovered, warnings
+    return recovered, warnings
 
 
 async def _restore_verify(api, fub_id: int, snapshot: dict, plan_hash) -> dict:

@@ -639,11 +639,30 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             # out of a plan element's ref_id (that field IS the webIoId, not the WebCommandId).
             plan_data = await api.function_plan_load_elements(fub_id)
             webio_ids: list[int] = []
+            unwired_marker_elem_ids: list[int] = []
             if plan_data:
                 for marker_id in cleanup_ids:
                     marker_elem_id = api._find_marker_element_id(plan_data.get("elements", {}), marker_id)
-                    if marker_elem_id:
-                        webio_ids.extend(api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data))
+                    if not marker_elem_id:
+                        continue
+                    marker_webio_ids = api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data)
+                    if marker_webio_ids:
+                        webio_ids.extend(marker_webio_ids)
+                    else:
+                        # No WebIO counterpart to unwire through — unwire_webio_commands below
+                        # only ever touches elements it finds wired to one of the given
+                        # webio_ids, so a marker with no wiring at all would otherwise be left
+                        # behind in the plan forever. Delete it directly instead.
+                        unwired_marker_elem_ids.append(int(marker_elem_id))
+            if unwired_marker_elem_ids:
+                result = await api._delete_plan_elements_and_restart(
+                    fub_id, unwired_marker_elem_ids, [], api.function_plan_name(fub_id)
+                )
+                lp_count += result.get("deleted_elem_count", 0)
+                if result.get("stop_failed"):
+                    stop_failures.append((result.get("plan_name", "?"), fub_id))
+                elif result.get("plan_stopped") and result.get("fub_id") is not None:
+                    stopped_plans.append((result.get("plan_name", "?"), result["fub_id"]))
             if not webio_ids:
                 continue
             unwired = await self.coordinator.unwire_webio_commands(webio_ids, preferred_fub_id=fub_id)
@@ -874,16 +893,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         label: str,
         class_dev_id: str | None,
         cls_effective_action: str,
-        cls_missing: list[dict],
-        cls_renamed: list[dict],
-        cls_types: list[dict],
-        cls_orphans: list[dict],
-        cls_dangling: list[dict],
+        cls_audit: dict[str, list[dict]],
         dev_ip_mismatch: bool,
         pct_start: int,
         pct_end: int,
     ) -> dict[str, Any]:
-        """Targeted create/rename/delete/type-fix of individual Web-IO commands for one class."""
+        """Targeted create/rename/delete/type-fix of individual Web-IO commands for one class.
+
+        cls_audit bundles this class' slice of the coordinator's audit results — keys
+        "missing"/"renamed"/"types"/"orphans"/"dangling" — into one dict purely to keep this
+        method's parameter count under SonarQube's limit (python:S107); see _sync_class for
+        where the individual lists still come from.
+        """
         api = ctx.api
         _LOGGER.info(
             "[%s] %s: performing targeted Delta Sync for mode: %s", self.server_id, label, cls_effective_action
@@ -896,7 +917,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 base_id = b_info[0]
                 _LOGGER.debug("[%s] %s: resolved fallback Base ID: %s", self.server_id, label, base_id)
 
-        tasks_to_do = self._build_delta_tasks(cls_effective_action, cls_renamed, cls_orphans, cls_missing, cls_types)
+        tasks_to_do = self._build_delta_tasks(
+            cls_effective_action,
+            cls_audit["renamed"],
+            cls_audit["orphans"],
+            cls_audit["missing"],
+            cls_audit["types"],
+        )
         skipped_creates = 0
         if not base_id:
             skipped_creates = sum(1 for t in tasks_to_do if t["type"] == "create")
@@ -920,7 +947,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         # Function Plan debris (cls_dangling) rides along with the same actions that already
         # remove Web-IO commands — no dedicated repair-dialog action for it.
-        cls_dangling_to_delete = cls_dangling if cls_effective_action in {"full_sync", "delete_orphans"} else []
+        cls_dangling_to_delete = (
+            cls_audit["dangling"] if cls_effective_action in {"full_sync", "delete_orphans"} else []
+        )
         result = await self._execute_delta_tasks(
             ctx, cls, class_dev_id, base_id, tasks_to_do, cls_dangling_to_delete, on_progress
         )
@@ -1002,6 +1031,74 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             tasks_to_do.extend([{"item": i, "type": "type"} for i in cls_types])
         return tasks_to_do
 
+    async def _cleanup_delta_debris(
+        self, cls: str, tasks_to_do: list[dict], cls_dangling: list[dict]
+    ) -> tuple[set[int], int]:
+        """Unwire orphaned Web-IO commands about to be deleted and remove leftover Function
+        Plan debris, ahead of running the delta tasks themselves (see _execute_delta_tasks).
+
+        Returns (fub_ids touched — for the caller to re-sort, since deleting an element opens
+        a gap in the plan's grid — and the total element count removed).
+        """
+        resort_fub_ids: set[int] = set()
+        debris_removed = 0
+
+        # Unwire any Function-Plan element still connected to an orphan before deleting its
+        # Web-IO command, unconditionally — not just when Comexio's delete call happens to
+        # refuse it (it doesn't reliably refuse, which is how orphaned plan elements were
+        # left dangling before). Batched once for the whole run, not per task.
+        delete_webio_ids = [
+            int(t["item"]["webIoId"])
+            for t in tasks_to_do
+            if t["type"] == "delete" and t["item"].get("webIoId") is not None
+        ]
+        if delete_webio_ids and not getattr(self.coordinator, "cancel_sync", False):
+            unwired = await self.coordinator.unwire_webio_commands(delete_webio_ids)
+            resort_fub_ids.update(unwired["touched_fub_ids"])
+            debris_removed += unwired["deleted_elem_count"]
+
+        # Function Plan debris (marker/IO elements whose WebIO counterpart was already
+        # removed elsewhere, e.g. directly in Comexio Studio) has no command to unwire —
+        # just delete the leftover element(s) directly.
+        source_type = "2" if cls == WEBIO_CLASS_MARKER else "1"
+        dangling_ref_ids = [i["ref_id"] for i in cls_dangling]
+        if dangling_ref_ids and not getattr(self.coordinator, "cancel_sync", False):
+            cleaned = await self.coordinator.delete_dangling_plan_elements(source_type, dangling_ref_ids)
+            resort_fub_ids.update(cleaned["touched_fub_ids"])
+            debris_removed += cleaned["deleted_elem_count"]
+
+        return resort_fub_ids, debris_removed
+
+    @staticmethod
+    async def _apply_delta_task(
+        api: Any,
+        dev_reg: dr.DeviceRegistry,
+        server_id: str,
+        base_id: str | None,
+        class_dev_id: str | None,
+        task: dict,
+        result: dict[str, Any],
+    ) -> None:
+        """Execute one delta-sync task (rename/delete/type-fix/create), updating `result` in place."""
+        item, t_type = task["item"], task["type"]
+        if t_type == "rename":
+            await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
+            result["renamed"] += 1
+        elif t_type == "delete":
+            await api.delete_single_command(item["id"], class_dev_id)
+            result["removed"] += 1
+        elif t_type == "type":
+            # Clean up entity from registry if type changed
+            device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{server_id}_{item['id']}")})
+            if device:
+                dev_reg.async_remove_device(device.id)
+            await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
+            result["updated"] += 1
+        elif t_type == "create":
+            await api.save_single_command(base_id, class_dev_id, item["payload"])
+            result["added"] += 1
+            result["created_names"].append(item["name"])
+
     async def _execute_delta_tasks(
         self,
         ctx: _SyncContext,
@@ -1024,30 +1121,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             "debris_removed": 0,
         }
 
-        # Unwire any Function-Plan element still connected to an orphan before deleting its
-        # Web-IO command, unconditionally — not just when Comexio's delete call happens to
-        # refuse it (it doesn't reliably refuse, which is how orphaned plan elements were
-        # left dangling before). Batched once for the whole run, not per task.
-        delete_webio_ids = [
-            int(t["item"]["webIoId"])
-            for t in tasks_to_do
-            if t["type"] == "delete" and t["item"].get("webIoId") is not None
-        ]
-        resort_fub_ids: set[int] = set()
-        if delete_webio_ids and not getattr(self.coordinator, "cancel_sync", False):
-            unwired = await self.coordinator.unwire_webio_commands(delete_webio_ids)
-            resort_fub_ids.update(unwired["touched_fub_ids"])
-            result["debris_removed"] += unwired["deleted_elem_count"]
-
-        # Function Plan debris (marker/IO elements whose WebIO counterpart was already
-        # removed elsewhere, e.g. directly in Comexio Studio) has no command to unwire —
-        # just delete the leftover element(s) directly.
-        source_type = "2" if cls == WEBIO_CLASS_MARKER else "1"
-        dangling_ref_ids = [i["ref_id"] for i in cls_dangling]
-        if dangling_ref_ids and not getattr(self.coordinator, "cancel_sync", False):
-            cleaned = await self.coordinator.delete_dangling_plan_elements(source_type, dangling_ref_ids)
-            resort_fub_ids.update(cleaned["touched_fub_ids"])
-            result["debris_removed"] += cleaned["deleted_elem_count"]
+        resort_fub_ids, debris_removed = await self._cleanup_delta_debris(cls, tasks_to_do, cls_dangling)
+        result["debris_removed"] += debris_removed
 
         # Deleting an element opens a gap in the plan's grid; re-sort to close it. Safe to
         # call directly (no is-managed-plan guard) because both cleanup calls above only ever
@@ -1060,25 +1135,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         for idx, task in enumerate(tasks_to_do):
             if getattr(self.coordinator, "cancel_sync", False):
                 break
-            item, t_type = task["item"], task["type"]
-            on_progress(idx, item["name"], t_type)
-            if t_type == "rename":
-                await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
-                result["renamed"] += 1
-            elif t_type == "delete":
-                await api.delete_single_command(item["id"], class_dev_id)
-                result["removed"] += 1
-            elif t_type == "type":
-                # Clean up entity from registry if type changed
-                device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{self.server_id}_{item['id']}")})
-                if device:
-                    dev_reg.async_remove_device(device.id)
-                await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
-                result["updated"] += 1
-            elif t_type == "create":
-                await api.save_single_command(base_id, class_dev_id, item["payload"])
-                result["added"] += 1
-                result["created_names"].append(item["name"])
+            on_progress(idx, task["item"]["name"], task["type"])
+            await self._apply_delta_task(api, dev_reg, self.server_id, base_id, class_dev_id, task, result)
         return result
 
     async def _sync_class(
@@ -1134,6 +1192,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 ],
             }
 
+        cls_audit = {
+            "missing": cls_missing,
+            "renamed": cls_renamed,
+            "types": cls_types,
+            "orphans": cls_orphans,
+            "dangling": cls_dangling,
+        }
         result = await self._delta_sync_class(
             ctx,
             cls,
@@ -1141,11 +1206,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             label,
             class_dev_id,
             cls_effective_action,
-            cls_missing,
-            cls_renamed,
-            cls_types,
-            cls_orphans,
-            cls_dangling,
+            cls_audit,
             dev_ip_mismatch,
             pct_start,
             pct_end,

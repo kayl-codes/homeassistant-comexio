@@ -1102,20 +1102,24 @@ class ComexioPlanCard extends HTMLElement {
       return;
     }
     const st = this._hass.states[this._config.backup_entity];
-    const label = st && st.state && !["unknown", "unavailable"].includes(st.state) ? st.state : null;
-    const restoreRunning = !!(st && st.attributes && st.attributes.restore_in_progress);
+    const label = st?.state && !["unknown", "unavailable"].includes(st.state) ? st.state : null;
+    const restoreRunning = !!st?.attributes?.restore_in_progress;
     this._backupRow.hidden = false;
     this._restoreLabel = label;
     this._restoreBtn.disabled = restoreRunning || !label || label === LIVE_BACKUP_OPTION;
-    this._restoreBtn.title = restoreRunning
-      ? "Ein Restore läuft bereits — bitte warten"
-      : label && label !== LIVE_BACKUP_OPTION
-        ? `Backup "${label}" wiederherstellen`
-        : "Erst ein gespeichertes Backup auswählen (nicht „Live“)";
+    let restoreTitle;
+    if (restoreRunning) {
+      restoreTitle = "Ein Restore läuft bereits — bitte warten";
+    } else if (label && label !== LIVE_BACKUP_OPTION) {
+      restoreTitle = `Backup "${label}" wiederherstellen`;
+    } else {
+      restoreTitle = "Erst ein gespeichertes Backup auswählen (nicht „Live“)";
+    }
+    this._restoreBtn.title = restoreTitle;
   }
 
   _openRestoreDialog() {
-    const match = this._restoreLabel && this._restoreLabel.match(_BACKUP_LABEL_RE);
+    const match = this._restoreLabel?.match(_BACKUP_LABEL_RE);
     if (!match) {
       return;
     }

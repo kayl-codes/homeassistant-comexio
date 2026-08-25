@@ -553,7 +553,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # online the next poll flags any remaining gaps again.
             managed_io_exts: set[str] = set(self.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
             managed_io_exts -= self.offline_extensions or set()
-            wired_marker_webio_pairs, wired_io_webio_pairs = self._audit_wired_pairs(has_active_plan, managed_io_exts)
+            wired_marker_webio_pairs, wired_io_webio_pairs, connected_marker_ids, connected_io_ids = (
+                self._audit_wired_pairs(has_active_plan, managed_io_exts)
+            )
 
             # Compare HA entities with Comexio commands to find inconsistencies
             type_mismatches: list[dict[str, Any]] = []
@@ -668,13 +670,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
             function_plan_dangling_items: list[dict[str, Any]] = []
             if has_active_plan:
-                for rid in self._dangling_source_ids("2", wired_marker_webio_pairs):
+                for rid in self._dangling_source_ids("2", wired_marker_webio_pairs, connected_marker_ids):
                     function_plan_dangling_items.append(
                         {"name": markers_by_id.get(rid, f"M{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_MARKER}
                     )
                     mismatches.add(f"function_plan_dangling_M{rid}")
             if managed_io_exts:
-                for rid in self._dangling_source_ids("1", wired_io_webio_pairs):
+                for rid in self._dangling_source_ids("1", wired_io_webio_pairs, connected_io_ids):
                     io = io_by_id.get(rid)
                     name = f"{io['ext_name']} {io['identifier']}" if io else f"IO#{rid}"
                     function_plan_dangling_items.append({"name": name, "ref_id": rid, "webio_class": WEBIO_CLASS_IO})
@@ -2392,6 +2394,87 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 plan_to_ids.setdefault(fub_id, []).append(marker_id)
         return plan_to_ids
 
+    async def _resolve_unwire_plan_targets(
+        self, webio_ids: list[int], preferred_fub_id: int | None
+    ) -> tuple[dict[int, dict], dict[int, list[int]]]:
+        """Resolve which plan(s) each webio_id needs to be unwired from.
+
+        Scoped to preferred_fub_id when given; otherwise scans every managed plan for a
+        wiring match. See unwire_webio_commands for the overall contract.
+        """
+        if preferred_fub_id is not None:
+            plan_data = await self.api.function_plan_load_elements(preferred_fub_id)
+            if not plan_data:
+                return {}, {}
+            return {preferred_fub_id: plan_data}, {preferred_fub_id: list(webio_ids)}
+
+        plans = await self._load_function_plan_check_data()
+        plan_to_ids: dict[int, list[int]] = {}
+        for webio_id in webio_ids:
+            for fub_id, plan_data in plans.items():
+                if self.api._find_webio_wiring(webio_id, plan_data) is not None:
+                    plan_to_ids.setdefault(fub_id, []).append(webio_id)
+                    break
+        return plans, plan_to_ids
+
+    async def _unwire_plan(
+        self, fub_id: int, ids: list[int], plan_data: dict, webio_id_to_cmd_id: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Unwire the given webio_ids from ONE plan and resolve their real cmdIds.
+
+        Returns {"deleted_elem_count", "cmd_ids", "stopped_plan" (name, fub_id)|None,
+        "stop_failure" (name, fub_id)|None, "touched" bool} for this single plan — aggregated
+        by the caller across every plan (see unwire_webio_commands).
+        """
+        elem_ids: list[int] = []
+        found_webio_ids: list[int] = []
+        for webio_id in ids:
+            pair = self.api._find_webio_wiring(webio_id, plan_data)
+            if pair is not None:
+                elem_ids.extend(pair)
+                found_webio_ids.append(webio_id)
+        if not elem_ids:
+            return {
+                "deleted_elem_count": 0,
+                "cmd_ids": [],
+                "stopped_plan": None,
+                "stop_failure": None,
+                "touched": False,
+            }
+
+        elem_ids = list(dict.fromkeys(elem_ids))
+        result = await self.api._delete_plan_elements_and_restart(
+            fub_id, elem_ids, found_webio_ids, self.api.function_plan_name(fub_id)
+        )
+        stopped_plan = None
+        stop_failure = None
+        if result.get("stop_failed"):
+            stop_failure = (result.get("plan_name", "?"), fub_id)
+        elif result.get("plan_stopped") and result.get("fub_id") is not None:
+            stopped_plan = (result.get("plan_name", "?"), result["fub_id"])
+
+        # webio_cmd_ids echoes back only the ids actually unwired (empty on failure) —
+        # resolving cmdIds only for those avoids deleting a command whose plan element
+        # deletion never actually succeeded.
+        cmd_ids: list[int] = []
+        for webio_id in result.get("webio_cmd_ids", []):
+            cmd_id = webio_id_to_cmd_id.get(str(webio_id))
+            if cmd_id is not None:
+                cmd_ids.append(cmd_id)
+            else:
+                _LOGGER.warning(
+                    "[%s] unwire_webio_commands: no cmdId found for webIoId=%s, skipping command deletion",
+                    self.server_id,
+                    webio_id,
+                )
+        return {
+            "deleted_elem_count": result.get("deleted_elem_count", 0),
+            "cmd_ids": cmd_ids,
+            "stopped_plan": stopped_plan,
+            "stop_failure": stop_failure,
+            "touched": result.get("deleted_elem_count", 0) > 0,
+        }
+
     async def unwire_webio_commands(self, webio_ids: list[int], preferred_fub_id: int | None = None) -> dict[str, Any]:
         """Remove Function-Plan wiring for the given webIoIds and resolve their real cmdIds.
 
@@ -2413,19 +2496,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for cmd in (self.data or {}).get("webio_commands", {}).values()
             if cmd.get("webIoId") is not None
         }
-
-        if preferred_fub_id is not None:
-            plan_data = await self.api.function_plan_load_elements(preferred_fub_id)
-            plans = {preferred_fub_id: plan_data} if plan_data else {}
-            plan_to_ids: dict[int, list[int]] = {preferred_fub_id: list(webio_ids)} if plan_data else {}
-        else:
-            plans = await self._load_function_plan_check_data()
-            plan_to_ids = {}
-            for webio_id in webio_ids:
-                for fub_id, plan_data in plans.items():
-                    if self.api._find_webio_wiring(webio_id, plan_data) is not None:
-                        plan_to_ids.setdefault(fub_id, []).append(webio_id)
-                        break
+        plans, plan_to_ids = await self._resolve_unwire_plan_targets(webio_ids, preferred_fub_id)
 
         deleted_elem_count = 0
         cmd_ids: list[int] = []
@@ -2437,41 +2508,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             plan_data = plans.get(fub_id)
             if not plan_data:
                 continue
-            elem_ids: list[int] = []
-            found_webio_ids: list[int] = []
-            for webio_id in ids:
-                pair = self.api._find_webio_wiring(webio_id, plan_data)
-                if pair is None:
-                    continue
-                elem_ids.extend(pair)
-                found_webio_ids.append(webio_id)
-            if not elem_ids:
-                continue
-            elem_ids = list(dict.fromkeys(elem_ids))
-            result = await self.api._delete_plan_elements_and_restart(
-                fub_id, elem_ids, found_webio_ids, self.api.function_plan_name(fub_id)
-            )
-            if result.get("deleted_elem_count", 0) > 0:
-                deleted_elem_count += result["deleted_elem_count"]
+            plan_result = await self._unwire_plan(fub_id, ids, plan_data, webio_id_to_cmd_id)
+            deleted_elem_count += plan_result["deleted_elem_count"]
+            cmd_ids.extend(plan_result["cmd_ids"])
+            if plan_result["touched"]:
                 touched_fub_ids.append(fub_id)
-            if result.get("stop_failed"):
-                stop_failures.append((result.get("plan_name", "?"), fub_id))
-            elif result.get("plan_stopped") and result.get("fub_id") is not None:
-                stopped_plans.append((result.get("plan_name", "?"), result["fub_id"]))
-
-            # webio_cmd_ids echoes back only the ids actually unwired (empty on failure) —
-            # resolving cmdIds only for those avoids deleting a command whose plan element
-            # deletion never actually succeeded.
-            for webio_id in result.get("webio_cmd_ids", []):
-                cmd_id = webio_id_to_cmd_id.get(str(webio_id))
-                if cmd_id is not None:
-                    cmd_ids.append(cmd_id)
-                else:
-                    _LOGGER.warning(
-                        "[%s] unwire_webio_commands: no cmdId found for webIoId=%s, skipping command deletion",
-                        self.server_id,
-                        webio_id,
-                    )
+            if plan_result["stop_failure"]:
+                stop_failures.append(plan_result["stop_failure"])
+            if plan_result["stopped_plan"]:
+                stopped_plans.append(plan_result["stopped_plan"])
 
         return {
             "deleted_elem_count": deleted_elem_count,
@@ -2558,6 +2603,50 @@ class ComexioCoordinator(DataUpdateCoordinator):
             pairs.update((s, w) for s in source_ids for w in webio_ids)
         return pairs
 
+    @staticmethod
+    def _plan_connected_source_ids(plan_data: dict, source_type: str) -> set[str]:
+        """ref_ids of `source_type` (marker "2" / IO "1") elements that are an endpoint of ANY
+        connection in the plan, regardless of what's on the other end.
+
+        Used by _dangling_source_ids as a conservative floor: a source element wired only to
+        non-WebIO logic (a timer, comparator, AND/OR block, ...) is still very much in active
+        use within the plan and must never be treated as WebIO debris just because it lacks a
+        direct WebIO pairing — only an element with NO connection at all is unambiguously
+        abandoned.
+        """
+        ref_by_elem_id: dict[str, str] = {}
+        for elem_id, elem in (plan_data.get("elements") or {}).items():
+            ref = elem.get("reference") or {}
+            if str(ref.get("type")) == source_type:
+                ref_by_elem_id[str(elem_id)] = str(ref.get("ref_id"))
+        if not ref_by_elem_id:
+            return set()
+
+        connected: set[str] = set()
+        for conn in (plan_data.get("connections") or {}).values():
+            endpoint_ids = {str((conn.get("input") or {}).get("FubElementId"))}
+            outputs = conn.get("output") or []
+            if isinstance(outputs, dict):
+                outputs = list(outputs.values())
+            endpoint_ids.update(str(o.get("FubElementId")) for o in outputs)
+            connected.update(ref_by_elem_id[eid] for eid in endpoint_ids if eid in ref_by_elem_id)
+        return connected
+
+    def _connected_source_ids(self, source_type: str) -> set[str] | None:
+        """ref_ids of `source_type` elements with ANY connection at all, across every plan
+        relevant to the wiring audit — see _plan_connected_source_ids. Mirrors
+        _wired_source_webio_pairs' scoping (same relevant_fub_ids, same None-while-not-loaded
+        contract) since both feed the same audit cycle.
+        """
+        if not self.function_plan_plans:
+            return None
+        relevant_fub_ids = self._function_plan_check_fub_ids()
+        connected: set[str] = set()
+        for fub_id, plan_data in self.function_plan_plans.items():
+            if fub_id in relevant_fub_ids:
+                connected.update(self._plan_connected_source_ids(plan_data, source_type))
+        return connected
+
     def _wired_source_webio_pairs(self, source_type: str) -> set[tuple[str, str]] | None:
         """Return (ref_id, webIoId) pairs of source elements (marker "2" / IO "1") directly
         wired to a WebIO element in a managed plan.
@@ -2588,33 +2677,46 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _audit_wired_pairs(
         self, has_active_plan: bool, managed_io_exts: set[str]
-    ) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None]:
-        """Wired (ref_id, webIoId) pair sets for the audit: (markers, IOs).
+    ) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None, set[str] | None, set[str] | None]:
+        """Wired (ref_id, webIoId) pair sets for the audit: (markers, IOs), plus the
+        any-connection-at-all ref_id sets _dangling_source_ids needs alongside them (see there).
 
-        Either set is None when its check is disabled (no active plan / no managed IO
+        Each set is None when its check is disabled (no active plan / no managed IO
         extensions) or the bulk plan snapshot is not loaded yet (recheck scheduled).
         """
         wired_marker_pairs: set[tuple[str, str]] | None = None
+        connected_marker_ids: set[str] | None = None
         if has_active_plan:
             wired_marker_pairs = self._wired_source_webio_pairs("2")
+            connected_marker_ids = self._connected_source_ids("2")
             if wired_marker_pairs is None:
                 self._lp_missing_recheck_pending = True
         wired_io_pairs: set[tuple[str, str]] | None = None
+        connected_io_ids: set[str] | None = None
         if managed_io_exts:
             wired_io_pairs = self._wired_source_webio_pairs("1")
+            connected_io_ids = self._connected_source_ids("1")
             if wired_io_pairs is None:
                 self._lp_missing_recheck_pending = True
-        return wired_marker_pairs, wired_io_pairs
+        return wired_marker_pairs, wired_io_pairs, connected_marker_ids, connected_io_ids
 
-    def _dangling_source_ids(self, source_type: str, wired_pairs: set[tuple[str, str]] | None) -> set[str]:
+    def _dangling_source_ids(
+        self,
+        source_type: str,
+        wired_pairs: set[tuple[str, str]] | None,
+        connected_ids: set[str] | None,
+    ) -> set[str]:
         """ref_ids of marker ("2") / IO ("1") elements present in a managed plan but never
-        paired with a WebIO element there — Function-Plan debris left behind when a Web-IO
-        command/element was removed (e.g. directly in Comexio Studio) without also removing
-        its wired source element. A plain set-difference against the wired-pairs set
-        _audit_wired_pairs already computed this cycle — no extra connection scan needed,
-        only one more pass over the already-loaded element maps.
+        paired with a WebIO element there AND without any other connection either —
+        Function-Plan debris left behind when a Web-IO command/element was removed (e.g.
+        directly in Comexio Studio) without also removing its wired source element.
+
+        The `connected_ids` floor (any connection at all, not just a WebIO one) is required
+        alongside `wired_pairs`: a source wired only to non-WebIO logic (a timer, comparator,
+        AND/OR block, ...) would otherwise be misclassified as debris and deleted on the next
+        sync even though it's in active use (see _plan_connected_source_ids).
         """
-        if wired_pairs is None or not self.function_plan_plans:
+        if wired_pairs is None or connected_ids is None or not self.function_plan_plans:
             return set()
         relevant_fub_ids = self._function_plan_check_fub_ids()
         present_ids = {
@@ -2624,7 +2726,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for elem in (plan_data.get("elements") or {}).values()
             if str((elem.get("reference") or {}).get("type")) == source_type
         }
-        return present_ids - {rid for rid, _ in wired_pairs}
+        return present_ids - {rid for rid, _ in wired_pairs} - connected_ids
 
     async def delete_dangling_plan_elements(self, source_type: str, ref_ids: list[str]) -> dict[str, Any]:
         """Delete Function-Plan marker/IO elements left behind after their WebIO counterpart
