@@ -1,4 +1,4 @@
-// Version: 0.9.7
+// Version: 0.9.15
 // Comexio function plan preview card — renders the plan-preview SVG INLINE (not via <img>).
 //
 // Why inline: an SVG inside an <img> is static — no :hover rules, no <title> tooltips,
@@ -9,6 +9,17 @@
 // Dashboard config:
 //   type: custom:comexio-plan-card
 //   entity: image.system_iosrv1_plan_vorschau
+//   backup_entity: select.system_iosrv1_logikplan_backup   # optional — the "Function Plan
+//     Backup" select entity created by this integration. When set, the card shows a
+//     "Restore" trigger (confirmation required) that acts on whichever backup is
+//     currently chosen in that selector — it never displays the choice itself, since the
+//     native selector already shows it on the dashboard.
+//
+// Compact trigger mode: omit `entity` and set only `backup_entity` to get a small
+// card containing nothing but the Restore trigger button — no toolbar/plan/debug box.
+// Meant to be placed as its own grid column right next to the native backup selector
+// (see the dashboard example in logikplan_vorschau), instead of the full preview
+// card's own full-width row.
 
 // Pure, `this`-independent helpers (pattern matching, timestamp formatting) live in a
 // sibling module — see comexio-plan-card-utils.js. Deployment note: this split means the
@@ -18,7 +29,16 @@ import { matchesPattern, fmtTs } from "./comexio-plan-card-utils.js";
 
 // Version banner: lets the user verify in the browser console WHICH build actually
 // executes — ?v= query bumps proved unreliable against the service-worker cache.
-console.info("comexio-plan-card v0.9.30 (Flussdiagramm: Hover-Highlight + Umbenennung) loaded");
+console.info("comexio-plan-card v0.9.31 (Restore-as-Copy + Flussdiagramm-Merge) loaded");
+
+// Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
+// function_plan_backup.py) so the card can parse kind+slot back out of the select's state
+// without ever having to know the backup manager's internal storage format itself.
+const _BACKUP_LABEL_RE = /^(\w+)\[(\d+)\]/;
+
+// Must match LIVE_BACKUP_OPTION in select.py — the backup selector's "show the live plan,
+// not a stored snapshot" option, which is the only state where Restore has nothing to do.
+const LIVE_BACKUP_OPTION = "Live";
 
 // Seed filter for a card whose filter was never touched (localStorage key absent):
 // hides the periodically chattering analog inputs. A deliberately cleared filter
@@ -306,10 +326,20 @@ class ComexioPlanCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config.entity) {
-      throw new Error("comexio-plan-card: 'entity' is required (the plan preview image entity)");
+    if (!config.entity && !config.backup_entity) {
+      throw new Error("comexio-plan-card: 'entity' (plan preview image) or 'backup_entity' is required");
     }
     this._config = config;
+    // No `entity` — compact trigger mode: nothing but the Restore button, no plan/zoom/debug
+    // state to restore (see class doc comment at the top of this file).
+    this._minimal = !config.entity;
+    if (!this.shadowRoot) {
+      this._buildDom();
+    }
+    this.classList.toggle("minimal-mode", this._minimal);
+    if (this._minimal) {
+      return;
+    }
     // Restore the per-entity zoom factor (survives reloads; purely client-side).
     const saved = Number(localStorage.getItem(`comexio-plan-zoom:${config.entity}`));
     this._zoom = saved >= 0.25 && saved <= 4 ? saved : 1;
@@ -321,9 +351,6 @@ class ComexioPlanCard extends HTMLElement {
       // corrupt entry — start with an empty history
     }
     this._history = Array.isArray(hist) ? hist.filter((h) => typeof h === "string") : [];
-    if (!this.shadowRoot) {
-      this._buildDom();
-    }
     this._zoomLabel.textContent = `${Math.round(this._zoom * 100)} %`;
     const storedFilter = localStorage.getItem(`comexio-plan-debugfilter:${config.entity}`);
     const savedFilter = storedFilter === null ? DEFAULT_DEBUG_FILTER : storedFilter;
@@ -483,8 +510,63 @@ class ComexioPlanCard extends HTMLElement {
           padding: 0 3px; border-radius: 3px;
         }
         .help-dialog em { color: var(--secondary-text-color, #888); font-style: normal; font-size: 0.9em; }
+
+        /* Compact trigger mode (no 'entity' configured): only the Restore button remains —
+           meant to sit as its own small card right next to the native backup selector. */
+        :host(.minimal-mode) .toolbar,
+        :host(.minimal-mode) .cross-results,
+        :host(.minimal-mode) .plan,
+        :host(.minimal-mode) .debug { display: none; }
+        :host(.minimal-mode) ha-card { padding: 0; background: transparent; border: none; box-shadow: none; }
+        :host(.minimal-mode) .backup-row { padding: 0; }
+
+        .backup-row { display: flex; padding: 0 4px 8px 4px; font-size: 0.9em; }
+        .backup-row[hidden] { display: none; }
+        .backup-row .restore-btn {
+          display: flex; align-items: center; justify-content: center; gap: 6px;
+          width: 100%; padding: 6px 10px; border-radius: 6px;
+          border: 1px solid var(--divider-color, #888); background: none; cursor: pointer;
+          color: var(--primary-text-color, inherit); font: inherit; white-space: nowrap;
+        }
+        .backup-row .restore-btn:hover:not(:disabled) { border-color: var(--primary-color, #03a9f4); color: var(--primary-color, #03a9f4); }
+        .backup-row .restore-btn ha-icon { --mdc-icon-size: 18px; }
+        .backup-row .restore-btn:disabled { opacity: 0.4; cursor: default; }
+
+        .restore-dialog {
+          border: 1px solid var(--divider-color, #888); border-radius: 8px; padding: 16px;
+          width: min(440px, 92vw);
+          background: var(--card-background-color, #fff); color: var(--primary-text-color, inherit);
+          font: inherit;
+        }
+        .restore-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+        .restore-dialog h3 { margin: 0 0 8px 0; font-size: 1.1em; }
+        .restore-dialog p { margin: 0 0 16px 0; line-height: 1.4; }
+        .restore-dialog .restore-option {
+          display: flex; align-items: center; gap: 6px; margin: 0 0 10px 0; cursor: pointer;
+        }
+        .restore-dialog .restore-copy-name {
+          width: 100%; box-sizing: border-box; padding: 6px 8px; margin: -4px 0 10px 0;
+          border-radius: 6px; border: 1px solid var(--divider-color, #888);
+          background: var(--card-background-color, #fff); color: var(--primary-text-color, inherit); font: inherit;
+        }
+        .restore-dialog .restore-copy-name[hidden] { display: none; }
+        .restore-dialog .restore-actions { display: flex; justify-content: flex-end; gap: 8px; }
+        .restore-dialog button {
+          padding: 6px 14px; border-radius: 6px; border: 1px solid var(--divider-color, #888);
+          background: none; cursor: pointer; color: var(--primary-text-color, inherit); font: inherit;
+        }
+        .restore-dialog .restore-confirm {
+          border-color: var(--error-color, #c62828); color: var(--error-color, #c62828);
+        }
+        .restore-dialog .restore-confirm:hover { background: var(--error-color, #c62828); color: #fff; }
+
       </style>
       <ha-card>
+        <div class="backup-row" hidden>
+          <button class="restore-btn" title="Ausgewähltes Backup wiederherstellen" aria-label="Ausgewähltes Backup wiederherstellen" disabled>
+            <ha-icon icon="mdi:backup-restore"></ha-icon>Restore
+          </button>
+        </div>
         <div class="toolbar">
           <button class="help-toggle" title="Hilfe: Bedienung der Karte" aria-label="Hilfe anzeigen"><ha-icon icon="mdi:help-circle-outline"></ha-icon></button>
           <input type="search" placeholder="Suche… (z. B. M14, M1?, IOX3 #*) — Enter: alle Pläne durchsuchen" aria-label="Suche im Plan">
@@ -546,6 +628,23 @@ class ComexioPlanCard extends HTMLElement {
             <tr><td>Griff über dem Log ziehen</td><td>Ändert die Höhe der Log-Box.</td></tr>
           </tbody>
         </table>
+      </dialog>
+      <dialog class="restore-dialog">
+        <h3>Backup wiederherstellen?</h3>
+        <p class="restore-text"></p>
+        <label class="restore-option">
+          <input type="checkbox" class="restore-as-copy">
+          Als neue Kopie wiederherstellen (Original bleibt unverändert)
+        </label>
+        <input type="text" class="restore-copy-name" placeholder="Name der Kopie" hidden>
+        <label class="restore-option">
+          <input type="checkbox" class="restore-auto-start" checked>
+          Automatisch starten nach dem Restore
+        </label>
+        <div class="restore-actions">
+          <button class="restore-cancel">Abbrechen</button>
+          <button class="restore-confirm">Wiederherstellen</button>
+        </div>
       </dialog>`;
     this._helpDialog = root.querySelector(".help-dialog");
     root.querySelector(".help-toggle").addEventListener("click", () => this._helpDialog.showModal());
@@ -554,6 +653,27 @@ class ComexioPlanCard extends HTMLElement {
     this._helpDialog.addEventListener("click", (ev) => {
       if (ev.target === this._helpDialog) {
         this._helpDialog.close();
+      }
+    });
+    this._backupRow = root.querySelector(".backup-row");
+    this._restoreBtn = root.querySelector(".restore-btn");
+    this._restoreBtn.addEventListener("click", () => this._openRestoreDialog());
+    this._restoreDialog = root.querySelector(".restore-dialog");
+    this._restoreTextEl = root.querySelector(".restore-text");
+    this._restoreAsCopyEl = root.querySelector(".restore-as-copy");
+    this._restoreCopyNameEl = root.querySelector(".restore-copy-name");
+    this._restoreAutoStartEl = root.querySelector(".restore-auto-start");
+    this._restoreAsCopyEl.addEventListener("change", () => {
+      this._restoreCopyNameEl.hidden = !this._restoreAsCopyEl.checked;
+      if (this._restoreAsCopyEl.checked) {
+        this._restoreCopyNameEl.focus();
+      }
+    });
+    root.querySelector(".restore-cancel").addEventListener("click", () => this._restoreDialog.close());
+    root.querySelector(".restore-confirm").addEventListener("click", () => this._confirmRestore());
+    this._restoreDialog.addEventListener("click", (ev) => {
+      if (ev.target === this._restoreDialog) {
+        this._restoreDialog.close();
       }
     });
     // The dialog itself is a page-wide singleton (_ensureSharedAnalysisDialog), created and
@@ -568,6 +688,17 @@ class ComexioPlanCard extends HTMLElement {
     this._zoomLabel.addEventListener("click", () => this._setZoom(1));
     this._resultsEl = root.querySelector(".cross-results");
     this._planEl = root.querySelector(".plan");
+    // Wire-hover survives the cyclic SVG reload (live poll swaps the whole tree every
+    // 0.5-2s while the debug box is open): track the pointer on this stable container
+    // (it's never replaced, only its innerHTML) and reapply hover in _enhance() after
+    // each swap, since the browser doesn't refire mouseenter for a stationary pointer.
+    this._hoverPointer = null;
+    this._planEl.addEventListener("mousemove", (ev) => {
+      this._hoverPointer = { x: ev.clientX, y: ev.clientY };
+    });
+    this._planEl.addEventListener("mouseleave", () => {
+      this._hoverPointer = null;
+    });
     this._debugEl = root.querySelector(".debug");
     this._logEl = root.querySelector(".debug-log");
     this._cmdInput = root.querySelector(".debug-cmd");
@@ -907,6 +1038,10 @@ class ComexioPlanCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this._updateBackupRow();
+    if (this._minimal) {
+      return; // trigger-only card: no plan/debug state to drive
+    }
     if (this._debugOn) {
       this._ensureDebugSubscription(); // deferred until hass exists (also re-arms after reconnect)
     }
@@ -957,6 +1092,86 @@ class ComexioPlanCard extends HTMLElement {
     }
   }
 
+  // Pure trigger: reads the configured backup select entity's current state on demand (kept
+  // in a separate config field, not derived from the entity registry, so this stays a plain
+  // declarative dashboard config value like `entity`) instead of mirroring it into its own
+  // label — the native selector already displays the chosen backup on the dashboard.
+  _updateBackupRow() {
+    if (!this._config.backup_entity) {
+      this._backupRow.hidden = true;
+      return;
+    }
+    const st = this._hass.states[this._config.backup_entity];
+    const label = st?.state && !["unknown", "unavailable"].includes(st.state) ? st.state : null;
+    const restoreRunning = !!st?.attributes?.restore_in_progress;
+    this._backupRow.hidden = false;
+    this._restoreLabel = label;
+    this._restoreBtn.disabled = restoreRunning || !label || label === LIVE_BACKUP_OPTION;
+    let restoreTitle;
+    if (restoreRunning) {
+      restoreTitle = "Ein Restore läuft bereits — bitte warten";
+    } else if (label && label !== LIVE_BACKUP_OPTION) {
+      restoreTitle = `Backup "${label}" wiederherstellen`;
+    } else {
+      restoreTitle = "Erst ein gespeichertes Backup auswählen (nicht „Live“)";
+    }
+    this._restoreBtn.title = restoreTitle;
+  }
+
+  _openRestoreDialog() {
+    const match = this._restoreLabel?.match(_BACKUP_LABEL_RE);
+    if (!match) {
+      return;
+    }
+    this._restoreKind = match[1];
+    this._restoreSlot = Number(match[2]);
+    this._restoreTextEl.textContent =
+      `Soll das Backup "${this._restoreLabel}" auf den aktuell aktiven Plan wiederhergestellt werden? ` +
+      "Der bisherige Stand wird vorher automatisch als Sicherheits-Backup gespeichert.";
+    this._restoreAsCopyEl.checked = false;
+    this._restoreCopyNameEl.hidden = true;
+    this._restoreCopyNameEl.value = "";
+    this._restoreAutoStartEl.checked = true;
+    this._restoreDialog.showModal();
+  }
+
+  async _confirmRestore() {
+    if (!this._hass || this._restoreKind === undefined) {
+      return;
+    }
+    const asCopy = this._restoreAsCopyEl.checked;
+    const newPlanName = this._restoreCopyNameEl.value.trim();
+    if (asCopy && !newPlanName) {
+      this._restoreCopyNameEl.focus();
+      return;
+    }
+    this._restoreDialog.close();
+    this._restoreBtn.disabled = true;
+    const data = {
+      kind: this._restoreKind,
+      slot: this._restoreSlot,
+      auto_start: this._restoreAutoStartEl.checked,
+    };
+    // Multiple Comexio config entries make config_entry required by the service — resolve it
+    // from the backup selector's own entity registry entry so this card keeps working without
+    // extra card-config options even when more than one Comexio instance is set up.
+    const configEntryId = this._hass.entities?.[this._config.backup_entity]?.config_entry_id;
+    if (configEntryId) {
+      data.config_entry = configEntryId;
+    }
+    if (asCopy) {
+      data.as_copy = true;
+      data.new_plan_name = newPlanName;
+    }
+    try {
+      await this._hass.callService("comexio", "function_plan_restore", data);
+    } catch (err) {
+      console.warn("comexio-plan-card: function_plan_restore failed", err);
+    } finally {
+      this._updateBackupRow();
+    }
+  }
+
   _enhance() {
     const svg = this._planEl.querySelector("svg");
     if (!svg) {
@@ -972,7 +1187,9 @@ class ComexioPlanCard extends HTMLElement {
       const hit = wire.cloneNode(false);
       hit.setAttribute("class", "edge-hit");
       hit.removeAttribute("stroke-width");
-      delete hit.dataset.net;
+      // Keep data-net on the hit path (harmless — no CSS depends on .edge-hit's data-net):
+      // _reapplyHover() below needs it to find the hit path back under the pointer after
+      // a live-poll SVG reload swaps the whole tree out from under a stationary mouse.
       const net = wire.dataset.net ?? null;
       const members = () => (net === null ? [wire] : svg.querySelectorAll(`[data-net="${net}"]`));
       hit.addEventListener("mouseenter", () => {
@@ -987,6 +1204,7 @@ class ComexioPlanCard extends HTMLElement {
       });
       wire.after(hit);
     }
+    this._reapplyHover(svg);
     // Debug-box support: collect the plan's set_value targets (markers/IOs annotated by
     // the renderer) for autocomplete + command validation, and wire up click-to-fill /
     // double-click-to-toggle. The handlers no-op while the debug box is closed.
@@ -1009,6 +1227,25 @@ class ComexioPlanCard extends HTMLElement {
       });
     }
     this._planEl.classList.toggle("debug-live", this._debugOn);
+  }
+
+  // Re-lights the net under a stationary pointer right after an SVG reload — otherwise
+  // the yellow wire highlight silently drops out every reload cycle (mouseenter never
+  // refires without actual pointer movement) and the user has to re-hover to get it back.
+  _reapplyHover(svg) {
+    if (!this._hoverPointer) {
+      return;
+    }
+    const el = this.shadowRoot.elementFromPoint(this._hoverPointer.x, this._hoverPointer.y);
+    const hit = el?.closest?.("path.edge-hit");
+    if (!hit) {
+      return;
+    }
+    const net = hit.dataset.net ?? null;
+    const members = net === null ? [hit.previousElementSibling] : svg.querySelectorAll(`[data-net="${net}"]`);
+    for (const member of members) {
+      member?.classList.add("edge-hover");
+    }
   }
 
   _setZoom(zoom) {
@@ -1575,7 +1812,7 @@ class ComexioPlanCard extends HTMLElement {
   }
 
   getCardSize() {
-    return 10;
+    return this._minimal ? 1 : 10;
   }
 
   static getStubConfig(hass) {

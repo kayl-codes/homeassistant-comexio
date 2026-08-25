@@ -25,6 +25,19 @@ _LOGGER = logging.getLogger(__name__)
 # handle, since plan names aren't unique in Comexio.
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
+# Prefixed onto an inactive plan's name (not the "(ID n)" suffix _PLAN_LABEL_ID_RE anchors
+# on) — a native HA select entity offers no per-option styling, so a text marker is the only
+# way to flag "not running" directly in the dropdown.
+_INACTIVE_PLAN_PREFIX = "⏸ "
+
+
+def _plan_option_label(fid, fub: dict) -> str:
+    """Select-option label for one fub_data entry, prefixed when the plan isn't active."""
+    name = fub.get("Name") or f"Plan {fid}"
+    prefix = "" if fub.get("Active", True) else _INACTIVE_PLAN_PREFIX
+    return format_plan_label(f"{prefix}{name}", fid)
+
+
 # Explicit choice in the backup selector for "show the live plan, not a stored snapshot".
 # Cannot collide with format_backup_label()'s "<kind>[<slot>] — <timestamp>" shape.
 LIVE_BACKUP_OPTION = "Live"
@@ -76,10 +89,7 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         # Plan names aren't unique in Comexio (only fub_id is) — the ID suffix keeps
         # options unambiguous and lets _resolve_fub_id() parse it back out directly.
         fub_data = self.coordinator.api.fub_data
-        return sorted(
-            (format_plan_label(fub.get("Name") or f"Plan {fid}", fid) for fid, fub in fub_data.items()),
-            key=str.lower,
-        )
+        return sorted((_plan_option_label(fid, fub) for fid, fub in fub_data.items()), key=str.lower)
 
     @property
     def current_option(self) -> str | None:
@@ -116,7 +126,7 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         fub = self.coordinator.api.fub_data.get(str(fub_id))
         if fub is None:
             return None
-        return format_plan_label(fub.get("Name") or f"Plan {fub_id}", fub_id)
+        return _plan_option_label(fub_id, fub)
 
 
 class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
@@ -186,6 +196,14 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
             return []
         entries = self.coordinator.function_plan_backup.plan_backups_for_identity_sync(fub_id, plan_name)
         return [LIVE_BACKUP_OPTION, *(format_backup_label(e) for e in entries)]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        # Read by comexio-plan-card.js to grey out its Restore trigger the moment ANY
+        # restore starts — a card only disables the button in the instance that was
+        # clicked, but this select is shared by every card instance on the dashboard, so
+        # it's the one place that can reach all of them at once.
+        return {"restore_in_progress": self.coordinator._restore_lock.locked()}
 
     @property
     def current_option(self) -> str | None:

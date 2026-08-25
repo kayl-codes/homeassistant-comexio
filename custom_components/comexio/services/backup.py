@@ -13,6 +13,7 @@ import logging
 import time
 from typing import Any
 
+import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.util import dt as dt_util
@@ -20,6 +21,7 @@ from homeassistant.util import dt as dt_util
 from ..const import (
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
+    FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     ICON_ERROR,
     ICON_INACTIVE,
     ICON_SUCCESS,
@@ -41,6 +43,7 @@ from ._yaml_sync import _refresh_service_descriptions
 _LOGGER = logging.getLogger(__name__)
 
 _TITLE_RESTORE_ERR = "Function Plan Restore — Error"
+_TITLE_RESTORE_PROGRESS = "Function Plan Restore — IN PROGRESS"
 _TITLE_LIST_BACKUPS_ERR = "Function Plan Backups — Error"
 _TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
 _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
@@ -242,7 +245,18 @@ async def _resolve_restore_target(
     stays None and the caller must disambiguate via _resolve_backup_identity. Falls back to a
     name lookup in the stored backup metadata for a plan name that no longer exists live.
     """
-    raw = str(call.data.get("fub_id") or f"select.comexio_{coordinator.server_id}_logikplan_plan_selector")
+    raw = call.data.get("fub_id")
+    if not raw:
+        fub_id = coordinator.get_active_function_plan_fub_id()
+        if fub_id is not None:
+            return fub_id, api.fub_data.get(str(fub_id), {}).get("Name"), None
+        return (
+            None,
+            None,
+            "No plan selected — the 'Function Plans' selector is empty. Please specify the plan (fub_id) explicitly.",
+        )
+
+    raw = str(raw)
     split = _split_plan_field(raw)
     if split and split[1] is not None:
         return split[0], split[1], None
@@ -303,6 +317,7 @@ async def _restore_plan_in_place(
     slot: int,
     plan_hash,
     identity_was_mismatched: bool = False,
+    auto_start: bool = True,
 ) -> None:
     """Restore a snapshot onto the SAME live plan via run_fup (the original, safe-path restore).
 
@@ -316,44 +331,92 @@ async def _restore_plan_in_place(
     was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
     t_start = time.monotonic()
 
-    # Safety net: snapshot the CURRENT state before restoring, so the restore itself is undoable
-    await coordinator.async_function_plan_change_backup(fub_id, f"pre_restore {kind}[{slot}]")
-
-    apply = await _restore_apply_snapshot(api, fub_id, snapshot, live_name, plan_name, was_active)
-    verify = await _restore_verify(api, fub_id, snapshot, plan_hash)
-    duration = time.monotonic() - t_start
-
-    # identity_was_mismatched (force_override onto a DIFFERENT plan): that plan's elements
-    # never existed under the snapshot's IDs, so Comexio always assigns fresh ones — a
-    # byte-for-byte hash match can never be achieved there, matching counts is the
-    # meaningful signal instead. Same-identity restore: elements keep their IDs, so a hash
-    # match IS achievable and more precise (run_fup returns result=False on an inactive plan
-    # even though the data payload IS applied).
-    content_ok = verify["counts_match"] if identity_was_mismatched else verify["hash_match"]
-    status = _restore_status(content_ok, apply, verify)
-
-    msg = _restore_build_message(
-        plan_name, fub_id, kind, slot, snapshot, status, apply, verify, identity_was_mismatched, was_active, duration
+    # Same notification_id for the start and final message — the "in progress" notice is
+    # replaced in place by the result, mirroring the sync-progress pattern in button.py.
+    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    persistent_notification.async_create(
+        hass,
+        f"Restoring plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] — this can take up to a minute…",
+        title=_TITLE_RESTORE_PROGRESS,
+        notification_id=notif_id,
     )
-    _LOGGER.info(
-        "Function Plan Restore result: fub=%s status=%s identity_was_mismatched=%s hash_match=%s "
-        "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s duration=%.1fs",
-        fub_id,
-        status,
-        identity_was_mismatched,
-        verify["hash_match"],
-        verify["counts_match"],
-        apply["pos_ok"],
-        apply["run_ok"],
-        apply["properties_changed"],
-        apply["paper_ok"],
-        duration,
-    )
-    persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}")
+
+    try:
+        # Safety net: snapshot the CURRENT state before restoring, so the restore itself is undoable
+        await coordinator.async_function_plan_change_backup(fub_id, f"pre_restore {kind}[{slot}]")
+
+        apply = await _restore_apply_snapshot(api, fub_id, snapshot, live_name, plan_name, was_active, auto_start)
+        verify = await _restore_verify(api, fub_id, snapshot, plan_hash)
+        duration = time.monotonic() - t_start
+
+        # identity_was_mismatched (force_override onto a DIFFERENT plan): that plan's elements
+        # never existed under the snapshot's IDs, so Comexio always assigns fresh ones — a
+        # byte-for-byte hash match can never be achieved there, matching counts is the
+        # meaningful signal instead. Same-identity restore: elements keep their IDs, so a hash
+        # match IS achievable and more precise (run_fup returns result=False on an inactive plan
+        # even though the data payload IS applied).
+        content_ok = verify["counts_match"] if identity_was_mismatched else verify["hash_match"]
+        status = _restore_status(content_ok, apply, verify)
+
+        # Promote the restored snapshot to slot 0 instead of leaving the next auto-backup cycle
+        # write a near-duplicate entry for content that's already stored (see async_mark_restored).
+        # Gated on content_ok (hash/counts match), NOT apply["run_ok"]: run_fup routinely returns
+        # result=False on a plan that needs manual reactivation in Comexio even though the actual
+        # element/connection data was applied correctly — using run_ok here would skip promotion
+        # for exactly that (common, still-successful) case.
+        # Skipped for identity_was_mismatched (force_override onto a DIFFERENT plan): this
+        # snapshot's own (fub_id, plan_name) key no longer describes what's now live, so its
+        # backup history is left exactly where it was.
+        promoted = False
+        if content_ok and not identity_was_mismatched:
+            promoted = await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, slot)
+
+        msg = _restore_build_message(
+            plan_name,
+            fub_id,
+            kind,
+            slot,
+            snapshot,
+            status,
+            apply,
+            verify,
+            identity_was_mismatched,
+            was_active,
+            duration,
+            promoted,
+            auto_start,
+        )
+        _LOGGER.info(
+            "Function Plan Restore result: fub=%s status=%s identity_was_mismatched=%s hash_match=%s "
+            "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s duration=%.1fs",
+            fub_id,
+            status,
+            identity_was_mismatched,
+            verify["hash_match"],
+            verify["counts_match"],
+            apply["pos_ok"],
+            apply["run_ok"],
+            apply["properties_changed"],
+            apply["paper_ok"],
+            duration,
+        )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        # Without this, a connection drop mid-restore leaves the "in progress" notification
+        # above stuck forever, same gap as the copy-restore path (see _restore_plan_as_copy).
+        _LOGGER.exception("Function Plan in-place restore failed for '%s' (ID %s)", plan_name, fub_id)
+        persistent_notification.async_create(
+            hass,
+            f"Restore of {kind}[{slot}] for plan '{plan_name}' (ID {fub_id}) failed: {exc}. "
+            "The plan may be left in a partially restored state — check it in Comexio Studio.",
+            title=_TITLE_RESTORE_ERR,
+            notification_id=notif_id,
+        )
+        return
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}", notification_id=notif_id)
 
 
 async def _restore_apply_snapshot(
-    api, fub_id: int, snapshot: dict, live_name: str, plan_name: str, was_active: bool
+    api, fub_id: int, snapshot: dict, live_name: str, plan_name: str, was_active: bool, auto_start: bool = True
 ) -> dict:
     """Apply a snapshot onto the live plan (align paper/name, restore positions, run_fup).
 
@@ -383,12 +446,39 @@ async def _restore_apply_snapshot(
     ]
     pos_ok = await api.function_plan_save_elements_pos(positions) if positions else True
 
-    # Restore structure + activate via run_fup with the snapshot payload
-    run_ok = await api.function_plan_run_fup(fub_id, plan_data=snapshot)
+    # A comment/header block (type=14) can be deleted independently of the plan's actual
+    # wiring (e.g. during a grid re-sort) without touching connections or hash-relevant
+    # structure — but its stale ID surviving in the run_fup payload crashes the ENTIRE call
+    # (Comexio returns HTTP 500 for any element ID it no longer recognizes), silently failing
+    # the whole restore rather than just the comment. Strip any such stale IDs from the
+    # payload first — but DON'T recreate the comments yet (see _recreate_missing_comments).
+    run_fup_snapshot, missing_comments, load_warning = await _sanitize_missing_comments(api, fub_id, snapshot)
 
-    # Preserve previous inactive state
-    if run_ok and not was_active:
-        await api.function_plan_stop_fup(fub_id)
+    # run_fup(plan_data=...) is Comexio's ONLY mechanism for applying a structural snapshot
+    # onto a live plan — it cannot be skipped just because the user doesn't want the plan
+    # left running. The "auto-start disabled" outcome is achieved by stopping it again right
+    # after, not by skipping the apply step (which would also drop the wiring restore).
+    run_ok = await api.function_plan_run_fup(fub_id, plan_data=run_fup_snapshot)
+
+    # Preserve previous inactive state, or leave it stopped when the user opted out of
+    # auto-start. NOT gated on run_ok: run_fup routinely reports result=False even though the
+    # payload WAS applied (the same Comexio quirk documented for the as-new restore path
+    # above) — skipping the stop on a "failed" run_ok could leave a plan running that either
+    # was inactive before the restore or that the user explicitly asked to leave stopped.
+    # stop_ok IS a reliable success signal (unlike run_ok) — function_plan_stop_fup has no
+    # equivalent "reports False on a technically-applied action" quirk — so it's tracked and
+    # surfaced in the result message instead of being discarded.
+    stop_ok = True
+    if not was_active or not auto_start:
+        stop_ok = await api.function_plan_stop_fup(fub_id)
+
+    # Recreate missing comments only AFTER run_fup: run_fup treats its plan_data argument as
+    # the plan's complete state, so a comment created before that call — and necessarily
+    # absent from run_fup_snapshot, since its stale ID had to be stripped to avoid the crash
+    # above — would be wiped out again by the call itself.
+    recovered_comments, comment_warnings = await _recreate_missing_comments(api, fub_id, missing_comments)
+    if load_warning:
+        comment_warnings = [load_warning, *comment_warnings]
 
     return {
         "paper": paper,
@@ -398,7 +488,60 @@ async def _restore_apply_snapshot(
         "paper_ok": paper_ok,
         "pos_ok": pos_ok,
         "run_ok": run_ok,
+        "stop_ok": stop_ok,
+        "recovered_comments": recovered_comments,
+        "comment_warnings": comment_warnings,
     }
+
+
+async def _sanitize_missing_comments(api, fub_id: int, snapshot: dict) -> tuple[dict, dict[str, dict], str | None]:
+    """Identify snapshot comment blocks (type=14) that no longer exist on the live plan.
+
+    See the call site in _restore_apply_snapshot for why the run_fup payload must have these
+    stripped out, and why recreating them has to happen AFTER run_fup rather than here.
+
+    Returns (snapshot with those elements stripped from "elements", the stripped elements
+    keyed by their stale snapshot ID, an optional warning if the live plan couldn't be
+    reloaded to check for missing elements at all).
+    """
+    current = await api.function_plan_load_elements(fub_id)
+    if current is None:
+        return snapshot, {}, "could not reload the live plan to check for missing elements"
+
+    current_ids = set(current.get("elements", {}))
+    missing_comments = {
+        eid: elem
+        for eid, elem in snapshot.get("elements", {}).items()
+        if eid not in current_ids and (elem.get("reference") or {}).get("type") == 14
+    }
+    if not missing_comments:
+        return snapshot, {}, None
+
+    sanitized_elements = {
+        eid: elem for eid, elem in snapshot.get("elements", {}).items() if eid not in missing_comments
+    }
+    return {**snapshot, "elements": sanitized_elements}, missing_comments, None
+
+
+async def _recreate_missing_comments(api, fub_id: int, missing_comments: dict[str, dict]) -> tuple[int, list[str]]:
+    """Recreate the comment blocks identified by _sanitize_missing_comments.
+
+    The original text IS recoverable here (unlike restore-as-new): a comment element carries
+    its text in its own "name" field, and function_plan_load_elements exposes that field —
+    it's the element's positional/ID metadata that's snapshot-local, not its text.
+
+    Returns (recovered count, warnings — e.g. a comment that failed to recreate).
+    """
+    recovered = 0
+    warnings: list[str] = []
+    for eid, elem in missing_comments.items():
+        text = (elem.get("name") or "").strip() or FUNCTION_PLAN_MANAGED_PLAN_COMMENT
+        x, y = elem.get("position_x", 0.0), elem.get("position_y", 0.0)
+        if await api.function_plan_add_comment_element(fub_id, text, x=x, y=y) is None:
+            warnings.append(f"comment element {eid} ('{text}') failed to recreate")
+        else:
+            recovered += 1
+    return recovered, warnings
 
 
 async def _restore_verify(api, fub_id: int, snapshot: dict, plan_hash) -> dict:
@@ -435,6 +578,30 @@ def _restore_status(content_ok: bool, apply: dict, verify: dict) -> str:
     return "FAILED"
 
 
+def _restore_run_label(apply: dict, was_active: bool, auto_start: bool) -> tuple[str, str]:
+    """(run_label, reactivation_note) for the run_fup line of a restore result message."""
+    # A stop is attempted whenever the plan needs to end up inactive (see
+    # _restore_apply_snapshot) — surface a failed stop regardless of which of those two
+    # conditions triggered it, since either way the plan may still be running unexpectedly.
+    if (not was_active or not auto_start) and not apply["stop_ok"]:
+        note = (
+            f"\n{ICON_WARNING} Plan could not be stopped after restore — it may still be running, "
+            "please check/stop it manually in Comexio."
+        )
+        return f"{ICON_ERROR} (stop failed after restore)", note
+    if not auto_start:
+        # run_fup still ran (it's the only apply mechanism), but the result was deliberately
+        # stopped again right after — this is neither a success nor a failure to report.
+        return f"{ICON_SUCCESS if apply['run_ok'] else ICON_ERROR} (left stopped — auto-start disabled)", ""
+    if apply["run_ok"]:
+        return ICON_SUCCESS, ""
+    if was_active:
+        note = f"\n{ICON_WARNING} Plan could not be re-activated — please check/activate it in Comexio."
+        return ICON_ERROR, note
+    # Data payload was applied; the server merely skipped activating an inactive plan.
+    return f"{ICON_INACTIVE} (plan inactive — activation skipped)", ""
+
+
 def _restore_build_message(
     plan_name: str,
     fub_id: int,
@@ -447,17 +614,11 @@ def _restore_build_message(
     identity_was_mismatched: bool,
     was_active: bool,
     duration: float,
+    promoted: bool = False,
+    auto_start: bool = True,
 ) -> str:
     """Human-readable persistent_notification body for a restore result."""
-    reactivation_note = ""
-    if apply["run_ok"]:
-        run_label = ICON_SUCCESS
-    elif was_active:
-        run_label = ICON_ERROR
-        reactivation_note = f"\n{ICON_WARNING} Plan could not be re-activated — please check/activate it in Comexio."
-    else:
-        # Data payload was applied; the server merely skipped activating an inactive plan.
-        run_label = f"{ICON_INACTIVE} (plan inactive — activation skipped)"
+    run_label, reactivation_note = _restore_run_label(apply, was_active, auto_start)
     paper_line = ""
     if apply["properties_changed"]:
         paper_line = (
@@ -473,6 +634,16 @@ def _restore_build_message(
         )
     else:
         content_line = f"Hash match: {ICON_SUCCESS if verify['hash_match'] else ICON_ERROR} | "
+    comment_line = ""
+    if apply["recovered_comments"]:
+        comment_line = (
+            f"Comment/header blocks recreated: {apply['recovered_comments']} "
+            "(were missing on the live plan — a hash mismatch above can be this alone, not a real problem)\n"
+        )
+    if apply["comment_warnings"]:
+        shown = apply["comment_warnings"][:5]
+        comment_line += "\n".join(f"{ICON_WARNING} {w}" for w in shown) + "\n"
+    promoted_line = f"Backup slot: promoted {kind}[{slot}] → {kind}[0] (now marked restored *)\n" if promoted else ""
     return (
         f"Restore of plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] "
         f"({snapshot.get('captured_at')}): **{status}**\n"
@@ -482,6 +653,8 @@ def _restore_build_message(
         f"{content_line}positions: {ICON_SUCCESS if apply['pos_ok'] else ICON_ERROR} | "
         f"run_fup: {run_label}"
         f"{reactivation_note}\n"
+        f"{comment_line}"
+        f"{promoted_line}"
         f"Duration: {duration:.1f}s"
     )
 
@@ -505,6 +678,15 @@ async def _restore_plan_as_new(
     plan_name = snapshot.get("plan_name", str(old_fub_id))
     t_start = time.monotonic()
 
+    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    persistent_notification.async_create(
+        hass,
+        f"Restoring plan '{plan_name}' (former ID {old_fub_id}) from {kind}[{slot}] as a new plan — "
+        "this can take up to a minute…",
+        title=_TITLE_RESTORE_PROGRESS,
+        notification_id=notif_id,
+    )
+
     # Snapshots captured before paper/DPI tracking existed (or never backfilled) fall back to
     # A3 @ 90 DPI landscape — a spacious default so the rebuild cannot come out clipped.
     paper = snapshot.get("paper", "A3")
@@ -517,6 +699,7 @@ async def _restore_plan_as_new(
             f"Could not create a replacement plan named '{plan_name}' (the name may already be in use live). "
             f"Restore of {kind}[{slot}] for the former plan {old_fub_id} was aborted.",
             title=_TITLE_RESTORE_ERR,
+            notification_id=notif_id,
         )
         return
 
@@ -573,7 +756,6 @@ async def _restore_plan_as_new(
         f"Connections: {connections_created}/{conn_count} recreated\n"
         f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
         f"{activation_line}\n\n"
-        "Comment text (if any) was reset to the managed-plan default — original wording isn't recoverable.\n"
         f"{consumer_line}\n"
         f"{lineage_line}\n\n"
         f"Duration: {duration:.1f}s"
@@ -596,7 +778,128 @@ async def _restore_plan_as_new(
         run_ok,
         duration,
     )
-    persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}")
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}", notification_id=notif_id)
+
+
+async def _restore_plan_as_copy(
+    hass: HomeAssistant,
+    coordinator: ComexioCoordinator,
+    api,
+    source_fub_id: int,
+    snapshot: dict,
+    kind: str,
+    slot: int,
+    new_plan_name: str,
+    auto_start: bool,
+) -> None:
+    """Restore a snapshot as a brand-new, independent plan — a true copy.
+
+    Unlike _restore_plan_as_new (which supersedes a deleted/reassigned plan's identity: it
+    rekeys the backup lineage onto the new ID and repoints any consumers), the source plan
+    here is untouched and still live: its backup lineage stays exactly where it is, and no
+    consumer (cluster plan_map, 'Function Plans' selector) is repointed at the copy. The copy
+    is not part of any backup lineage yet — it just starts fresh from here on.
+    """
+    source_name = snapshot.get("plan_name", str(source_fub_id))
+    t_start = time.monotonic()
+
+    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    persistent_notification.async_create(
+        hass,
+        f"Restoring {kind}[{slot}] of plan '{source_name}' as a new copy '{new_plan_name}' — "
+        "this can take up to a minute…",
+        title=_TITLE_RESTORE_PROGRESS,
+        notification_id=notif_id,
+    )
+
+    paper = snapshot.get("paper", "A3")
+    dpi = snapshot.get("dpi", 90)
+    orientation = snapshot.get("orientation", "landscape")
+    try:
+        new_fub_id = await api.create_fup(new_plan_name, paper_format=paper, dpi=dpi, orientation=orientation)
+        if new_fub_id is None:
+            persistent_notification.async_create(
+                hass,
+                f"Could not create plan '{new_plan_name}' (the name may already be in use live). "
+                f"Copy-restore of {kind}[{slot}] for '{source_name}' was aborted.",
+                title=_TITLE_RESTORE_ERR,
+                notification_id=notif_id,
+            )
+            return
+
+        elements_created, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(
+            new_fub_id, snapshot
+        )
+        # create_fup always creates plans inactive — auto_start=False just leaves that default
+        # alone instead of calling run_fup at all (no plan_data payload here: the structure was
+        # already built above via individual element/connection calls, not via run_fup).
+        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        # Without this, a connection drop mid-restore leaves the "in progress" notification
+        # above stuck forever — the exception propagates past the persistent_notification calls
+        # instead of replacing it, even though the restore lock is released either way.
+        _LOGGER.exception("Function Plan copy-restore failed while building '%s'", new_plan_name)
+        persistent_notification.async_create(
+            hass,
+            f"Copy-restore of {kind}[{slot}] for '{source_name}' failed while building '{new_plan_name}': {exc}. "
+            "The new plan may be partially created — check Comexio Studio and delete it manually if needed.",
+            title=_TITLE_RESTORE_ERR,
+            notification_id=notif_id,
+        )
+        return
+    duration = time.monotonic() - t_start
+
+    elem_count = len(snapshot.get("elements", {}))
+    conn_count = len(snapshot.get("connections", {}))
+    structurally_complete = elements_created == elem_count and connections_created == conn_count
+    status = "OK" if structurally_complete and not warnings else "PARTIAL"
+
+    captured_raw = snapshot.get("captured_at")
+    captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
+    captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
+
+    if not auto_start:
+        activation_line = f"Activation: {ICON_INACTIVE} not started (auto-start disabled for this restore)"
+    elif run_ok:
+        activation_line = f"Activation: {ICON_SUCCESS} active"
+    else:
+        activation_line = (
+            f"Activation: {ICON_INACTIVE} not active yet (Comexio always creates new plans inactive — "
+            "activate manually in Comexio Studio if needed)"
+        )
+
+    msg = (
+        f"Plan '{new_plan_name}' created as a COPY of '{source_name}' "
+        f"(source ID {source_fub_id} unchanged, new copy ID {new_fub_id})\n\n"
+        f"Source: {kind}[{slot}], captured {captured_label}\n"
+        f"Elements: {elements_created}/{elem_count} recreated\n"
+        f"Connections: {connections_created}/{conn_count} recreated\n"
+        f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
+        f"{activation_line}\n\n"
+        "Backup lineage: unchanged — snapshots stay with the source plan; the copy starts fresh.\n\n"
+        f"Duration: {duration:.1f}s"
+    )
+    if warnings:
+        shown = warnings[:10]
+        msg += "\n\nWarnings:\n" + "\n".join(f"- {w}" for w in shown)
+        if len(warnings) > len(shown):
+            msg += f"\n… and {len(warnings) - len(shown)} more (see log)"
+
+    _LOGGER.info(
+        "Function Plan Restore (copy): source_fub=%s new_fub=%s new_name=%s status=%s elements=%d "
+        "connections=%d/%d run_ok=%s auto_start=%s duration=%.1fs",
+        source_fub_id,
+        new_fub_id,
+        new_plan_name,
+        status,
+        elements_created,
+        connections_created,
+        conn_count,
+        run_ok,
+        auto_start,
+        duration,
+    )
+    persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}", notification_id=notif_id)
 
 
 async def _resolve_restore_params(
@@ -696,6 +999,32 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         return
     coordinator, api, _unused_fub_id = ctx
 
+    if coordinator._restore_lock.locked():
+        _LOGGER.warning("Function Plan Restore already in progress, ignoring concurrent request")
+        persistent_notification.async_create(
+            hass,
+            "A restore is already running — please wait for it to finish before starting another one.",
+            title=_TITLE_RESTORE_ERR,
+        )
+        return
+
+    async with coordinator._restore_lock:
+        # Fire an immediate coordinator update so the backup-select entity's
+        # 'restore_in_progress' attribute (select.py) reaches every dashboard card instance
+        # right away — a card only disables its OWN restore button on click, so a second
+        # card instance (or a stale browser tab) needs this push to grey out too, instead
+        # of relying solely on the lock rejection above.
+        coordinator.async_update_listeners()
+        try:
+            await _run_function_plan_restore(hass, call, coordinator, api, plan_hash)
+        finally:
+            coordinator.async_update_listeners()
+
+
+async def _run_function_plan_restore(
+    hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator, api, plan_hash
+) -> None:
+    """Body of _handle_function_plan_restore, run while holding coordinator._restore_lock."""
     resolved = await _resolve_restore_params(hass, call, coordinator, api)
     if resolved is None:
         return
@@ -708,15 +1037,27 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
 
     on_conflict = str(call.data.get("on_conflict", "new_id")).strip().lower()
     confirm = bool(call.data.get("confirm", False))
+    as_copy = bool(call.data.get("as_copy", False))
+    new_plan_name = str(call.data.get("new_plan_name", "")).strip()
+    auto_start = bool(call.data.get("auto_start", True))
     _LOGGER.info(
-        "Function Plan Restore: fub_id=%s plan_name=%s kind=%s slot=%s on_conflict=%s confirm=%s",
+        "Function Plan Restore: fub_id=%s plan_name=%s kind=%s slot=%s on_conflict=%s confirm=%s "
+        "as_copy=%s new_plan_name=%s auto_start=%s",
         fub_id,
         plan_name,
         kind,
         slot,
         on_conflict,
         confirm,
+        as_copy,
+        new_plan_name,
+        auto_start,
     )
+    if as_copy and not new_plan_name:
+        persistent_notification.async_create(
+            hass, "A name is required for 'Restore as copy' ('new_plan_name').", title=_TITLE_RESTORE_ERR
+        )
+        return
 
     snapshot = await _resolve_restore_snapshot(hass, coordinator, fub_id, plan_name, kind, slot)
     if snapshot is None:
@@ -724,6 +1065,12 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
 
     if not await api.login():
         persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=_TITLE_RESTORE_ERR)
+        return
+
+    if as_copy:
+        # The source plan is never touched here — no conflict/identity check applies.
+        await _restore_plan_as_copy(hass, coordinator, api, fub_id, snapshot, kind, slot, new_plan_name, auto_start)
+        await _refresh_service_descriptions(hass)
         return
 
     # Fresh live lookup — api.fub_data may be up to one poll interval stale, and this
@@ -737,7 +1084,18 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
     conflict = live_fub is None or live_name != snapshot_name
 
     if conflict and await _resolve_restore_conflict(
-        hass, coordinator, api, fub_id, snapshot, kind, slot, live_fub, live_name, snapshot_name, on_conflict, confirm
+        hass,
+        coordinator,
+        api,
+        fub_id,
+        snapshot,
+        kind,
+        slot,
+        live_fub,
+        live_name,
+        snapshot_name,
+        on_conflict,
+        confirm,
     ):
         return
 

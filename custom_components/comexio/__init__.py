@@ -6,7 +6,7 @@ import logging
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 
 from .api import ComexioAPI
@@ -55,6 +55,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     try:
         if not await api.login():
+            if api.last_login_error == "connection":
+                _LOGGER.warning(
+                    "Comexio login failed due to a connection problem for %s — will retry", entry.data[CONF_HOST]
+                )
+                raise ConfigEntryNotReady(f"Cannot connect to Comexio at {entry.data[CONF_HOST]}")
             _LOGGER.error("Comexio login rejected for %s — check credentials", entry.data[CONF_HOST])
             raise ConfigEntryAuthFailed
         await coordinator.async_config_entry_first_refresh()
@@ -168,6 +173,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_plan_preview_sensor")
     active_unique_ids.add(f"comexio_{server_id}_plan_preview_btn")
     active_unique_ids.add(f"comexio_{server_id}_plan_preview_image")
+    active_unique_ids.add(f"comexio_{server_id}_function_plan_toggle_btn")
 
     # Extension firmware updates (update.py): one entity per known extension + BASE. Built the
     # same way as the IO entities above, since extension existence is independent of the

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -308,6 +309,8 @@ def _backup_entry(key: str, plan_name: str, slot: int, snap: dict[str, Any]) -> 
     }
     if "operation" in snap:
         entry["operation"] = snap["operation"]
+    if "restored_at" in snap:
+        entry["restored_at"] = snap["restored_at"]
     for opt_key in ("paper", "dpi", "orientation"):
         if opt_key in snap:
             entry[opt_key] = snap[opt_key]
@@ -381,6 +384,28 @@ def retention_cutoff(months: int) -> datetime:
     return dt_util.utcnow() - timedelta(days=months * 30)
 
 
+_OP_LIST_MAX_ITEMS = 3
+_OP_LIST_RE = re.compile(r"\[([^\[\]]*)]")
+
+
+def _truncate_operation_lists(operation: str) -> str:
+    """Cap any bracketed id list embedded in an operation string (e.g. add_marker_pairs).
+
+    HA's native select dropdown CSS-ellipsizes the whole label once it overflows the box,
+    which can swallow the operation name itself for a long marker list. Truncating the list
+    here — not the label as a whole — keeps the meaningful part ("add_marker_pairs", the
+    first few ids) visible regardless of box width.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        items = [item.strip() for item in match.group(1).split(",") if item.strip()]
+        if len(items) <= _OP_LIST_MAX_ITEMS:
+            return match.group(0)
+        return "[" + ", ".join(items[:_OP_LIST_MAX_ITEMS]) + ", …]"
+
+    return _OP_LIST_RE.sub(_replace, operation)
+
+
 def format_backup_label(entry: dict[str, Any]) -> str:
     """Human-readable label for one plan_backups_for_identity_sync() entry.
 
@@ -391,9 +416,14 @@ def format_backup_label(entry: dict[str, Any]) -> str:
     """
     ts = dt_util.parse_datetime(str(entry.get("captured_at", "")))
     ts_label = dt_util.as_local(ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if ts else "?"
+    # "*" marks a snapshot promoted to slot 0 by a restore (see async_mark_restored) — the
+    # captured_at timestamp stays the ORIGINAL capture time, not the restore time, so the
+    # marker is the only visible sign this isn't a fresh auto/change snapshot.
+    if entry.get("restored_at"):
+        ts_label += "*"
     operation = entry.get("operation")
     kind = entry.get("kind")
-    op_suffix = f" ({operation})" if kind == "change" and operation else ""
+    op_suffix = f" ({_truncate_operation_lists(operation)})" if kind == "change" and operation else ""
     return f"{kind}[{entry.get('slot')}] — {ts_label}{op_suffix}"
 
 
@@ -689,6 +719,37 @@ class FunctionPlanBackupManager:
             )
         return removed
 
+    async def async_mark_restored(self, kind: str, fub_id: int, plan_name: str, slot: int) -> bool:
+        """Promote a just-restored snapshot to slot 0 of its own kind-array and flag it.
+
+        Called right after a restore that leaves the live plan matching this snapshot (see
+        services/backup.py's _restore_plan_in_place) — the restored content IS now the
+        current state, so instead of leaving a duplicate for the next auto-backup cycle to
+        write, the existing entry is moved to the front (no new storage) and stamped with
+        "restored_at". captured_at is deliberately left untouched: it still records when this
+        content was ORIGINALLY captured, not when it was restored. format_backup_label() shows
+        a trailing "*" for any entry carrying restored_at. Returns False if the slot is gone
+        (e.g. deleted or rotated out between resolving the restore target and finishing it).
+        """
+        await self._async_ensure_loaded()
+        data, store = (self._auto_data, self._auto_store) if kind == "auto" else (self._change_data, self._change_store)
+        history = data.get(str(fub_id), {}).get(plan_name)
+        if not history or not (0 <= slot < len(history)):
+            return False
+        snap = history.pop(slot)
+        snap["restored_at"] = dt_util.utcnow().isoformat()
+        history.insert(0, snap)
+        await store.async_save(data)
+        _LOGGER.info(
+            "[%s] Function Plan backup: promoted %s[%d] of '%s' (fub=%s) to slot 0 after restore",
+            self._server_id,
+            kind,
+            slot,
+            plan_name,
+            fub_id,
+        )
+        return True
+
     async def async_delete_snapshot(self, kind: str, fub_id: int, plan_name: str, slot: int) -> bool:
         """Delete a single stored snapshot (one slot of one plan identity/kind). Returns True if removed."""
         await self._async_ensure_loaded()
@@ -864,6 +925,8 @@ class FunctionPlanBackupManager:
                 entry = {"kind": kind, "slot": slot, "captured_at": snap.get("captured_at")}
                 if "operation" in snap:
                     entry["operation"] = snap["operation"]
+                if "restored_at" in snap:
+                    entry["restored_at"] = snap["restored_at"]
                 entries.append(entry)
         return entries
 

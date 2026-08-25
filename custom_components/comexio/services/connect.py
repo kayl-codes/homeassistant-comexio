@@ -125,7 +125,9 @@ async def _get_or_create_webio_element(
         )
         # Reused elements aren't connected yet (already_connected would have skipped this
         # marker otherwise), so the wire has to be drawn explicitly here.
-        conn_id = await api.function_plan_save_connection(fub_id, elem_marker, existing_webio_elem, conn_type)
+        conn_id = await api.function_plan_save_connection(
+            fub_id, elem_marker, [(existing_webio_elem, 0, False)], conn_type
+        )
         if conn_id is None:
             return None, f"M{marker_id}: save_connection (elem {elem_marker}→{existing_webio_elem}) failed"
         _LOGGER.info(

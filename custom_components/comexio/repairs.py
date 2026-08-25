@@ -369,6 +369,7 @@ class ComexioRepairFlow(RepairsFlow):
             ce_c = counts.get("cleanup_entities", 0)
             lp_c = counts.get("cleanup_function_plan_count", 0)
             lp_missing_c = counts.get("function_plan_missing", 0)
+            lp_dangling_c = counts.get("function_plan_dangling", 0)
             lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
             # Fallback for stale issues created before the coordinator started storing an
             # exact estimate: approximate the affected-plan count from the detail split (one
@@ -385,7 +386,7 @@ class ComexioRepairFlow(RepairsFlow):
                 + SYNC_DURATION_FUNCTION_PLAN_FINALIZE * affected_plan_count,
             )
 
-            config_issues = t_c + m_c + r_c + o_c + ce_c + lp_missing_c
+            config_issues = t_c + m_c + r_c + o_c + ce_c + lp_missing_c + lp_dangling_c
             ha_count = placeholders.get("ha_count", "0")
             com_count = placeholders.get("com_count", "0")
 
@@ -402,7 +403,7 @@ class ComexioRepairFlow(RepairsFlow):
 
             # 1. Calculate Full Sync ETA first to decide on the hint visibility
             total_write = t_c + r_c + m_c
-            total_del = o_c + ce_c
+            total_del = o_c + ce_c + lp_dangling_c
             total_sec = (total_write * SYNC_DURATION_WRITE) + (total_del * SYNC_DURATION_DELETE)
             # Always add IP duration if a mismatch exists, as it's a separate call in Delta-Sync
             if i_c > 0:
@@ -449,6 +450,11 @@ class ComexioRepairFlow(RepairsFlow):
                     )
                 if lp_missing_c > 0:
                     lines.extend(_function_plan_gap_lines(lp_missing_c, lp_detail))
+                if lp_dangling_c > 0:
+                    lines.append(
+                        f"* {ICON_DELETE} "
+                        f"**{'Verwaiste Plan-Elemente' if is_de else 'Function Plan debris'}:** {lp_dangling_c}"
+                    )
                 if i_c > 0:
                     lines.append(
                         f"* {ICON_NETWORK} **{'Server-Adresse' if is_de else 'Server Address'}:** "
@@ -456,9 +462,21 @@ class ComexioRepairFlow(RepairsFlow):
                     )
 
                 if is_de:
-                    footer = f"\n\nGesamt: {ha_count} (HA) zu {com_count} (Comexio)."
+                    footer = f"\n\nWeb-IO-Befehle: {ha_count} (HA) zu {com_count} (Comexio)"
                 else:
-                    footer = f"\n\nTotal: {ha_count} (HA) vs {com_count} (Comexio)."
+                    footer = f"\n\nWeb-IO commands: {ha_count} (HA) vs {com_count} (Comexio)"
+                # Function Plan items (missing/debris) never move this count — they're plan
+                # elements, not Web-IO commands — so make the scope explicit whenever they're
+                # part of the picture, otherwise a matching total reads as "nothing's wrong".
+                # "  \n" is a CommonMark hard line break, keeping the note on its own line.
+                if lp_missing_c > 0 or lp_dangling_c > 0:
+                    footer += (
+                        "  \n*(ohne Funktionsplan-Abweichungen)*"
+                        if is_de
+                        else "  \n*(excluding Function Plan differences)*"
+                    )
+                else:
+                    footer += "."
 
                 prompt = "Bitte wähle eine Aktion aus:" if is_de else "Please select an action:"
                 summary = header + "\n".join(lines) + footer + "\n\n" + prompt
