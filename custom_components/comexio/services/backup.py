@@ -13,6 +13,7 @@ import logging
 import time
 from typing import Any
 
+import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.util import dt as dt_util
@@ -787,24 +788,38 @@ async def _restore_plan_as_copy(
     paper = snapshot.get("paper", "A3")
     dpi = snapshot.get("dpi", 90)
     orientation = snapshot.get("orientation", "landscape")
-    new_fub_id = await api.create_fup(new_plan_name, paper_format=paper, dpi=dpi, orientation=orientation)
-    if new_fub_id is None:
+    try:
+        new_fub_id = await api.create_fup(new_plan_name, paper_format=paper, dpi=dpi, orientation=orientation)
+        if new_fub_id is None:
+            persistent_notification.async_create(
+                hass,
+                f"Could not create plan '{new_plan_name}' (the name may already be in use live). "
+                f"Copy-restore of {kind}[{slot}] for '{source_name}' was aborted.",
+                title=_TITLE_RESTORE_ERR,
+                notification_id=notif_id,
+            )
+            return
+
+        elements_created, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(
+            new_fub_id, snapshot
+        )
+        # create_fup always creates plans inactive — auto_start=False just leaves that default
+        # alone instead of calling run_fup at all (no plan_data payload here: the structure was
+        # already built above via individual element/connection calls, not via run_fup).
+        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        # Without this, a connection drop mid-restore leaves the "in progress" notification
+        # above stuck forever — the exception propagates past the persistent_notification calls
+        # instead of replacing it, even though the restore lock is released either way.
+        _LOGGER.exception("Function Plan copy-restore failed while building '%s'", new_plan_name)
         persistent_notification.async_create(
             hass,
-            f"Could not create plan '{new_plan_name}' (the name may already be in use live). "
-            f"Copy-restore of {kind}[{slot}] for '{source_name}' was aborted.",
+            f"Copy-restore of {kind}[{slot}] for '{source_name}' failed while building '{new_plan_name}': {exc}. "
+            "The new plan may be partially created — check Comexio Studio and delete it manually if needed.",
             title=_TITLE_RESTORE_ERR,
             notification_id=notif_id,
         )
         return
-
-    elements_created, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(
-        new_fub_id, snapshot
-    )
-    # create_fup always creates plans inactive — auto_start=False just leaves that default
-    # alone instead of calling run_fup at all (no plan_data payload here: the structure was
-    # already built above via individual element/connection calls, not via run_fup).
-    run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
     duration = time.monotonic() - t_start
 
     elem_count = len(snapshot.get("elements", {}))
