@@ -2408,8 +2408,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for webio_id in webio_ids:
             for fub_id, plan_data in plans.items():
                 if self.api._find_webio_wiring(webio_id, plan_data) is not None:
+                    # No break: a stray duplicate element (e.g. left behind by a delete+
+                    # recreate cycle, see _wired_source_webio_pairs) can reuse the same
+                    # webIoId in more than one managed plan. Collecting into every matching
+                    # plan instead of just the first keeps the promise made by
+                    # unwire_webio_commands' docstring ("across managed plans") — cmd_ids/
+                    # touched_fub_ids are deduplicated by the caller either way.
                     plan_to_ids.setdefault(fub_id, []).append(webio_id)
-                    break
         return plans, plan_to_ids
 
     async def _unwire_plan(

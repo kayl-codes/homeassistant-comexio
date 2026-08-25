@@ -616,6 +616,48 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             for plan_name_s, fub_id_s in stop_failures
         ]
 
+    @staticmethod
+    def _resolve_plan_webio_and_unwired(
+        api: Any, plan_data: dict, cleanup_ids: list[int]
+    ) -> tuple[list[int], list[int]]:
+        """For each marker in cleanup_ids, collect its wired WebIO ids in this plan — or,
+        if it has no WebIO counterpart at all, its element id for direct deletion (see
+        _delete_unwired_marker_elements).
+        """
+        webio_ids: list[int] = []
+        unwired_marker_elem_ids: list[int] = []
+        for marker_id in cleanup_ids:
+            marker_elem_id = api._find_marker_element_id(plan_data.get("elements", {}), marker_id)
+            if not marker_elem_id:
+                continue
+            marker_webio_ids = api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data)
+            if marker_webio_ids:
+                webio_ids.extend(marker_webio_ids)
+            else:
+                unwired_marker_elem_ids.append(int(marker_elem_id))
+        return webio_ids, unwired_marker_elem_ids
+
+    @staticmethod
+    async def _delete_unwired_marker_elements(
+        api: Any, fub_id: int, unwired_marker_elem_ids: list[int]
+    ) -> tuple[int, tuple[str, int] | None, tuple[str, int] | None]:
+        """Delete marker elements with no WebIO counterpart directly — unwire_webio_commands
+        only ever touches elements it finds wired to one of the given webio_ids, so a marker
+        with no wiring at all would otherwise be left behind in the plan forever.
+
+        Returns (deleted element count, stopped_plan or None, stop_failure or None).
+        """
+        result = await api._delete_plan_elements_and_restart(
+            fub_id, unwired_marker_elem_ids, [], api.function_plan_name(fub_id)
+        )
+        stopped_plan = None
+        stop_failure = None
+        if result.get("stop_failed"):
+            stop_failure = (result.get("plan_name", "?"), fub_id)
+        elif result.get("plan_stopped") and result.get("fub_id") is not None:
+            stopped_plan = (result.get("plan_name", "?"), result["fub_id"])
+        return result.get("deleted_elem_count", 0), stopped_plan, stop_failure
+
     async def _cleanup_function_plan_plans(
         self, api: Any, marker_ids: list[int], lp_fub_id: int | None
     ) -> tuple[int, list[int], list[tuple[str, int]], list[tuple[str, int]]]:
@@ -641,28 +683,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             webio_ids: list[int] = []
             unwired_marker_elem_ids: list[int] = []
             if plan_data:
-                for marker_id in cleanup_ids:
-                    marker_elem_id = api._find_marker_element_id(plan_data.get("elements", {}), marker_id)
-                    if not marker_elem_id:
-                        continue
-                    marker_webio_ids = api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data)
-                    if marker_webio_ids:
-                        webio_ids.extend(marker_webio_ids)
-                    else:
-                        # No WebIO counterpart to unwire through — unwire_webio_commands below
-                        # only ever touches elements it finds wired to one of the given
-                        # webio_ids, so a marker with no wiring at all would otherwise be left
-                        # behind in the plan forever. Delete it directly instead.
-                        unwired_marker_elem_ids.append(int(marker_elem_id))
+                webio_ids, unwired_marker_elem_ids = self._resolve_plan_webio_and_unwired(api, plan_data, cleanup_ids)
             if unwired_marker_elem_ids:
-                result = await api._delete_plan_elements_and_restart(
-                    fub_id, unwired_marker_elem_ids, [], api.function_plan_name(fub_id)
+                deleted, stopped_plan, stop_failure = await self._delete_unwired_marker_elements(
+                    api, fub_id, unwired_marker_elem_ids
                 )
-                lp_count += result.get("deleted_elem_count", 0)
-                if result.get("stop_failed"):
-                    stop_failures.append((result.get("plan_name", "?"), fub_id))
-                elif result.get("plan_stopped") and result.get("fub_id") is not None:
-                    stopped_plans.append((result.get("plan_name", "?"), result["fub_id"]))
+                lp_count += deleted
+                if stop_failure:
+                    stop_failures.append(stop_failure)
+                if stopped_plan:
+                    stopped_plans.append(stopped_plan)
             if not webio_ids:
                 continue
             unwired = await self.coordinator.unwire_webio_commands(webio_ids, preferred_fub_id=fub_id)

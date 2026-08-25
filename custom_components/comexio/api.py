@@ -389,7 +389,7 @@ class ComexioAPI:
                     return True
             self.last_login_error = "rejected"
             return False
-        except (aiohttp.ClientError, ValueError, KeyError) as e:
+        except (aiohttp.ClientError, TimeoutError, ValueError, KeyError) as e:
             _LOGGER.exception("Critical error during Comexio login: %s", e)
             self.last_login_error = "connection"
             return False
