@@ -1947,16 +1947,16 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
 
     @property
     def available(self) -> bool:
-        """Grayed out with no plan selected — there's nothing to toggle."""
-        return self._selected_fub_id() is not None
+        """Grayed out with no plan selected, or while its live Active flag isn't known yet
+        (fub_id missing from the cached fub_data — toggling would be a guess)."""
+        return self._selected_fub_id() is not None and self._selected_plan_active() is not None
 
     async def async_press(self) -> None:
         fub_id = self._selected_fub_id()
-        if fub_id is None:
+        active = self._selected_plan_active()
+        if fub_id is None or active is None:
             return
-        service = (
-            FUNCTION_PLAN_SERVICE_ACTIVATE if self._selected_plan_active() is False else FUNCTION_PLAN_SERVICE_STOP
-        )
+        service = FUNCTION_PLAN_SERVICE_ACTIVATE if active is False else FUNCTION_PLAN_SERVICE_STOP
         self._pending = True
         self.async_write_ha_state()
         try:

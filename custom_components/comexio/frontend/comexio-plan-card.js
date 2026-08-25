@@ -1152,6 +1152,13 @@ class ComexioPlanCard extends HTMLElement {
       slot: this._restoreSlot,
       auto_start: this._restoreAutoStartEl.checked,
     };
+    // Multiple Comexio config entries make config_entry required by the service — resolve it
+    // from the backup selector's own entity registry entry so this card keeps working without
+    // extra card-config options even when more than one Comexio instance is set up.
+    const configEntryId = this._hass.entities?.[this._config.backup_entity]?.config_entry_id;
+    if (configEntryId) {
+      data.config_entry = configEntryId;
+    }
     if (asCopy) {
       data.as_copy = true;
       data.new_plan_name = newPlanName;

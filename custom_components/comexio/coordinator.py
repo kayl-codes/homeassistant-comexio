@@ -2335,18 +2335,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         startup fallback) and every cluster plan from CONF_FUNCTION_PLAN_PLAN_MAP.
         """
         fub_ids: set[int] = set()
-        _lp_sel = self._active_plan_selector_state()
-
-        if _lp_sel and _lp_sel.state not in ("unavailable", "unknown"):
-            fub_id_str = next((fid for fid, fd in self.api.fub_data.items() if fd.get("Name") == _lp_sel.state), None)
-            if fub_id_str:
-                fub_ids.add(int(fub_id_str))
-        elif (fallback := self.config_entry.options.get(CONF_FUNCTION_PLAN_FUB_ID)) not in (
-            None,
-            FUNCTION_PLAN_FUB_ID_AUTO,
-        ):
-            # State machine not yet populated (startup timing); fall back to persisted fub_id from options
-            fub_ids.add(int(fallback))
+        # Resolved via get_active_function_plan_fub_id() (parses the "(ID n)" suffix) rather
+        # than matching the selector state against the bare Name here: the selector label can
+        # carry the "⏸ " inactive-plan prefix (see select.py's _plan_option_label), which a
+        # direct Name comparison would never match — silently dropping the selected plan from
+        # every audit below.
+        if (active_fub_id := self.get_active_function_plan_fub_id()) is not None:
+            fub_ids.add(active_fub_id)
 
         plan_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         if isinstance(plan_map, dict):
@@ -2604,7 +2599,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return pairs
 
     @staticmethod
-    def _plan_connected_source_ids(plan_data: dict, source_type: str) -> set[str]:
+    def _connection_endpoint_ids(conn: dict) -> set[str]:
+        """FubElementIds referenced by one connection — its single input plus every output."""
+        endpoint_ids = {str((conn.get("input") or {}).get("FubElementId"))}
+        outputs = conn.get("output") or []
+        if isinstance(outputs, dict):
+            outputs = list(outputs.values())
+        endpoint_ids.update(str(o.get("FubElementId")) for o in outputs)
+        return endpoint_ids
+
+    @classmethod
+    def _plan_connected_elem_ids(cls, plan_data: dict) -> set[str]:
+        """elem_ids that are an endpoint of ANY connection in the plan, regardless of type.
+
+        Used by delete_dangling_plan_elements to re-verify — against a freshly reloaded
+        snapshot, at delete time — that a candidate element is still actually unconnected in
+        THIS specific plan: the same ref_id can appear as a separate element instance in
+        several managed plans, dangling in one but genuinely wired in another, so a match on
+        ref_id+type alone is not enough to justify deleting it everywhere it turns up.
+        """
+        connected: set[str] = set()
+        for conn in (plan_data.get("connections") or {}).values():
+            connected.update(cls._connection_endpoint_ids(conn))
+        return connected
+
+    @classmethod
+    def _plan_connected_source_ids(cls, plan_data: dict, source_type: str) -> set[str]:
         """ref_ids of `source_type` (marker "2" / IO "1") elements that are an endpoint of ANY
         connection in the plan, regardless of what's on the other end.
 
@@ -2624,11 +2644,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         connected: set[str] = set()
         for conn in (plan_data.get("connections") or {}).values():
-            endpoint_ids = {str((conn.get("input") or {}).get("FubElementId"))}
-            outputs = conn.get("output") or []
-            if isinstance(outputs, dict):
-                outputs = list(outputs.values())
-            endpoint_ids.update(str(o.get("FubElementId")) for o in outputs)
+            endpoint_ids = cls._connection_endpoint_ids(conn)
             connected.update(ref_by_elem_id[eid] for eid in endpoint_ids if eid in ref_by_elem_id)
         return connected
 
@@ -2735,13 +2751,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Unlike unwire_webio_commands, there is no Web-IO command to resolve/delete here (it's
         already gone); this is a plain element delete + plan restart. Returns
         {"deleted_elem_count": int, "touched_fub_ids": list[int]}.
+
+        `ref_ids` reflects a snapshot potentially taken cycles ago and is a global judgement
+        (dangling across all managed plans combined) — the same ref_id can also exist as a
+        separate, still-genuinely-wired element instance in another plan. Each candidate is
+        therefore re-verified against the freshly reloaded snapshot here, per plan, via
+        _plan_connected_elem_ids, instead of trusting the ref_id match alone.
         """
         plans = await self._load_function_plan_check_data()
         plan_to_elem_ids: dict[int, list[int]] = {}
         for fub_id, plan_data in plans.items():
+            connected_elem_ids = self._plan_connected_elem_ids(plan_data)
             for elem_id, elem in (plan_data.get("elements") or {}).items():
                 ref = elem.get("reference") or {}
-                if str(ref.get("type")) == source_type and str(ref.get("ref_id")) in ref_ids:
+                if (
+                    str(ref.get("type")) == source_type
+                    and str(ref.get("ref_id")) in ref_ids
+                    and str(elem_id) not in connected_elem_ids
+                ):
                     plan_to_elem_ids.setdefault(fub_id, []).append(int(elem_id))
 
         deleted_elem_count = 0
