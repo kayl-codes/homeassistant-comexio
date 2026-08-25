@@ -341,64 +341,77 @@ async def _restore_plan_in_place(
         notification_id=notif_id,
     )
 
-    # Safety net: snapshot the CURRENT state before restoring, so the restore itself is undoable
-    await coordinator.async_function_plan_change_backup(fub_id, f"pre_restore {kind}[{slot}]")
+    try:
+        # Safety net: snapshot the CURRENT state before restoring, so the restore itself is undoable
+        await coordinator.async_function_plan_change_backup(fub_id, f"pre_restore {kind}[{slot}]")
 
-    apply = await _restore_apply_snapshot(api, fub_id, snapshot, live_name, plan_name, was_active, auto_start)
-    verify = await _restore_verify(api, fub_id, snapshot, plan_hash)
-    duration = time.monotonic() - t_start
+        apply = await _restore_apply_snapshot(api, fub_id, snapshot, live_name, plan_name, was_active, auto_start)
+        verify = await _restore_verify(api, fub_id, snapshot, plan_hash)
+        duration = time.monotonic() - t_start
 
-    # identity_was_mismatched (force_override onto a DIFFERENT plan): that plan's elements
-    # never existed under the snapshot's IDs, so Comexio always assigns fresh ones — a
-    # byte-for-byte hash match can never be achieved there, matching counts is the
-    # meaningful signal instead. Same-identity restore: elements keep their IDs, so a hash
-    # match IS achievable and more precise (run_fup returns result=False on an inactive plan
-    # even though the data payload IS applied).
-    content_ok = verify["counts_match"] if identity_was_mismatched else verify["hash_match"]
-    status = _restore_status(content_ok, apply, verify)
+        # identity_was_mismatched (force_override onto a DIFFERENT plan): that plan's elements
+        # never existed under the snapshot's IDs, so Comexio always assigns fresh ones — a
+        # byte-for-byte hash match can never be achieved there, matching counts is the
+        # meaningful signal instead. Same-identity restore: elements keep their IDs, so a hash
+        # match IS achievable and more precise (run_fup returns result=False on an inactive plan
+        # even though the data payload IS applied).
+        content_ok = verify["counts_match"] if identity_was_mismatched else verify["hash_match"]
+        status = _restore_status(content_ok, apply, verify)
 
-    # Promote the restored snapshot to slot 0 instead of leaving the next auto-backup cycle
-    # write a near-duplicate entry for content that's already stored (see async_mark_restored).
-    # Gated on content_ok (hash/counts match), NOT apply["run_ok"]: run_fup routinely returns
-    # result=False on a plan that needs manual reactivation in Comexio even though the actual
-    # element/connection data was applied correctly — using run_ok here would skip promotion
-    # for exactly that (common, still-successful) case.
-    # Skipped for identity_was_mismatched (force_override onto a DIFFERENT plan): this
-    # snapshot's own (fub_id, plan_name) key no longer describes what's now live, so its
-    # backup history is left exactly where it was.
-    promoted = False
-    if content_ok and not identity_was_mismatched:
-        promoted = await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, slot)
+        # Promote the restored snapshot to slot 0 instead of leaving the next auto-backup cycle
+        # write a near-duplicate entry for content that's already stored (see async_mark_restored).
+        # Gated on content_ok (hash/counts match), NOT apply["run_ok"]: run_fup routinely returns
+        # result=False on a plan that needs manual reactivation in Comexio even though the actual
+        # element/connection data was applied correctly — using run_ok here would skip promotion
+        # for exactly that (common, still-successful) case.
+        # Skipped for identity_was_mismatched (force_override onto a DIFFERENT plan): this
+        # snapshot's own (fub_id, plan_name) key no longer describes what's now live, so its
+        # backup history is left exactly where it was.
+        promoted = False
+        if content_ok and not identity_was_mismatched:
+            promoted = await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, slot)
 
-    msg = _restore_build_message(
-        plan_name,
-        fub_id,
-        kind,
-        slot,
-        snapshot,
-        status,
-        apply,
-        verify,
-        identity_was_mismatched,
-        was_active,
-        duration,
-        promoted,
-        auto_start,
-    )
-    _LOGGER.info(
-        "Function Plan Restore result: fub=%s status=%s identity_was_mismatched=%s hash_match=%s "
-        "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s duration=%.1fs",
-        fub_id,
-        status,
-        identity_was_mismatched,
-        verify["hash_match"],
-        verify["counts_match"],
-        apply["pos_ok"],
-        apply["run_ok"],
-        apply["properties_changed"],
-        apply["paper_ok"],
-        duration,
-    )
+        msg = _restore_build_message(
+            plan_name,
+            fub_id,
+            kind,
+            slot,
+            snapshot,
+            status,
+            apply,
+            verify,
+            identity_was_mismatched,
+            was_active,
+            duration,
+            promoted,
+            auto_start,
+        )
+        _LOGGER.info(
+            "Function Plan Restore result: fub=%s status=%s identity_was_mismatched=%s hash_match=%s "
+            "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s duration=%.1fs",
+            fub_id,
+            status,
+            identity_was_mismatched,
+            verify["hash_match"],
+            verify["counts_match"],
+            apply["pos_ok"],
+            apply["run_ok"],
+            apply["properties_changed"],
+            apply["paper_ok"],
+            duration,
+        )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        # Without this, a connection drop mid-restore leaves the "in progress" notification
+        # above stuck forever, same gap as the copy-restore path (see _restore_plan_as_copy).
+        _LOGGER.exception("Function Plan in-place restore failed for '%s' (ID %s)", plan_name, fub_id)
+        persistent_notification.async_create(
+            hass,
+            f"Restore of {kind}[{slot}] for plan '{plan_name}' (ID {fub_id}) failed: {exc}. "
+            "The plan may be left in a partially restored state — check it in Comexio Studio.",
+            title=_TITLE_RESTORE_ERR,
+            notification_id=notif_id,
+        )
+        return
     persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}", notification_id=notif_id)
 
 
@@ -452,8 +465,12 @@ async def _restore_apply_snapshot(
     # payload WAS applied (the same Comexio quirk documented for the as-new restore path
     # above) — skipping the stop on a "failed" run_ok could leave a plan running that either
     # was inactive before the restore or that the user explicitly asked to leave stopped.
+    # stop_ok IS a reliable success signal (unlike run_ok) — function_plan_stop_fup has no
+    # equivalent "reports False on a technically-applied action" quirk — so it's tracked and
+    # surfaced in the result message instead of being discarded.
+    stop_ok = True
     if not was_active or not auto_start:
-        await api.function_plan_stop_fup(fub_id)
+        stop_ok = await api.function_plan_stop_fup(fub_id)
 
     # Recreate missing comments only AFTER run_fup: run_fup treats its plan_data argument as
     # the plan's complete state, so a comment created before that call — and necessarily
@@ -471,6 +488,7 @@ async def _restore_apply_snapshot(
         "paper_ok": paper_ok,
         "pos_ok": pos_ok,
         "run_ok": run_ok,
+        "stop_ok": stop_ok,
         "recovered_comments": recovered_comments,
         "comment_warnings": comment_warnings,
     }
@@ -562,6 +580,15 @@ def _restore_status(content_ok: bool, apply: dict, verify: dict) -> str:
 
 def _restore_run_label(apply: dict, was_active: bool, auto_start: bool) -> tuple[str, str]:
     """(run_label, reactivation_note) for the run_fup line of a restore result message."""
+    # A stop is attempted whenever the plan needs to end up inactive (see
+    # _restore_apply_snapshot) — surface a failed stop regardless of which of those two
+    # conditions triggered it, since either way the plan may still be running unexpectedly.
+    if (not was_active or not auto_start) and not apply["stop_ok"]:
+        note = (
+            f"\n{ICON_WARNING} Plan could not be stopped after restore — it may still be running, "
+            "please check/stop it manually in Comexio."
+        )
+        return f"{ICON_ERROR} (stop failed after restore)", note
     if not auto_start:
         # run_fup still ran (it's the only apply mechanism), but the result was deliberately
         # stopped again right after — this is neither a success nor a failure to report.
