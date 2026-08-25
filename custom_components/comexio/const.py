@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from enum import StrEnum
 import re
 
-# Version: 0.8.0
+# Version: 0.8.1
 DOMAIN = "comexio"
 
 CONF_HOST = "host"
@@ -214,7 +214,7 @@ CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = "function_plan_backup_retention_mon
 DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = 6
 TIMESTAMP_DISPLAY_FORMAT = "%d.%m.%Y %H:%M"
 
-# The five live-plan-state services with a services.yaml `fub_id` dropdown that needs to stay in
+# The six live-plan-state services with a services.yaml `fub_id` dropdown that needs to stay in
 # sync with the managed plan set (services/_yaml_sync.py) — single source of truth also used by
 # services/__init__.py's registration, so the two lists can't silently diverge. Named individually
 # (rather than relying on positional unpacking of FUNCTION_PLAN_SERVICE_NAMES) so a reorder can't
@@ -224,12 +224,16 @@ FUNCTION_PLAN_SERVICE_SORT = "function_plan_sort"
 FUNCTION_PLAN_SERVICE_STOP = "function_plan_stop"
 FUNCTION_PLAN_SERVICE_ACTIVATE = "function_plan_activate"
 FUNCTION_PLAN_SERVICE_VISUALIZE = "function_plan_visualize"
+FUNCTION_PLAN_SERVICE_ANALYZE = "function_plan_analyze"
+FUNCTION_PLAN_SERVICE_FLOW_DIAGRAM = "function_plan_flow_diagram"
 FUNCTION_PLAN_SERVICE_NAMES = (
     FUNCTION_PLAN_SERVICE_CONNECT,
     FUNCTION_PLAN_SERVICE_SORT,
     FUNCTION_PLAN_SERVICE_STOP,
     FUNCTION_PLAN_SERVICE_ACTIVATE,
     FUNCTION_PLAN_SERVICE_VISUALIZE,
+    FUNCTION_PLAN_SERVICE_ANALYZE,
+    FUNCTION_PLAN_SERVICE_FLOW_DIAGRAM,
 )
 
 # HA-bus event fired for every webhook value push that belongs to the currently rendered

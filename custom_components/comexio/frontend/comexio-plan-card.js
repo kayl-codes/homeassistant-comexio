@@ -29,7 +29,7 @@ import { matchesPattern, fmtTs } from "./comexio-plan-card-utils.js";
 
 // Version banner: lets the user verify in the browser console WHICH build actually
 // executes — ?v= query bumps proved unreliable against the service-worker cache.
-console.info("comexio-plan-card v0.9.15 (Backup Restore-Trigger + Draht-Hover-Persistenz) loaded");
+console.info("comexio-plan-card v0.9.31 (Restore-as-Copy + Flussdiagramm-Merge) loaded");
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
 // function_plan_backup.py) so the card can parse kind+slot back out of the select's state
@@ -44,6 +44,264 @@ const LIVE_BACKUP_OPTION = "Live";
 // hides the periodically chattering analog inputs. A deliberately cleared filter
 // ("" in storage) stays cleared — the default must never resurrect itself.
 const DEFAULT_DEBUG_FILTER = "*#TL1, *#UL1, *#AI*, *#QI*";
+
+// Fixed display order for Plan-Analyse finding groups — mirrors the backend's own emission
+// order (function_plan_analysis.py: conflicts, pin issues, suspicious, self-reset). A
+// category not listed here (future addition) still renders, just appended at the end.
+const _ANALYSIS_CATEGORY_ORDER = ["CONFLICT", "MISSING_INPUT", "UNUSED_BLOCK", "DEAD_OUTPUT", "SUSPICIOUS", "SELF_RESET"];
+
+// The analysis dialog lives OUTSIDE any card's shadow root, as a single element shared by
+// EVERY comexio-plan-card instance on the page (see _ensureSharedAnalysisDialog below) —
+// two reasons, both hard requirements, not style preferences:
+//  1. Centering/clickability: the dialog's own "position: fixed" (see _ANALYSIS_DIALOG_CSS) only
+//     reliably centers on the true viewport (and reliably receives clicks) when nothing between
+//     it and <body> establishes a new containing block for fixed-position elements — HA's
+//     sections-view card wrapper does exactly that, which is why it used to render stuck
+//     mid-card instead of centered over everything, with its buttons partly unclickable.
+//  2. One instance, not one per card: HA dashboards commonly keep every visited tab's cards
+//     mounted at once (instant tab switching). If each card instance built and relocated its
+//     OWN dialog to <body>, every one of them would still be sitting there — all shown at the
+//     identical centered position — the moment more than one had ever been opened,
+//     making "Schließen" close whichever one happened to be topmost while an IDENTICAL-looking
+//     one from another instance stayed open underneath. A page-wide singleton, re-targeted to
+//     whichever card most recently opened it (see _runAnalysis), has no such twin to hide behind.
+// Moving the node out of any shadow root means no shadow <style> reaches it, hence this
+// standalone stylesheet travels with it.
+const _ANALYSIS_DIALOG_CSS = `
+  /* Non-modal (.show(), not .showModal()) on purpose: a modal <dialog> dims the whole page via
+     ::backdrop for as long as it's open (not just while loading) and treats every click outside
+     the box — including clicks on the plan or on a finding's list item — as a "close" click via
+     its ::backdrop, which is ev.target === dialog under the hood. Neither is wanted here: the
+     user wants the plan visible and clickable WHILE the dialog stays open, closing only via the
+     Schließen button. Non-modal drops the backdrop and top-layer stacking entirely, so this
+     block now does its own fixed centering (UA auto-centering only applies to :modal dialogs)
+     and its own z-index/shadow (no top-layer boost to rely on for staying above the dashboard).
+  */
+  .analysis-dialog {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 1000;
+    border: 1px solid var(--divider-color, #888); border-radius: 8px; padding: 16px;
+    width: min(560px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
+    background: var(--card-background-color, #fff); color: var(--primary-text-color, inherit);
+    font: inherit; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  }
+  /* The UA stylesheet normally hides a <dialog> via "dialog:not([open]) { display: none }" —
+     but that rule loses to ANY author rule on the same element regardless of specificity
+     (author origin always beats user-agent origin in the cascade), so the unconditional
+     "display: flex" above was keeping the box on screen even after .close() ran successfully
+     (open attribute gone — hence e.g. the old ::backdrop visibly cleared — box did not).
+     This re-establishes the closed state at higher specificity than the plain-class rule. */
+  .analysis-dialog:not([open]) { display: none; }
+  .analysis-dialog h3 { margin: 0 0 4px 0; font-size: 1.1em; cursor: grab; user-select: none; }
+  .analysis-dialog h3:active { cursor: grabbing; }
+  .analysis-dialog .analysis-tabs { display: flex; gap: 4px; margin: 0 0 8px 0; border-bottom: 1px solid var(--divider-color, #888); }
+  .analysis-dialog .analysis-tab {
+    padding: 6px 10px; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+    background: none; cursor: pointer; color: var(--secondary-text-color, #888); font: inherit;
+  }
+  .analysis-dialog .analysis-tab.active { color: var(--primary-text-color, inherit); border-bottom-color: var(--primary-color, #03a9f4); }
+  .analysis-dialog .analysis-panel { display: flex; flex-direction: column; min-height: 0; }
+  .analysis-dialog .analysis-panel[hidden] { display: none; }
+  .analysis-dialog .analysis-summary { margin: 0 0 12px 0; font-size: 0.85em; color: var(--secondary-text-color, #888); }
+  .analysis-dialog .analysis-list { overflow-y: auto; margin: 0 0 12px 0; }
+  /* The flow tab needs much more room than the findings list — a diagram squeezed into the
+     560px findings-tab width was unreadable without excessive zooming (user feedback, 2026-08-24). */
+  .analysis-dialog.flow-active { width: min(1150px, 95vw); max-height: 90vh; }
+  .analysis-dialog .flow-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 8px 0; }
+  .analysis-dialog .flow-toolbar .flow-zoom-label {
+    cursor: pointer; font-size: 0.85em; color: var(--secondary-text-color, #888); min-width: 3.5em; text-align: center;
+  }
+  .analysis-dialog .flow-svg-container { overflow: auto; margin: 0 0 12px 0; }
+  /* No explicit width rule here on purpose — the SVG's width is set in JS (_applyFlowZoom),
+     mirroring the main preview's own zoom (_applyZoom): a CSS-only "max-width: none" still let
+     the UA's default block-replaced-element sizing shrink the SVG to the container's width,
+     defeating the whole point of overflow:auto (user feedback, 2026-08-24). */
+  .analysis-dialog .flow-svg-container svg { height: auto; display: block; }
+  /* Wire hover for the flow diagram — same invisible-wide-hit-path trick as the main plan
+     preview's .edge-hit (see ComexioPlanCard._enhance), scoped to the flow diagram's own
+     class names and highlighting the whole data-net group (a fan-out's shared trunk +
+     junction dot + every branch), not just the segment under the pointer. */
+  .analysis-dialog .flow-svg-container path.flow-hit {
+    stroke: transparent; stroke-width: 10; fill: none; pointer-events: stroke;
+  }
+  .analysis-dialog .flow-svg-container path.flow-edge.flow-hover { stroke: #f0c000; stroke-width: 2.4; }
+  .analysis-dialog .flow-svg-container circle.flow-junction.flow-hover { fill: #f0c000; }
+  .analysis-dialog .analysis-group { margin: 0 0 8px 0; }
+  .analysis-dialog .analysis-group summary {
+    cursor: pointer; font-weight: 600; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.02em;
+    color: var(--secondary-text-color, #888); padding: 4px 2px; list-style: none;
+  }
+  .analysis-dialog .analysis-group summary::-webkit-details-marker { display: none; }
+  .analysis-dialog .analysis-group summary::before { content: "▸ "; }
+  .analysis-dialog .analysis-group[open] summary::before { content: "▾ "; }
+  .analysis-dialog .analysis-group ul { list-style: none; margin: 4px 0 0 0; padding: 0; }
+  .analysis-dialog .analysis-group li {
+    padding: 6px 8px; margin: 0 0 6px 0; border-radius: 6px; border-left: 3px solid var(--divider-color, #888);
+    background: var(--secondary-background-color, rgba(0, 0, 0, 0.04)); font-size: 0.9em; line-height: 1.35;
+    cursor: pointer;
+  }
+  .analysis-dialog .analysis-group li:hover { filter: brightness(1.15); }
+  .analysis-dialog .analysis-group li.warning { border-left-color: var(--warning-color, #ff9800); }
+  .analysis-dialog .analysis-group li.info { border-left-color: var(--info-color, #03a9f4); }
+  .analysis-dialog .analysis-empty { color: var(--secondary-text-color, #888); font-style: italic; margin: 0; }
+  .analysis-dialog .analysis-actions { display: flex; justify-content: flex-end; }
+  .analysis-dialog button {
+    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--divider-color, #888);
+    background: none; cursor: pointer; color: var(--primary-text-color, inherit); font: inherit;
+  }
+`;
+
+// Click-and-hold on the title bar moves the dialog. Native <dialog> centers itself via a
+// UA-stylesheet "margin: auto" — the first pointerdown overrides that with an explicit
+// left/top computed from the dialog's current on-screen rect, so the drag starts at zero
+// jump; every following pointermove just offsets from that anchor.
+//
+// Deliberately NOT using handle.setPointerCapture here (unlike the debug-log resize grip,
+// which drags a sibling within its own fixed-position box): capturing on `handle` while the
+// code above it moves `handle`'s own ANCESTOR (the dialog) on every pointermove reportedly left
+// the dialog's click handling broken for the rest of the page session after a single drag —
+// closing via the button AND via backdrop/gap clicks both stopped firing, recoverable only by
+// a full page reload. Tracking the gesture on `document` instead sidesteps capture entirely,
+// so nothing about the dialog's own click listener can be affected by having been dragged.
+function _makeDialogDraggable(dialog, handle) {
+  handle.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) {
+      return; // left button / primary touch only
+    }
+    ev.preventDefault(); // no text selection while dragging the title
+    const rect = dialog.getBoundingClientRect();
+    dialog.style.margin = "0";
+    dialog.style.transform = "none"; // drop the CSS centering transform — left/top take over below
+    dialog.style.left = `${rect.left}px`;
+    dialog.style.top = `${rect.top}px`;
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const onMove = (mev) => {
+      dialog.style.left = `${rect.left + (mev.clientX - startX)}px`;
+      dialog.style.top = `${rect.top + (mev.clientY - startY)}px`;
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  });
+}
+
+// Pure DOM tab switch — module-level (not a card method) since the tab buttons are wired up
+// once, at dialog creation, before any card instance owns the shared dialog yet. Loading the
+// flow diagram's data is the owning card instance's job (dialog._owner, set by _runAnalysis —
+// see _ensureSharedAnalysisDialog's click listener below).
+function _switchAnalysisTab(dialog, tabName) {
+  dialog.querySelectorAll(".analysis-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.tab === tabName);
+  });
+  // The flow tab needs far more width than the findings list — see .flow-active in
+  // _ANALYSIS_DIALOG_CSS.
+  dialog.classList.toggle("flow-active", tabName === "flow");
+  dialog.querySelector(".analysis-panel-findings").hidden = tabName !== "findings";
+  dialog.querySelector(".analysis-panel-flow").hidden = tabName !== "flow";
+}
+
+// Module-scope singleton: created once (lazily, on the first "Analyse" click of any card
+// instance on the page) and reused forever after — see _ANALYSIS_DIALOG_CSS's comment for why
+// this must NOT be one-per-card-instance.
+let _sharedAnalysisDialog = null;
+
+function _ensureSharedAnalysisDialog() {
+  if (_sharedAnalysisDialog) {
+    return _sharedAnalysisDialog;
+  }
+  if (!document.getElementById("comexio-analysis-dialog-style")) {
+    const style = document.createElement("style");
+    style.id = "comexio-analysis-dialog-style";
+    style.textContent = _ANALYSIS_DIALOG_CSS;
+    document.body.append(style);
+  }
+  const dialog = document.createElement("dialog");
+  dialog.className = "analysis-dialog";
+  // nosemgrep: javascript.browser.security.insecure-document-method, javascript.browser.security.insecure-innerhtml
+  dialog.innerHTML = `
+    <h3>Plan-Analyse (experimentell)</h3>
+    <div class="analysis-tabs">
+      <button type="button" class="analysis-tab active" data-tab="findings">Befunde</button>
+      <button type="button" class="analysis-tab" data-tab="flow">Flussdiagramm</button>
+    </div>
+    <div class="analysis-panel analysis-panel-findings">
+      <p class="analysis-summary"></p>
+      <div class="analysis-list"></div>
+    </div>
+    <div class="analysis-panel analysis-panel-flow" hidden>
+      <div class="flow-toolbar">
+        <button type="button" class="flow-zoom-out" title="Verkleinern" aria-label="Verkleinern"><ha-icon icon="mdi:magnify-minus-outline"></ha-icon></button>
+        <span class="flow-zoom-label" title="Klick: zurück auf 100 %">100 %</span>
+        <button type="button" class="flow-zoom-in" title="Vergrößern" aria-label="Vergrößern"><ha-icon icon="mdi:magnify-plus-outline"></ha-icon></button>
+      </div>
+      <div class="flow-svg-container">Lade Flussdiagramm…</div>
+    </div>
+    <div class="analysis-actions">
+      <button type="button" class="analysis-close">Schließen</button>
+    </div>
+  `;
+  // Zoom preference is dialog-wide (not per-plan/per-card like the main preview's own zoom —
+  // this dialog is a page-wide singleton, see the class doc comment above), so one fixed
+  // localStorage key is enough.
+  const savedFlowZoom = Number(localStorage.getItem("comexio-flow-zoom"));
+  // Default (no saved preference yet) starts at 150 %, not 100 % — the flow diagram's text
+  // read too small at the plain 1:1 baseline (user feedback, 2026-08-24).
+  dialog._flowZoom = savedFlowZoom >= 0.25 && savedFlowZoom <= 4 ? savedFlowZoom : 1.5;
+  dialog.querySelector(".flow-zoom-out").addEventListener("click", () => _setFlowZoom(dialog, dialog._flowZoom / 1.25));
+  dialog.querySelector(".flow-zoom-in").addEventListener("click", () => _setFlowZoom(dialog, dialog._flowZoom * 1.25));
+  dialog.querySelector(".flow-zoom-label").addEventListener("click", () => _setFlowZoom(dialog, 1));
+  dialog.querySelectorAll(".analysis-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      _switchAnalysisTab(dialog, tab.dataset.tab);
+      // dialog._owner: the card instance that last ran _runAnalysis() — set there, not here,
+      // since these tab listeners are wired once for the page-wide singleton, long before any
+      // card owns it (see _ANALYSIS_DIALOG_CSS's comment on why the dialog isn't per-card).
+      dialog._owner?._onAnalysisTabSwitch(tab.dataset.tab);
+    });
+  });
+  // Only the button closes it — deliberately no delegated "click anywhere outside the box"
+  // listener: that used to piggyback on the modal ::backdrop's ev.target === dialog quirk, which
+  // is exactly the behavior the non-modal switch above was meant to drop (a click on the plan or
+  // on a finding in the list must NOT close the dialog).
+  dialog.querySelector(".analysis-close").addEventListener("click", () => dialog.close());
+  _makeDialogDraggable(dialog, dialog.querySelector("h3"));
+  document.body.append(dialog);
+  _sharedAnalysisDialog = dialog;
+  return dialog;
+}
+
+// Zoom for the Ablaufdiagramm tab — module-level like _switchAnalysisTab, since the dialog is
+// a page-wide singleton (see _ensureSharedAnalysisDialog's class doc comment), not per-card
+// state. Mirrors ComexioPlanCard._setZoom/_applyZoom for the main preview, but the baseline
+// SVG carries no server-side inline width to fall back on at 100 % (see the CSS comment on
+// .flow-svg-container svg), so this always sets an explicit pixel width.
+function _setFlowZoom(dialog, zoom) {
+  dialog._flowZoom = Math.min(4, Math.max(0.25, zoom));
+  try {
+    localStorage.setItem("comexio-flow-zoom", String(dialog._flowZoom));
+  } catch {
+    // private mode / storage full — zoom just won't persist
+  }
+  _applyFlowZoom(dialog);
+}
+
+function _applyFlowZoom(dialog) {
+  const label = dialog.querySelector(".flow-zoom-label");
+  if (label) {
+    label.textContent = `${Math.round(dialog._flowZoom * 100)} %`;
+  }
+  const container = dialog.querySelector(".flow-svg-container");
+  const svg = container?.querySelector("svg");
+  const vb = svg?.viewBox?.baseVal;
+  if (!svg || !vb || vb.width <= 0) {
+    return;
+  }
+  const baseline = Math.min(container.clientWidth || vb.width, vb.width);
+  svg.style.width = `${baseline * dialog._flowZoom}px`;
+}
 
 class ComexioPlanCard extends HTMLElement {
   constructor() {
@@ -64,6 +322,7 @@ class ComexioPlanCard extends HTMLElement {
     this._sugIdx = -1; // highlighted autocomplete suggestion (-1 = none)
     this._filterPatterns = []; // debug-log exclude patterns (comma-separated user input)
     this._logPaused = false; // pause button: drop incoming events (deliberately NOT persisted)
+    this._analysisHighlightIds = new Set(); // element ids highlighted from a clicked finding
   }
 
   setConfig(config) {
@@ -216,6 +475,13 @@ class ComexioPlanCard extends HTMLElement {
         .plan g.node-g.search-hit rect { stroke: #f0c000; stroke-width: 3; }
         .plan g.node-g.search-hit text.node-comment { fill: #f0c000; }
 
+        /* Plan-Analyse: clicking a finding highlights its element(s) the same way a search
+           hit does (yellow border) — a separate class from .search-hit so the two don't
+           fight over the same nodes and so _applySearch() clearing an empty pattern (which
+           runs on every SVG reload) can't wipe it out. */
+        .plan g.node-g.analysis-hit rect { stroke: #f0c000; stroke-width: 3; }
+        .plan g.node-g.analysis-hit text.node-comment { fill: #f0c000; }
+
         /* Help dialog: native <dialog> renders in the top layer, so it always sits
            above the plan/debug box regardless of the card's own stacking context. */
         .help-dialog {
@@ -309,6 +575,7 @@ class ComexioPlanCard extends HTMLElement {
           <span class="zoom-label" title="Klick: zurück auf 100 %">100 %</span>
           <button class="zoom-in" title="Vergrößern" aria-label="Vergrößern"><ha-icon icon="mdi:magnify-plus-outline"></ha-icon></button>
           <button class="debug-toggle" title="Debug-Box ein-/ausblenden" aria-label="Debug-Box umschalten"><ha-icon icon="mdi:console-line"></ha-icon></button>
+          <button class="analyze-toggle" title="Plan analysieren (manuell, kein Automat)" aria-label="Plan analysieren"><ha-icon icon="mdi:stethoscope"></ha-icon></button>
         </div>
         <div class="cross-results" hidden></div>
         <div class="plan"></div>
@@ -409,6 +676,10 @@ class ComexioPlanCard extends HTMLElement {
         this._restoreDialog.close();
       }
     });
+    // The dialog itself is a page-wide singleton (_ensureSharedAnalysisDialog), created and
+    // bound to this._analysisDialog/_analysisSummaryEl/_analysisListEl lazily in
+    // _runAnalysis() — not here, since it doesn't belong to this card's own DOM.
+    root.querySelector(".analyze-toggle").addEventListener("click", () => this._runAnalysis());
     this._input = root.querySelector("input");
     this._hitsEl = root.querySelector(".hits");
     this._zoomLabel = root.querySelector(".zoom-label");
@@ -527,6 +798,244 @@ class ComexioPlanCard extends HTMLElement {
     }
   }
 
+  // Manual "plan health check": delegates to the function_plan_analyze service (no fub_id
+  // passed — the backend uses whichever plan is currently selected in the "Function Plans"
+  // entity, same fallback as function_plan_visualize). Never triggered automatically, and
+  // the result is shown ONLY in this popup — the service itself never posts a notification
+  // on success (see services/analyze.py).
+  async _runAnalysis() {
+    if (this._analysisInFlight) {
+      return;
+    }
+    this._analysisInFlight = true;
+    // Claim the shared dialog for THIS card instance — a later _highlightFinding() looks up
+    // elements in THIS instance's own plan SVG, so "whoever opened it last" must own it.
+    // dialog._analysisGeneration is bumped on every claim: if a second card claims the dialog
+    // before this card's service call resolves, the stale response below (and any later flow
+    // diagram load, see _loadFlowDiagram) is detected by generation mismatch and dropped instead
+    // of overwriting the now-current owner's findings/flow (two mounted cards racing their
+    // Analyse buttons, reported 2026-08-25).
+    const dialog = _ensureSharedAnalysisDialog();
+    const generation = (dialog._analysisGeneration || 0) + 1;
+    dialog._analysisGeneration = generation;
+    this._analysisGeneration = generation;
+    dialog._owner = this;
+    this._analysisDialog = dialog;
+    this._analysisSummaryEl = dialog.querySelector(".analysis-summary");
+    this._analysisListEl = dialog.querySelector(".analysis-list");
+    this._flowContainerEl = dialog.querySelector(".flow-svg-container");
+    this._analysisSummaryEl.textContent = "Analysiere…";
+    this._analysisListEl.replaceChildren();
+    // A new analysis run means a (possibly different) plan — the old flow diagram, if any,
+    // belongs to whatever was analyzed last, so it's discarded rather than shown stale.
+    this._flowLoaded = false;
+    this._flowContainerEl.textContent = "Lade Flussdiagramm…";
+    _switchAnalysisTab(dialog, "findings");
+    if (!dialog.open) {
+      // Reset any drag offset from a previous session — reopens centered, not wherever it
+      // was last dragged to (clearing all three lets the CSS defaults, incl. the centering
+      // transform, apply again).
+      dialog.style.left = "";
+      dialog.style.top = "";
+      dialog.style.margin = "";
+      dialog.style.transform = "";
+      // .show(), not .showModal(): non-modal on purpose, see _ANALYSIS_DIALOG_CSS's comment —
+      // no backdrop dimming the plan, and the plan stays clickable while this is open.
+      dialog.show();
+    }
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "call_service",
+        domain: "comexio",
+        service: "function_plan_analyze",
+        service_data: {},
+        return_response: true,
+      });
+      console.debug("comexio-plan-card: _runAnalysis result", result);
+      if (dialog._analysisGeneration !== generation) {
+        return; // a later Analyse click (this card or another) has since taken over the dialog
+      }
+      this._renderAnalysis(result?.response);
+    } catch (err) {
+      console.warn("comexio-plan-card: plan analysis failed", err);
+      if (dialog._analysisGeneration === generation) {
+        this._analysisSummaryEl.textContent = "Analyse fehlgeschlagen.";
+      }
+    } finally {
+      this._analysisInFlight = false;
+    }
+  }
+
+  _renderAnalysis(data) {
+    if (!data || data.error) {
+      this._analysisSummaryEl.textContent = data?.error || "Kein Ergebnis erhalten.";
+      this._analysisListEl.replaceChildren();
+      return;
+    }
+    const { plan_name: planName, source, element_count: elementCount, connection_count: connectionCount, findings } = data;
+    this._analysisSummaryEl.textContent =
+      `${planName} (${source}) — ${elementCount} Elemente, ${connectionCount} Verbindungen, ${findings.length} Befund(e)`;
+    if (!findings.length) {
+      const empty = document.createElement("p");
+      empty.className = "analysis-empty";
+      empty.textContent = "Keine Auffälligkeiten gefunden.";
+      this._analysisListEl.replaceChildren(empty);
+      return;
+    }
+    // Grouped by category, each group a native <details> (free collapse/expand, keyboard
+    // accessible) — info groups (currently just SELF_RESET) start collapsed since they're
+    // "for information", not action items; warning groups start open.
+    const groups = new Map();
+    for (const f of findings) {
+      if (!groups.has(f.category)) {
+        groups.set(f.category, []);
+      }
+      groups.get(f.category).push(f);
+    }
+    const order = [
+      ..._ANALYSIS_CATEGORY_ORDER.filter((c) => groups.has(c)),
+      ...[...groups.keys()].filter((c) => !_ANALYSIS_CATEGORY_ORDER.includes(c)),
+    ];
+    this._analysisListEl.replaceChildren(
+      ...order.map((cat) => {
+        const items = groups.get(cat);
+        const details = document.createElement("details");
+        details.className = "analysis-group";
+        details.open = items[0].severity !== "info";
+        const summary = document.createElement("summary");
+        summary.textContent = `${cat} (${items.length})`;
+        const ul = document.createElement("ul");
+        ul.append(
+          ...items.map((f) => {
+            const li = document.createElement("li");
+            li.className = f.severity;
+            li.tabIndex = 0;
+            li.title = "Klicken, um das Element im Plan zu markieren.";
+            li.textContent = f.message;
+            li.addEventListener("click", () => this._highlightFinding(f));
+            li.addEventListener("keydown", (ev) => {
+              if (ev.key === "Enter" || ev.key === " ") {
+                ev.preventDefault();
+                this._highlightFinding(f);
+              }
+            });
+            return li;
+          })
+        );
+        details.append(summary, ul);
+        return details;
+      })
+    );
+  }
+
+  // Called from the module-level tab click listener (_ensureSharedAnalysisDialog) — only this
+  // card instance (the dialog's current _owner) knows which _hass/plan to fetch the diagram
+  // for. Lazy: fetches once per _runAnalysis() run, not on every tab re-visit.
+  _onAnalysisTabSwitch(tabName) {
+    if (tabName === "flow" && !this._flowLoaded) {
+      this._loadFlowDiagram();
+    }
+  }
+
+  // Signal-flow diagram (function_plan_flow_diagram service) for the "Ablaufdiagramm" tab —
+  // same plan-resolution fallback as _runAnalysis (no fub_id passed). Static, fetched once per
+  // dialog open; see _runAnalysis for the _flowLoaded reset on re-open.
+  async _loadFlowDiagram() {
+    this._flowLoaded = true; // set before the await — a second tab click while in flight is a no-op
+    // Captured at call time: only this card was _owner (see _onAnalysisTabSwitch), but the
+    // dialog can still be reclaimed by another card's Analyse click before this resolves — same
+    // generation guard as _runAnalysis, checked against the shared dialog before touching it.
+    const dialog = this._analysisDialog;
+    const generation = this._analysisGeneration;
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "call_service",
+        domain: "comexio",
+        service: "function_plan_flow_diagram",
+        service_data: {},
+        return_response: true,
+      });
+      console.debug("comexio-plan-card: _loadFlowDiagram result", result);
+      if (dialog._analysisGeneration !== generation) {
+        return;
+      }
+      const data = result?.response;
+      if (!data || data.error || !data.svg) {
+        this._flowContainerEl.textContent = data?.error || "Kein Ergebnis erhalten.";
+        return;
+      }
+      // Server-rendered SVG (html.escape'd labels, same trust model as the main plan preview
+      // this card already injects elsewhere) — no new XSS surface.
+      // nosemgrep: javascript.browser.security.insecure-innerhtml
+      this._flowContainerEl.innerHTML = data.svg;
+      _applyFlowZoom(this._analysisDialog);
+      this._enhanceFlowDiagram();
+    } catch (err) {
+      console.warn("comexio-plan-card: flow diagram failed", err);
+      if (dialog._analysisGeneration === generation) {
+        this._flowContainerEl.textContent = "Flussdiagramm konnte nicht geladen werden.";
+      }
+    }
+  }
+
+  // Wires are 1.2px — too thin to hover reliably; same invisible-wide-hit-path trick as the
+  // main preview's _enhance() (see there), scoped to the flow diagram's own class names
+  // (.flow-edge/.flow-junction instead of .edge-line/.edge-junction). Fetched once per dialog
+  // open (see _loadFlowDiagram), so unlike the main preview there is no live-reload cycle to
+  // re-apply hover after.
+  _enhanceFlowDiagram() {
+    const svg = this._flowContainerEl.querySelector("svg");
+    if (!svg) {
+      return;
+    }
+    for (const wire of svg.querySelectorAll("path.flow-edge")) {
+      const hit = wire.cloneNode(false);
+      hit.setAttribute("class", "flow-hit");
+      hit.removeAttribute("marker-end");
+      const net = wire.dataset.net ?? null;
+      const members = () => (net === null ? [wire] : svg.querySelectorAll(`[data-net="${net}"]`));
+      hit.addEventListener("mouseenter", () => {
+        for (const el of members()) {
+          el.classList.add("flow-hover");
+        }
+      });
+      hit.addEventListener("mouseleave", () => {
+        for (const el of members()) {
+          el.classList.remove("flow-hover");
+        }
+      });
+      wire.after(hit);
+    }
+  }
+
+  // Jump-to-element: highlights the finding's plan element(s) (yellow border, same visual
+  // language as a search hit — see .analysis-hit) and scrolls the first one into view, so the
+  // reviewer doesn't have to search for it by hand. Dialog stays open (non-modal — the plan is
+  // already visible and clickable behind it, see _ANALYSIS_DIALOG_CSS's comment). The highlight
+  // is reapplied after every SVG reload (_loadSvg) exactly like search hits and wire hover, since
+  // a live-poll refresh replaces the whole SVG tree.
+  _highlightFinding(finding) {
+    this._analysisHighlightIds = new Set((finding.element_ids || []).map(String));
+    this._applyAnalysisHighlight();
+    const svg = this._planEl.querySelector("svg");
+    const firstId = finding.element_ids?.[0];
+    const node = firstId != null && svg?.querySelector(`g.node-g[data-eid="${CSS.escape(String(firstId))}"]`);
+    node?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+  }
+
+  _applyAnalysisHighlight() {
+    const svg = this._planEl.querySelector("svg");
+    if (!svg) {
+      return;
+    }
+    for (const node of svg.querySelectorAll("g.node-g.analysis-hit")) {
+      node.classList.remove("analysis-hit");
+    }
+    for (const eid of this._analysisHighlightIds || []) {
+      svg.querySelector(`g.node-g[data-eid="${CSS.escape(eid)}"]`)?.classList.add("analysis-hit");
+    }
+  }
+
   set hass(hass) {
     this._hass = hass;
     this._updateBackupRow();
@@ -577,6 +1086,7 @@ class ComexioPlanCard extends HTMLElement {
       this._planEl.innerHTML = text;
       this._enhance();
       this._applySearch();
+      this._applyAnalysisHighlight();
     } catch (err) {
       console.warn("comexio-plan-card: preview fetch failed, keeping previous image", err);
     }

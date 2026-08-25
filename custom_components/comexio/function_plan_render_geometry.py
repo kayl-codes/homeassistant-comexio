@@ -1,4 +1,4 @@
-# Version: 0.8.4
+# Version: 0.8.5
 """Per-element geometry (position/size/ports) for the Function Plan renderer.
 
 Split out of function_plan_render.py (2026-08). Builds, per plan element, the x/y/w/h box
@@ -280,3 +280,17 @@ def _bounding_box(geos: dict[str, dict[str, Any]]) -> tuple[float, float, float,
     max_x = max(g["x"] + g["w"] for g in geos.values())
     max_y = max(g["y"] + g["h"] for g in geos.values())
     return min_x, min_y, max_x, max_y
+
+
+def _fit_to_bounding_box(geos: dict[str, dict[str, Any]]) -> tuple[float, float]:
+    """Translate every geo so the content's bounding box starts at _MARGIN and return the
+    (width, height) canvas that exactly fits it, plus the title's headroom (34, see
+    render_plan_svg's title text) — the "no fixed Studio paper size given" sizing shared by
+    every renderer that just fits its own content instead of a real plan's paper bounds."""
+    min_x, min_y, max_x, max_y = _bounding_box(geos)
+    width = max_x - min_x + 2 * _MARGIN
+    height = max_y - min_y + 2 * _MARGIN + 34
+    for geo in geos.values():
+        geo["x"] += _MARGIN - min_x
+        geo["y"] += _MARGIN + 34 - min_y
+    return width, height
