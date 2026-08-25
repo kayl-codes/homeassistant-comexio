@@ -1665,7 +1665,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 dirty = True
             elif known["name"] != new_name:
                 old_name = known["name"]
-                self._migrate_extension_entities(old_name, new_name)
+                await self._migrate_extension_entities(old_name, new_name)
                 self.extension_registry[serial]["name"] = new_name
                 dirty = True
                 renames.append({"old_name": old_name, "new_name": new_name})
@@ -1675,7 +1675,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         return renames
 
-    def _migrate_extension_entities(self, old_name: str, new_name: str) -> None:
+    async def _migrate_extension_entities(self, old_name: str, new_name: str) -> None:
         """Rewrite unique_id/device identifiers for one renamed extension, in place."""
         ent_reg = er.async_get(self.hass)
         server_slug = self.server_id.lower()
@@ -1698,9 +1698,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
 
         # Keep the firmware cache under the new name so update.* doesn't briefly show
-        # "Unknown" until the next nightly firmware check re-populates it.
+        # "Unknown" until the next nightly firmware check re-populates it. Persisted
+        # immediately so a restart before that nightly check doesn't reload the stale
+        # old-name key from disk.
         if old_name in self.extension_firmware:
             self.extension_firmware[new_name] = self.extension_firmware.pop(old_name)
+            await self._firmware_store.async_save(
+                {
+                    "extension_firmware": self.extension_firmware,
+                    "last_checked_fw_version": self._last_checked_fw_version,
+                }
+            )
 
     def async_start_firmware_update_check(self):
         """Start the nightly firmware-check gate; returns the cancel callback.
