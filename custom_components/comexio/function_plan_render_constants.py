@@ -1,4 +1,4 @@
-# Version: 0.8.4
+# Version: 0.8.6
 """Shared geometry/style constants for the Function Plan SVG renderer.
 
 Split out of function_plan_render.py (2026-08) so every render submodule (labels, values,
