@@ -35,7 +35,7 @@ def _empty_result(error: str) -> dict[str, Any]:
 
 async def _handle_function_plan_flow_diagram(hass: HomeAssistant, call: ServiceCall) -> dict[str, Any]:
     """Render a live plan or a stored backup snapshot as a topologically-layered signal-flow
-    diagram (input -> logic -> output columns) instead of Comexio Studio's physical layout.
+    diagram (input -> logic -> output rows, top to bottom) instead of Comexio Studio's physical layout.
 
     Data resolution mirrors handle_function_plan_visualize/analyze exactly (same 'snapshot'
     field, same live/backup source split) — only the rendering differs.

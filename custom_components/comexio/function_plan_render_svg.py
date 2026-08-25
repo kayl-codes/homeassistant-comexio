@@ -200,7 +200,7 @@ def _render_one_node(parts: list[str], elem_id: str, geo: dict[str, Any], label:
     attrs = f' data-eid="{escape(elem_id)}"'
     if target := geo.get("target"):
         value_raw = geo.get("value_raw")
-        attrs = (
+        attrs += (
             f' data-target="{escape(str(target))}"'
             f' data-analog="{1 if geo.get("analog") else 0}"'
             f' data-writable="{1 if geo.get("writable") else 0}"'
