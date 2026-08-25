@@ -2727,22 +2727,33 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Function-Plan debris left behind when a Web-IO command/element was removed (e.g.
         directly in Comexio Studio) without also removing its wired source element.
 
-        The `connected_ids` floor (any connection at all, not just a WebIO one) is required
-        alongside `wired_pairs`: a source wired only to non-WebIO logic (a timer, comparator,
-        AND/OR block, ...) would otherwise be misclassified as debris and deleted on the next
-        sync even though it's in active use (see _plan_connected_source_ids).
+        `wired_pairs`/`connected_ids` (from _audit_wired_pairs) are used only as the "bulk
+        snapshot loaded yet" signal here — the actual wired/connected floor is recomputed
+        PER PLAN below (via _plan_wired_pairs / _plan_connected_source_ids) and a ref_id is
+        unioned in as soon as ANY relevant plan has an unconnected, unwired instance of it.
+        The same ref_id can be a separate element instance in more than one managed plan —
+        wired or otherwise connected in one, genuinely orphaned in another — so subtracting
+        a floor combined across all plans (as an earlier version of this method did) would
+        hide real debris in the second plan just because the first one still uses it.
         """
         if wired_pairs is None or connected_ids is None or not self.function_plan_plans:
             return set()
         relevant_fub_ids = self._function_plan_check_fub_ids()
-        present_ids = {
-            str((elem.get("reference") or {}).get("ref_id"))
-            for fub_id, plan_data in self.function_plan_plans.items()
-            if fub_id in relevant_fub_ids
-            for elem in (plan_data.get("elements") or {}).values()
-            if str((elem.get("reference") or {}).get("type")) == source_type
-        }
-        return present_ids - {rid for rid, _ in wired_pairs} - connected_ids
+        dangling: set[str] = set()
+        for fub_id, plan_data in self.function_plan_plans.items():
+            if fub_id not in relevant_fub_ids:
+                continue
+            present_ids: set[str] = set()
+            for elem in (plan_data.get("elements") or {}).values():
+                ref = elem.get("reference") or {}
+                if str(ref.get("type")) == source_type:
+                    present_ids.add(str(ref.get("ref_id")))
+            if not present_ids:
+                continue
+            plan_wired_ids = {rid for rid, _ in self._plan_wired_pairs(plan_data, source_type)}
+            plan_connected_ids = self._plan_connected_source_ids(plan_data, source_type)
+            dangling.update(present_ids - plan_wired_ids - plan_connected_ids)
+        return dangling
 
     async def delete_dangling_plan_elements(self, source_type: str, ref_ids: list[str]) -> dict[str, Any]:
         """Delete Function-Plan marker/IO elements left behind after their WebIO counterpart
