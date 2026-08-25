@@ -446,8 +446,12 @@ async def _restore_apply_snapshot(
     # after, not by skipping the apply step (which would also drop the wiring restore).
     run_ok = await api.function_plan_run_fup(fub_id, plan_data=run_fup_snapshot)
 
-    # Preserve previous inactive state, or leave it stopped when the user opted out of auto-start
-    if run_ok and (not was_active or not auto_start):
+    # Preserve previous inactive state, or leave it stopped when the user opted out of
+    # auto-start. NOT gated on run_ok: run_fup routinely reports result=False even though the
+    # payload WAS applied (the same Comexio quirk documented for the as-new restore path
+    # above) — skipping the stop on a "failed" run_ok could leave a plan running that either
+    # was inactive before the restore or that the user explicitly asked to leave stopped.
+    if not was_active or not auto_start:
         await api.function_plan_stop_fup(fub_id)
 
     # Recreate missing comments only AFTER run_fup: run_fup treats its plan_data argument as
