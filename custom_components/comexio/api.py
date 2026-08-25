@@ -607,6 +607,9 @@ class ComexioAPI:
             "webio_names": {},
             # Two separate Web-IO device classes on the Comexio server — see const.webio_class_name.
             "webio_devices": {cls: {"device_id": None, "device_ip": None, "base_id": None} for cls in WEBIO_CLASSES},
+            # Per-extension identity (name + stable serial), see _process_ios — used by the
+            # coordinator's extension-rename migration to detect a Comexio-side rename.
+            "extensions": {},
         }
         live_states = live_states or {}
 
@@ -906,7 +909,9 @@ class ComexioAPI:
         for ext_id, ext_content in fub_modules.get("1", {}).items():
             ext_meta = ext_content.get("extension", {})
             ext_name = ext_meta.get("Name", f"Ext{ext_id}")
-            ext_offline = _is_extension_offline(ext_meta.get("Identifier", ""))
+            ext_serial = ext_meta.get("Identifier", "")
+            ext_offline = _is_extension_offline(ext_serial)
+            data["extensions"][ext_id] = {"name": ext_name, "serial": ext_serial}
 
             for io_item in ext_content.get("inoutput", {}).values():
                 if not io_item:
