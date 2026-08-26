@@ -31,6 +31,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 - 🛠️ **Integrated Repair Dialogs (HA Repairs):** In case of inconsistencies between HA and Comexio, the integration creates interactive repair suggestions directly in the HA dashboard.
 - 📴 **Offline Extension Handling:** When a Comexio extension module goes offline, all its entities and its sub-device are automatically removed from the HA device list. A diagnostic sensor on the hub device shows which extensions are currently offline.
 - 🧩 **Function Plan Management & Backups:** Manage Comexio function plans (Logikpläne) directly from HA — wire markers to Web-IO commands, sort plan layouts, and roll back any plan to an automatically captured backup snapshot (SharePoint-style per-plan versioning).
+- 🖼️ **Live Function Plan Preview:** An interactive SVG diagram of any function plan, rendered at Comexio Studio's own layout, with live wire colors, search, and a debug console — plus an experimental wiring health-check and a signal-flow diagram.
 - 🔒 **Secure Authentication:** Full support for the modern RSA login method (v11) for administrative tasks as well as Basic Auth for standard API calls.
 
 ## 📦 Supported Entities
@@ -116,6 +117,8 @@ When the extension comes back online, a full HA restart or integration reload wi
 > [!NOTE]
 > Detection works by checking the `Identifier` field returned by the Comexio API. An online extension returns a serial number (e.g. `8505-2057-2326`), while an offline one only returns its model code (e.g. `5010`) without dashes.
 
+**Renaming an extension in Comexio** is also handled automatically: the same stable serial number is used to detect the rename at the next HA restart, and the affected entities' `unique_id`s plus the device identifier/name are rewritten in place — `entity_id`s and statistics history are preserved instead of new, orphaned entities being created.
+
 ## 📊 Bus Workload Monitoring
 
 The integration polls Comexio's internal bus/CPU workload (`Bus Workload` sensor, in %) and SD card presence (`SD Card Present`) independently of the main coordinator, every 10 seconds — fast enough to catch short spikes without waiting for the regular audit interval.
@@ -155,8 +158,11 @@ The integration can manage Comexio **function plans** directly from Home Assista
 | `comexio.function_plan_sort` | Sorts all plan elements by marker ID and snaps them to exact grid positions. |
 | `comexio.function_plan_visualize` | Shows a text overview of all connections and unconnected elements. |
 | `comexio.function_plan_stop` / `..._activate` | Manual plan lifecycle control (stop / save + activate). |
-| `comexio.function_plan_restore` | Rolls a plan back to a stored backup snapshot. |
+| `comexio.function_plan_restore` | Rolls a plan back to a stored backup snapshot — optionally as an independent copy instead of overwriting the source. |
 | `comexio.function_plan_list_backups` | Returns all stored snapshots as a structured service response — filterable by plan, name, backup type, slot, and age; sortable by timestamp, plan, or slot. |
+| `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Deletes one snapshot, all snapshots of a plan, or every stored backup — or, for purge, only the snapshots of plans that no longer exist. |
+| `comexio.function_plan_search` | Finds which plans contain elements matching a text query (same wildcard syntax as the preview card's search bar). |
+| `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimental:* flags likely wiring mistakes, and lays a plan out by signal-flow topology instead of its physical position. |
 
 📖 **[Function Plan Preview guide →](FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
 
@@ -224,6 +230,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 - 🛠️ **Integrierte Reparatur-Dialoge (HA Repairs):** Bei Unstimmigkeiten zwischen HA und Comexio erstellt die Integration interaktive Reparatur-Vorschläge direkt im HA-Dashboard.
 - 📴 **Offline-Extension-Erkennung:** Geht ein Comexio-Erweiterungsmodul offline, werden alle zugehörigen Entitäten und das Sub-Device automatisch aus der HA-Geräteliste entfernt. Ein Diagnose-Sensor am Hub-Device zeigt, welche Module gerade offline sind.
 - 🧩 **Funktionsplan-Verwaltung & Backups:** Comexio-Funktionspläne (Logikpläne) direkt aus HA verwalten — Merker mit Web-IO-Befehlen verdrahten, Plan-Layouts sortieren und jeden Plan auf einen automatisch erfassten Backup-Snapshot zurücksetzen (Versionierung je Plan wie in SharePoint).
+- 🖼️ **Live-Logikplan-Vorschau:** Ein interaktives SVG-Diagramm jedes Funktionsplans im Original-Layout von Comexio Studio, mit Live-Drahtfarben, Suche und Debug-Konsole — dazu ein experimenteller Verdrahtungs-Check und ein Signalfluss-Diagramm.
 - 🔒 **Sichere Authentifizierung:** Volle Unterstützung für das moderne RSA-Login-Verfahren (v11) für administrative Aufgaben sowie Basic Auth für Standard-API-Aufrufe.
 
 ## 📦 Unterstützte Entitäten
@@ -309,6 +316,8 @@ Kommt das Modul wieder online, stellt ein Reload der Integration (*Einstellungen
 > [!NOTE]
 > Die Erkennung basiert auf dem `Identifier`-Feld der Comexio-API. Ein Online-Modul liefert eine Seriennummer (z. B. `8505-2057-2326`), ein Offline-Modul nur den Geräte-Code ohne Bindestriche (z. B. `5010`).
 
+**Eine Umbenennung eines Erweiterungsmoduls** in Comexio wird ebenfalls automatisch nachgezogen: dieselbe stabile Seriennummer erkennt die Umbenennung beim nächsten HA-Neustart, und die `unique_id`s der betroffenen Entitäten sowie Geräte-Identifier/-Name werden direkt angepasst — `entity_id`s und Statistik-Historie bleiben erhalten, statt neue, verwaiste Entitäten anzulegen.
+
 ## 📊 Busauslastungs-Überwachung
 
 Die Integration fragt die interne Comexio Bus-/CPU-Auslastung (`Bus Workload`-Sensor, in %) und den SD-Karten-Status (`SD Card Present`) unabhängig vom Haupt-Coordinator alle 10 Sekunden ab — schnell genug, um kurze Lastspitzen zu erfassen, ohne auf das reguläre Audit-Intervall zu warten.
@@ -348,8 +357,11 @@ Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwa
 | `comexio.function_plan_sort` | Sortiert alle Plan-Elemente nach Merker-ID und richtet sie exakt am Raster aus. |
 | `comexio.function_plan_visualize` | Zeigt eine Text-Übersicht aller Verbindungen und unverbundenen Elemente. |
 | `comexio.function_plan_stop` / `..._activate` | Manuelle Lifecycle-Steuerung (Stoppen / Speichern + Aktivieren). |
-| `comexio.function_plan_restore` | Setzt einen Plan auf einen gespeicherten Backup-Snapshot zurück. |
+| `comexio.function_plan_restore` | Setzt einen Plan auf einen gespeicherten Backup-Snapshot zurück — optional als unabhängige Kopie statt Überschreiben des Original-Plans. |
 | `comexio.function_plan_list_backups` | Liefert alle Snapshots als strukturierte Service-Response — filterbar nach Plan, Name, Backup-Typ, Slot und Alter; sortierbar nach Zeitstempel, Plan oder Slot. |
+| `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Löscht einen Snapshot, alle Snapshots eines Plans oder sämtliche Backups — bzw. beim Purge nur die Snapshots nicht mehr existierender Pläne. |
+| `comexio.function_plan_search` | Findet Pläne mit Elementen, die zu einem Suchtext passen (gleiche Platzhalter-Syntax wie die Suchleiste der Vorschau-Karte). |
+| `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimentell:* markiert wahrscheinliche Verdrahtungsfehler bzw. ordnet einen Plan nach Signalfluss statt nach physischer Position an. |
 
 📖 **[Logikplan-Vorschau — Anleitung →](FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
 
