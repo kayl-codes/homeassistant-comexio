@@ -12,7 +12,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 ## [0.9.1] — 2026-08-28
 
 ### ✨ New Features
-- **Self-healing bus-load watchdog:** Detects a sustained rise in Comexio bus workload over a configurable window/threshold and cascades a stop/restart across the managed cluster function plans from last to first — the same manual recovery previously done by hand. Behind a default-**off** option switch, it can additionally trigger an unconditional emergency Comexio reboot if load stays above 90% for 5 minutes.
+- **Self-healing bus-load watchdog:** Detects a sustained rise in Comexio bus workload over a configurable window/threshold and cascades a stop/restart across the managed cluster function plans from last to first — the same manual recovery previously done by hand. This cascade-restart path is **on by default** (non-destructive, HA-managed plans only); a separate, default-**off** option can additionally trigger an unconditional emergency Comexio reboot if load stays above 90% for 5 minutes.
 - **Watchdog diagnostic sensors:** Five new diagnostic sensors (extension/marker/plan/Web-IO-command counts plus the latest watchdog event), with event history persisted across restarts.
 
 ### 🛠️ Core & Stability Improvements
