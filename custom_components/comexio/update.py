@@ -89,7 +89,12 @@ class ComexioFirmwareUpdateBase(UpdateEntity):
 
 
 class ComexioBaseFirmwareUpdate(ComexioFirmwareUpdateBase):
-    """Firmware status of the IO-Server base module itself."""
+    """Firmware status of the IO-Server base module itself.
+
+    Attached to the "BASE" extension sub-device (not the hub/instance device) — "BASE" is
+    Comexio's own name for the IO-Server's onboard IOs, and its firmware version is a property
+    of that physical module, grouped there together with its IOs like any other extension.
+    """
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator, server_id, catalog_name="BASE")
@@ -98,10 +103,11 @@ class ComexioBaseFirmwareUpdate(ComexioFirmwareUpdateBase):
     @property
     def device_info(self) -> dict[str, Any]:
         return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
+            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_BASE".lower())},
+            "name": f"{self.coordinator.server_id} BASE",
             "manufacturer": "Comexio",
-            "model": "IO-Server",
+            "model": "Extension Module",
+            "via_device": (DOMAIN, self.coordinator.server_id),
         }
 
 
