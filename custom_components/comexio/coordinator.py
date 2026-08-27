@@ -1934,7 +1934,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         async with self._watchdog_lock:
             raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-            plan_map: dict[str, int] = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
+            plan_map: dict[str, int] = {}
+            if isinstance(raw_map, dict):
+                for plan_name, fub_id in raw_map.items():
+                    try:
+                        plan_map[plan_name] = int(fub_id)
+                    except (TypeError, ValueError):
+                        _LOGGER.warning(
+                            "[%s] Bus-load watchdog: skipping non-numeric plan_map entry '%s' -> %r",
+                            self.server_id,
+                            plan_name,
+                            fub_id,
+                        )
             if not plan_map:
                 _LOGGER.warning(
                     "[%s] Bus-load watchdog: rise detected but no managed cluster plans to restart",
@@ -2073,10 +2084,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
         unlike that tick this safely calls async_set_updated_data to push the new history to
         ComexioWatchdogEventSensor — a CoordinatorEntity that would otherwise stay stale until
         the next unrelated main-coordinator refresh.
+
+        A disk-write failure here must not propagate: callers persist this event either right
+        before the actual emergency reboot call or right before the cascade-finished notification,
+        so an unhandled exception would silently skip that action too — turning a storage hiccup
+        into a lost recovery action.
         """
         self.watchdog_history.append(event)
         self.watchdog_history = self.watchdog_history[-WATCHDOG_HISTORY_MAX_ENTRIES:]
-        await self._watchdog_history_store.async_save({"events": self.watchdog_history})
+        try:
+            await self._watchdog_history_store.async_save({"events": self.watchdog_history})
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Failed to persist watchdog history to disk — continuing with in-memory history only",
+                self.server_id,
+            )
         self.async_set_updated_data(self.data)
 
     async def async_config_entry_updated(self) -> None:
