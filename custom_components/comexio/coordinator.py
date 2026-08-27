@@ -1849,7 +1849,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         async_dispatcher_send(self.hass, bus_load_signal(self.server_id))
 
         now = dt_util.utcnow()
-        self._bus_load_samples.append((now, self.bus_workload))
+        if self.bus_workload is not None:
+            self._bus_load_samples.append((now, self.bus_workload))
         cutoff = now - timedelta(seconds=max(BUS_LOAD_RISE_WINDOW_SEC, EMERGENCY_REBOOT_WINDOW_SEC))
         while self._bus_load_samples and self._bus_load_samples[0][0] < cutoff:
             self._bus_load_samples.popleft()
@@ -1947,9 +1948,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             culprit: str | None = None
             for plan_name, fub_id in reversed(list(plan_map.items())):
-                await self.api.function_plan_stop_fup(fub_id)
+                if not await self.api.function_plan_stop_fup(fub_id):
+                    _LOGGER.warning(
+                        "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "
+                        "restarting it anyway, run_fup re-applies its state authoritatively",
+                        self.server_id,
+                        plan_name,
+                        fub_id,
+                    )
                 await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
-                await self.api.function_plan_run_fup(fub_id)
+                if not await self.api.function_plan_run_fup(fub_id):
+                    _LOGGER.warning(
+                        "[%s] Bus-load watchdog: run_fup failed for plan '%s' (fub=%s) — it may now be left stopped",
+                        self.server_id,
+                        plan_name,
+                        fub_id,
+                    )
                 await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
                 if self.bus_workload is not None and baseline - self.bus_workload >= CASCADE_RECOVERY_DROP_PCT:
                     culprit = plan_name
@@ -2016,8 +2030,30 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "outcome": "reboot_triggered",
                 }
             )
-            await self.api.system_emergency_reboot()
-            self._watchdog_cooldown_until = now + timedelta(seconds=EMERGENCY_REBOOT_COOLDOWN_SEC)
+            if await self.api.system_emergency_reboot():
+                self._watchdog_cooldown_until = now + timedelta(seconds=EMERGENCY_REBOOT_COOLDOWN_SEC)
+                return
+
+            _LOGGER.error(
+                "[%s] Bus-load watchdog: emergency reboot request failed (HTTP error) — "
+                "will re-evaluate on the next tick instead of waiting out the reboot cooldown",
+                self.server_id,
+            )
+            await self._async_persist_watchdog_event(
+                {
+                    "timestamp": dt_util.utcnow().isoformat(),
+                    "trigger_type": "emergency",
+                    "culprit_plan": None,
+                    "outcome": "reboot_request_failed",
+                }
+            )
+            self._notify_watchdog(
+                f"comexio_watchdog_emergency_failed_{self.server_id}",
+                "Comexio Emergency Reboot Request Failed",
+                "The emergency reboot request could not be delivered to Comexio (HTTP error). "
+                "The watchdog will retry on the next bus-load evaluation instead of waiting out "
+                "the normal reboot cooldown.",
+            )
 
     def _notify_watchdog(self, notification_id: str, title: str, message: str) -> None:
         """Persistent-notification helper for watchdog events, gated on CONF_ENABLE_NOTIFICATIONS."""
@@ -2027,10 +2063,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         persistent_notification.async_create(self.hass, message, title=title, notification_id=notification_id)
 
     async def _async_persist_watchdog_event(self, event: dict[str, Any]) -> None:
-        """Append one event to the watchdog history, trim it, and persist to disk."""
+        """Append one event to the watchdog history, trim it, persist to disk, and refresh listeners.
+
+        Watchdog events are rare (unlike the 10s bus-load tick, see _async_bus_load_tick), so
+        unlike that tick this safely calls async_set_updated_data to push the new history to
+        ComexioWatchdogEventSensor — a CoordinatorEntity that would otherwise stay stale until
+        the next unrelated main-coordinator refresh.
+        """
         self.watchdog_history.append(event)
         self.watchdog_history = self.watchdog_history[-WATCHDOG_HISTORY_MAX_ENTRIES:]
         await self._watchdog_history_store.async_save({"events": self.watchdog_history})
+        self.async_set_updated_data(self.data)
 
     async def async_config_entry_updated(self) -> None:
         """Handle config entry update (e.g. from Options Flow)."""

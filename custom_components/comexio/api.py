@@ -2746,7 +2746,7 @@ class ComexioAPI:
                 _LOGGER.warning("system_emergency_reboot: request sent, HTTP status %s", resp.status)
                 return resp.status == 200
         except aiohttp.ClientError as err:
-            _LOGGER.error("system_emergency_reboot: HTTP request error: %s", err)
+            _LOGGER.exception("system_emergency_reboot: HTTP request error: %s", err)
             return False
 
     async def check_extension_firmware(self) -> list[dict[str, Any]]:
