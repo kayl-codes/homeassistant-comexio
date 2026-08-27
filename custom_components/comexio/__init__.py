@@ -88,6 +88,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             renamed["new_name"],
         )
 
+    # Restore the Bus-Load-Watchdog's persisted event history before its poll starts (below),
+    # so an event written early after restart can't race the load and be lost.
+    await coordinator.async_load_watchdog_history()
+
     # ---------------------------
     # Explicit Device Registration
     # ---------------------------
@@ -188,6 +192,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_plan_preview_btn")
     active_unique_ids.add(f"comexio_{server_id}_plan_preview_image")
     active_unique_ids.add(f"comexio_{server_id}_function_plan_toggle_btn")
+
+    # Bus-Load-Watchdog diagnostic sensors (always active, independent of extension/marker state)
+    active_unique_ids.add(f"comexio_{server_id}_extension_count_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_active_marker_count_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_function_plan_count_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_webio_command_count_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_watchdog_event_sensor")
 
     # Extension firmware updates (update.py): one entity per known extension + BASE. Built the
     # same way as the IO entities above, since extension existence is independent of the

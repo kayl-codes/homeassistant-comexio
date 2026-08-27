@@ -102,7 +102,9 @@
           "logikplan_io_extensions": "Extensions managed as IO cluster plans",
           "ignored_markers": "Marker IDs to exclude from function plan connection",
           "cover_keywords": "Keywords for cover detection",
-          "function_plan_backup_retention_months": "Orphaned backup retention"
+          "function_plan_backup_retention_months": "Orphaned backup retention",
+          "bus_watchdog_enabled": "Enable Bus-Load Watchdog",
+          "bus_watchdog_auto_reboot": "Allow automatic Comexio reboot on emergency bus load"
         },
         "data_description": {
           "schema_marker": "Available variables: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -112,7 +114,9 @@
           "logikplan_io_extensions": "Each selected extension gets its IOs wired into a managed IO cluster plan (e.g. HA - IO [Ext]), one column per extension. Start with a single extension to test, then add the others.",
           "ignored_markers": "Comma-, semicolon-, space- or dot-separated marker IDs and ranges, with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456' or '8-12'). Only markers with a description can be ignored.",
           "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)",
-          "function_plan_backup_retention_months": "Backup snapshots of a plan that was deleted directly in Comexio are purged automatically once they are older than this. A live plan's backups are never affected. Also available as the 'Function Plan Purge Orphaned Backups' action for an on-demand cleanup."
+          "function_plan_backup_retention_months": "Backup snapshots of a plan that was deleted directly in Comexio are purged automatically once they are older than this. A live plan's backups are never affected. Also available as the 'Function Plan Purge Orphaned Backups' action for an on-demand cleanup.",
+          "bus_watchdog_enabled": "On a sustained bus-load rise, automatically restart the HA-managed cluster function plans (back to front) to try to relieve it. Non-destructive to the Comexio system itself.",
+          "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog."
         }
       }
     },
@@ -169,6 +173,21 @@
       },
       "plan_changed": {
         "name": "Plan Changed"
+      },
+      "extension_count": {
+        "name": "Extension Count"
+      },
+      "active_marker_count": {
+        "name": "Active Marker Count"
+      },
+      "function_plan_count": {
+        "name": "Function Plan Count"
+      },
+      "webio_command_count": {
+        "name": "Web-IO Command Count"
+      },
+      "watchdog_event": {
+        "name": "Last Watchdog Event"
       }
     }
   },

@@ -191,10 +191,9 @@ def fw_update_signal(server_id: str) -> str:
 
 
 # Bus workload monitoring: independent fast poll of the Comexio internal bus/CPU load,
-# separate from the main config-audit coordinator (which runs every few minutes). Only
-# the raw reading is exposed here — sustained-overload detection (e.g. "80% for 60s") is
-# left to a native HA automation (numeric_state trigger with a `for:` duration), which
-# already covers debounce/hysteresis correctly instead of reimplementing it in Python.
+# separate from the main config-audit coordinator (which runs every few minutes). The raw
+# reading is exposed as a sensor; sustained-rise/overload detection is handled by the
+# Bus-Load-Watchdog below, which needs the sample history the poll builds up.
 BUS_LOAD_POLL_INTERVAL_SEC = 10
 
 # Consecutive failed ticks before the diagnostics fall back to "unknown" instead of
@@ -205,6 +204,37 @@ BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
 def bus_load_signal(server_id: str) -> str:
     """Dispatcher signal fired when a fresh Comexio bus workload reading arrives."""
     return f"{DOMAIN}_{server_id}_bus_load_update"
+
+
+# Bus-Load-Watchdog: self-healing reaction to a sustained bus-load rise (observed root cause:
+# a Comexio-side WebIO command stack that gets stuck over many hours; restarting the HA-managed
+# cluster function plans relieves it — discovered manually 2026-07-30/31). Kept as plain module
+# constants (not options-flow fields) so they can be tuned without picking through the logic.
+#
+# Rise-detection window/threshold are a first estimate from the real incident (~20 percentage
+# points over ~40h, i.e. ~0.5pp/h): a 6h window with a 10pp threshold would fire around the
+# halfway mark of a comparable slow-burn rise, well before it reaches critical levels. Tune
+# after living with real data rather than reworking the algorithm.
+BUS_LOAD_STARTUP_GRACE_SEC = 900  # no rise-evaluation for 15 min after coordinator start
+BUS_LOAD_RISE_WINDOW_SEC = 21600  # 6h comparison window
+BUS_LOAD_RISE_THRESHOLD_PCT = 10  # rise over the window that counts as "sustained"
+BUS_LOAD_SMOOTHING_SAMPLES = 5  # last N 10s ticks averaged into "current" (ignore single spikes)
+
+CASCADE_POST_STOP_WAIT_SEC = 30  # wait after stopping each managed plan, before restarting it
+CASCADE_POST_RESTART_SETTLE_SEC = 30  # wait after restarting, before checking for recovery
+CASCADE_RECOVERY_DROP_PCT = 10  # drop from the pre-cascade baseline that counts as "recovered"
+CASCADE_COOLDOWN_SEC = 1800  # don't re-trigger a cascade for this long after one finishes
+
+EMERGENCY_REBOOT_WINDOW_SEC = 300  # 5 min sustained-average window
+EMERGENCY_REBOOT_THRESHOLD_PCT = 90  # average bus load over the window that triggers a reboot
+EMERGENCY_REBOOT_COOLDOWN_SEC = 3600  # don't re-trigger for 1h after a reboot (system is rebooting)
+
+WATCHDOG_HISTORY_MAX_ENTRIES = 20  # trim limit for the persisted watchdog event log
+
+CONF_BUS_WATCHDOG_ENABLED = "bus_watchdog_enabled"
+DEFAULT_BUS_WATCHDOG_ENABLED = True  # cascade-restarts HA-managed plans only, non-destructive
+CONF_BUS_WATCHDOG_AUTO_REBOOT = "bus_watchdog_auto_reboot"
+DEFAULT_BUS_WATCHDOG_AUTO_REBOOT = False  # gates the immediate, unconfirmed system reboot call
 
 
 # Function Plan backup/restore: rotating snapshot slots per plan (see function_plan_backup.py).

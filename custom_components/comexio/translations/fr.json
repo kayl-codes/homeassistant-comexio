@@ -102,7 +102,9 @@
           "logikplan_io_extensions": "Extensions gérées comme plans de cluster IO",
           "ignored_markers": "IDs de marqueurs à exclure de la connexion aux plans de fonction",
           "cover_keywords": "Mots-clés pour la détection des volets",
-          "function_plan_backup_retention_months": "Rétention des sauvegardes orphelines"
+          "function_plan_backup_retention_months": "Rétention des sauvegardes orphelines",
+          "bus_watchdog_enabled": "Activer le Bus-Load Watchdog",
+          "bus_watchdog_auto_reboot": "Autoriser le redémarrage automatique de Comexio en cas de charge de bus critique"
         },
         "data_description": {
           "schema_marker": "Variables disponibles : '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -112,7 +114,9 @@
           "logikplan_io_extensions": "Les IO de chaque extension sélectionnée sont câblés dans un plan de cluster IO géré (par ex. HA - IO [Ext]), une colonne par extension. Commencez par une seule extension pour tester, puis ajoutez les autres.",
           "ignored_markers": "IDs de marqueurs et plages séparés par des virgules, points-virgules, espaces ou points, avec ou sans préfixe 'M' (ex. '123, 456; 789' ou 'M123, M456' ou '8-12'). Seuls les marqueurs avec description peuvent être exclus.",
           "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)",
-          "function_plan_backup_retention_months": "Les sauvegardes d'un plan supprimé directement dans Comexio sont purgées automatiquement dès qu'elles dépassent cette durée. Les sauvegardes d'un plan encore actif ne sont jamais concernées. Également disponible via l'action 'Function Plan Purge Orphaned Backups' pour un nettoyage manuel."
+          "function_plan_backup_retention_months": "Les sauvegardes d'un plan supprimé directement dans Comexio sont purgées automatiquement dès qu'elles dépassent cette durée. Les sauvegardes d'un plan encore actif ne sont jamais concernées. Également disponible via l'action 'Function Plan Purge Orphaned Backups' pour un nettoyage manuel.",
+          "bus_watchdog_enabled": "En cas de hausse durable de la charge du bus, redémarre automatiquement les plans fonctionnels de cluster gérés par HA (de l'arrière vers l'avant) pour tenter de la soulager. Non destructif pour le système Comexio lui-même.",
+          "bus_watchdog_auto_reboot": "Si la charge du bus dépasse en moyenne 90 % pendant 5 minutes, déclenche un redémarrage COMPLET et IMMÉDIAT de Comexio, sans confirmation. Désactivé par défaut — à activer une fois que vous faites confiance au mécanisme."
         }
       }
     },
@@ -169,6 +173,21 @@
       },
       "plan_changed": {
         "name": "Plan modifié"
+      },
+      "extension_count": {
+        "name": "Nombre d'extensions"
+      },
+      "active_marker_count": {
+        "name": "Nombre de marqueurs actifs"
+      },
+      "function_plan_count": {
+        "name": "Nombre de plans fonctionnels"
+      },
+      "webio_command_count": {
+        "name": "Nombre de commandes Web-IO"
+      },
+      "watchdog_event": {
+        "name": "Dernier événement du Watchdog"
       }
     }
   },
