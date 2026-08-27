@@ -1270,12 +1270,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         managed_exts = set(self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
         managed_exts -= self.coordinator.offline_extensions or set()
 
+        known_io_names = {
+            f"HA IO {io['ext_name']} {io['identifier']}": (io["ext_name"], io["identifier"])
+            for io in self.coordinator.data.get("io", [])
+        }
         created_marker_ids: list[int] = []
         created_io_refs: list[tuple[str, str]] = []
         for name in created_names:
             if (mid := _parse_marker_id_from_webio_name(name)) is not None:
                 created_marker_ids.append(mid)
-            elif (io_ref := _parse_io_from_webio_name(name)) is not None:
+            elif (io_ref := _parse_io_from_webio_name(name, known_io_names)) is not None:
                 created_io_refs.append(io_ref)
 
         if ctx.action in {"full_sync", "function_plan_add_missing"}:
@@ -1584,12 +1588,15 @@ def _parse_marker_id_from_webio_name(name: str) -> int | None:
     return None
 
 
-def _parse_io_from_webio_name(name: str) -> tuple[str, str] | None:
+def _parse_io_from_webio_name(name: str, known_names: dict[str, tuple[str, str]]) -> tuple[str, str] | None:
     """Extract (ext_name, identifier) from a Web-IO command name like 'HA IO UD1 Q3'.
 
-    Extension names containing spaces are not parseable this way — the same known
-    limitation as the audit's com_map key parsing.
+    Tries an exact reverse lookup against the known (ext_name, identifier) pairs first, since
+    a positional `name.split()` misparses an extension name that itself contains spaces. Falls
+    back to the positional heuristic only for names with no known counterpart.
     """
+    if ref := known_names.get(name):
+        return ref
     parts = name.split()
     if len(parts) >= 4 and parts[0] == "HA" and parts[1] == "IO":
         return parts[2], parts[3]

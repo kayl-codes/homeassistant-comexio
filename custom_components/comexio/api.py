@@ -2732,6 +2732,23 @@ class ComexioAPI:
             _LOGGER.debug("Unexpected error fetching bus workload: %s", err)
             return {}
 
+    async def system_emergency_reboot(self) -> bool:
+        """Trigger an IMMEDIATE, unconfirmed full Comexio system reboot.
+
+        Comexio has no confirmation dialog for this and returns no structured result — the
+        request itself is the action. Only called by the Bus-Load-Watchdog's emergency path,
+        gated behind CONF_BUS_WATCHDOG_AUTO_REBOOT (default off). HTTP 200 only means the
+        request was accepted, not that the reboot completed cleanly.
+        """
+        url = f"{self._base_url}/admin/admin_dashboard/home/"
+        try:
+            async with self.session.get(url, params={"id": "system", "restart": "1"}) as resp:
+                _LOGGER.warning("system_emergency_reboot: request sent, HTTP status %s", resp.status)
+                return resp.status == 200
+        except aiohttp.ClientError as err:
+            _LOGGER.error("system_emergency_reboot: HTTP request error: %s", err)
+            return False
+
     async def check_extension_firmware(self) -> list[dict[str, Any]]:
         """Query the local extension bus for available firmware updates (BASE + all extensions).
 

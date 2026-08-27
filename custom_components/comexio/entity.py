@@ -25,6 +25,16 @@ class ComexioIOEntity(CoordinatorEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
+        # "BASE" is not a separate physical extension module — it's Comexio's own name for the
+        # IO-Server's built-in IOs, i.e. the hub itself. Group these under the hub device instead
+        # of a synthetic "... BASE" sub-device.
+        if self._ext_name.upper() == "BASE":
+            return {
+                "identifiers": {(DOMAIN, self.coordinator.server_id)},
+                "name": self.coordinator.server_id,
+                "manufacturer": "Comexio",
+                "model": "IO-Server",
+            }
         return {
             "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
             "name": f"{self.coordinator.server_id} {self._ext_name}",

@@ -102,7 +102,9 @@
           "logikplan_io_extensions": "Extensiones gestionadas como planes de clúster de IO",
           "ignored_markers": "IDs de marcadores a excluir de la conexión de planes de función",
           "cover_keywords": "Palabras clave para detectar persianas",
-          "function_plan_backup_retention_months": "Retención de backups huérfanos"
+          "function_plan_backup_retention_months": "Retención de backups huérfanos",
+          "bus_watchdog_enabled": "Activar el Bus-Load Watchdog",
+          "bus_watchdog_auto_reboot": "Permitir el reinicio automático de Comexio ante una carga de bus de emergencia"
         },
         "data_description": {
           "schema_marker": "Variables disponibles: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -112,7 +114,9 @@
           "logikplan_io_extensions": "Los IO de cada extensión seleccionada se cablean en un plan de clúster de IO gestionado (p. ej. HA - IO [Ext]), una columna por extensión. Empiece con una sola extensión para probar y añada las demás después.",
           "ignored_markers": "IDs de marcadores y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'M' (p. ej. '123, 456; 789' o 'M123, M456' o '8-12'). Solo se pueden excluir marcadores con descripción.",
           "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)",
-          "function_plan_backup_retention_months": "Las copias de seguridad de un plan eliminado directamente en Comexio se purgan automáticamente en cuanto son más antiguas que este período. Las copias de un plan aún activo nunca se ven afectadas. También disponible como la acción 'Function Plan Purge Orphaned Backups' para una limpieza manual."
+          "function_plan_backup_retention_months": "Las copias de seguridad de un plan eliminado directamente en Comexio se purgan automáticamente en cuanto son más antiguas que este período. Las copias de un plan aún activo nunca se ven afectadas. También disponible como la acción 'Function Plan Purge Orphaned Backups' para una limpieza manual.",
+          "bus_watchdog_enabled": "Ante una subida sostenida de la carga del bus, reinicia automáticamente los planes de función de clúster gestionados por HA (de atrás hacia adelante) para intentar aliviarla. No es destructivo para el propio sistema Comexio.",
+          "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo."
         }
       }
     },
@@ -169,6 +173,21 @@
       },
       "plan_changed": {
         "name": "Plan modificado"
+      },
+      "extension_count": {
+        "name": "Número de extensiones"
+      },
+      "active_marker_count": {
+        "name": "Número de marcadores activos"
+      },
+      "function_plan_count": {
+        "name": "Número de planes de función"
+      },
+      "webio_command_count": {
+        "name": "Número de comandos Web-IO"
+      },
+      "watchdog_event": {
+        "name": "Último evento del Watchdog"
       }
     }
   },

@@ -1,4 +1,5 @@
 # Version: 0.7.5
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -16,6 +17,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, bus_load_signal
 from .coordinator import ComexioCoordinator
@@ -59,6 +61,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioPlanChangedSensor(coordinator, coordinator.server_id),
             ComexioBusLoadSensor(coordinator, coordinator.server_id),
             ComexioPlanPreviewSensor(coordinator, coordinator.server_id),
+            ComexioExtensionCountSensor(coordinator, coordinator.server_id),
+            ComexioActiveMarkerCountSensor(coordinator, coordinator.server_id),
+            ComexioFunctionPlanCountSensor(coordinator, coordinator.server_id),
+            ComexioWebioCommandCountSensor(coordinator, coordinator.server_id),
+            ComexioWatchdogEventSensor(coordinator, coordinator.server_id),
         ]
     )
 
@@ -278,8 +285,8 @@ class ComexioBusLoadSensor(SensorEntity):
     through the main coordinator would notify every other entity on each tick for no
     benefit.
 
-    Only the raw value is exposed — sustained-overload alerting (e.g. "80% for 60s") is
-    left to a native HA automation (numeric_state trigger with a `for:` duration).
+    Sustained-rise/overload detection lives in the Bus-Load-Watchdog
+    (coordinator._evaluate_bus_load_watchdog); this sensor just exposes the raw reading.
     """
 
     _attr_has_entity_name = True
@@ -316,6 +323,158 @@ class ComexioBusLoadSensor(SensorEntity):
     @callback
     def _handle_bus_load_update(self) -> None:
         self.async_write_ha_state()
+
+
+class ComexioExtensionCountSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor: number of Comexio extension modules known to HA (online + offline)."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:expansion-card"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_extension_count_sensor"
+        self._attr_translation_key = "extension_count"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.data.get("extensions", {}))
+
+
+class ComexioActiveMarkerCountSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor: number of active (non-ignored) markers known to HA."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:map-marker-multiple"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_active_marker_count_sensor"
+        self._attr_translation_key = "active_marker_count"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def native_value(self) -> int:
+        ignored = self.coordinator.ignored_marker_ids
+        return sum(int(m["id"]) not in ignored for m in self.coordinator.data.get("markers", []))
+
+
+class ComexioFunctionPlanCountSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor: total number of function plans on the Comexio server (managed + others)."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:sitemap"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_function_plan_count_sensor"
+        self._attr_translation_key = "function_plan_count"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.api.fub_data)
+
+
+class ComexioWebioCommandCountSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor: number of Web-IO commands HA has registered on the Comexio server."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:swap-horizontal"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_webio_command_count_sensor"
+        self._attr_translation_key = "webio_command_count"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.data.get("webio_commands", {}))
+
+
+class ComexioWatchdogEventSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor exposing the most recent Bus-Load-Watchdog event, if any.
+
+    Ties the statistics sensors together with the watchdog for exactly the diagnosis
+    context a Repair/Issue investigation needs: last trigger time, culprit plan, outcome.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:pulse"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_watchdog_event_sensor"
+        self._attr_translation_key = "watchdog_event"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    @property
+    def _last_event(self) -> dict[str, Any] | None:
+        history = self.coordinator.watchdog_history
+        return history[-1] if history else None
+
+    @property
+    def native_value(self) -> datetime | None:
+        event = self._last_event
+        return dt_util.parse_datetime(event["timestamp"]) if event else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if not (event := self._last_event):
+            return {}
+        return {
+            "trigger_type": event.get("trigger_type"),
+            "culprit_plan": event.get("culprit_plan"),
+            "outcome": event.get("outcome"),
+        }
 
 
 class ComexioPlanPreviewSensor(CoordinatorEntity, SensorEntity):

@@ -1,5 +1,6 @@
 # Version: 0.8.0
 import asyncio
+from collections import deque
 import contextlib
 from datetime import datetime, timedelta
 import logging
@@ -22,9 +23,20 @@ from .api import ComexioAPI
 from .const import (
     BUS_LOAD_FAIL_STREAK_THRESHOLD,
     BUS_LOAD_POLL_INTERVAL_SEC,
+    BUS_LOAD_RISE_THRESHOLD_PCT,
+    BUS_LOAD_RISE_WINDOW_SEC,
+    BUS_LOAD_SMOOTHING_SAMPLES,
+    BUS_LOAD_STARTUP_GRACE_SEC,
+    CASCADE_COOLDOWN_SEC,
+    CASCADE_POST_RESTART_SETTLE_SEC,
+    CASCADE_POST_STOP_WAIT_SEC,
+    CASCADE_RECOVERY_DROP_PCT,
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
+    CONF_BUS_WATCHDOG_AUTO_REBOOT,
+    CONF_BUS_WATCHDOG_ENABLED,
     CONF_COVER_KEYWORDS,
+    CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     CONF_FUNCTION_PLAN_FUB_ID,
@@ -38,11 +50,17 @@ from .const import (
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
     CONF_USERNAME,
+    DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
+    DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
+    DEFAULT_ENABLE_NOTIFICATIONS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DOMAIN,
+    EMERGENCY_REBOOT_COOLDOWN_SEC,
+    EMERGENCY_REBOOT_THRESHOLD_PCT,
+    EMERGENCY_REBOOT_WINDOW_SEC,
     EVENT_PLAN_VALUE,
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
@@ -61,6 +79,7 @@ from .const import (
     ICON_WARNING,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
@@ -319,6 +338,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.bus_workload: int | None = None
         self.bus_sd_card: bool | None = None
         self._bus_load_fail_streak = 0
+        # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
+        # _evaluate_bus_load_watchdog), trimmed to the longer of the two detection windows.
+        # The lock also blocks a concurrent cascade and emergency reboot from overlapping.
+        self._bus_load_samples: deque[tuple[datetime, int]] = deque()
+        self._watchdog_lock: asyncio.Lock = asyncio.Lock()
+        self._watchdog_cooldown_until: datetime | None = None
+        self._watchdog_started_at: datetime = dt_util.utcnow()
+        self.watchdog_history: list[dict[str, Any]] = []
+        self._watchdog_history_store: Store = Store(hass, 1, f"{DOMAIN}_watchdog_history_{self.server_id}")
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
@@ -455,6 +483,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 io_meta_by_key[key] = io
 
             # 3. Comexio Map (Audit the counterpart on the server)
+            # Exact reverse lookup first: ha_map's "name" values are built from the same
+            # extension names that may contain spaces, so a positional full_name.split(" ")
+            # would misparse "HA IO <Ext With Space> <Ident>" (parts[2] wouldn't be the whole
+            # extension name). Only fall back to the positional heuristic for commands with no
+            # current HA counterpart (renamed/deleted markers or extensions) purely for grouping.
+            name_to_key = {info["name"]: key for key, info in ha_map.items()}
             com_map = {}
             for full_name, info in com_commands.items():
                 cmd_id = info.get("cmdId")
@@ -462,15 +496,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # Mapping Web-IO Command TypeId: 1 = Digital, 2 = Analog
                 mapped_type = "analog" if comexio_type_id == 2 else "digital"
 
-                key = full_name
-                parts = full_name.split(" ")
-                if len(parts) >= 3:
-                    if parts[1].startswith("M"):
-                        # Marker identification via "HA M<ID> <Name>"
-                        key = parts[1]
-                    elif parts[1] == "IO" and len(parts) >= 4:
-                        # IO identification via "HA IO <Ext> <Ident>"
-                        key = io_audit_key(parts[2], parts[3])
+                key = name_to_key.get(full_name, full_name)
+                if key == full_name:
+                    parts = full_name.split(" ")
+                    if len(parts) >= 3:
+                        if parts[1].startswith("M"):
+                            # Marker identification via "HA M<ID> <Name>"
+                            key = parts[1]
+                        elif parts[1] == "IO" and len(parts) >= 4:
+                            # IO identification via "HA IO <Ext> <Ident>" (best-effort only —
+                            # may misparse if <Ext> itself contains spaces)
+                            key = io_audit_key(parts[2], parts[3])
 
                 if key not in com_map:
                     com_map[key] = []
@@ -1640,6 +1676,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         self.extension_registry = stored.get("extensions", {})
 
+    async def async_load_watchdog_history(self) -> None:
+        """Restore the persisted Bus-Load-Watchdog event history (called once at setup)."""
+        stored = await self._watchdog_history_store.async_load()
+        if not stored:
+            return
+        self.watchdog_history = stored.get("events", [])
+
     async def async_detect_and_migrate_extension_renames(self) -> list[dict[str, str]]:
         """Detect Comexio-side extension renames via their stable serial and migrate in place.
 
@@ -1804,6 +1847,190 @@ class ComexioCoordinator(DataUpdateCoordinator):
         sd_card = result.get("sd_card")
         self.bus_sd_card = sd_card if isinstance(sd_card, bool) else None
         async_dispatcher_send(self.hass, bus_load_signal(self.server_id))
+
+        now = dt_util.utcnow()
+        self._bus_load_samples.append((now, self.bus_workload))
+        cutoff = now - timedelta(seconds=max(BUS_LOAD_RISE_WINDOW_SEC, EMERGENCY_REBOOT_WINDOW_SEC))
+        while self._bus_load_samples and self._bus_load_samples[0][0] < cutoff:
+            self._bus_load_samples.popleft()
+        self._evaluate_bus_load_watchdog(now)
+
+    def _evaluate_bus_load_watchdog(self, now: datetime) -> None:
+        """Check the latest bus-load samples for a sustained rise or emergency-level average.
+
+        Pure detection, no I/O — spawns background tasks (see _async_bus_load_cascade_restart /
+        _async_bus_load_emergency_reboot) for the actual reaction. Emergency takes priority over
+        a plain rise so only one background task is spawned per tick.
+        """
+        if self.bus_workload is None:
+            return
+        if (now - self._watchdog_started_at).total_seconds() < BUS_LOAD_STARTUP_GRACE_SEC:
+            return
+        if self._watchdog_lock.locked():
+            return
+        if self._watchdog_cooldown_until and now < self._watchdog_cooldown_until:
+            return
+
+        conf = {**self.config_entry.data, **self.config_entry.options}
+        recent = [v for _, v in list(self._bus_load_samples)[-BUS_LOAD_SMOOTHING_SAMPLES:]]
+        if not recent:
+            return
+        current = sum(recent) / len(recent)
+
+        if conf.get(
+            CONF_BUS_WATCHDOG_AUTO_REBOOT, DEFAULT_BUS_WATCHDOG_AUTO_REBOOT
+        ) and self._bus_load_emergency_average_exceeded(now):
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self._async_bus_load_emergency_reboot(),
+                name=f"comexio_{self.server_id}_bus_load_emergency_reboot",
+            )
+            return
+
+        if conf.get(CONF_BUS_WATCHDOG_ENABLED, DEFAULT_BUS_WATCHDOG_ENABLED) and self._bus_load_rise_detected(
+            now, current
+        ):
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self._async_bus_load_cascade_restart(current),
+                name=f"comexio_{self.server_id}_bus_load_cascade",
+            )
+
+    def _bus_load_emergency_average_exceeded(self, now: datetime) -> bool:
+        """Whether the average bus load over EMERGENCY_REBOOT_WINDOW_SEC exceeds the threshold.
+
+        Requires the sample buffer to already span the full window — otherwise a fresh restart
+        with only a few samples could look like a sustained high average.
+        """
+        window_start = now - timedelta(seconds=EMERGENCY_REBOOT_WINDOW_SEC)
+        if not self._bus_load_samples or self._bus_load_samples[0][0] > window_start:
+            return False
+        windowed = [v for ts, v in self._bus_load_samples if ts >= window_start]
+        return sum(windowed) / len(windowed) > EMERGENCY_REBOOT_THRESHOLD_PCT
+
+    def _bus_load_rise_detected(self, now: datetime, current: float) -> bool:
+        """Whether bus load has risen by BUS_LOAD_RISE_THRESHOLD_PCT over BUS_LOAD_RISE_WINDOW_SEC.
+
+        Compares against the oldest sample still inside the window, not an absolute high value —
+        a stable-but-high or falling reading must not trigger (see project backlog rationale).
+        """
+        window_start = now - timedelta(seconds=BUS_LOAD_RISE_WINDOW_SEC)
+        if not self._bus_load_samples or self._bus_load_samples[0][0] > window_start:
+            return False
+        baseline = next((v for ts, v in self._bus_load_samples if ts >= window_start), None)
+        if baseline is None:
+            return False
+        return (current - baseline) >= BUS_LOAD_RISE_THRESHOLD_PCT
+
+    async def _async_bus_load_cascade_restart(self, baseline: float) -> None:
+        """Cascade-restart HA-managed cluster function plans (back to front) to relieve a
+        sustained bus-load rise — automates what the user previously did by hand (stop/start
+        each managed plan, checking after each one whether the bus load recovers).
+        """
+        async with self._watchdog_lock:
+            raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+            plan_map: dict[str, int] = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
+            if not plan_map:
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: rise detected but no managed cluster plans to restart",
+                    self.server_id,
+                )
+                self._watchdog_cooldown_until = dt_util.utcnow() + timedelta(seconds=CASCADE_COOLDOWN_SEC)
+                return
+
+            _LOGGER.warning(
+                "[%s] Bus-load watchdog: sustained rise detected (baseline %.0f%%) — "
+                "cascading restart of %d managed plan(s)",
+                self.server_id,
+                baseline,
+                len(plan_map),
+            )
+            culprit: str | None = None
+            for plan_name, fub_id in reversed(list(plan_map.items())):
+                await self.api.function_plan_stop_fup(fub_id)
+                await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
+                await self.api.function_plan_run_fup(fub_id)
+                await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
+                if self.bus_workload is not None and baseline - self.bus_workload >= CASCADE_RECOVERY_DROP_PCT:
+                    culprit = plan_name
+                    break
+
+            await self._async_finish_watchdog_cascade(baseline, culprit, len(plan_map))
+
+    async def _async_finish_watchdog_cascade(self, baseline: float, culprit: str | None, plan_count: int) -> None:
+        """Notify + persist history for a finished cascade run, and start its cooldown."""
+        now = dt_util.utcnow()
+        self._watchdog_cooldown_until = now + timedelta(seconds=CASCADE_COOLDOWN_SEC)
+        if culprit:
+            outcome = "recovered"
+            msg = (
+                f"Sustained bus-load rise detected (baseline ~{baseline:.0f}%). Cascade-restarted "
+                f"managed function plans — **{culprit}** was the trigger, bus load has recovered."
+            )
+        else:
+            outcome = "cascade_failed"
+            msg = (
+                f"Sustained bus-load rise detected (baseline ~{baseline:.0f}%). Cascade-restarted "
+                f"all {plan_count} managed function plan(s), but bus load did NOT recover. The "
+                "problem may be deeper than a single plan — manual investigation (or an emergency "
+                "reboot) may be needed."
+            )
+        _LOGGER.warning("[%s] Bus-load watchdog cascade finished: %s", self.server_id, outcome)
+        await self._async_persist_watchdog_event(
+            {
+                "timestamp": now.isoformat(),
+                "trigger_type": "rise",
+                "culprit_plan": culprit,
+                "outcome": outcome,
+            }
+        )
+        self._notify_watchdog(f"comexio_watchdog_cascade_{self.server_id}", "Comexio Bus-Load Watchdog", msg)
+
+    async def _async_bus_load_emergency_reboot(self) -> None:
+        """Trigger Comexio's immediate, unconfirmed full system reboot (emergency threshold only).
+
+        Notification + history are written BEFORE the API call so there's a paper trail even if
+        the reboot makes the instance briefly unreachable right after.
+        """
+        async with self._watchdog_lock:
+            now = dt_util.utcnow()
+            _LOGGER.warning(
+                "[%s] Bus-load watchdog: EMERGENCY threshold (%s%% over %ss) exceeded — "
+                "triggering immediate Comexio reboot",
+                self.server_id,
+                EMERGENCY_REBOOT_THRESHOLD_PCT,
+                EMERGENCY_REBOOT_WINDOW_SEC,
+            )
+            self._notify_watchdog(
+                f"comexio_watchdog_emergency_{self.server_id}",
+                "Comexio Emergency Reboot Triggered",
+                f"Bus load stayed above {EMERGENCY_REBOOT_THRESHOLD_PCT}% for over "
+                f"{EMERGENCY_REBOOT_WINDOW_SEC // 60} minutes. Triggering an immediate Comexio "
+                "system reboot (no confirmation — this happens instantly on the Comexio side).",
+            )
+            await self._async_persist_watchdog_event(
+                {
+                    "timestamp": now.isoformat(),
+                    "trigger_type": "emergency",
+                    "culprit_plan": None,
+                    "outcome": "reboot_triggered",
+                }
+            )
+            await self.api.system_emergency_reboot()
+            self._watchdog_cooldown_until = now + timedelta(seconds=EMERGENCY_REBOOT_COOLDOWN_SEC)
+
+    def _notify_watchdog(self, notification_id: str, title: str, message: str) -> None:
+        """Persistent-notification helper for watchdog events, gated on CONF_ENABLE_NOTIFICATIONS."""
+        conf = {**self.config_entry.data, **self.config_entry.options}
+        if not conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS):
+            return
+        persistent_notification.async_create(self.hass, message, title=title, notification_id=notification_id)
+
+    async def _async_persist_watchdog_event(self, event: dict[str, Any]) -> None:
+        """Append one event to the watchdog history, trim it, and persist to disk."""
+        self.watchdog_history.append(event)
+        self.watchdog_history = self.watchdog_history[-WATCHDOG_HISTORY_MAX_ENTRIES:]
+        await self._watchdog_history_store.async_save({"events": self.watchdog_history})
 
     async def async_config_entry_updated(self) -> None:
         """Handle config entry update (e.g. from Options Flow)."""

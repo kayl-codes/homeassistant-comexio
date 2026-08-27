@@ -6,6 +6,8 @@ from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig,
 import voluptuous as vol
 
 from .const import (
+    CONF_BUS_WATCHDOG_AUTO_REBOOT,
+    CONF_BUS_WATCHDOG_ENABLED,
     CONF_COVER_KEYWORDS,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
@@ -16,6 +18,8 @@ from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
     CONF_SCHEMA_MARKER,
+    DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
+    DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
@@ -127,6 +131,14 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_INCLUDE_OFFLINE_EXTENSIONS,
                         default=conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False),
+                    ): bool,
+                    vol.Required(
+                        CONF_BUS_WATCHDOG_ENABLED,
+                        default=conf.get(CONF_BUS_WATCHDOG_ENABLED, DEFAULT_BUS_WATCHDOG_ENABLED),
+                    ): bool,
+                    vol.Required(
+                        CONF_BUS_WATCHDOG_AUTO_REBOOT,
+                        default=conf.get(CONF_BUS_WATCHDOG_AUTO_REBOOT, DEFAULT_BUS_WATCHDOG_AUTO_REBOOT),
                     ): bool,
                     vol.Optional(
                         CONF_COVER_KEYWORDS, default=conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS)
