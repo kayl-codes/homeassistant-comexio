@@ -2748,6 +2748,9 @@ class ComexioAPI:
         except aiohttp.ClientError as err:
             _LOGGER.exception("system_emergency_reboot: HTTP request error: %s", err)
             return False
+        except Exception:
+            _LOGGER.exception("system_emergency_reboot: unexpected error")
+            return False
 
     async def check_extension_firmware(self) -> list[dict[str, Any]]:
         """Query the local extension bus for available firmware updates (BASE + all extensions).

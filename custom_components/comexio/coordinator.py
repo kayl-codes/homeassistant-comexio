@@ -1912,15 +1912,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _bus_load_rise_detected(self, now: datetime, current: float) -> bool:
         """Whether bus load has risen by BUS_LOAD_RISE_THRESHOLD_PCT over BUS_LOAD_RISE_WINDOW_SEC.
 
-        Compares against the oldest sample still inside the window, not an absolute high value —
-        a stable-but-high or falling reading must not trigger (see project backlog rationale).
+        Compares against the oldest samples still inside the window, not an absolute high value —
+        a stable-but-high or falling reading must not trigger (see project backlog rationale). The
+        baseline is smoothed the same way as `current` (average of BUS_LOAD_SMOOTHING_SAMPLES) so a
+        single low outlier at the start of the window can't fake a sustained rise.
         """
         window_start = now - timedelta(seconds=BUS_LOAD_RISE_WINDOW_SEC)
         if not self._bus_load_samples or self._bus_load_samples[0][0] > window_start:
             return False
-        baseline = next((v for ts, v in self._bus_load_samples if ts >= window_start), None)
-        if baseline is None:
+        windowed = [v for ts, v in self._bus_load_samples if ts >= window_start]
+        baseline_samples = windowed[:BUS_LOAD_SMOOTHING_SAMPLES]
+        if not baseline_samples:
             return False
+        baseline = sum(baseline_samples) / len(baseline_samples)
         return (current - baseline) >= BUS_LOAD_RISE_THRESHOLD_PCT
 
     async def _async_bus_load_cascade_restart(self, baseline: float) -> None:
@@ -2027,7 +2031,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "timestamp": now.isoformat(),
                     "trigger_type": "emergency",
                     "culprit_plan": None,
-                    "outcome": "reboot_triggered",
+                    "outcome": "reboot_attempted",
                 }
             )
             if await self.api.system_emergency_reboot():
