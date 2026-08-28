@@ -22,7 +22,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MARKER_TYPE_INTERVAL, bus_load_signal
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity
+from .entity import ComexioIOEntity, ComexioMarkerEntity
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -111,7 +111,7 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
             return val
 
 
-class ComexioMarkerSensor(CoordinatorEntity, SensorEntity):
+class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):
     """Representation of a read-only ("[RO]"-suffixed) analog Comexio Marker.
 
     Same unique_id as ComexioMarkerNumber would use for a normal analog marker — HA's
@@ -119,14 +119,10 @@ class ComexioMarkerSensor(CoordinatorEntity, SensorEntity):
     is renamed to add/drop the [RO] suffix.
     """
 
-    _attr_has_entity_name = True
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
-        super().__init__(coordinator)
-        self._marker_id = str(marker["id"])
-        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}".lower()
-        self._attr_name = marker["ha_name"]
+        super().__init__(coordinator, server_id, marker)
 
         if marker.get("type_raw") == MARKER_TYPE_INTERVAL:
             self._attr_icon = "mdi:timer-outline"
@@ -142,16 +138,6 @@ class ComexioMarkerSensor(CoordinatorEntity, SensorEntity):
                 self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
             else:
                 self._attr_icon = "mdi:gauge"
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            "name": f"{self.coordinator.server_id} Markers",
-            "manufacturer": "Comexio",
-            "model": "Marker Group",
-            "via_device": (DOMAIN, self.coordinator.server_id),
-        }
 
     @property
     def native_value(self) -> float | None:

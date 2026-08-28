@@ -7,11 +7,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity
+from .entity import ComexioIOEntity, ComexioMarkerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,28 +42,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     async_add_entities(entities)
 
 
-class ComexioMarkerSwitch(CoordinatorEntity, SwitchEntity):
+class ComexioMarkerSwitch(ComexioMarkerEntity, SwitchEntity):
     """Representation of a digital Comexio Marker as a Switch."""
-
-    _attr_has_entity_name = True
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
         """Initialize the marker switch."""
-        super().__init__(coordinator)
-        self._marker_id = str(marker["id"])
-        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}".lower()
-        self._attr_name = marker["ha_name"]
+        super().__init__(coordinator, server_id, marker)
         self._attr_device_class = SwitchDeviceClass.SWITCH
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            "name": f"{self.coordinator.server_id} Markers",
-            "manufacturer": "Comexio",
-            "model": "Marker Group",
-            "via_device": (DOMAIN, self.coordinator.server_id),
-        }
 
     @property
     def is_on(self) -> bool:

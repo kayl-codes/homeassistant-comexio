@@ -10,11 +10,10 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, bus_load_signal
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity
+from .entity import ComexioIOEntity, ComexioMarkerEntity
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -69,31 +68,13 @@ class ComexioBinarySensor(ComexioIOEntity, BinarySensorEntity):
             return False
 
 
-class ComexioMarkerBinarySensor(CoordinatorEntity, BinarySensorEntity):
+class ComexioMarkerBinarySensor(ComexioMarkerEntity, BinarySensorEntity):
     """Representation of a read-only ("[RO]"-suffixed) digital Comexio Marker.
 
     Same unique_id as ComexioMarkerSwitch would use for a normal digital marker — HA's
     stale-platform cleanup (__init__.py) removes the writable switch entity if a marker
     is renamed to add/drop the [RO] suffix.
     """
-
-    _attr_has_entity_name = True
-
-    def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
-        super().__init__(coordinator)
-        self._marker_id = str(marker["id"])
-        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}".lower()
-        self._attr_name = marker["ha_name"]
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            "name": f"{self.coordinator.server_id} Markers",
-            "manufacturer": "Comexio",
-            "model": "Marker Group",
-            "via_device": (DOMAIN, self.coordinator.server_id),
-        }
 
     @property
     def is_on(self) -> bool:

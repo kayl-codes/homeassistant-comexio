@@ -36,3 +36,29 @@ class ComexioIOEntity(CoordinatorEntity):
     @property
     def available(self) -> bool:
         return super().available and self._ext_name not in self.coordinator.offline_extensions
+
+
+class ComexioMarkerEntity(CoordinatorEntity):
+    """Shared base for all marker entities (writable and read-only).
+
+    Centralises unique_id/name/device_info that would otherwise be duplicated
+    across the switch, number, binary_sensor, and sensor platforms.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
+        super().__init__(coordinator)
+        self._marker_id = str(marker["id"])
+        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}".lower()
+        self._attr_name = marker["ha_name"]
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
+            "name": f"{self.coordinator.server_id} Markers",
+            "manufacturer": "Comexio",
+            "model": "Marker Group",
+            "via_device": (DOMAIN, self.coordinator.server_id),
+        }
