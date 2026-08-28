@@ -9,6 +9,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ---
 
+## [0.9.1] — 2026-08-28
+
+### ✨ New Features
+- **Self-healing bus-load watchdog:** Detects a sustained rise in Comexio bus workload over a fixed six-hour window with a fixed 10-percentage-point threshold and cascades a stop/restart across the managed cluster function plans from last to first — the same manual recovery previously done by hand. This cascade-restart path is **on by default** (HA-managed plans only; the watchdog attempts to restore each plan, but a failed restart can leave it stopped); a separate, default-**off** option can additionally trigger an unconditional emergency Comexio reboot if the five-minute average load exceeds 90%.
+- **Watchdog diagnostic sensors:** Five new diagnostic sensors (extension/marker/plan/Web-IO-command counts plus the latest watchdog event), with event history persisted across restarts.
+
+### 🛠️ Core & Stability Improvements
+- **BASE extension grouped correctly:** Comexio's own `"BASE"` extension (the IO-Server's onboard IOs) is now grouped as its own extension sub-device (IOs + firmware), like any other extension, while the hub device keeps only integration/diagnostic entities — without colliding with the existing base firmware update entity.
+- **Extension names with spaces resolved correctly:** Audit and sync name resolution no longer mis-parses Web-IO command names for extensions whose name contains a space; both call sites now do an exact reverse-lookup against known `(extension name, identifier)` pairs first, falling back to the old heuristic only for genuinely unknown/orphaned command names.
+
+### 🐛 Bug Fixes & Refactoring
+- **Watchdog sensors survived restarts correctly:** The entity-cleanup whitelist was missing the 5 new watchdog sensor unique IDs, which silently removed them again on every restart.
+- **Store-write failures no longer swallow the recovery action:** An unhandled exception while persisting watchdog history could previously skip the actual cascade-restart or emergency-reboot call, not just the history entry — now handled defensively so the recovery action always runs.
+- **Malformed cluster-plan entries no longer cause a respawn loop:** A single invalid entry in the managed plan map is now skipped with a logged warning instead of raising, so the watchdog task can no longer be forced into an immediate 10-second respawn loop.
+
 ## [0.9.0] — 2026-08-26
 
 ### ✨ New Features
