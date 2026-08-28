@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
     EntityCategory,
+    UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -19,9 +20,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, bus_load_signal
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MARKER_TYPE_INTERVAL, bus_load_signal
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity
+from .entity import ComexioIOEntity, ComexioMarkerEntity
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -50,6 +51,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioIOSensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
             if not io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
+        )
+
+    if conf.get("import_markers", True):
+        ignored_ids = coordinator.ignored_marker_ids
+        entities.extend(
+            ComexioMarkerSensor(coordinator, coordinator.server_id, marker)
+            for marker in coordinator.data.get("markers", [])
+            if marker["type"] == "analog" and marker.get("read_only") and int(marker["id"]) not in ignored_ids
         )
 
     entities.extend(
@@ -100,6 +109,46 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
             return int(f) if f == int(f) else f
         except (ValueError, TypeError):
             return val
+
+
+class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):
+    """Representation of a read-only ("[RO]"-suffixed) analog Comexio Marker.
+
+    Same unique_id as ComexioMarkerNumber would use for a normal analog marker — HA's
+    stale-platform cleanup (__init__.py) removes the writable number entity if a marker
+    is renamed to add/drop the [RO] suffix.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
+        super().__init__(coordinator, server_id, marker)
+
+        if marker.get("type_raw") == MARKER_TYPE_INTERVAL:
+            self._attr_icon = "mdi:timer-outline"
+        else:
+            name_lower = marker["name"].lower()
+            is_cover = any(x in name_lower for x in coordinator.cover_keywords)
+
+            if "%" in name_lower or is_cover or "dimmer" in name_lower:
+                self._attr_native_unit_of_measurement = PERCENTAGE
+                self._attr_icon = "mdi:window-shutter" if is_cover else "mdi:percent"
+            elif any(x in name_lower for x in ["soll", "temp", "setpoint"]):
+                self._attr_device_class = SensorDeviceClass.TEMPERATURE
+                self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+            else:
+                self._attr_icon = "mdi:gauge"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current value from coordinator cache."""
+        val = self.coordinator.marker_states.get(self._marker_id)
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
 
 
 class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):

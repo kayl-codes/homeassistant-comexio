@@ -13,11 +13,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, bus_load_signal
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity
+from .entity import ComexioIOEntity, ComexioMarkerEntity
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
-    """Set up Comexio binary sensors (digital inputs)."""
+    """Set up Comexio binary sensors (digital inputs, read-only digital markers)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     conf = {**entry.data, **entry.options}
 
@@ -29,6 +29,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioBinarySensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
             if io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
+        )
+
+    if conf.get("import_markers", True):
+        ignored_ids = coordinator.ignored_marker_ids
+        entities.extend(
+            ComexioMarkerBinarySensor(coordinator, coordinator.server_id, marker)
+            for marker in coordinator.data.get("markers", [])
+            if marker["type"] == "digital" and marker.get("read_only") and int(marker["id"]) not in ignored_ids
         )
 
     entities.append(ComexioSdCardSensor(coordinator, coordinator.server_id))
@@ -58,6 +66,21 @@ class ComexioBinarySensor(ComexioIOEntity, BinarySensorEntity):
             return float(value) > 0
         except (ValueError, TypeError):
             return False
+
+
+class ComexioMarkerBinarySensor(ComexioMarkerEntity, BinarySensorEntity):
+    """Representation of a read-only ("[RO]"-suffixed) digital Comexio Marker.
+
+    Same unique_id as ComexioMarkerSwitch would use for a normal digital marker — HA's
+    stale-platform cleanup (__init__.py) removes the writable switch entity if a marker
+    is renamed to add/drop the [RO] suffix.
+    """
+
+    @property
+    def is_on(self) -> bool:
+        """Return true if the digital marker is active."""
+        val = self.coordinator.marker_states.get(self._marker_id, 0)
+        return float(val) >= 1.0
 
 
 class ComexioSdCardSensor(BinarySensorEntity):

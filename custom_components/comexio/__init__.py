@@ -214,7 +214,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     expected_platform: dict[str, str] = {}
     for m in coordinator.data.get("markers", []):
         uid = f"comexio_{server_id}_m{m['id']}".lower()
-        expected_platform[uid] = "switch" if m["type"] == "digital" else "number"
+        if m.get("read_only"):
+            expected_platform[uid] = "binary_sensor" if m["type"] == "digital" else "sensor"
+        else:
+            expected_platform[uid] = "switch" if m["type"] == "digital" else "number"
     for io in coordinator.data.get("io", []):
         if not io.get("offline") or include_offline:
             uid = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()

@@ -34,6 +34,7 @@ from .const import (
     FUNCTION_PLAN_PAIR_RELOAD_INITIAL_DELAY,
     FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS,
     KNOWN_DOMAINS,
+    MARKER_READ_ONLY_SUFFIX,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
@@ -888,6 +889,9 @@ class ComexioAPI:
                     "type": m_type_str,
                     "type_raw": m_type_raw,
                     "value": self._clean_value(live_states.get(m_id, 0)),
+                    # Comexio-side naming convention: title ends with "[RO]" -> exposed as a
+                    # read-only sensor/binary_sensor instead of a writable number/switch.
+                    "read_only": m_title.rstrip().endswith(MARKER_READ_ONLY_SUFFIX),
                 }
             )
 

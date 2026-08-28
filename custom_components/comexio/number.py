@@ -8,11 +8,10 @@ from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MARKER_INTERVAL_MAX_VALUE, MARKER_TYPE_INTERVAL
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity
+from .entity import ComexioIOEntity, ComexioMarkerEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioMarkerNumber(coordinator, coordinator.server_id, marker)
             for marker in coordinator.data.get("markers", [])
-            if marker["type"] == "analog" and int(marker["id"]) not in ignored_ids
+            if marker["type"] == "analog" and int(marker["id"]) not in ignored_ids and not marker.get("read_only")
         )
 
     if conf.get("import_ios", True):
@@ -43,19 +42,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     async_add_entities(entities)
 
 
-class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
+class ComexioMarkerNumber(ComexioMarkerEntity, NumberEntity):
     """Representation of an analog Comexio Marker as a Number."""
 
-    _attr_has_entity_name = True
-
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
-        super().__init__(coordinator)
-        self._marker_id = str(marker["id"])
-
-        # Unique ID for the database
-        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}".lower()
-        # Display name
-        self._attr_name = marker["ha_name"]
+        super().__init__(coordinator, server_id, marker)
 
         self._attr_native_min_value = 0.0
         self._attr_native_max_value = 100.0
@@ -83,16 +74,6 @@ class ComexioMarkerNumber(CoordinatorEntity, NumberEntity):
                 self._attr_native_max_value = 50.0
             else:
                 self._attr_icon = "mdi:gauge"
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            "name": f"{self.coordinator.server_id} Markers",
-            "manufacturer": "Comexio",
-            "model": "Marker Group",
-            "via_device": (DOMAIN, self.coordinator.server_id),
-        }
 
     @property
     def native_value(self) -> float | None:
