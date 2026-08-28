@@ -28,7 +28,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioMarkerSwitch(coordinator, coordinator.server_id, marker)
             for marker in coordinator.data.get("markers", [])
-            if marker["type"] == "digital" and int(marker["id"]) not in ignored_ids
+            if marker["type"] == "digital" and int(marker["id"]) not in ignored_ids and not marker.get("read_only")
         )
 
     # 2. Digital Outputs (Relays) — binary and writable (not an input)

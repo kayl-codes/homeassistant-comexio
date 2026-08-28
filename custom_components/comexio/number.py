@@ -29,7 +29,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioMarkerNumber(coordinator, coordinator.server_id, marker)
             for marker in coordinator.data.get("markers", [])
-            if marker["type"] == "analog" and int(marker["id"]) not in ignored_ids
+            if marker["type"] == "analog" and int(marker["id"]) not in ignored_ids and not marker.get("read_only")
         )
 
     if conf.get("import_ios", True):

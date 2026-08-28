@@ -96,6 +96,8 @@ def _resolve_set_value_marker_target(marker_id: str, value: float, data: dict) -
     marker = next((mk for mk in data.get("markers", []) if str(mk.get("id")) == marker_id), None)
     if marker is None:
         return None, f"Unknown marker 'M{marker_id}' — not in the current Comexio configuration."
+    if marker.get("read_only"):
+        return None, f"Marker 'M{marker_id}' is read-only (title ends with [RO]) — writes are rejected."
     if marker.get("type") == "digital" and value not in (0, 1):
         return None, f"Digital marker 'M{marker_id}' only accepts 0 or 1 (got {value})."
     return {"target_type": "marker", "target_id": marker_id}, ""

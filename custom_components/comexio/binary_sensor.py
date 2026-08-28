@@ -10,6 +10,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, bus_load_signal
 from .coordinator import ComexioCoordinator
@@ -17,7 +18,7 @@ from .entity import ComexioIOEntity
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
-    """Set up Comexio binary sensors (digital inputs)."""
+    """Set up Comexio binary sensors (digital inputs, read-only digital markers)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     conf = {**entry.data, **entry.options}
 
@@ -29,6 +30,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioBinarySensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
             if io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
+        )
+
+    if conf.get("import_markers", True):
+        ignored_ids = coordinator.ignored_marker_ids
+        entities.extend(
+            ComexioMarkerBinarySensor(coordinator, coordinator.server_id, marker)
+            for marker in coordinator.data.get("markers", [])
+            if marker["type"] == "digital" and marker.get("read_only") and int(marker["id"]) not in ignored_ids
         )
 
     entities.append(ComexioSdCardSensor(coordinator, coordinator.server_id))
@@ -58,6 +67,39 @@ class ComexioBinarySensor(ComexioIOEntity, BinarySensorEntity):
             return float(value) > 0
         except (ValueError, TypeError):
             return False
+
+
+class ComexioMarkerBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Representation of a read-only ("[RO]"-suffixed) digital Comexio Marker.
+
+    Same unique_id as ComexioMarkerSwitch would use for a normal digital marker — HA's
+    stale-platform cleanup (__init__.py) removes the writable switch entity if a marker
+    is renamed to add/drop the [RO] suffix.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, marker: dict[str, Any]) -> None:
+        super().__init__(coordinator)
+        self._marker_id = str(marker["id"])
+        self._attr_unique_id = f"comexio_{server_id}_m{self._marker_id}".lower()
+        self._attr_name = marker["ha_name"]
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
+            "name": f"{self.coordinator.server_id} Markers",
+            "manufacturer": "Comexio",
+            "model": "Marker Group",
+            "via_device": (DOMAIN, self.coordinator.server_id),
+        }
+
+    @property
+    def is_on(self) -> bool:
+        """Return true if the digital marker is active."""
+        val = self.coordinator.marker_states.get(self._marker_id, 0)
+        return float(val) >= 1.0
 
 
 class ComexioSdCardSensor(BinarySensorEntity):
