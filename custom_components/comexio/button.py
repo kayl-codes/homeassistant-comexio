@@ -1415,9 +1415,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cached fub_id's live name before trusting it), this reads CONF_FUNCTION_PLAN_PLAN_MAP
         directly — a stale entry left behind by a plan rename/deletion/ID reuse in Comexio
         would otherwise let this delete Marker+Flanke elements from whatever plan that fub_id
-        now belongs to, including one the user authored by hand. _is_managed_function_plan()
-        is the same guard every other destructive plan-element action in this integration is
-        required to pass first (see its docstring).
+        now belongs to, including one the user authored by hand. The trigger plan's name is
+        always the fixed FUNCTION_PLAN_TRIGGER_PLAN_NAME regardless of the configured cluster-
+        plan prefix (see resolve_trigger_plan), so an exact-name check is used here instead of
+        _is_managed_function_plan()'s prefix check — otherwise changing CONF_FUNCTION_PLAN_PLAN_PREFIX
+        away from its default would make this guard reject the trigger plan itself.
         """
         raw_fub_id = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}).get(
             FUNCTION_PLAN_TRIGGER_PLAN_NAME
@@ -1426,10 +1428,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             return f"{ICON_WARNING} {len(orphan_ids)} orphaned trigger construct(s) found, but no trigger plan exists."
 
         fub_id = int(raw_fub_id)
-        if not self.coordinator._is_managed_function_plan(fub_id):
+        if self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
             return (
-                f"{ICON_WARNING} Trigger plan mapping (fub={fub_id}) no longer points to a HA-managed "
-                "plan — skipped orphan cleanup to avoid touching a user-owned plan."
+                f"{ICON_WARNING} Trigger plan mapping (fub={fub_id}) no longer points to "
+                f"'{FUNCTION_PLAN_TRIGGER_PLAN_NAME}' — skipped orphan cleanup to avoid touching a user-owned plan."
             )
 
         await self.coordinator.async_function_plan_change_backup(
@@ -1752,9 +1754,12 @@ class ComexioMarkerTriggerButton(ComexioMarkerEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Fire the trigger by writing 1 to the marker once.
 
-        Re-checks the marker's current kind against live coordinator data (not the kind
-        captured at entity creation) so a title edit that drops [TRIG]/[TP] or adds [RO]
-        after this button was created can't be bypassed by a stale, still-registered entity.
+        Re-checks the marker's current kind against the coordinator's last-polled data
+        (not the kind captured at entity creation) so a title edit that drops [TRIG]/[TP]
+        or adds [RO] after this button was created can't be bypassed by a stale,
+        still-registered entity. Like every other write path in this integration, this
+        reads coordinator.data as of the most recent poll — it narrows the staleness
+        window to at most one poll interval, it does not eliminate it.
         """
         marker = next(
             (mk for mk in self.coordinator.data.get("markers", []) if str(mk.get("id")) == self._marker_id),
