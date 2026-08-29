@@ -3338,12 +3338,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         orphaned marker regardless of completeness, so an incomplete leftover pair must be
         reported here too, not just fully-wired ones — otherwise it never gets swept up. Uses
         the cached plan snapshot (self.function_plan_plans), consistent with the other
-        Function Plan checks above — not a live reload on every audit tick.
+        Function Plan checks above — not a live reload on every audit tick. The mapped
+        fub_id's live $Fubs name is checked (same freshness guard as
+        _resolve_single_cluster_plan) so a renamed/repurposed/reused plan id is treated as
+        "no trigger plan yet" instead of being audited as if it still were the trigger plan —
+        otherwise a coincidentally-complete pair in that unrelated plan would make a trigger
+        marker look wired when resolve_trigger_plan() would actually create a fresh plan.
         """
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         plan_map = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
         fub_id = plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
-        if fub_id is None:
+        if fub_id is None or self.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
             return list(trigger_marker_ids), []
 
         plan_data = self.function_plan_plans.get(fub_id)

@@ -41,6 +41,16 @@ def _is_comment_ref_type(ref_type: str | int | None) -> bool:
     return str(ref_type) == _COMMENT_REF_TYPE
 
 
+def _connection_outputs(conn: dict) -> list[dict]:
+    """A connection's "output" sinks, normalized to a list.
+
+    Comexio may serialize "output" as a dict ({"0": {...}}) instead of a list — same
+    server quirk normalized in api.py's _connection_output_ids/_rebuild_one_connection.
+    """
+    raw_outputs = conn.get("output", [])
+    return list(raw_outputs.values()) if isinstance(raw_outputs, dict) else raw_outputs
+
+
 def _build_sorted_pairs(
     elements: dict,
     connections: dict,
@@ -68,7 +78,7 @@ def _build_sorted_pairs(
         if elem_ref.get(inp_eid, {}).get("type") != 2:
             continue
         marker_ref_id = int(elem_ref[inp_eid].get("ref_id", 0))
-        for out in conn.get("output", []):
+        for out in _connection_outputs(conn):
             out_eid_raw = out.get("FubElementId")
             if out_eid_raw is None:
                 continue
