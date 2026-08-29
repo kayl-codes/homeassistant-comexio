@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, bus_load_signal
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MarkerKind, bus_load_signal
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity, ComexioMarkerEntity
 
@@ -36,7 +36,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioMarkerBinarySensor(coordinator, coordinator.server_id, marker)
             for marker in coordinator.data.get("markers", [])
-            if marker["type"] == "digital" and marker.get("read_only") and int(marker["id"]) not in ignored_ids
+            if marker["type"] == "digital"
+            and marker.get("kind") == MarkerKind.READ_ONLY
+            and int(marker["id"]) not in ignored_ids
         )
 
     entities.append(ComexioSdCardSensor(coordinator, coordinator.server_id))

@@ -12,6 +12,7 @@ import time
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 
+from ..const import FUNCTION_PLAN_LAYOUT_Y_STEP, FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
 from ..coordinator import ComexioCoordinator
 from ..function_plan_backup import snapshot_label_maps
 from ..function_plan_render import resolve_element_label
@@ -274,7 +275,10 @@ async def async_sort_function_plan(
     if was_active is None:
         was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
 
-    canvas_label, x_max, rows_per_col, max_cols = _sort_canvas_bounds(api, fub_id, canvas_format)
+    row_step = (
+        FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP if coordinator.is_trigger_plan(fub_id) else FUNCTION_PLAN_LAYOUT_Y_STEP
+    )
+    canvas_label, x_max, rows_per_col, max_cols = _sort_canvas_bounds(api, fub_id, canvas_format, row_step)
 
     plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
@@ -283,7 +287,7 @@ async def async_sort_function_plan(
         return None
 
     new_positions, n_pairs, n_single, sort_line, header_slots, io_members = _sort_compute_positions(
-        coordinator, plan_data, fub_id, x_max, rows_per_col, max_cols
+        coordinator, plan_data, fub_id, x_max, rows_per_col, max_cols, row_step
     )
     if not new_positions:
         if notify:
@@ -326,16 +330,22 @@ async def async_sort_function_plan(
     }
 
 
-def _sort_canvas_bounds(api, fub_id: int, canvas_format: str | None) -> tuple[str, float, int, int]:
+def _sort_canvas_bounds(api, fub_id: int, canvas_format: str | None, row_step: float) -> tuple[str, float, int, int]:
     """Canvas label + content-x-bound + grid dimensions for a sort run (see async_sort_function_plan)."""
     canvas_label, x_max, _y_max, rows_per_col, max_cols = _get_canvas_grid_dims(
-        api, fub_id, (canvas_format or "").strip().upper()
+        api, fub_id, (canvas_format or "").strip().upper(), row_step
     )
     return canvas_label, x_max, rows_per_col, max_cols
 
 
 def _sort_compute_positions(
-    coordinator: ComexioCoordinator, plan_data: dict, fub_id: int, x_max: float, rows_per_col: int, max_cols: int
+    coordinator: ComexioCoordinator,
+    plan_data: dict,
+    fub_id: int,
+    x_max: float,
+    rows_per_col: int,
+    max_cols: int,
+    row_step: float,
 ) -> tuple[list[tuple[int, float, float]], int, int, str, list[tuple[float, float, str]], list[str] | None]:
     """New element positions for a sort run — IO cluster grid or marker-ID grid (see async_sort_function_plan)."""
     # Template elements (the managed comment) are pinned to their canonical spot instead
@@ -359,7 +369,7 @@ def _sort_compute_positions(
     else:
         pairs, orphans = _build_sorted_pairs(plan_data.get("elements", {}), plan_data.get("connections", {}))
         orphans = [eid for eid in orphans if eid not in pinned_ids]
-        new_positions = _assign_grid_positions(pairs, orphans, rows_per_col, max_cols) + pinned
+        new_positions = _assign_grid_positions(pairs, orphans, rows_per_col, max_cols, row_step) + pinned
         n_pairs, n_single = len(pairs), len(orphans)
         sort_line = f"{n_pairs} pairs sorted by marker ID + {n_single} single elements."
     return new_positions, n_pairs, n_single, sort_line, header_slots, io_members

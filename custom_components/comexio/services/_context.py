@@ -255,8 +255,15 @@ def _plan_activation_note(was_active: bool, activated: bool, has_changes: bool, 
     return "Plan activation failed — please save manually in the Comexio UI."
 
 
-def _get_canvas_grid_dims(api, fub_id: int, canvas_format_raw: str) -> tuple[str, float, float, int, int]:
-    """Resolve canvas paper format + pixel bounds, then derive the (rows_per_col, max_cols) layout grid."""
+def _get_canvas_grid_dims(
+    api, fub_id: int, canvas_format_raw: str, row_step: float = _LAYOUT_Y_STEP
+) -> tuple[str, float, float, int, int]:
+    """Resolve canvas paper format + pixel bounds, then derive the (rows_per_col, max_cols) layout grid.
+
+    row_step overrides the row pitch used for rows_per_col (default: the generic single-row-tall
+    marker/WebIO pitch) — callers sorting a plan whose pairs render taller (e.g. the trigger
+    plan's Marker+Flanke pairs) must pass their own step or rows would visually overlap.
+    """
     if canvas_format_raw and canvas_format_raw != "AUTO":
         canvas_label = canvas_format_raw
         x_max, y_max = api.get_fub_canvas_bounds(fub_id, paper_name=canvas_format_raw)
@@ -264,6 +271,6 @@ def _get_canvas_grid_dims(api, fub_id: int, canvas_format_raw: str) -> tuple[str
         canvas_label = api.get_fub_paper_format(fub_id).upper()
         x_max, y_max = api.get_fub_canvas_bounds(fub_id)
 
-    rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / _LAYOUT_Y_STEP))
+    rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / row_step))
     max_cols = max(1, round((x_max - _LAYOUT_X_MARKER) / _LAYOUT_COLUMN_WIDTH))
     return canvas_label, x_max, y_max, rows_per_col, max_cols

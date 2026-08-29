@@ -14,6 +14,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_platform, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
@@ -28,6 +29,7 @@ from .const import (
     DOMAIN,
     FUNCTION_PLAN_SERVICE_ACTIVATE,
     FUNCTION_PLAN_SERVICE_STOP,
+    FUNCTION_PLAN_TRIGGER_PLAN_NAME,
     ICON_ADD,
     ICON_CHECK,
     ICON_CLOCK,
@@ -50,10 +52,12 @@ from .const import (
     SYNC_PROGRESS_START_PCT,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
+    MarkerKind,
     webio_class_label,
     webio_class_name,
 )
 from .coordinator import ComexioCoordinator
+from .entity import ComexioMarkerEntity
 from .function_plan_backup import format_backup_label
 from .services import async_resync_io_group_headers, async_sort_function_plan
 
@@ -160,18 +164,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     preview_button = ComexioPlanPreviewButton(coordinator, coordinator.server_id)
     uninstall_cleanup_button = ComexioCleanupButton(coordinator, coordinator.server_id)
     plan_toggle_button = ComexioPlanToggleButton(coordinator, coordinator.server_id)
-    async_add_entities(
-        [
-            sync_button,
-            cancel_button,
-            migration_button,
-            stats_cleanup_button,
-            fw_check_button,
-            preview_button,
-            uninstall_cleanup_button,
-            plan_toggle_button,
-        ]
-    )
+    entities: list[Any] = [
+        sync_button,
+        cancel_button,
+        migration_button,
+        stats_cleanup_button,
+        fw_check_button,
+        preview_button,
+        uninstall_cleanup_button,
+        plan_toggle_button,
+    ]
+
+    conf = {**entry.data, **entry.options}
+    if conf.get("import_markers", True):
+        ignored_ids = coordinator.ignored_marker_ids
+        entities.extend(
+            ComexioMarkerTriggerButton(coordinator, coordinator.server_id, marker)
+            for marker in coordinator.data.get("markers", [])
+            if marker.get("kind") == MarkerKind.TRIGGER and int(marker["id"]) not in ignored_ids
+        )
+
+    async_add_entities(entities)
 
     # Register the entity service.
     # As a custom integration, the service is registered under
@@ -267,10 +280,26 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         try:
             update_status("Analyzing Comexio configuration...", pct=5, step_info="Analyzing configuration")
 
-            # Check if the Web-IO device instances are already present (one per class)
-            dev_ids = {cls: await api.get_webio_device_info(class_names[cls]) for cls in WEBIO_CLASSES}
+            # Check if the Web-IO device instances are already present (one per class). Reported
+            # per class (not just once before the loop) because this duration varies a lot with
+            # Comexio server responsiveness, and the notification otherwise sits on the same
+            # static text for however long that turns out to take.
+            dev_ids: dict[str, str | None] = {}
+            for cls in WEBIO_CLASSES:
+                update_status(
+                    f"Analyzing Comexio configuration — checking Web-IO device '{class_names[cls]}'...",
+                    pct=5,
+                    step_info="Analyzing configuration",
+                )
+                dev_ids[cls] = await api.get_webio_device_info(class_names[cls])
 
-            # Get the current network address of this Home Assistant instance
+            # Get the current network address of this Home Assistant instance — can take a while
+            # if DNS lookups for KNOWN_DOMAINS time out before falling back to the local IP.
+            update_status(
+                "Analyzing Comexio configuration — resolving Home Assistant network address...",
+                pct=5,
+                step_info="Analyzing configuration",
+            )
             ha_address = await api.get_ha_address()
 
             # Retrieve audit results stored in the coordinator
@@ -302,6 +331,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             if action == "function_plan_add_missing":
                 # Standalone action: wire pre-existing but unwired pairs only, no Web-IO sync.
                 plan_summary = await self._wire_created_pairs(ctx, [], gap_items)
+                plan_summary += await self._wire_trigger_pairs(ctx)
                 duration = datetime.datetime.now() - start_time
                 msg = self._build_function_plan_add_missing_message(plan_summary, duration)
             else:
@@ -319,6 +349,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
 
                 plan_summary = await self._wire_created_pairs(ctx, created_names, gap_items)
+                plan_summary += await self._wire_trigger_pairs(ctx)
 
                 duration = datetime.datetime.now() - start_time
                 duration_str = f"{_mmss(duration.total_seconds())} min"
@@ -1159,10 +1190,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         result["debris_removed"] += debris_removed
 
         # Deleting an element opens a gap in the plan's grid; re-sort to close it. Safe to
-        # call directly (no is-managed-plan guard) because both cleanup calls above only ever
-        # touch plans from _load_function_plan_check_data(), which is already scoped to
-        # managed cluster plans. was_active=True because each cleanup's own restart already
-        # brought the plan back up by this point.
+        # call directly (no is-managed-plan guard here) because both cleanup calls above only
+        # ever return fub_ids that already passed coordinator._is_managed_function_plan() —
+        # resort touching a non-"{prefix} - "-named plan (e.g. a user's own hand-laid-out
+        # plan) would silently rewrite its layout, so that filter must stay enforced at the
+        # source rather than re-checked here. was_active=True because each cleanup's own
+        # restart already brought the plan back up by this point.
         for fub_id in resort_fub_ids:
             await async_sort_function_plan(self.hass, self.coordinator, api, fub_id, notify=False, was_active=True)
 
@@ -1312,6 +1345,71 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         _LOGGER.info("[%s] Cluster plan wiring done: added=%d, errors=%d", self.server_id, n_added, n_errors)
         return summary
+
+    async def _wire_trigger_pairs(self, ctx: _SyncContext) -> list[str]:
+        """Create/remove Marker+Flanke self-reset pairs for [TRIG]/[TP] markers.
+
+        Driven by the coordinator's function_plan_trigger_missing/orphan audit lists, not by
+        created_names — a trigger marker's Web-IO command is audited/created exactly like any
+        other marker's, independently of this construct (see const.py's trigger-plan notes).
+        """
+        if ctx.action not in {"full_sync", "function_plan_add_missing"}:
+            return []
+        audit_data = getattr(self.coordinator, "last_audit_results", {})
+        missing_ids: list[int] = audit_data.get("function_plan_trigger_missing", [])
+        orphan_ids: list[int] = audit_data.get("function_plan_trigger_orphan", [])
+        if not missing_ids and not orphan_ids:
+            return []
+
+        summary: list[str] = []
+        if missing_ids:
+            summary.append(await self._add_trigger_pairs(ctx, missing_ids))
+        if orphan_ids:
+            summary.append(await self._remove_trigger_pairs(ctx, orphan_ids))
+        return summary
+
+    async def _add_trigger_pairs(self, ctx: _SyncContext, missing_ids: list[int]) -> str:
+        """Resolve/create the trigger plan and add the missing Marker+Flanke pairs."""
+        api = ctx.api
+        fub_id, is_fresh = await self.coordinator.resolve_trigger_plan()
+        if fub_id is None:
+            return (
+                f"{ICON_WARNING} Trigger plan '{FUNCTION_PLAN_TRIGGER_PLAN_NAME}': could not resolve/create — see log."
+            )
+
+        plan_name = self._plan_name(fub_id)
+        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        t0 = time.monotonic()
+        await self.coordinator.async_function_plan_change_backup(
+            fub_id, f"add_trigger_pairs {[f'M{m}' for m in missing_ids]}"
+        )
+        await api.function_plan_stop_fup(fub_id)
+        added, errors = await api.function_plan_add_trigger_pairs(fub_id, missing_ids, fresh_plan=is_fresh)
+        if errors:
+            _LOGGER.warning("[%s] function_plan_add_trigger_pairs errors: %s", self.server_id, errors)
+        if added and not is_fresh:
+            await async_sort_function_plan(self.hass, self.coordinator, api, fub_id, notify=False, was_active=False)
+        if is_fresh or was_active:
+            # create_fup always creates plans inactive (fub_active="0") — a fresh plan must be
+            # activated unconditionally, was_active=False would otherwise leave it stopped forever.
+            await api.function_plan_run_fup(fub_id)
+        return _plan_summary_line(plan_name, is_fresh, len(added), len(missing_ids), "trigger pairs", t0, "", errors)
+
+    async def _remove_trigger_pairs(self, ctx: _SyncContext, orphan_ids: list[int]) -> str:
+        """Remove orphaned Marker+Flanke pairs from the trigger plan (marker lost its suffix)."""
+        raw_fub_id = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}).get(
+            FUNCTION_PLAN_TRIGGER_PLAN_NAME
+        )
+        if raw_fub_id is None:
+            return f"{ICON_WARNING} {len(orphan_ids)} orphaned trigger construct(s) found, but no trigger plan exists."
+
+        fub_id = int(raw_fub_id)
+        await self.coordinator.async_function_plan_change_backup(
+            fub_id, f"remove_trigger_pairs {[f'M{m}' for m in orphan_ids]}"
+        )
+        deleted, plan_stopped = await ctx.api.function_plan_remove_trigger_pairs(fub_id, orphan_ids)
+        note = f", {ICON_WARNING} plan left stopped — please restart it in Comexio" if plan_stopped else ""
+        return f"{ICON_DELETE} Removed {deleted} orphaned trigger element(s){note}"
 
     async def _wire_marker_clusters(
         self, ctx: _SyncContext, marker_ids: list[int], progress_state: dict
@@ -1613,6 +1711,20 @@ def _merge_io_items(created_refs: list[tuple[str, str]], gap_items: list[dict], 
     for item in gap_items:
         merged.setdefault((item["ext_name"], item["identifier"]), item)
     return list(merged.values())
+
+
+class ComexioMarkerTriggerButton(ComexioMarkerEntity, ButtonEntity):
+    """Representation of a "virtueller Taster" ([TRIG]/[TP]) Comexio Marker as a Button.
+
+    Pressing it writes a single 1 via the normal marker Web-IO write path. The marker's
+    own auto-reset back to 0 runs entirely inside Comexio (Marker+Flanke self-reset loop
+    in the dedicated "HA - TRIGGER" plan) — no HA-side wait/reset is needed.
+    """
+
+    async def async_press(self) -> None:
+        """Fire the trigger by writing 1 to the marker once."""
+        if not await self.coordinator.api.set_value("marker", self._marker_id, 1):
+            raise HomeAssistantError(f"Failed to trigger marker {self._marker_id}")
 
 
 class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):

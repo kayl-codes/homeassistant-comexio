@@ -9,7 +9,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MARKER_INTERVAL_MAX_VALUE, MARKER_TYPE_INTERVAL
+from .const import (
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    DOMAIN,
+    MARKER_INTERVAL_MAX_VALUE,
+    MARKER_TYPE_INTERVAL,
+    MarkerKind,
+)
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity, ComexioMarkerEntity
 
@@ -28,7 +34,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioMarkerNumber(coordinator, coordinator.server_id, marker)
             for marker in coordinator.data.get("markers", [])
-            if marker["type"] == "analog" and int(marker["id"]) not in ignored_ids and not marker.get("read_only")
+            if marker["type"] == "analog"
+            and int(marker["id"]) not in ignored_ids
+            and marker.get("kind") == MarkerKind.NORMAL
         )
 
     if conf.get("import_ios", True):

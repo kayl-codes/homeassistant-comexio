@@ -118,8 +118,14 @@ def _assign_grid_positions(
     orphans: list[int],
     rows_per_col: int,
     max_cols: int,
+    row_step: float = _LAYOUT_Y_STEP,
 ) -> list[tuple[int, float, float]]:
-    """Calculate exact grid positions for sorted pairs and orphan elements."""
+    """Calculate exact grid positions for sorted pairs and orphan elements.
+
+    row_step overrides the row pitch (default: the generic single-row-tall marker/WebIO
+    pitch) — pass the caller's own step when the pair's second element renders taller
+    (e.g. the trigger plan's Flanke block), or consecutive rows would visually overlap.
+    """
     positions: dict[int, tuple[float, float]] = {}
     pairs_placed = 0
     for row_idx, (_, m_eid, w_eid) in enumerate(pairs):
@@ -127,7 +133,7 @@ def _assign_grid_positions(
         if col >= max_cols:
             break
         row_in_col = row_idx % rows_per_col
-        y = _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP
+        y = _LAYOUT_Y_START + row_in_col * row_step
         if m_eid not in positions:
             positions[m_eid] = (_LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH, y)
         if w_eid not in positions:
@@ -145,7 +151,7 @@ def _assign_grid_positions(
             )
             break
         row_in_col = row_idx % rows_per_col
-        y = _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP
+        y = _LAYOUT_Y_START + row_in_col * row_step
         positions[eid] = (_LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH, y)
     return [(eid, x, y) for eid, (x, y) in positions.items()]
 
