@@ -3356,6 +3356,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
         orphan_ids = [mid for mid in all_marker_ids if mid not in trigger_id_set]
         return missing_ids, orphan_ids
 
+    async def async_fresh_trigger_audit(self) -> tuple[list[int], list[int]]:
+        """Fetch Comexio's config directly and re-run the trigger-pair audit against it.
+
+        async_request_refresh() is *not* an option here: _async_update_data() returns the
+        existing (possibly stale) self.data as-is whenever self.in_sync is True, which covers
+        the whole duration of a manual sync — the exact window this needs a fresh picture for.
+        So this bypasses the coordinator update machinery entirely and fetches raw config
+        straight from the API. live_states/referenced_markers are omitted deliberately: marker
+        kind depends only on its title, and a trigger marker always has a real name (a suffix
+        needs something to be suffixed to), so it's never affected by the referenced-marker
+        cold-start fallback that only concerns unnamed markers.
+        """
+        raw_config = await self.api.get_raw_config()
+        parsed = self.api.parse_config(raw_config)
+        trigger_marker_ids = [int(m["id"]) for m in parsed["markers"] if m.get("kind") == MarkerKind.TRIGGER]
+        return self._audit_trigger_pairs(trigger_marker_ids)
+
     def _function_plan_missing_eta_sec(self, missing_items: list[dict]) -> int:
         """Estimate the duration of the add-pairs repair action in seconds.
 

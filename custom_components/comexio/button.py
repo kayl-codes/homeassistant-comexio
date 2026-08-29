@@ -1353,20 +1353,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         Driven by the coordinator's function_plan_trigger_missing/orphan audit lists, not by
         created_names — a trigger marker's Web-IO command is audited/created exactly like any
         other marker's, independently of this construct (see const.py's trigger-plan notes).
-        refresh_audit=True forces a fresh coordinator poll first — used after _sync_all_classes,
-        since a marker renamed to add/drop its [TRIG]/[TP] suffix around the time this sync ran
-        would otherwise be judged against the audit snapshot from the *previous* poll, leaving
-        its self-reset pair uncreated/undeleted until some unrelated later poll happens to
-        pick it up (same staleness concern ComexioCleanupButton.async_press guards against
-        with the same async_request_refresh() call, further down in this file).
+        refresh_audit=True re-audits against Comexio's *current* config instead of trusting
+        last_audit_results — used after _sync_all_classes, since a marker renamed to add/drop
+        its [TRIG]/[TP] suffix around the time this sync ran would otherwise be judged against
+        the audit snapshot from the *previous* poll, leaving its self-reset pair
+        uncreated/undeleted until some unrelated later poll happens to pick it up.
+        coordinator.async_request_refresh() cannot help here: it goes through
+        _async_update_data(), which returns the existing (stale) data as-is for as long as
+        self.coordinator.in_sync is True — i.e. the whole duration of this sync. See
+        async_fresh_trigger_audit()'s docstring for why it fetches around that instead.
         """
         if ctx.action not in {"full_sync", "function_plan_add_missing"}:
             return []
         if refresh_audit:
-            await self.coordinator.async_request_refresh()
-        audit_data = getattr(self.coordinator, "last_audit_results", {})
-        missing_ids: list[int] = audit_data.get("function_plan_trigger_missing", [])
-        orphan_ids: list[int] = audit_data.get("function_plan_trigger_orphan", [])
+            missing_ids, orphan_ids = await self.coordinator.async_fresh_trigger_audit()
+        else:
+            audit_data = getattr(self.coordinator, "last_audit_results", {})
+            missing_ids = audit_data.get("function_plan_trigger_missing", [])
+            orphan_ids = audit_data.get("function_plan_trigger_orphan", [])
         if not missing_ids and not orphan_ids:
             return []
 
