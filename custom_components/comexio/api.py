@@ -2131,6 +2131,46 @@ class ComexioAPI:
             conn_endpoints.append(endpoints)
         return existing_by_ref, conn_endpoints
 
+    @staticmethod
+    def _function_plan_trigger_wired_marker_ids(plan_data: dict | None) -> set[int]:
+        """Marker (type=2) ref_ids in plan_data with a complete Marker<->Flanke round trip.
+
+        A marker element that exists but is missing either the Marker->Flanke or the
+        Flanke->Marker connection — e.g. left behind by a pair creation that failed
+        partway through — must not count as wired: the trigger audit needs to see it
+        as still incomplete so sync repairs it, instead of treating a bare marker
+        element as proof the self-reset wiring is already in place.
+        """
+        if not plan_data:
+            return set()
+        elements = plan_data.get("elements", {})
+        flanke_ref_id = str(FUB_BASE_REF_ID_FLANKE)
+
+        def _elem_ref(elem_id: int) -> dict:
+            return (elements.get(str(elem_id)) or {}).get("reference") or {}
+
+        def _is_flanke(elem_id: int) -> bool:
+            ref = _elem_ref(elem_id)
+            return str(ref.get("type")) == "5" and str(ref.get("ref_id")) == flanke_ref_id
+
+        edges: set[tuple[int, int]] = set()
+        for conn in (plan_data.get("connections") or {}).values():
+            src_id = (conn.get("input") or {}).get("FubElementId")
+            outputs = conn.get("output") or []
+            if isinstance(outputs, dict):
+                outputs = list(outputs.values())
+            for sink in outputs:
+                dst_id = sink.get("FubElementId")
+                if src_id is not None and dst_id is not None:
+                    edges.add((src_id, dst_id))
+
+        wired_marker_elem_ids = {src for src, dst in edges if _is_flanke(dst) and (dst, src) in edges}
+        return {
+            int(_elem_ref(elem_id)["ref_id"])
+            for elem_id in wired_marker_elem_ids
+            if str(_elem_ref(elem_id).get("type")) == "2"
+        }
+
     async def _function_plan_wire_ref_pair(
         self,
         fub_id: int,
@@ -2451,31 +2491,50 @@ class ComexioAPI:
         _LOGGER.info("trigger pair %s created: marker=%s flanke=%s (fub=%s)", label, elem_marker, elem_flanke, fub_id)
         return None
 
+    @staticmethod
+    def _function_plan_paired_flanke_ids(
+        plan_data: dict | None, marker_elem_ids: list[int], flanke_ref_id: int
+    ) -> list[int]:
+        """Find each Flanke element wired to one of marker_elem_ids via a Marker->Flanke connection.
+
+        Connection outputs may be a dict or a list (Comexio returns either shape — see
+        _function_plan_existing_refs, which normalizes the same way); missing that here
+        would make orphan cleanup silently fail to find (and delete) the paired Flanke
+        whenever a plan happens to use the list shape.
+        """
+        if not plan_data:
+            return []
+        elements = plan_data.get("elements", {})
+        marker_elem_id_set = set(marker_elem_ids)
+        flanke_elem_ids: list[int] = []
+        for conn in (plan_data.get("connections") or {}).values():
+            src_id = (conn.get("input") or {}).get("FubElementId")
+            if src_id not in marker_elem_id_set:
+                continue
+            outputs = conn.get("output") or []
+            if isinstance(outputs, dict):
+                outputs = list(outputs.values())
+            for sink in outputs:
+                dst_id = sink.get("FubElementId")
+                if dst_id is None:
+                    continue
+                ref = (elements.get(str(dst_id)) or {}).get("reference") or {}
+                if str(ref.get("type")) == "5" and str(ref.get("ref_id")) == str(flanke_ref_id):
+                    flanke_elem_ids.append(int(dst_id))
+        return flanke_elem_ids
+
     async def function_plan_remove_trigger_pairs(self, fub_id: int, marker_ids: list[int]) -> tuple[int, bool]:
         """Remove orphaned Marker+Flanke pairs (marker no longer [TRIG]/[TP]) from the trigger plan.
 
         Returns (deleted element count, plan_stopped) — mirrors _delete_plan_elements_and_restart.
+        Each trigger marker has its own dedicated Flanke element (never shared), so it is
+        always safe to remove alongside its marker.
         """
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, _ = self._function_plan_existing_refs(plan_data)
-        elem_ids: list[int] = []
-        flanke_ref_id = int(FUB_BASE_REF_ID_FLANKE)
-        for marker_id in marker_ids:
-            if elem_id := existing_by_ref.get((2, marker_id)):
-                elem_ids.append(elem_id)
-            # Each trigger marker has its own dedicated Flanke element (never shared), so it
-            # is always safe to remove alongside its marker.
-        # A marker's paired Flanke sits at the same grid row but isn't identified by marker_id;
-        # find it via the connection it shares with the marker element being removed.
-        connections = (plan_data or {}).get("connections", {}) if plan_data else {}
-        for conn in connections.values():
-            src_id = (conn.get("input") or {}).get("FubElementId")
-            for sink in conn.get("output", {}).values() if isinstance(conn.get("output"), dict) else []:
-                dst_id = sink.get("FubElementId")
-                if src_id in elem_ids and dst_id is not None:
-                    ref = (plan_data.get("elements", {}).get(str(dst_id)) or {}).get("reference") or {}
-                    if str(ref.get("type")) == "5" and str(ref.get("ref_id")) == str(flanke_ref_id):
-                        elem_ids.append(int(dst_id))
+        marker_elem_ids = [elem_id for marker_id in marker_ids if (elem_id := existing_by_ref.get((2, marker_id)))]
+        flanke_elem_ids = self._function_plan_paired_flanke_ids(plan_data, marker_elem_ids, int(FUB_BASE_REF_ID_FLANKE))
+        elem_ids = marker_elem_ids + flanke_elem_ids
         if not elem_ids:
             return 0, False
         result = await self._delete_plan_elements_and_restart(fub_id, elem_ids, [], self.function_plan_name(fub_id))

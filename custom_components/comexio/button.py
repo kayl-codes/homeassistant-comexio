@@ -73,6 +73,7 @@ _SYNC_PROGRESS_NOTIFY_EVERY = 5  # notify every Nth pair; the plan's final pair 
 _NOTE_ACTIVATED = ", plan activated"
 _NOTE_NOT_ACTIVATED = f", {ICON_WARNING} plan NOT activated"
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
+_STEP_ANALYZING_CONFIG = "Analyzing configuration"
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -278,7 +279,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         class_names = {cls: webio_class_name(webio_name, cls) for cls in WEBIO_CLASSES}
 
         try:
-            update_status("Analyzing Comexio configuration...", pct=5, step_info="Analyzing configuration")
+            update_status("Analyzing Comexio configuration...", pct=5, step_info=_STEP_ANALYZING_CONFIG)
 
             # Check if the Web-IO device instances are already present (one per class). Reported
             # per class (not just once before the loop) because this duration varies a lot with
@@ -289,7 +290,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 update_status(
                     f"Analyzing Comexio configuration — checking Web-IO device '{class_names[cls]}'...",
                     pct=5,
-                    step_info="Analyzing configuration",
+                    step_info=_STEP_ANALYZING_CONFIG,
                 )
                 dev_ids[cls] = await api.get_webio_device_info(class_names[cls])
 
@@ -298,7 +299,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             update_status(
                 "Analyzing Comexio configuration — resolving Home Assistant network address...",
                 pct=5,
-                step_info="Analyzing configuration",
+                step_info=_STEP_ANALYZING_CONFIG,
             )
             ha_address = await api.get_ha_address()
 
