@@ -3367,8 +3367,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         kind depends only on its title, and a trigger marker always has a real name (a suffix
         needs something to be suffixed to), so it's never affected by the referenced-marker
         cold-start fallback that only concerns unnamed markers.
+
+        get_raw_config() returns {} on an HTTP failure rather than raising — indistinguishable
+        from a genuinely empty config by shape alone. Proceeding anyway would derive an empty
+        trigger_marker_ids list and make _audit_trigger_pairs() read every existing Marker
+        element in the trigger plan as orphaned, deleting valid self-reset pairs over what was
+        really just a transient fetch failure. So an empty result skips the audit entirely
+        (missing=[], orphan=[] — a safe no-op); the next successful poll or sync retries it.
         """
         raw_config = await self.api.get_raw_config()
+        if not raw_config:
+            _LOGGER.warning(
+                "[%s] Trigger re-audit: direct config fetch failed — skipping rather than risk "
+                "misreading it as zero trigger markers and deleting valid self-reset pairs",
+                self.server_id,
+            )
+            return [], []
         parsed = self.api.parse_config(raw_config)
         trigger_marker_ids = [int(m["id"]) for m in parsed["markers"] if m.get("kind") == MarkerKind.TRIGGER]
         return self._audit_trigger_pairs(trigger_marker_ids)

@@ -1409,7 +1409,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return _plan_summary_line(plan_name, is_fresh, len(added), len(missing_ids), "trigger pairs", t0, "", errors)
 
     async def _remove_trigger_pairs(self, ctx: _SyncContext, orphan_ids: list[int]) -> str:
-        """Remove orphaned Marker+Flanke pairs from the trigger plan (marker lost its suffix)."""
+        """Remove orphaned Marker+Flanke pairs from the trigger plan (marker lost its suffix).
+
+        Unlike _add_trigger_pairs (which goes through resolve_trigger_plan, verifying the
+        cached fub_id's live name before trusting it), this reads CONF_FUNCTION_PLAN_PLAN_MAP
+        directly — a stale entry left behind by a plan rename/deletion/ID reuse in Comexio
+        would otherwise let this delete Marker+Flanke elements from whatever plan that fub_id
+        now belongs to, including one the user authored by hand. _is_managed_function_plan()
+        is the same guard every other destructive plan-element action in this integration is
+        required to pass first (see its docstring).
+        """
         raw_fub_id = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}).get(
             FUNCTION_PLAN_TRIGGER_PLAN_NAME
         )
@@ -1417,6 +1426,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             return f"{ICON_WARNING} {len(orphan_ids)} orphaned trigger construct(s) found, but no trigger plan exists."
 
         fub_id = int(raw_fub_id)
+        if not self.coordinator._is_managed_function_plan(fub_id):
+            return (
+                f"{ICON_WARNING} Trigger plan mapping (fub={fub_id}) no longer points to a HA-managed "
+                "plan — skipped orphan cleanup to avoid touching a user-owned plan."
+            )
+
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"remove_trigger_pairs {[f'M{m}' for m in orphan_ids]}"
         )
