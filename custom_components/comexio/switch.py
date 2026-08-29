@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MarkerKind
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity, ComexioMarkerEntity
 
@@ -27,7 +27,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioMarkerSwitch(coordinator, coordinator.server_id, marker)
             for marker in coordinator.data.get("markers", [])
-            if marker["type"] == "digital" and int(marker["id"]) not in ignored_ids and not marker.get("read_only")
+            if marker["type"] == "digital"
+            and int(marker["id"]) not in ignored_ids
+            and marker.get("kind") == MarkerKind.NORMAL
         )
 
     # 2. Digital Outputs (Relays) — binary and writable (not an input)

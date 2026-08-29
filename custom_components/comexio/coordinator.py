@@ -70,6 +70,7 @@ from .const import (
     FUNCTION_PLAN_LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
+    FUNCTION_PLAN_TRIGGER_PLAN_NAME,
     ICON_ADD,
     ICON_DELETE,
     ICON_FIX,
@@ -83,6 +84,7 @@ from .const import (
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
+    MarkerKind,
     bus_load_signal,
     expand_ignored_marker_ids,
     fw_update_signal,
@@ -725,6 +727,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     function_plan_dangling_items.append({"name": name, "ref_id": rid, "webio_class": WEBIO_CLASS_IO})
                     mismatches.add(f"function_plan_dangling_IO{rid}")
 
+            # Trigger markers ([TRIG]/[TP]): independent of the Web-IO comparison above — the
+            # marker's own Web-IO wiring is audited exactly like any other marker (missing_items
+            # etc.); this only checks the separate Marker+Flanke self-reset construct.
+            trigger_marker_ids = [int(m["id"]) for m in final_data["markers"] if m.get("kind") == MarkerKind.TRIGGER]
+            function_plan_trigger_missing_ids, function_plan_trigger_orphan_ids = self._audit_trigger_pairs(
+                trigger_marker_ids
+            )
+            for mid in function_plan_trigger_missing_ids:
+                mismatches.add(f"function_plan_trigger_missing_M{mid}")
+            for mid in function_plan_trigger_orphan_ids:
+                mismatches.add(f"function_plan_trigger_orphan_M{mid}")
+
             self.last_audit_results = {
                 "type": type_mismatches,
                 "missing": missing_items,
@@ -737,6 +751,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "cleanup_function_plan_count": self._cleanup_function_plan_count,
                 "function_plan_missing": function_plan_missing_items,
                 "function_plan_dangling": function_plan_dangling_items,
+                "function_plan_trigger_missing": function_plan_trigger_missing_ids,
+                "function_plan_trigger_orphan": function_plan_trigger_orphan_ids,
             }
 
             # Include pending entity cleanups (ignored markers with remaining HA entities) in mismatches
@@ -749,7 +765,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 current_summary_content = (
                     f"{len(type_mismatches)}-{len(missing_items)}-{len(renamed_items)}"
                     f"-{len(orphans)}-{ip_mismatch}-{len(function_plan_missing_items)}"
-                    f"-{len(function_plan_dangling_items)}"
+                    f"-{len(function_plan_dangling_items)}-{len(function_plan_trigger_missing_ids)}"
+                    f"-{len(function_plan_trigger_orphan_ids)}"
                 )
 
                 # Only log details if the audit result differs from the previous run
@@ -759,7 +776,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     # Consolidated warning for the Home Assistant log overview
                     _LOGGER.warning(
                         "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
-                        "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d)",
+                        "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d, Trigger gaps:%d, Trigger orphans:%d)",
                         self.server_id,
                         len(mismatches),
                         len(type_mismatches),
@@ -768,6 +785,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         len(orphans),
                         1 if ip_mismatch else 0,
                         len(function_plan_dangling_items),
+                        len(function_plan_trigger_missing_ids),
+                        len(function_plan_trigger_orphan_ids),
                     )
                     if ip_mismatch:
                         mismatched = {cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]}
@@ -803,6 +822,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         for item in function_plan_dangling_items:
                             _LOGGER.info("   -> %s", item["name"])
 
+                    if function_plan_trigger_missing_ids:
+                        _LOGGER.info(
+                            "%s Trigger markers not wired (%d): %s",
+                            ICON_LINK,
+                            len(function_plan_trigger_missing_ids),
+                            ", ".join(f"M{mid}" for mid in function_plan_trigger_missing_ids),
+                        )
+
+                    if function_plan_trigger_orphan_ids:
+                        _LOGGER.info(
+                            "%s Orphaned trigger constructs (%d): %s",
+                            ICON_DELETE,
+                            len(function_plan_trigger_orphan_ids),
+                            ", ".join(f"M{mid}" for mid in function_plan_trigger_orphan_ids),
+                        )
+
                     if ip_mismatch:
                         mismatched_ips = {
                             cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]
@@ -833,6 +868,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "function_plan_missing": len(function_plan_missing_items),
                     "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(function_plan_missing_items),
                     "function_plan_dangling": len(function_plan_dangling_items),
+                    "function_plan_trigger_missing": len(function_plan_trigger_missing_ids),
+                    "function_plan_trigger_orphan": len(function_plan_trigger_orphan_ids),
                     "all": len(mismatches),
                 }
 
@@ -2407,6 +2444,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Configured name prefix of the HA-managed cluster plans (default 'HA')."""
         return self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_PREFIX, DEFAULT_FUNCTION_PLAN_PLAN_PREFIX)
 
+    def _is_managed_function_plan(self, fub_id: int) -> bool:
+        """True if fub_id's live plan name follows the '{prefix} - ...' managed naming.
+
+        _function_plan_check_fub_ids() also includes the plan currently picked in the plan
+        selector — which the user is free to point at any plan on the server, including one
+        they author and lay out by hand (e.g. "Rolladen") — for the read-only missing-wiring
+        check. Any *destructive* action (deleting debris elements, unwiring, re-sorting) must
+        never touch a plan outside HA's own naming convention, or it silently rewrites the
+        user's own logic. Callers that mutate plan elements must filter through this first.
+        """
+        return self.api.function_plan_name(fub_id).startswith(f"{self._function_plan_prefix()} - ")
+
     def _function_plan_cluster_size(self) -> int:
         """Configured maximum number of element pairs per managed cluster plan."""
         return int(
@@ -2472,6 +2521,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self._persist_plan_map(plan_map_updates, removals=set(stale))
 
         return result, created_plans
+
+    async def resolve_trigger_plan(self) -> tuple[int | None, bool]:
+        """Find or create the single dedicated "HA - TRIGGER" plan. Returns (fub_id, freshly_created)."""
+        fub_data = self.api.fub_data
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        plan_map: dict[str, int] = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
+        fub_id, created = await self._resolve_single_cluster_plan(FUNCTION_PLAN_TRIGGER_PLAN_NAME, plan_map, fub_data)
+        if fub_id is not None:
+            await self._persist_plan_map({FUNCTION_PLAN_TRIGGER_PLAN_NAME: fub_id})
+        return fub_id, created
 
     async def _resolve_single_cluster_plan(
         self, plan_name: str, plan_map: dict[str, int], fub_data: dict
@@ -2543,6 +2602,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Public counterpart of _io_plan_membership for the services module's grid/sort code.
         """
         return self._io_plan_membership(self._function_plan_prefix()).get(fub_id)
+
+    def is_trigger_plan(self, fub_id: int) -> bool:
+        """Whether fub_id is the single HA-managed trigger plan ("HA - TRIGGER").
+
+        The sort/grid code needs this to pick FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP over the
+        generic row pitch — the Flanke block renders taller than a plain marker/WebIO pair.
+        """
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        plan_map: dict[str, int] = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
+        return plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME) == fub_id
 
     def _io_rows_needed(self, ext_name: str) -> int:
         """Column rows one extension package needs (IOs + header/blank separator rows)."""
@@ -2770,7 +2839,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plans = await self._load_function_plan_check_data()
         plan_to_ids: dict[int, list[int]] = {}
         for marker_id in marker_ids:
-            if (fub_id := self._check_marker_function_plan_link(marker_id, plans)) is not None:
+            fub_id = self._check_marker_function_plan_link(marker_id, plans)
+            if fub_id is not None and self._is_managed_function_plan(fub_id):
                 plan_to_ids.setdefault(fub_id, []).append(marker_id)
         return plan_to_ids
 
@@ -2792,6 +2862,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plan_to_ids: dict[int, list[int]] = {}
         for webio_id in webio_ids:
             for fub_id, plan_data in plans.items():
+                if not self._is_managed_function_plan(fub_id):
+                    continue
                 if self.api._find_webio_wiring(webio_id, plan_data) is not None:
                     # No break: a stray duplicate element (e.g. left behind by a delete+
                     # recreate cycle, see _wired_source_webio_pairs) can reuse the same
@@ -3131,7 +3203,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         relevant_fub_ids = self._function_plan_check_fub_ids()
         dangling: set[str] = set()
         for fub_id, plan_data in self.function_plan_plans.items():
-            if fub_id not in relevant_fub_ids:
+            if fub_id not in relevant_fub_ids or not self._is_managed_function_plan(fub_id):
                 continue
             present_ids: set[str] = set()
             for elem in (plan_data.get("elements") or {}).values():
@@ -3162,6 +3234,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plans = await self._load_function_plan_check_data()
         plan_to_elem_ids: dict[int, list[int]] = {}
         for fub_id, plan_data in plans.items():
+            if not self._is_managed_function_plan(fub_id):
+                continue
             connected_elem_ids = self._plan_connected_elem_ids(plan_data)
             for elem_id, elem in (plan_data.get("elements") or {}).items():
                 ref = elem.get("reference") or {}
@@ -3251,6 +3325,72 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "markers_by_plan": {name: [gaps_by_plan[name], totals_by_plan[name]] for name in sorted(gaps_by_plan)},
             "ios_by_ext": {ext: [gaps_by_ext[ext], totals_by_ext[ext]] for ext in sorted(gaps_by_ext)},
         }
+
+    def _audit_trigger_pairs(self, trigger_marker_ids: list[int]) -> tuple[list[int], list[int]]:
+        """Compare trigger markers ([TRIG]/[TP]) against the dedicated trigger plan's wiring.
+
+        Returns (missing_ids, orphan_ids): missing = trigger marker without a *complete*
+        Marker+Flanke round trip in the plan (plan may not even exist yet, or pair creation
+        may have failed partway through, leaving a bare marker element); orphan = any Marker
+        element present in the plan — complete pair or not — whose marker is no longer
+        kind==TRIGGER (suffix removed, or the marker was removed while its pair creation was
+        still incomplete). Cleanup finds and removes whatever Flanke wiring exists for an
+        orphaned marker regardless of completeness, so an incomplete leftover pair must be
+        reported here too, not just fully-wired ones — otherwise it never gets swept up. Uses
+        the cached plan snapshot (self.function_plan_plans), consistent with the other
+        Function Plan checks above — not a live reload on every audit tick. The mapped
+        fub_id's live $Fubs name is checked (same freshness guard as
+        _resolve_single_cluster_plan) so a renamed/repurposed/reused plan id is treated as
+        "no trigger plan yet" instead of being audited as if it still were the trigger plan —
+        otherwise a coincidentally-complete pair in that unrelated plan would make a trigger
+        marker look wired when resolve_trigger_plan() would actually create a fresh plan.
+        """
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        plan_map = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
+        fub_id = plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
+        if fub_id is None or self.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
+            return list(trigger_marker_ids), []
+
+        plan_data = self.function_plan_plans.get(fub_id)
+        existing_by_ref, _ = self.api._function_plan_existing_refs(plan_data)
+        all_marker_ids = {ref_id for ref_type, ref_id in existing_by_ref if ref_type == 2}
+        wired_marker_ids = self.api._function_plan_trigger_wired_marker_ids(plan_data)
+
+        missing_ids = [mid for mid in trigger_marker_ids if mid not in wired_marker_ids]
+        trigger_id_set = set(trigger_marker_ids)
+        orphan_ids = [mid for mid in all_marker_ids if mid not in trigger_id_set]
+        return missing_ids, orphan_ids
+
+    async def async_fresh_trigger_audit(self) -> tuple[list[int], list[int]]:
+        """Fetch Comexio's config directly and re-run the trigger-pair audit against it.
+
+        async_request_refresh() is *not* an option here: _async_update_data() returns the
+        existing (possibly stale) self.data as-is whenever self.in_sync is True, which covers
+        the whole duration of a manual sync — the exact window this needs a fresh picture for.
+        So this bypasses the coordinator update machinery entirely and fetches raw config
+        straight from the API. live_states/referenced_markers are omitted deliberately: marker
+        kind depends only on its title, and a trigger marker always has a real name (a suffix
+        needs something to be suffixed to), so it's never affected by the referenced-marker
+        cold-start fallback that only concerns unnamed markers.
+
+        get_raw_config() returns {} on an HTTP failure rather than raising — indistinguishable
+        from a genuinely empty config by shape alone. Proceeding anyway would derive an empty
+        trigger_marker_ids list and make _audit_trigger_pairs() read every existing Marker
+        element in the trigger plan as orphaned, deleting valid self-reset pairs over what was
+        really just a transient fetch failure. So an empty result skips the audit entirely
+        (missing=[], orphan=[] — a safe no-op); the next successful poll or sync retries it.
+        """
+        raw_config = await self.api.get_raw_config()
+        if not raw_config:
+            _LOGGER.warning(
+                "[%s] Trigger re-audit: direct config fetch failed — skipping rather than risk "
+                "misreading it as zero trigger markers and deleting valid self-reset pairs",
+                self.server_id,
+            )
+            return [], []
+        parsed = self.api.parse_config(raw_config)
+        trigger_marker_ids = [int(m["id"]) for m in parsed["markers"] if m.get("kind") == MarkerKind.TRIGGER]
+        return self._audit_trigger_pairs(trigger_marker_ids)
 
     def _function_plan_missing_eta_sec(self, missing_items: list[dict]) -> int:
         """Estimate the duration of the add-pairs repair action in seconds.

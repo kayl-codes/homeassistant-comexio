@@ -368,8 +368,12 @@ class ComexioRepairFlow(RepairsFlow):
             i_c = counts.get("ip_mismatch", 0)
             ce_c = counts.get("cleanup_entities", 0)
             lp_c = counts.get("cleanup_function_plan_count", 0)
-            lp_missing_c = counts.get("function_plan_missing", 0)
-            lp_dangling_c = counts.get("function_plan_dangling", 0)
+            # Trigger-marker gaps/orphans are folded into the same counts: both are fixed by
+            # the identical "function_plan_add_missing" action (button.py's _wire_trigger_pairs
+            # runs alongside the normal Function Plan wiring pass), so they share its UI option
+            # rather than needing a dedicated repair-dialog branch.
+            lp_missing_c = counts.get("function_plan_missing", 0) + counts.get("function_plan_trigger_missing", 0)
+            lp_dangling_c = counts.get("function_plan_dangling", 0) + counts.get("function_plan_trigger_orphan", 0)
             lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
             # Fallback for stale issues created before the coordinator started storing an
             # exact estimate: approximate the affected-plan count from the detail split (one

@@ -41,6 +41,16 @@ def _is_comment_ref_type(ref_type: str | int | None) -> bool:
     return str(ref_type) == _COMMENT_REF_TYPE
 
 
+def _connection_outputs(conn: dict) -> list[dict]:
+    """A connection's "output" sinks, normalized to a list.
+
+    Comexio may serialize "output" as a dict ({"0": {...}}) instead of a list — same
+    server quirk normalized in api.py's _connection_output_ids/_rebuild_one_connection.
+    """
+    raw_outputs = conn.get("output", [])
+    return list(raw_outputs.values()) if isinstance(raw_outputs, dict) else raw_outputs
+
+
 def _build_sorted_pairs(
     elements: dict,
     connections: dict,
@@ -68,7 +78,7 @@ def _build_sorted_pairs(
         if elem_ref.get(inp_eid, {}).get("type") != 2:
             continue
         marker_ref_id = int(elem_ref[inp_eid].get("ref_id", 0))
-        for out in conn.get("output", []):
+        for out in _connection_outputs(conn):
             out_eid_raw = out.get("FubElementId")
             if out_eid_raw is None:
                 continue
@@ -118,8 +128,14 @@ def _assign_grid_positions(
     orphans: list[int],
     rows_per_col: int,
     max_cols: int,
+    row_step: float = _LAYOUT_Y_STEP,
 ) -> list[tuple[int, float, float]]:
-    """Calculate exact grid positions for sorted pairs and orphan elements."""
+    """Calculate exact grid positions for sorted pairs and orphan elements.
+
+    row_step overrides the row pitch (default: the generic single-row-tall marker/WebIO
+    pitch) — pass the caller's own step when the pair's second element renders taller
+    (e.g. the trigger plan's Flanke block), or consecutive rows would visually overlap.
+    """
     positions: dict[int, tuple[float, float]] = {}
     pairs_placed = 0
     for row_idx, (_, m_eid, w_eid) in enumerate(pairs):
@@ -127,7 +143,7 @@ def _assign_grid_positions(
         if col >= max_cols:
             break
         row_in_col = row_idx % rows_per_col
-        y = _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP
+        y = _LAYOUT_Y_START + row_in_col * row_step
         if m_eid not in positions:
             positions[m_eid] = (_LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH, y)
         if w_eid not in positions:
@@ -145,7 +161,7 @@ def _assign_grid_positions(
             )
             break
         row_in_col = row_idx % rows_per_col
-        y = _LAYOUT_Y_START + row_in_col * _LAYOUT_Y_STEP
+        y = _LAYOUT_Y_START + row_in_col * row_step
         positions[eid] = (_LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH, y)
     return [(eid, x, y) for eid, (x, y) in positions.items()]
 

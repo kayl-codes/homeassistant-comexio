@@ -19,6 +19,7 @@ from .const import (
     CONF_SERVER_ID,
     CONF_USERNAME,
     DOMAIN,
+    MarkerKind,
 )
 from .coordinator import ComexioCoordinator
 from .services import async_setup_services
@@ -214,8 +215,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     expected_platform: dict[str, str] = {}
     for m in coordinator.data.get("markers", []):
         uid = f"comexio_{server_id}_m{m['id']}".lower()
-        if m.get("read_only"):
+        kind = m.get("kind")
+        if kind == MarkerKind.READ_ONLY:
             expected_platform[uid] = "binary_sensor" if m["type"] == "digital" else "sensor"
+        elif kind == MarkerKind.TRIGGER:
+            expected_platform[uid] = "button"
         else:
             expected_platform[uid] = "switch" if m["type"] == "digital" else "number"
     for io in coordinator.data.get("io", []):

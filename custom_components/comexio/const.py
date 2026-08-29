@@ -169,6 +169,20 @@ MARKER_INTERVAL_MAX_VALUE = 86400
 # read-only sensor/binary_sensor instead of a writable number/switch (e.g. "Boiler Temp [RO]").
 MARKER_READ_ONLY_SUFFIX = "[RO]"
 
+# "Virtueller Taster" markers: exposed to HA as a button instead of a switch. "[TP]" (Time
+# Pulse) is the legacy alias from the original 2026-06-27 discovery; "[TRIG]" is the current,
+# preferred name — both are recognized so existing [TP] markers don't need renaming.
+MARKER_TRIGGER_SUFFIXES = ("[TRIG]", "[TP]")
+
+
+class MarkerKind(StrEnum):
+    """How a marker is exposed to HA, derived from its Comexio-side title suffix."""
+
+    NORMAL = "normal"
+    READ_ONLY = "read_only"
+    TRIGGER = "trigger"
+
+
 # Analog markers have no configurable value range on the Comexio side, so their Web-IO
 # datapoints must not clamp. The Comexio admin UI round-trips values as wide as ±1e16
 # unchanged, but that only proves the UI's own storage tolerates it — the Web-IO push
@@ -294,6 +308,31 @@ FUNCTION_PLAN_LAYOUT_GRID_SNAP = 7.5  # Studio snaps element positions to half t
 # Retry the reload with exponential backoff before giving up on a pair.
 FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS = 5
 FUNCTION_PLAN_PAIR_RELOAD_INITIAL_DELAY = 1.0  # seconds, doubles every attempt
+
+# Trigger markers ([TRIG]/[TP]): HA maintains one dedicated managed plan containing only
+# Marker+Flanke self-reset pairs — never a Web-IO element. A trigger marker's Web-IO command
+# stays exactly where every other marker's already lives (the normal marker cluster plan, a
+# completely separate fub_id), because the marker's write path is the same direct
+# api.set_value() call used by any writable marker; only the auto-reset-to-0 needs Comexio-side
+# logic. Verified live 2026-08-29 (TestPlan fub_id 33, M6): with only Marker+Flanke wired in
+# one plan (Marker output -> Flanke "In"; Flanke "+" output -> Marker input, no Web-IO element
+# involved at all) and the Web-IO wiring left in the standard "HA - Marker" plan, toggling the
+# HA switch on made M6 fall back to off immediately, exactly as intended — the marker's plan
+# input behaves as a toggle, not a level-set, so each incoming edge (from any plan) flips it.
+FUNCTION_PLAN_TRIGGER_PLAN_NAME = "HA - TRIGGER"
+FUB_BASE_REF_ID_FLANKE = "113"  # $FubModules["5"]["113"], internal catalog name "flankenerkenner"
+FLANKE_PORT_IN = 0  # "In"
+FLANKE_PORT_OUT_RISING = 1  # "+", fires for one cycle on a rising edge only
+
+# Compact per-pair layout in the trigger plan (Marker + Flanke only, no Web-IO element).
+FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER = FUNCTION_PLAN_LAYOUT_X_MARKER
+FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE = FUNCTION_PLAN_LAYOUT_X_WEBIO
+# The Flanke block has 3 in-/3 out-ports -> renders 1+3 = 4 row-heights tall (see the
+# renderer's own geo["h"] formula, function_plan_render_geometry.py), unlike the single-row-tall
+# marker/WebIO pills the generic FUNCTION_PLAN_LAYOUT_Y_STEP (22.5) was sized for. Reusing that
+# step let consecutive trigger rows' Flanke blocks visually overlap. 90.0 = 4 rows (60) + one
+# blank row (15) of breathing room between pairs, rounded up to the 7.5 grid snap.
+FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP = 90.0
 
 # Fixed top-to-bottom rhythm of one extension column in a managed IO cluster plan. Groups the
 # extension lacks are skipped; one blank row separates consecutive groups (visual scanning

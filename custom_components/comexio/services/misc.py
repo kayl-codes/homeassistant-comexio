@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from ..const import DOMAIN, WEBIO_CLASSES, webio_class_name
+from ..const import DOMAIN, WEBIO_CLASSES, MarkerKind, webio_class_name
 from ..coordinator import ComexioCoordinator
 from ..function_plan_render import resolve_element_label
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context
@@ -96,8 +96,10 @@ def _resolve_set_value_marker_target(marker_id: str, value: float, data: dict) -
     marker = next((mk for mk in data.get("markers", []) if str(mk.get("id")) == marker_id), None)
     if marker is None:
         return None, f"Unknown marker 'M{marker_id}' — not in the current Comexio configuration."
-    if marker.get("read_only"):
+    if marker.get("kind") == MarkerKind.READ_ONLY:
         return None, f"Marker 'M{marker_id}' is read-only (title ends with [RO]) — writes are rejected."
+    if marker.get("kind") == MarkerKind.TRIGGER and value != 1:
+        return None, f"Trigger marker 'M{marker_id}' only accepts value 1 (press) — writes are rejected."
     if marker.get("type") == "digital" and value not in (0, 1):
         return None, f"Digital marker 'M{marker_id}' only accepts 0 or 1 (got {value})."
     return {"target_type": "marker", "target_id": marker_id}, ""
