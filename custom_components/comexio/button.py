@@ -350,7 +350,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
 
                 plan_summary = await self._wire_created_pairs(ctx, created_names, gap_items)
-                plan_summary += await self._wire_trigger_pairs(ctx)
+                plan_summary += await self._wire_trigger_pairs(ctx, refresh_audit=True)
 
                 duration = datetime.datetime.now() - start_time
                 duration_str = f"{_mmss(duration.total_seconds())} min"
@@ -1347,15 +1347,23 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         _LOGGER.info("[%s] Cluster plan wiring done: added=%d, errors=%d", self.server_id, n_added, n_errors)
         return summary
 
-    async def _wire_trigger_pairs(self, ctx: _SyncContext) -> list[str]:
+    async def _wire_trigger_pairs(self, ctx: _SyncContext, refresh_audit: bool = False) -> list[str]:
         """Create/remove Marker+Flanke self-reset pairs for [TRIG]/[TP] markers.
 
         Driven by the coordinator's function_plan_trigger_missing/orphan audit lists, not by
         created_names — a trigger marker's Web-IO command is audited/created exactly like any
         other marker's, independently of this construct (see const.py's trigger-plan notes).
+        refresh_audit=True forces a fresh coordinator poll first — used after _sync_all_classes,
+        since a marker renamed to add/drop its [TRIG]/[TP] suffix around the time this sync ran
+        would otherwise be judged against the audit snapshot from the *previous* poll, leaving
+        its self-reset pair uncreated/undeleted until some unrelated later poll happens to
+        pick it up (same staleness concern ComexioCleanupButton.async_press guards against
+        with the same async_request_refresh() call, further down in this file).
         """
         if ctx.action not in {"full_sync", "function_plan_add_missing"}:
             return []
+        if refresh_audit:
+            await self.coordinator.async_request_refresh()
         audit_data = getattr(self.coordinator, "last_audit_results", {})
         missing_ids: list[int] = audit_data.get("function_plan_trigger_missing", [])
         orphan_ids: list[int] = audit_data.get("function_plan_trigger_orphan", [])
