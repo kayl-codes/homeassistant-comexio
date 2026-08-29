@@ -3331,9 +3331,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Returns (missing_ids, orphan_ids): missing = trigger marker without a *complete*
         Marker+Flanke round trip in the plan (plan may not even exist yet, or pair creation
-        may have failed partway through, leaving a bare marker element); orphan = a fully
-        wired Marker+Flanke pair whose marker is no longer kind==TRIGGER (suffix removed).
-        Uses the cached plan snapshot (self.function_plan_plans), consistent with the other
+        may have failed partway through, leaving a bare marker element); orphan = any Marker
+        element present in the plan — complete pair or not — whose marker is no longer
+        kind==TRIGGER (suffix removed, or the marker was removed while its pair creation was
+        still incomplete). Cleanup finds and removes whatever Flanke wiring exists for an
+        orphaned marker regardless of completeness, so an incomplete leftover pair must be
+        reported here too, not just fully-wired ones — otherwise it never gets swept up. Uses
+        the cached plan snapshot (self.function_plan_plans), consistent with the other
         Function Plan checks above — not a live reload on every audit tick.
         """
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
@@ -3343,11 +3347,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return list(trigger_marker_ids), []
 
         plan_data = self.function_plan_plans.get(fub_id)
+        existing_by_ref, _ = self.api._function_plan_existing_refs(plan_data)
+        all_marker_ids = {ref_id for ref_type, ref_id in existing_by_ref if ref_type == 2}
         wired_marker_ids = self.api._function_plan_trigger_wired_marker_ids(plan_data)
 
         missing_ids = [mid for mid in trigger_marker_ids if mid not in wired_marker_ids]
         trigger_id_set = set(trigger_marker_ids)
-        orphan_ids = [mid for mid in wired_marker_ids if mid not in trigger_id_set]
+        orphan_ids = [mid for mid in all_marker_ids if mid not in trigger_id_set]
         return missing_ids, orphan_ids
 
     def _function_plan_missing_eta_sec(self, missing_items: list[dict]) -> int:

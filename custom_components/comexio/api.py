@@ -2384,7 +2384,7 @@ class ComexioAPI:
         Returns (added_marker_ids, error_messages).
         """
         plan_data = await self.function_plan_load_elements(fub_id)
-        existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
+        existing_by_ref, _ = self._function_plan_existing_refs(plan_data)
 
         if fresh_plan:
             marker_ids = sorted(marker_ids)
@@ -2416,7 +2416,7 @@ class ComexioAPI:
         errors: list[str] = []
         for i, marker_id in enumerate(marker_ids):
             err = await self._function_plan_add_single_trigger(
-                fub_id, marker_id, existing_by_ref, conn_endpoints, _pair_pos(len(added), i)
+                fub_id, marker_id, plan_data, existing_by_ref, _pair_pos(len(added), i)
             )
             if err is None:
                 added.append(marker_id)
@@ -2431,8 +2431,8 @@ class ComexioAPI:
         self,
         fub_id: int,
         marker_id: int,
+        plan_data: dict | None,
         existing_by_ref: dict[tuple[int, int], int],
-        conn_endpoints: list[set[int]],
         pos: tuple[float, float, float],
     ) -> str | None:
         """Add one Marker+Flanke self-reset pair at pos=(x_marker, x_flanke, y).
@@ -2445,18 +2445,30 @@ class ComexioAPI:
         a rising edge) -> marker input[0]. The marker's plan input behaves as a toggle, so this
         loop alone (no Web-IO) makes an external write to the marker self-clear back to 0.
         Return semantics as _function_plan_wire_ref_pair (None = added, "" = already wired).
+
+        existing_by_ref collapses same-(ref_type, ref_id) elements to one arbitrary elem_id —
+        every Flanke in this plan shares the same (type=5, ref_id) block-type reference, so
+        looking a Flanke up there would silently reuse one marker's Flanke for every other
+        trigger marker. The marker's own Flanke (if any) is found via its connections instead
+        (_function_plan_paired_flanke_ids), and reused only if the round trip is complete
+        (_function_plan_flanke_wires_back) — a one-directional leftover from a failed previous
+        attempt must not be reported as already wired.
         """
         label = f"M{marker_id}"
         x_marker, x_flanke, y = pos
         flanke_ref_id = int(FUB_BASE_REF_ID_FLANKE)
 
         existing_marker_elem = existing_by_ref.get((2, marker_id))
-        existing_flanke_elem = existing_by_ref.get((5, flanke_ref_id))
-        if (
-            existing_marker_elem
-            and existing_flanke_elem
-            and any(existing_marker_elem in eps and existing_flanke_elem in eps for eps in conn_endpoints)
-        ):
+        existing_flanke_elem: int | None = None
+        already_complete = False
+        if existing_marker_elem:
+            paired_flanke_ids = self._function_plan_paired_flanke_ids(plan_data, [existing_marker_elem], flanke_ref_id)
+            if paired_flanke_ids:
+                existing_flanke_elem = paired_flanke_ids[0]
+                already_complete = self._function_plan_flanke_wires_back(
+                    plan_data, existing_flanke_elem, existing_marker_elem
+                )
+        if already_complete:
             _LOGGER.info("trigger pair %s already wired in plan fub=%s, skipping", label, fub_id)
             return ""
 
@@ -2522,6 +2534,22 @@ class ComexioAPI:
                 if str(ref.get("type")) == "5" and str(ref.get("ref_id")) == str(flanke_ref_id):
                     flanke_elem_ids.append(int(dst_id))
         return flanke_elem_ids
+
+    @staticmethod
+    def _function_plan_flanke_wires_back(plan_data: dict | None, flanke_elem_id: int, marker_elem_id: int) -> bool:
+        """True if flanke_elem_id has a Flanke->Marker connection back to marker_elem_id."""
+        if not plan_data:
+            return False
+        for conn in (plan_data.get("connections") or {}).values():
+            src_id = (conn.get("input") or {}).get("FubElementId")
+            if src_id != flanke_elem_id:
+                continue
+            outputs = conn.get("output") or []
+            if isinstance(outputs, dict):
+                outputs = list(outputs.values())
+            if any(sink.get("FubElementId") == marker_elem_id for sink in outputs):
+                return True
+        return False
 
     async def function_plan_remove_trigger_pairs(self, fub_id: int, marker_ids: list[int]) -> tuple[int, bool]:
         """Remove orphaned Marker+Flanke pairs (marker no longer [TRIG]/[TP]) from the trigger plan.
