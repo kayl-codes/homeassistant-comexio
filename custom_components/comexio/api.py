@@ -2107,6 +2107,19 @@ class ComexioAPI:
         return fresh_data
 
     @staticmethod
+    def _function_plan_elem_id(value: Any) -> int | None:
+        """Cast a raw FubElementId to int, tolerating the string-or-int shapes Comexio mixes.
+
+        Every trigger-pair helper below matches these against elem_ids sourced from
+        _function_plan_existing_refs, which are always int — comparing an un-cast string
+        against that int set would silently never match.
+        """
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _function_plan_existing_refs(plan_data: dict | None) -> tuple[dict[tuple[int, int], int], list[set[int]]]:
         """Index a plan's elements by (ref_type, ref_id) and collect connection endpoint sets.
 
@@ -2155,12 +2168,12 @@ class ComexioAPI:
 
         edges: set[tuple[int, int]] = set()
         for conn in (plan_data.get("connections") or {}).values():
-            src_id = (conn.get("input") or {}).get("FubElementId")
+            src_id = ComexioAPI._function_plan_elem_id((conn.get("input") or {}).get("FubElementId"))
             outputs = conn.get("output") or []
             if isinstance(outputs, dict):
                 outputs = list(outputs.values())
             for sink in outputs:
-                dst_id = sink.get("FubElementId")
+                dst_id = ComexioAPI._function_plan_elem_id(sink.get("FubElementId"))
                 if src_id is not None and dst_id is not None:
                     edges.add((src_id, dst_id))
 
@@ -2553,16 +2566,16 @@ class ComexioAPI:
 
         flanke_elem_ids: set[int] = set()
         for conn in (plan_data.get("connections") or {}).values():
-            src_id = (conn.get("input") or {}).get("FubElementId")
+            src_id = ComexioAPI._function_plan_elem_id((conn.get("input") or {}).get("FubElementId"))
             outputs = conn.get("output") or []
             if isinstance(outputs, dict):
                 outputs = list(outputs.values())
-            dst_ids = [sink.get("FubElementId") for sink in outputs]
+            dst_ids = [ComexioAPI._function_plan_elem_id(sink.get("FubElementId")) for sink in outputs]
             endpoint_ids = [src_id, *dst_ids]
             if not any(eid in marker_elem_id_set for eid in endpoint_ids):
                 continue
             other_ids = [eid for eid in endpoint_ids if eid is not None and eid not in marker_elem_id_set]
-            flanke_elem_ids.update(int(eid) for eid in other_ids if _is_flanke(eid))
+            flanke_elem_ids.update(eid for eid in other_ids if _is_flanke(eid))
         return list(flanke_elem_ids)
 
     @staticmethod
@@ -2571,13 +2584,13 @@ class ComexioAPI:
         if not plan_data:
             return False
         for conn in (plan_data.get("connections") or {}).values():
-            src_id = (conn.get("input") or {}).get("FubElementId")
+            src_id = ComexioAPI._function_plan_elem_id((conn.get("input") or {}).get("FubElementId"))
             if src_id != flanke_elem_id:
                 continue
             outputs = conn.get("output") or []
             if isinstance(outputs, dict):
                 outputs = list(outputs.values())
-            if any(sink.get("FubElementId") == marker_elem_id for sink in outputs):
+            if any(ComexioAPI._function_plan_elem_id(sink.get("FubElementId")) == marker_elem_id for sink in outputs):
                 return True
         return False
 
