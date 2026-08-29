@@ -2477,18 +2477,23 @@ class ComexioAPI:
         )
         if elem_flanke is None:
             return f"{label}: add_element (Flanke) failed"
+        flanke_is_new = existing_flanke_elem is None
 
         elem_marker = existing_marker_elem or await self.function_plan_add_element(
             fub_id=fub_id, ref_id=marker_id, element_type=2, x=x_marker, y=y
         )
         if elem_marker is None:
-            return f"{label}: add_element (marker) failed"
+            return await self._function_plan_trigger_add_failed(
+                fub_id, elem_flanke, flanke_is_new, f"{label}: add_element (marker) failed"
+            )
 
         conn_out = await self.function_plan_save_connection(
             fub_id, int(elem_marker), [(int(elem_flanke), FLANKE_PORT_IN, False)], "binary"
         )
         if conn_out is None:
-            return f"{label}: save_connection (marker→Flanke) failed"
+            return await self._function_plan_trigger_add_failed(
+                fub_id, elem_flanke, flanke_is_new, f"{label}: save_connection (marker→Flanke) failed"
+            )
 
         conn_back = await self.function_plan_save_connection(
             fub_id,
@@ -2498,42 +2503,67 @@ class ComexioAPI:
             input_pos=FLANKE_PORT_OUT_RISING,
         )
         if conn_back is None:
-            return f"{label}: save_connection (Flanke→marker) failed"
+            return await self._function_plan_trigger_add_failed(
+                fub_id, elem_flanke, flanke_is_new, f"{label}: save_connection (Flanke→marker) failed"
+            )
 
         _LOGGER.info("trigger pair %s created: marker=%s flanke=%s (fub=%s)", label, elem_marker, elem_flanke, fub_id)
         return None
+
+    async def _function_plan_trigger_add_failed(
+        self, fub_id: int, elem_flanke: int, flanke_is_new: bool, error: str
+    ) -> str:
+        """On a failed trigger-pair step, delete a just-created Flanke instead of leaving debris.
+
+        A bare, disconnected Flanke has no marker to key off of, so the marker-based trigger
+        audit can never find and clean it up later — it would silently accumulate across
+        repeated failed sync attempts. The caller (button.py) already stops the trigger plan
+        before calling function_plan_add_trigger_pairs and restarts it afterwards, so this
+        needs no stop/restart of its own. A *reused* existing Flanke (flanke_is_new=False)
+        predates this call and must not be deleted — it may still complete on a later retry.
+        """
+        if flanke_is_new:
+            await self.function_plan_delete_elements([int(elem_flanke)])
+        return error
 
     @staticmethod
     def _function_plan_paired_flanke_ids(
         plan_data: dict | None, marker_elem_ids: list[int], flanke_ref_id: int
     ) -> list[int]:
-        """Find each Flanke element wired to one of marker_elem_ids via a Marker->Flanke connection.
+        """Find each Flanke element connected to one of marker_elem_ids, in either direction.
 
-        Connection outputs may be a dict or a list (Comexio returns either shape — see
-        _function_plan_existing_refs, which normalizes the same way); missing that here
-        would make orphan cleanup silently fail to find (and delete) the paired Flanke
-        whenever a plan happens to use the list shape.
+        A pair's Marker->Flanke or Flanke->Marker connection alone can be the only one present
+        (e.g. left behind by a failed pair creation), so both directions must be checked here —
+        otherwise orphan cleanup can delete the marker but leave its Flanke behind. Connection
+        outputs may be a dict or a list (Comexio returns either shape — see
+        _function_plan_existing_refs, which normalizes the same way); missing that here would
+        make orphan cleanup silently fail to find (and delete) the paired Flanke whenever a
+        plan happens to use the list shape.
         """
         if not plan_data:
             return []
         elements = plan_data.get("elements", {})
         marker_elem_id_set = set(marker_elem_ids)
-        flanke_elem_ids: list[int] = []
+
+        def _is_flanke(elem_id: int | None) -> bool:
+            if elem_id is None:
+                return False
+            ref = (elements.get(str(elem_id)) or {}).get("reference") or {}
+            return str(ref.get("type")) == "5" and str(ref.get("ref_id")) == str(flanke_ref_id)
+
+        flanke_elem_ids: set[int] = set()
         for conn in (plan_data.get("connections") or {}).values():
             src_id = (conn.get("input") or {}).get("FubElementId")
-            if src_id not in marker_elem_id_set:
-                continue
             outputs = conn.get("output") or []
             if isinstance(outputs, dict):
                 outputs = list(outputs.values())
-            for sink in outputs:
-                dst_id = sink.get("FubElementId")
-                if dst_id is None:
-                    continue
-                ref = (elements.get(str(dst_id)) or {}).get("reference") or {}
-                if str(ref.get("type")) == "5" and str(ref.get("ref_id")) == str(flanke_ref_id):
-                    flanke_elem_ids.append(int(dst_id))
-        return flanke_elem_ids
+            dst_ids = [sink.get("FubElementId") for sink in outputs]
+            endpoint_ids = [src_id, *dst_ids]
+            if not any(eid in marker_elem_id_set for eid in endpoint_ids):
+                continue
+            other_ids = [eid for eid in endpoint_ids if eid is not None and eid not in marker_elem_id_set]
+            flanke_elem_ids.update(int(eid) for eid in other_ids if _is_flanke(eid))
+        return list(flanke_elem_ids)
 
     @staticmethod
     def _function_plan_flanke_wires_back(plan_data: dict | None, flanke_elem_id: int, marker_elem_id: int) -> bool:
