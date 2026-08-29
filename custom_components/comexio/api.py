@@ -2506,25 +2506,27 @@ class ComexioAPI:
                 elem_flanke, flanke_is_new, f"{label}: add_element (marker) failed"
             )
 
-        conn_out = await self.function_plan_save_connection(
-            fub_id, int(elem_marker), [(int(elem_flanke), FLANKE_PORT_IN, False)], "binary"
-        )
-        if conn_out is None:
-            return await self._function_plan_trigger_add_failed(
-                elem_flanke, flanke_is_new, f"{label}: save_connection (marker→Flanke) failed"
+        if not self._function_plan_connection_exists(plan_data, int(elem_marker), int(elem_flanke)):
+            conn_out = await self.function_plan_save_connection(
+                fub_id, int(elem_marker), [(int(elem_flanke), FLANKE_PORT_IN, False)], "binary"
             )
+            if conn_out is None:
+                return await self._function_plan_trigger_add_failed(
+                    elem_flanke, flanke_is_new, f"{label}: save_connection (marker→Flanke) failed"
+                )
 
-        conn_back = await self.function_plan_save_connection(
-            fub_id,
-            int(elem_flanke),
-            [(int(elem_marker), 0, False)],
-            "binary",
-            input_pos=FLANKE_PORT_OUT_RISING,
-        )
-        if conn_back is None:
-            return await self._function_plan_trigger_add_failed(
-                elem_flanke, flanke_is_new, f"{label}: save_connection (Flanke→marker) failed"
+        if not self._function_plan_flanke_wires_back(plan_data, int(elem_flanke), int(elem_marker)):
+            conn_back = await self.function_plan_save_connection(
+                fub_id,
+                int(elem_flanke),
+                [(int(elem_marker), 0, False)],
+                "binary",
+                input_pos=FLANKE_PORT_OUT_RISING,
             )
+            if conn_back is None:
+                return await self._function_plan_trigger_add_failed(
+                    elem_flanke, flanke_is_new, f"{label}: save_connection (Flanke→marker) failed"
+                )
 
         _LOGGER.info("trigger pair %s created: marker=%s flanke=%s (fub=%s)", label, elem_marker, elem_flanke, fub_id)
         return None
@@ -2583,20 +2585,25 @@ class ComexioAPI:
         return list(flanke_elem_ids)
 
     @staticmethod
-    def _function_plan_flanke_wires_back(plan_data: dict | None, flanke_elem_id: int, marker_elem_id: int) -> bool:
-        """True if flanke_elem_id has a Flanke->Marker connection back to marker_elem_id."""
+    def _function_plan_connection_exists(plan_data: dict | None, src_elem_id: int, dst_elem_id: int) -> bool:
+        """True if plan_data already has a connection from src_elem_id to dst_elem_id."""
         if not plan_data:
             return False
         for conn in (plan_data.get("connections") or {}).values():
             src_id = ComexioAPI._function_plan_elem_id((conn.get("input") or {}).get("FubElementId"))
-            if src_id != flanke_elem_id:
+            if src_id != src_elem_id:
                 continue
             outputs = conn.get("output") or []
             if isinstance(outputs, dict):
                 outputs = list(outputs.values())
-            if any(ComexioAPI._function_plan_elem_id(sink.get("FubElementId")) == marker_elem_id for sink in outputs):
+            if any(ComexioAPI._function_plan_elem_id(sink.get("FubElementId")) == dst_elem_id for sink in outputs):
                 return True
         return False
+
+    @staticmethod
+    def _function_plan_flanke_wires_back(plan_data: dict | None, flanke_elem_id: int, marker_elem_id: int) -> bool:
+        """True if flanke_elem_id has a Flanke->Marker connection back to marker_elem_id."""
+        return ComexioAPI._function_plan_connection_exists(plan_data, flanke_elem_id, marker_elem_id)
 
     async def function_plan_remove_trigger_pairs(self, fub_id: int, marker_ids: list[int]) -> tuple[int, bool]:
         """Remove orphaned Marker+Flanke pairs (marker no longer [TRIG]/[TP]) from the trigger plan.
