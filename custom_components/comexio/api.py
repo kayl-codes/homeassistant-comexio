@@ -2145,6 +2145,15 @@ class ComexioAPI:
         return existing_by_ref, conn_endpoints
 
     @staticmethod
+    def _function_plan_elem_ref(elements: dict, elem_id: int) -> dict:
+        return (elements.get(str(elem_id)) or {}).get("reference") or {}
+
+    @staticmethod
+    def _function_plan_elem_is_flanke(elements: dict, elem_id: int, flanke_ref_id: str) -> bool:
+        ref = ComexioAPI._function_plan_elem_ref(elements, elem_id)
+        return str(ref.get("type")) == "5" and str(ref.get("ref_id")) == flanke_ref_id
+
+    @staticmethod
     def _function_plan_trigger_wired_marker_ids(plan_data: dict | None) -> set[int]:
         """Marker (type=2) ref_ids in plan_data with a complete Marker<->Flanke round trip.
 
@@ -2159,13 +2168,6 @@ class ComexioAPI:
         elements = plan_data.get("elements", {})
         flanke_ref_id = str(FUB_BASE_REF_ID_FLANKE)
 
-        def _elem_ref(elem_id: int) -> dict:
-            return (elements.get(str(elem_id)) or {}).get("reference") or {}
-
-        def _is_flanke(elem_id: int) -> bool:
-            ref = _elem_ref(elem_id)
-            return str(ref.get("type")) == "5" and str(ref.get("ref_id")) == flanke_ref_id
-
         edges: set[tuple[int, int]] = set()
         for conn in (plan_data.get("connections") or {}).values():
             src_id = ComexioAPI._function_plan_elem_id((conn.get("input") or {}).get("FubElementId"))
@@ -2177,11 +2179,15 @@ class ComexioAPI:
                 if src_id is not None and dst_id is not None:
                     edges.add((src_id, dst_id))
 
-        wired_marker_elem_ids = {src for src, dst in edges if _is_flanke(dst) and (dst, src) in edges}
+        wired_marker_elem_ids = {
+            src
+            for src, dst in edges
+            if ComexioAPI._function_plan_elem_is_flanke(elements, dst, flanke_ref_id) and (dst, src) in edges
+        }
         return {
-            int(_elem_ref(elem_id)["ref_id"])
+            int(ComexioAPI._function_plan_elem_ref(elements, elem_id)["ref_id"])
             for elem_id in wired_marker_elem_ids
-            if str(_elem_ref(elem_id).get("type")) == "2"
+            if str(ComexioAPI._function_plan_elem_ref(elements, elem_id).get("type")) == "2"
         }
 
     async def _function_plan_wire_ref_pair(
@@ -2497,7 +2503,7 @@ class ComexioAPI:
         )
         if elem_marker is None:
             return await self._function_plan_trigger_add_failed(
-                fub_id, elem_flanke, flanke_is_new, f"{label}: add_element (marker) failed"
+                elem_flanke, flanke_is_new, f"{label}: add_element (marker) failed"
             )
 
         conn_out = await self.function_plan_save_connection(
@@ -2505,7 +2511,7 @@ class ComexioAPI:
         )
         if conn_out is None:
             return await self._function_plan_trigger_add_failed(
-                fub_id, elem_flanke, flanke_is_new, f"{label}: save_connection (marker→Flanke) failed"
+                elem_flanke, flanke_is_new, f"{label}: save_connection (marker→Flanke) failed"
             )
 
         conn_back = await self.function_plan_save_connection(
@@ -2517,15 +2523,13 @@ class ComexioAPI:
         )
         if conn_back is None:
             return await self._function_plan_trigger_add_failed(
-                fub_id, elem_flanke, flanke_is_new, f"{label}: save_connection (Flanke→marker) failed"
+                elem_flanke, flanke_is_new, f"{label}: save_connection (Flanke→marker) failed"
             )
 
         _LOGGER.info("trigger pair %s created: marker=%s flanke=%s (fub=%s)", label, elem_marker, elem_flanke, fub_id)
         return None
 
-    async def _function_plan_trigger_add_failed(
-        self, fub_id: int, elem_flanke: int, flanke_is_new: bool, error: str
-    ) -> str:
+    async def _function_plan_trigger_add_failed(self, elem_flanke: int, flanke_is_new: bool, error: str) -> str:
         """On a failed trigger-pair step, delete a just-created Flanke instead of leaving debris.
 
         A bare, disconnected Flanke has no marker to key off of, so the marker-based trigger
