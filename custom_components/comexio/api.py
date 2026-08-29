@@ -2541,8 +2541,12 @@ class ComexioAPI:
         needs no stop/restart of its own. A *reused* existing Flanke (flanke_is_new=False)
         predates this call and must not be deleted — it may still complete on a later retry.
         """
-        if flanke_is_new:
-            await self.function_plan_delete_elements([int(elem_flanke)])
+        if flanke_is_new and not await self.function_plan_delete_elements([int(elem_flanke)]):
+            _LOGGER.error(
+                "trigger pair rollback: failed to delete orphaned Flanke elem=%s — "
+                "will not be found by the marker-based trigger audit; needs manual plan cleanup",
+                elem_flanke,
+            )
         return error
 
     @staticmethod

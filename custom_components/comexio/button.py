@@ -1750,7 +1750,20 @@ class ComexioMarkerTriggerButton(ComexioMarkerEntity, ButtonEntity):
     """
 
     async def async_press(self) -> None:
-        """Fire the trigger by writing 1 to the marker once."""
+        """Fire the trigger by writing 1 to the marker once.
+
+        Re-checks the marker's current kind against live coordinator data (not the kind
+        captured at entity creation) so a title edit that drops [TRIG]/[TP] or adds [RO]
+        after this button was created can't be bypassed by a stale, still-registered entity.
+        """
+        marker = next(
+            (mk for mk in self.coordinator.data.get("markers", []) if str(mk.get("id")) == self._marker_id),
+            None,
+        )
+        if marker is None or marker.get("kind") != MarkerKind.TRIGGER:
+            raise HomeAssistantError(
+                f"Marker {self._marker_id} is no longer a trigger marker — reload the integration to refresh entities."
+            )
         if not await self.coordinator.api.set_value("marker", self._marker_id, 1):
             raise HomeAssistantError(f"Failed to trigger marker {self._marker_id}")
 
