@@ -67,11 +67,13 @@ jobs:
           # for why mypy's own python_version setting is pinned lower, at 3.13).
           python-version: '3.14'
       - name: Install mypy
-        run: pip install mypy==2.3.1 homeassistant-stubs==2026.8.3
+        run: pip install --only-binary :all: mypy==2.3.1 homeassistant-stubs==2026.8.3
       - name: Run mypy
         id: mypy
         continue-on-error: true
-        run: mypy custom_components/comexio | tee mypy-output.txt
+        run: |
+          set -o pipefail
+          mypy custom_components/comexio | tee mypy-output.txt
       - name: Summarize mypy results
         if: always()
         run: |
