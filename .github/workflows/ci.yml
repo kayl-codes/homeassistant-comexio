@@ -47,6 +47,33 @@ jobs:
       - name: Security check - Bandit
         run: bandit -r custom_components/comexio
 
+  mypy:
+    name: Type check - mypy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          # homeassistant-stubs requires >=3.14.2 (see pyproject.toml [tool.mypy] comment
+          # for why mypy's own python_version setting is pinned lower, at 3.13).
+          python-version: '3.14'
+      - name: Install mypy
+        run: pip install mypy==2.3.1 homeassistant-stubs==2026.8.3
+      - name: Run mypy
+        id: mypy
+        continue-on-error: true
+        run: mypy custom_components/comexio | tee mypy-output.txt
+      - name: Summarize mypy results
+        if: always()
+        run: |
+          count=$(grep -c ": error:" mypy-output.txt || true)
+          echo "### mypy: ${count} error(s) found (non-blocking during initial type-coverage rollout)" >> "$GITHUB_STEP_SUMMARY"
+
   validate:
     name: Check hassfest
     runs-on: ubuntu-latest

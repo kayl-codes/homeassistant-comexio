@@ -29,3 +29,17 @@ combine-as-imports = true
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.mypy]
+# homeassistant-stubs uses PEP 696 generic defaults (e.g. ConfigEntry[_DataT = None]),
+# which mypy only parses under python_version >= 3.13, independent of this project's
+# own requires-python (>=3.12, unaffected since we never write 3.13-only syntax).
+python_version = "3.13"
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# yaml ships no stubs; scoped per-module so a typo'd/broken import elsewhere
+# still surfaces as an error instead of being silently swallowed.
+module = ["yaml"]
+ignore_missing_imports = true
