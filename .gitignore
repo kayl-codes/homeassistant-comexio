@@ -10,8 +10,9 @@ __pycache__/
 .github/copilot-instructions/
 .vscode/
 
-# Generated requirements (built in CI from the Pipfile)
-/requirements.txt
+# requirements.txt is committed (generated from manifest.json by
+# scripts/generate_requirements.py, see .pre-commit-config.yaml) so OSV-Scanner
+# has a lockfile-shaped format to scan.
 /requirements_tests.txt
 /requirements_tests_only_binary_exempt.txt
 
