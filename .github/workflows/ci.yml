@@ -4,12 +4,18 @@ on:
   push:
     paths:
       - 'custom_components/**'
+      - '.github/workflows/**'
       - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'scripts/generate_requirements.py'
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - 'custom_components/**'
+      - '.github/workflows/**'
       - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'scripts/generate_requirements.py'
   workflow_dispatch:
 
 permissions:
@@ -46,6 +52,63 @@ jobs:
         run: pip install bandit
       - name: Security check - Bandit
         run: bandit -r custom_components/comexio
+
+  mypy:
+    name: Type check - mypy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          # homeassistant-stubs requires >=3.14.2 (see pyproject.toml [tool.mypy] comment
+          # for why mypy's own python_version setting is pinned lower, at 3.13).
+          python-version: '3.14'
+      - name: Install mypy
+        run: |
+          # homeassistant-stubs declares a hard dependency on the full homeassistant
+          # runtime package, which drags in HA's entire mandatory dependency tree
+          # (Bluetooth stack, boto3, SQLAlchemy, ...). On the still-new cp314 ABI most
+          # of those don't have prebuilt wheels yet, so combined with --only-binary
+          # pip's resolver backtracks across dozens of versions and hits
+          # "resolution-too-deep". We only need the .pyi stub files, never the runtime
+          # package itself, so install it with --no-deps to skip that tree entirely.
+          pip install --only-binary :all: mypy==2.3.1
+          pip install --only-binary :all: --no-deps homeassistant-stubs==2026.8.3
+      - name: Run mypy
+        id: mypy
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mypy custom_components/comexio | tee mypy-output.txt
+      - name: Summarize mypy results
+        if: always()
+        run: |
+          count=$(grep -c ": error:" mypy-output.txt || true)
+          if [ "${{ steps.mypy.outcome }}" = "failure" ] && [ "$count" -eq 0 ]; then
+            echo "### mypy: run failed without producing line-level errors (fatal crash or config issue) — see job log" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### mypy: ${count} error(s) found (non-blocking during initial type-coverage rollout)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  check-requirements-sync:
+    name: Verify requirements.txt matches manifest.json
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Check requirements.txt is in sync with manifest.json
+        run: python scripts/generate_requirements.py --check
 
   validate:
     name: Check hassfest
