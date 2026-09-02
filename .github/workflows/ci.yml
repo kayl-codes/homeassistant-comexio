@@ -68,7 +68,15 @@ jobs:
           python-version: '3.14'
       - name: Install mypy
         run: |
-          pip install --only-binary :all: mypy==2.3.1 homeassistant-stubs==2026.8.3
+          # homeassistant-stubs declares a hard dependency on the full homeassistant
+          # runtime package, which drags in HA's entire mandatory dependency tree
+          # (Bluetooth stack, boto3, SQLAlchemy, ...). On the still-new cp314 ABI most
+          # of those don't have prebuilt wheels yet, so combined with --only-binary
+          # pip's resolver backtracks across dozens of versions and hits
+          # "resolution-too-deep". We only need the .pyi stub files, never the runtime
+          # package itself, so install it with --no-deps to skip that tree entirely.
+          pip install --only-binary :all: mypy==2.3.1
+          pip install --no-deps homeassistant-stubs==2026.8.3
       - name: Run mypy
         id: mypy
         continue-on-error: true
