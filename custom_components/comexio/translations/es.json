@@ -135,6 +135,9 @@
       "fw_check": {
         "name": "Comprobar firmware ahora"
       },
+      "webio_range_check": {
+        "name": "Comprobar rango Web-IO ahora"
+      },
       "entity_id_fix": {
         "name": "Corrección de ID de entidad"
       },

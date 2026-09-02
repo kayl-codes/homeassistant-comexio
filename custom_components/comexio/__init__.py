@@ -6,7 +6,7 @@ import logging
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 
 from .api import ComexioAPI
@@ -93,6 +93,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # so an event written early after restart can't race the load and be lost.
     await coordinator.async_load_watchdog_history()
 
+    # One-time migration: the Web-IO range-check button's entity_id used to be derived from
+    # its translated name at first registration, which could freeze in a nonsense object_id
+    # (e.g. "button.system_iosrv1_2") if the translation file was momentarily out of sync at
+    # setup time. The button now pins its own entity_id in code (button.py), but that only
+    # applies to entities registered from now on — this renames an already-registered one in
+    # place. Must run before the platform setup below, so the rename (and its state migration)
+    # happens before button.py's entity attaches to its registry entry, not after.
+    _migrate_webio_range_check_entity_id(hass, server_id)
+
     # ---------------------------
     # Explicit Device Registration
     # ---------------------------
@@ -112,6 +121,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Extension firmware check: nightly window, version-gated (see
     # coordinator.async_start_firmware_update_check). Cancelled automatically on unload/reload.
     entry.async_on_unload(coordinator.async_start_firmware_update_check())
+
+    # Web-IO analog Min/Max range check: nightly window (see
+    # coordinator.async_start_webio_range_check). Cancelled automatically on unload/reload.
+    entry.async_on_unload(coordinator.async_start_webio_range_check())
 
     # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
     # cancelled automatically on unload/reload.
@@ -179,6 +192,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_webio_sync_status_sensor")
     active_unique_ids.add(f"comexio_{server_id}_entity_id_fix_btn")
     active_unique_ids.add(f"comexio_{server_id}_fw_check_btn")
+    active_unique_ids.add(f"comexio_{server_id}_webio_range_check_btn")
     active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
     active_unique_ids.add(f"comexio_{server_id}_uninstall_cleanup_btn")
     active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
@@ -284,6 +298,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.async_check_orphaned_statistics(conf)
 
     return True
+
+
+def _migrate_webio_range_check_entity_id(hass: HomeAssistant, server_id: str) -> None:
+    """One-time rename of the Web-IO range-check button to its pinned entity_id (see caller)."""
+    ent_reg = er.async_get(hass)
+    unique_id = f"comexio_{server_id}_webio_range_check_btn"
+    old_entity_id = ent_reg.async_get_entity_id("button", DOMAIN, unique_id)
+    target_entity_id = f"button.comexio_{server_id}_webio_range_check"
+    if not old_entity_id or old_entity_id == target_entity_id:
+        return
+    if ent_reg.async_get(target_entity_id) is not None:
+        _LOGGER.warning(
+            "[%s] Cannot migrate '%s' to '%s' — target entity_id already taken",
+            server_id,
+            old_entity_id,
+            target_entity_id,
+        )
+        return
+    try:
+        ent_reg.async_update_entity(old_entity_id, new_entity_id=target_entity_id)
+    except (ValueError, HomeAssistantError):
+        _LOGGER.exception("[%s] Failed to migrate entity_id '%s' -> '%s'", server_id, old_entity_id, target_entity_id)
+        return
+    _LOGGER.info("[%s] Migrated entity_id '%s' -> '%s'", server_id, old_entity_id, target_entity_id)
 
 
 def _delete_stale_statistics_issues(hass: HomeAssistant, issue_reg, server_slug: str) -> int:

@@ -135,6 +135,9 @@
       "fw_check": {
         "name": "Firmware jetzt prüfen"
       },
+      "webio_range_check": {
+        "name": "Web-IO-Wertebereich jetzt prüfen"
+      },
       "entity_id_fix": {
         "name": "Entity-IDs korrigieren"
       },

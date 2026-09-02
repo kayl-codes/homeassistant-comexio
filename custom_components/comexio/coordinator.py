@@ -78,12 +78,20 @@ from .const import (
     ICON_NETWORK,
     ICON_RENAME,
     ICON_WARNING,
+    RANGE_CHECK_CHECKED,
+    RANGE_CHECK_CORRECTION_FAILED,
+    RANGE_CHECK_EXCLUDED,
+    RANGE_CHECK_FAILED,
+    RANGE_CHECK_FIXED,
+    RANGE_CHECK_SKIPPED,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
+    WEBIO_RANGE_CHECK_HOUR,
+    WEBIO_RANGE_CHECK_MINUTE,
     MarkerKind,
     bus_load_signal,
     expand_ignored_marker_ids,
@@ -651,20 +659,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         mismatches.add(f"rename_{key}")
                         is_renamed = True
 
-                    if not is_renamed and ha["type"] != best_match.get("type"):
-                        type_mismatches.append(
-                            {
-                                "id": best_match["id"],
-                                "name": ha["name"],
-                                "payload": payload_map.get(ha["name"]),
-                                "webio_class": match_class,
-                            }
-                        )
-                        mismatches.add(f"type_{key}")
-
-                    # Function Plan gap: command exists but is not wired directly to its
-                    # marker (M-keys) / IO (IO_-keys of managed extensions)
                     if not is_renamed:
+                        if ha["type"] != best_match.get("type"):
+                            type_mismatches.append(
+                                {
+                                    "id": best_match["id"],
+                                    "name": ha["name"],
+                                    "payload": payload_map.get(ha["name"]),
+                                    "webio_class": match_class,
+                                }
+                            )
+                            mismatches.add(f"type_{key}")
+
+                        # Function Plan gap: command exists but is not wired directly to its
+                        # marker (M-keys) / IO (IO_-keys of managed extensions)
                         gap_item = self._function_plan_gap_item(
                             key,
                             ha["name"],
@@ -1831,6 +1839,133 @@ class ComexioCoordinator(DataUpdateCoordinator):
         warns it can briefly interrupt extension outputs. Returns whether the API call ran.
         """
         return await self._async_firmware_check_tick(force=True)
+
+    def async_start_webio_range_check(self):
+        """Start the nightly Web-IO analog range-check gate; returns the cancel callback.
+
+        Fires once a day at WEBIO_RANGE_CHECK_HOUR:WEBIO_RANGE_CHECK_MINUTE. The bulk config
+        scrape ($FubModules["10"]) never returns Min/Max for HA's own Web-IO commands (see
+        api.get_webio_command_range), so drift can only be detected by reading each analog
+        command's edit form individually — one HTTP GET per command. That cost is why this
+        runs on its own nightly schedule instead of piggybacking on the regular poll audit
+        or the manual sync button.
+        """
+        return async_track_time_change(
+            self.hass,
+            self._async_webio_range_check_tick,
+            hour=WEBIO_RANGE_CHECK_HOUR,
+            minute=WEBIO_RANGE_CHECK_MINUTE,
+            second=0,
+        )
+
+    async def _async_check_one_webio_range(
+        self, name: str, cmd_id: Any, device: dict[str, Any], target: dict[str, Any], result: dict[str, int]
+    ) -> None:
+        """Check one analog Web-IO command's Min/Max against target; correct on drift.
+
+        Mutates result's "checked"/"fixed"/"failed"/"correction_failed" counters in place —
+        factored out of _async_webio_range_check_tick purely to keep that method's cognitive
+        complexity down. "failed" counts unreadable commands (read errors); "correction_failed"
+        counts commands that were read fine, found drifted, but whose corrective write failed —
+        kept separate so a run where every fix fails can't misreport as a clean success.
+        """
+        device_id = device.get("device_id")
+        live_min, live_max = await self.api.get_webio_command_range(cmd_id, device_id)
+        if live_min is None or live_max is None:
+            result[RANGE_CHECK_FAILED] += 1
+            return
+        result[RANGE_CHECK_CHECKED] += 1
+        if live_min == target["Min"] and live_max == target["Max"]:
+            return
+
+        if await self.api.save_single_command(device.get("base_id"), device_id, target, existing_cmd_id=cmd_id):
+            result[RANGE_CHECK_FIXED] += 1
+            _LOGGER.warning(
+                "Web-IO command '%s' Min/Max drifted (%s/%s -> %s/%s); corrected.",
+                name,
+                live_min,
+                live_max,
+                target["Min"],
+                target["Max"],
+            )
+        else:
+            result[RANGE_CHECK_CORRECTION_FAILED] += 1
+            _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max drift.", name)
+
+    async def _async_webio_range_check_tick(self, _now: datetime | None = None) -> dict[str, int]:
+        """Check and correct analog Web-IO command Min/Max drift against the target range.
+
+        For every analog Web-IO command, compares its live Min/Max (read via
+        api.get_webio_command_range) against the target build_webio_commands would create
+        today — WEBIO_MARKER_ANALOG_MIN/MAX for markers, the authentic IO type range for
+        physical IOs — and rewrites it via api.save_single_command on a mismatch. Returns a
+        {"checked": n, "fixed": n, "failed": n, "correction_failed": n, "excluded": n,
+        "skipped": 0|1} summary; shared by the nightly schedule and the manual force trigger.
+        "skipped" is 1 (with the other counters left at 0) when no data is loaded yet, or while
+        a sync is in progress — save_single_command would otherwise race the sync button's
+        delta/full-recreate writes against the same Web-IO devices (see _sync_lock / R4) — so
+        callers can tell "skipped" apart from a genuine clean run that found nothing to fix.
+        "excluded" counts commands that were never read at all because they couldn't be matched
+        to a target (naming mismatch, stale command) or are missing an id/device — kept separate
+        so a mass name-matching regression can't hide behind a "Checked: N" count that quietly
+        excludes most of the fleet.
+        """
+        result = {
+            RANGE_CHECK_CHECKED: 0,
+            RANGE_CHECK_FIXED: 0,
+            RANGE_CHECK_FAILED: 0,
+            RANGE_CHECK_CORRECTION_FAILED: 0,
+            RANGE_CHECK_EXCLUDED: 0,
+            RANGE_CHECK_SKIPPED: 0,
+        }
+        if not self.data:
+            result[RANGE_CHECK_SKIPPED] = 1
+            return result
+        if self._sync_lock.locked():
+            _LOGGER.warning("[%s] Sync in progress, skipping Web-IO range check", self.server_id)
+            result[RANGE_CHECK_SKIPPED] = 1
+            return result
+
+        async with self._sync_lock:
+            webio_commands = self.data.get("webio_commands", {})
+            webio_devices = self.data.get("webio_devices", {})
+            target_by_name = {
+                cmd["Name"]: cmd
+                for cmd in self.api.build_webio_commands(self.server_id, self.data, None, self.ignored_marker_ids)
+            }
+
+            for name, cmd in webio_commands.items():
+                if cmd.get("typeId") not in {2, "2"}:
+                    continue
+                target = target_by_name.get(name)
+                cmd_id = cmd.get("cmdId")
+                device = webio_devices.get(cmd.get("webioClass"), {})
+                if target is None or not cmd_id or not device.get("device_id"):
+                    result[RANGE_CHECK_EXCLUDED] += 1
+                    _LOGGER.warning(
+                        "Web-IO command '%s' excluded from range check (no matching target/id/device)", name
+                    )
+                    continue
+                try:
+                    await self._async_check_one_webio_range(name, cmd_id, device, target, result)
+                except Exception:
+                    result[RANGE_CHECK_FAILED] += 1
+                    _LOGGER.exception("Unexpected error checking Web-IO command '%s' range", name)
+
+        _LOGGER.info(
+            "[%s] Web-IO range check: %d checked, %d fixed, %d failed to read, %d correction failed, %d excluded",
+            self.server_id,
+            result[RANGE_CHECK_CHECKED],
+            result[RANGE_CHECK_FIXED],
+            result[RANGE_CHECK_FAILED],
+            result[RANGE_CHECK_CORRECTION_FAILED],
+            result[RANGE_CHECK_EXCLUDED],
+        )
+        return result
+
+    async def async_force_webio_range_check(self) -> dict[str, int]:
+        """Force-run the Web-IO analog range check outside its nightly window (manual trigger)."""
+        return await self._async_webio_range_check_tick()
 
     def async_start_bus_load_poll(self):
         """Start the independent fast bus-workload poll; returns the cancel callback.

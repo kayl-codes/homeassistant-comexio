@@ -14,6 +14,8 @@ from .const import (
     DOMAIN,
     MARKER_INTERVAL_MAX_VALUE,
     MARKER_TYPE_INTERVAL,
+    WEBIO_MARKER_ANALOG_MAX,
+    WEBIO_MARKER_ANALOG_MIN,
     MarkerKind,
 )
 from .coordinator import ComexioCoordinator
@@ -81,6 +83,10 @@ class ComexioMarkerNumber(ComexioMarkerEntity, NumberEntity):
                 self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
                 self._attr_native_max_value = 50.0
             else:
+                # Comexio has no configurable value range for markers (see
+                # WEBIO_MARKER_ANALOG_MIN/MAX docstring) — don't clamp to the 0-100 default.
+                self._attr_native_min_value = float(WEBIO_MARKER_ANALOG_MIN)
+                self._attr_native_max_value = float(WEBIO_MARKER_ANALOG_MAX)
                 self._attr_icon = "mdi:gauge"
 
     @property

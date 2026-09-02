@@ -45,6 +45,7 @@ from .const import (
     WEBIO_CLASS_IO,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
+    WEBIO_INT16_DANGER_ZONE,
     WEBIO_MARKER_ANALOG_MAX,
     WEBIO_MARKER_ANALOG_MIN,
     MarkerKind,
@@ -86,6 +87,13 @@ _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTENT_TYPE_JSON = "Content-Type: application/json"
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
+
+# get_webio_command_range: the min/max <input> tags on a Web-IO command's edit form, e.g.
+# <input type="text" id="max_cmd_io_0" name="max_cmd_io_0" value="4294967296" .../>.
+# Attribute order isn't guaranteed, so this captures the whole tag by its id and pulls the
+# value out separately rather than assuming id comes before value.
+_WEBIO_CMD_INPUT_RE = re.compile(r'<input\b[^>]*\bid="(min|max)_cmd_io_0"[^>]*>', re.IGNORECASE)
+_WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
 
 
 def _js_timestamp() -> str:
@@ -1227,7 +1235,7 @@ class ComexioAPI:
             "input_cmd_io_0": 1,
             "type_cmd_io_0": cmd_payload["TypeId"],
             "send_on_one_cmd_io_0": 0,
-            "min_cmd_io_0": 0,
+            "min_cmd_io_0": cmd_payload["Min"],
             "max_cmd_io_0": cmd_payload["Max"],
             "default_value_cmd_io_0": "",
             "id_cmd_io_sample": "",
@@ -1251,10 +1259,62 @@ class ComexioAPI:
 
         # _LOGGER.debug("Sending save_single_command payload: %s", payload)
 
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            await resp.text()
-            # _LOGGER.debug("save_single_command response [%s]: %s", resp.status, resp_text)
-            return resp.status == 200
+        try:
+            async with self.session.post(url, data=payload, headers=headers) as resp:
+                await resp.text()
+                # _LOGGER.debug("save_single_command response [%s]: %s", resp.status, resp_text)
+                return resp.status == 200
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("HTTP request error saving Web-IO command %s: %s", cmd_payload.get("Name"), err)
+            return False
+        except Exception:
+            _LOGGER.exception("Unexpected error saving Web-IO command %s", cmd_payload.get("Name"))
+            return False
+
+    async def get_webio_command_range(
+        self, cmd_id: str | int, device_id: str | int
+    ) -> tuple[float | None, float | None]:
+        """Reads a single Web-IO command's live Min/Max from its edit form.
+
+        The bulk config scrape ($FubModules["10"], see _add_webhook_command) never returns
+        Min/Max for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
+        edit form is the only reliable source. Used by the nightly range check (see
+        WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against
+        WEBIO_MARKER_ANALOG_MIN/MAX. Returns (None, None) on a fetch failure or if a field is
+        missing from the form.
+        """
+        url = f"{self._base_url}/admin/web_io/edit_command/?Id={cmd_id}&TestDevice={device_id}"
+        try:
+            async with self.session.get(url) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("Failed to fetch Web-IO command %s edit form (HTTP %s)", cmd_id, resp.status)
+                    return None, None
+                html = await resp.text()
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("HTTP request error fetching Web-IO command %s edit form: %s", cmd_id, err)
+            return None, None
+        except Exception:
+            _LOGGER.exception("Unexpected error fetching Web-IO command %s edit form", cmd_id)
+            return None, None
+
+        values: dict[str, float | None] = {"min": None, "max": None}
+        matched = False
+        for tag_match in _WEBIO_CMD_INPUT_RE.finditer(html):
+            matched = True
+            field = tag_match[1].lower()
+            if value_match := _WEBIO_CMD_VALUE_RE.search(tag_match[0]):
+                try:
+                    values[field] = float(value_match[1])
+                except ValueError:
+                    _LOGGER.warning(
+                        "Web-IO command %s edit form has a non-numeric %s value: %r",
+                        cmd_id,
+                        field,
+                        value_match[1],
+                    )
+        if not matched:
+            _LOGGER.warning("Web-IO command %s edit form has no min/max input tags (page layout changed?)", cmd_id)
+        return values["min"], values["max"]
 
     def build_webio_commands(
         self,
@@ -1344,12 +1404,30 @@ class ComexioAPI:
         )
 
     @staticmethod
+    def _safe_webio_range(v_min: float, v_max: float) -> tuple[float, float]:
+        """Widen a Web-IO Min/Max pair whose bounds land in the int16 clamp-bug danger zone.
+
+        See WEBIO_INT16_DANGER_ZONE / WEBIO_MARKER_ANALOG_MIN docstrings for the underlying
+        Comexio bug this guards against.
+        """
+        lo, hi = WEBIO_INT16_DANGER_ZONE
+        if lo <= abs(v_min) <= hi or lo <= abs(v_max) <= hi:
+            return WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
+        return v_min, v_max
+
+    @staticmethod
     def _build_io_webio_command(io_item: dict[str, Any], webhook_path: str) -> dict[str, Any]:
         """Build the Web-IO command dict for a single physical IO."""
         is_ana = not io_item.get("is_binary", False)
-        # Use the authentic min/max from the Comexio type definition
-        v_min = io_item.get("min", 0)
-        v_max = io_item.get("max", 100 if is_ana else 1)
+        # Use the authentic min/max from the Comexio type definition, unless it lands in the
+        # int16 danger zone (see _safe_webio_range). io_item["min"/"max"] can be present but
+        # None (scraped $ioTypes value missing) — .get()'s default only covers a missing key,
+        # so None is coerced explicitly before the abs() calls in _safe_webio_range.
+        raw_min = io_item.get("min")
+        raw_max = io_item.get("max")
+        v_min = 0 if raw_min is None else raw_min
+        v_max = (100 if is_ana else 1) if raw_max is None else raw_max
+        v_min, v_max = ComexioAPI._safe_webio_range(v_min, v_max)
         safe_ext = ComexioAPI._lua_escape(io_item["ext_name"])
         safe_io_id = ComexioAPI._lua_escape(io_item["identifier"])
         lua = ComexioAPI._webio_data_lua(f'ext="{safe_ext}", io="{safe_io_id}", value=a, type="io"')
@@ -1671,35 +1749,65 @@ class ComexioAPI:
             _LOGGER.exception("function_plan_load_elements fub_id=%s failed", fub_id)
             return None
 
-    async def function_plan_load_all_plans(self, concurrency: int = 4) -> dict[int, dict]:
-        """Load elements and connections for ALL known function plans concurrently.
+    async def function_plan_load_all_plans(self) -> dict[int, dict]:
+        """Load elements and connections for ALL known function plans in one bulk request.
 
-        Uses the fub list cached by parse_config (self._fub_data). Requests run in
-        parallel, limited by a semaphore so the embedded Comexio server is not
-        overwhelmed. Plans that fail to load are skipped.
+        Uses the loadallelements endpoint (bulk variant of loadelements) instead of one
+        request per plan — Comexio serializes requests server-side anyway, so N sequential
+        per-plan calls gain nothing over a single bulk call. Result is filtered down to the
+        fub list cached by parse_config (self._fub_data).
         Returns {fub_id: {"elements": {...}, "connections": {...}}}.
         """
-        fub_ids = [int(fid) for fid in self._fub_data]
+        fub_ids = {int(fid) for fid in self._fub_data}
         if not fub_ids:
             _LOGGER.warning("function_plan_load_all_plans: self._fub_data is empty — nothing to load")
             return {}
 
-        semaphore = asyncio.Semaphore(concurrency)
-
-        async def _load_one(fid: int) -> tuple[int, dict | None]:
-            async with semaphore:
-                return fid, await self.function_plan_load_elements(fid)
-
+        url = f"{self._base_url}/admin/function_function_module/loadallelements"
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
         t_start = time.monotonic()
-        results = await asyncio.gather(*(_load_one(fid) for fid in fub_ids))
+        try:
+            async with self.session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("function_plan_load_all_plans failed (HTTP %s)", resp.status)
+                    return {}
+                raw = await resp.json(content_type=None)
+        except Exception:
+            _LOGGER.exception("function_plan_load_all_plans failed")
+            return {}
+
+        if not isinstance(raw, dict):
+            _LOGGER.error("function_plan_load_all_plans: unexpected response shape (%s)", type(raw).__name__)
+            return {}
+
+        plans: dict[int, dict] = {}
+        for fid_str, data in raw.items():
+            try:
+                fid = int(fid_str)
+                if fid not in fub_ids:
+                    continue
+                elements = data.get("elements")
+                data["elements"] = (
+                    self._keyed_by_list_position(elements) if isinstance(elements, list) else (elements or {})
+                )
+                connections = data.get("connections")
+                data["connections"] = (
+                    self._keyed_by_list_position(connections) if isinstance(connections, list) else (connections or {})
+                )
+                plans[fid] = data
+            except (ValueError, TypeError, AttributeError):
+                _LOGGER.exception("function_plan_load_all_plans: skipping malformed entry fid=%r", fid_str)
+                continue
+
         duration = time.monotonic() - t_start
-        plans = {fid: data for fid, data in results if data is not None}
         _LOGGER.info(
-            "function_plan_load_all_plans: %d/%d plans loaded in %.2fs (concurrency=%d)",
+            "function_plan_load_all_plans: %d/%d plans loaded in %.2fs (bulk request)",
             len(plans),
             len(fub_ids),
             duration,
-            concurrency,
         )
         return plans
 
