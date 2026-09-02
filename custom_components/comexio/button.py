@@ -45,6 +45,12 @@ from .const import (
     ICON_TOOLS,
     ICON_UPLOAD,
     ICON_WARNING,
+    RANGE_CHECK_CHECKED,
+    RANGE_CHECK_CORRECTION_FAILED,
+    RANGE_CHECK_EXCLUDED,
+    RANGE_CHECK_FAILED,
+    RANGE_CHECK_FIXED,
+    RANGE_CHECK_SKIPPED,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
@@ -162,6 +168,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     migration_button = ComexioEntityIdMigrationButton(coordinator, coordinator.server_id)
     stats_cleanup_button = ComexioStatisticsCleanupButton(coordinator, coordinator.server_id)
     fw_check_button = ComexioFirmwareCheckButton(coordinator, coordinator.server_id)
+    webio_range_check_button = ComexioWebioRangeCheckButton(coordinator, coordinator.server_id)
     preview_button = ComexioPlanPreviewButton(coordinator, coordinator.server_id)
     uninstall_cleanup_button = ComexioCleanupButton(coordinator, coordinator.server_id)
     plan_toggle_button = ComexioPlanToggleButton(coordinator, coordinator.server_id)
@@ -171,6 +178,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         migration_button,
         stats_cleanup_button,
         fw_check_button,
+        webio_range_check_button,
         preview_button,
         uninstall_cleanup_button,
         plan_toggle_button,
@@ -260,16 +268,26 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def async_handle_press(self, action: str = "full_sync") -> None:
         """Execute the sync logic with mode selection."""
+        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
+        notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
+        notif_id = f"comexio_sync_{self.server_id}"
         if self.coordinator._sync_lock.locked():
             _LOGGER.warning("[%s] Sync already in progress, ignoring concurrent request", self.server_id)
+            if notify_enabled:
+                # Own notification_id — notif_id is the *in-progress* sync's live-progress
+                # notification, and reusing it here would clobber that progress display.
+                persistent_notification.async_create(
+                    self.hass,
+                    f"{ICON_WARNING} Sync request ignored — a sync or Web-IO range check is already "
+                    "running. Please try again shortly.",
+                    title=f"Comexio Sync ({self.server_id})",
+                    notification_id=f"comexio_sync_blocked_{self.server_id}",
+                )
             return
         await self.coordinator._sync_lock.acquire()
         self.coordinator.in_sync = True
         self.coordinator.sync_error = False
 
-        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
-        notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
-        notif_id = f"comexio_sync_{self.server_id}"
         update_status = partial(self._update_sync_status, notify_enabled, notif_id)
 
         update_status("Initializing sync process...", pct=0, step_info="Initializing")
@@ -1856,6 +1874,75 @@ class ComexioFirmwareCheckButton(CoordinatorEntity, ButtonEntity):
                 msg,
                 title=f"Comexio Firmware Check ({self.server_id})",
                 notification_id=f"comexio_fw_check_{self.server_id}",
+            )
+
+
+class ComexioWebioRangeCheckButton(CoordinatorEntity, ButtonEntity):
+    """Button to force-run the Web-IO analog Min/Max range check outside its nightly window.
+
+    See coordinator.async_force_webio_range_check / async_start_webio_range_check — the
+    check itself is a plain safe GET per analog command, so unlike the firmware check this
+    has no risk gate to bypass; the button exists purely so drift doesn't have to wait for
+    the next WEBIO_RANGE_CHECK_HOUR window.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_webio_range_check_btn"
+        self._attr_translation_key = "webio_range_check"
+        self._attr_icon = "mdi:ruler"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        # Pin the object_id instead of leaving it to derive from the translated name —
+        # that derivation only runs once, at first registration, so a translation file
+        # that's momentarily out of sync with the code (deploy-order race) would freeze
+        # a bad entity_id into the registry permanently.
+        self.entity_id = f"button.comexio_{server_id}_webio_range_check"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return {
+            "identifiers": {(DOMAIN, self.coordinator.server_id)},
+            "name": self.coordinator.server_id,
+            "manufacturer": "Comexio",
+            "model": "IO-Server",
+        }
+
+    async def async_press(self) -> None:
+        """Force-run the Web-IO analog range check."""
+        _LOGGER.warning("[%s] Manual Web-IO range check requested by user", self.server_id)
+        start = time.monotonic()
+        result = await self.coordinator.async_force_webio_range_check()
+        duration = time.monotonic() - start
+
+        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
+        if conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS):
+            if result[RANGE_CHECK_SKIPPED]:
+                icon = ICON_WARNING
+                msg = (
+                    f"{icon} Web-IO range check skipped — a sync is in progress or no data is "
+                    "loaded yet. Please try again shortly."
+                )
+            else:
+                has_problems = (
+                    result[RANGE_CHECK_FAILED] or result[RANGE_CHECK_CORRECTION_FAILED] or result[RANGE_CHECK_EXCLUDED]
+                )
+                icon = ICON_WARNING if has_problems else ICON_SUCCESS
+                msg = (
+                    f"{icon} Web-IO range check finished in {duration:.1f}s.\n\n"
+                    f"Checked: {result[RANGE_CHECK_CHECKED]}, corrected: {result[RANGE_CHECK_FIXED]}, "
+                    f"failed to read: {result[RANGE_CHECK_FAILED]}, "
+                    f"correction failed: {result[RANGE_CHECK_CORRECTION_FAILED]}, "
+                    f"excluded: {result[RANGE_CHECK_EXCLUDED]}."
+                )
+            persistent_notification.async_create(
+                self.hass,
+                msg,
+                title=f"Comexio Web-IO Range Check ({self.server_id})",
+                notification_id=f"comexio_webio_range_check_{self.server_id}",
             )
 
 

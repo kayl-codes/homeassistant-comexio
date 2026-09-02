@@ -184,13 +184,24 @@ class MarkerKind(StrEnum):
 
 
 # Analog markers have no configurable value range on the Comexio side, so their Web-IO
-# datapoints must not clamp. The Comexio admin UI round-trips values as wide as ±1e16
-# unchanged, but that only proves the UI's own storage tolerates it — the Web-IO push
-# mechanism itself validates Min/Max as a signed 32-bit int and silently stops sending
-# updates once either bound overflows that range. Physical IOs keep the authentic
-# min/max from their Comexio type definition instead.
-WEBIO_MARKER_ANALOG_MIN = -2_147_483_648
-WEBIO_MARKER_ANALOG_MAX = 2_147_483_647
+# datapoints must not clamp. Comexio's Web-IO push mechanism has two independently verified,
+# server-side bugs (systematically reproduced 2026-08-30, unrelated to the HA integration
+# code): (1) json_stringify() rounds numeric values to 6 significant decimal digits, and
+# (2) whenever a Web-IO command's own Min/Max bounds sit at/near the signed-16-bit boundary
+# (~±32767/32768), EVERY pushed value is silently clamped to the configured Max regardless of
+# the actual input. ±500,000 was empirically confirmed to dodge both: it clears the int16
+# danger zone by a wide margin, and its own magnitude never exceeds 6 significant digits.
+# Physical IOs keep the authentic min/max from their Comexio type definition instead, but
+# see WEBIO_INT16_DANGER_ZONE for the same guard applied there.
+WEBIO_MARKER_ANALOG_MIN = -500_000
+WEBIO_MARKER_ANALOG_MAX = 500_000
+
+# Physical IO ranges scraped from Comexio's own type definitions (percent, temperature,
+# voltage, ...) normally sit far outside the int16 danger zone described above, but a raw or
+# counter-style IO type could plausibly land its Min/Max right on that boundary. Any IO whose
+# authentic Min or Max falls in this band gets widened to the same verified-safe
+# WEBIO_MARKER_ANALOG_MIN/MAX range before being sent as a Web-IO command.
+WEBIO_INT16_DANGER_ZONE = (30_000, 40_000)
 
 DEFAULT_HOST = "192.168.1.100"
 
@@ -206,6 +217,27 @@ FIRMWARE_CHECK_MINUTE = 0
 def fw_update_signal(server_id: str) -> str:
     """Dispatcher signal fired when a fresh extension firmware check result arrives."""
     return f"{DOMAIN}_{server_id}_fw_update"
+
+
+# Web-IO analog range check: the bulk config scrape ($FubModules["10"], see api.py
+# _add_webhook_command) never returns a Web-IO command's actual Min/Max for HA's own
+# commands (confirmed live 2026-08-30) — Comexio only exposes those via each command's
+# individual edit form. Reading that form costs one HTTP GET per analog command
+# (currently ~150-400), so — like the firmware check above — this runs on its own nightly
+# schedule rather than on every poll or every manual sync. Offset by 20 minutes from
+# FIRMWARE_CHECK_HOUR/MINUTE so the two nightly jobs don't burst requests at Comexio
+# simultaneously.
+WEBIO_RANGE_CHECK_HOUR = 4
+WEBIO_RANGE_CHECK_MINUTE = 20
+
+# Result dict keys shared between coordinator._async_webio_range_check_tick and the
+# range-check button's notification — extracted so both sides can't drift apart on a typo.
+RANGE_CHECK_CHECKED = "checked"
+RANGE_CHECK_FIXED = "fixed"
+RANGE_CHECK_FAILED = "failed"
+RANGE_CHECK_CORRECTION_FAILED = "correction_failed"
+RANGE_CHECK_EXCLUDED = "excluded"
+RANGE_CHECK_SKIPPED = "skipped"
 
 
 # Bus workload monitoring: independent fast poll of the Comexio internal bus/CPU load,

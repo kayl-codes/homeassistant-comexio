@@ -135,6 +135,9 @@
       "fw_check": {
         "name": "Check Firmware Now"
       },
+      "webio_range_check": {
+        "name": "Check Web-IO Range Now"
+      },
       "entity_id_fix": {
         "name": "Fix Entity IDs"
       },
