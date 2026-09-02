@@ -78,7 +78,7 @@ jobs:
           # "resolution-too-deep". We only need the .pyi stub files, never the runtime
           # package itself, so install it with --no-deps to skip that tree entirely.
           pip install --only-binary :all: mypy==2.3.1
-          pip install --no-deps homeassistant-stubs==2026.8.3
+          pip install --only-binary :all: --no-deps homeassistant-stubs==2026.8.3
       - name: Run mypy
         id: mypy
         continue-on-error: true
