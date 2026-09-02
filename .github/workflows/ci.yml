@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'custom_components/**'
+      - '.github/workflows/**'
       - 'pyproject.toml'
       - 'requirements.txt'
       - 'scripts/generate_requirements.py'
@@ -11,6 +12,7 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - 'custom_components/**'
+      - '.github/workflows/**'
       - 'pyproject.toml'
       - 'requirements.txt'
       - 'scripts/generate_requirements.py'
