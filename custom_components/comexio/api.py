@@ -1426,7 +1426,8 @@ class ComexioAPI:
         raw_min = io_item.get("min")
         raw_max = io_item.get("max")
         v_min = 0 if raw_min is None else raw_min
-        v_max = (100 if is_ana else 1) if raw_max is None else raw_max
+        default_max = 100 if is_ana else 1
+        v_max = default_max if raw_max is None else raw_max
         v_min, v_max = ComexioAPI._safe_webio_range(v_min, v_max)
         safe_ext = ComexioAPI._lua_escape(io_item["ext_name"])
         safe_io_id = ComexioAPI._lua_escape(io_item["identifier"])
