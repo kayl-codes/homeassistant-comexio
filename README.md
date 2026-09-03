@@ -32,6 +32,8 @@ Every contribution is greatly appreciated. Thank you for your support!
 - 📴 **Offline Extension Handling:** When a Comexio extension module goes offline, all its entities and its sub-device are automatically removed from the HA device list. A diagnostic sensor on the hub device shows which extensions are currently offline.
 - 🧩 **Function Plan Management & Backups:** Manage Comexio function plans (Logikpläne) directly from HA — wire markers to Web-IO commands, sort plan layouts, and roll back any plan to an automatically captured backup snapshot (SharePoint-style per-plan versioning).
 - 🖼️ **Live Function Plan Preview:** An interactive SVG diagram of any function plan, rendered at Comexio Studio's own layout, with live wire colors, search, and a debug console — plus an experimental wiring health-check and a signal-flow diagram.
+- 🔐 **Read-Only & Trigger Markers:** Tag a marker `[RO]` to expose it as a read-only sensor instead of a writable switch/number — protects security-critical values from accidental overwrites, enforced both at the entity level and in the `set_value` service. Tag it `[TRIG]` (or the legacy `[TP]` alias) to get a one-shot "virtual button" entity instead; the marker resets itself via a dedicated, auto-managed `HA - TRIGGER` function plan, no manual wiring needed.
+- 🩺 **Web-IO Range Guard:** A nightly check (plus an on-demand trigger button) verifies every analog Web-IO command's Min/Max against Comexio's live config and automatically corrects any drift, with a summary notification of checked/fixed/failed commands.
 - 🔒 **Secure Authentication:** Full support for the modern RSA login method (v11) for administrative tasks as well as Basic Auth for standard API calls.
 
 ## 📦 Supported Entities
@@ -42,6 +44,8 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `binary_sensor` | Digital Inputs | Auto-detection of motion detectors, window and door contacts based on the name. |
 | `switch` | Digital Outputs (Q) & Markers | Switches physical relays (classified as outlets) and digital markers. |
 | `number` | Analog Markers | Sets setpoints with automatic range checking (e.g., target temperature). |
+| `sensor` / `binary_sensor` | Read-Only Markers (`[RO]`) | Analog/digital markers tagged `[RO]` are exposed as read-only sensors instead of writable `number`/`switch` entities. |
+| `button` | Trigger Markers (`[TRIG]` / `[TP]`) | One-shot "virtual button" entity for trigger-tagged markers; the marker resets itself via a dedicated, auto-managed `HA - TRIGGER` function plan. |
 | `button` | System Functions | Manual "Smart-Sync" trigger and cancel button directly from the HA device view. |
 | `select` | Function Plans | Lists all Comexio function plans; used as the default target for the function-plan services. |
 | `sensor` (diagnostic) | Integration | `Offline Extensions` — shows how many extension modules are currently offline and lists their names as a state attribute. |
@@ -49,6 +53,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `sensor` (diagnostic) | Integration | `Bus Workload` — internal Comexio bus/CPU load in %, polled independently every 10 s. |
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
+| `button` (diagnostic) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
 
 ## 🚀 Installation
 
@@ -231,6 +236,8 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 - 📴 **Offline-Extension-Erkennung:** Geht ein Comexio-Erweiterungsmodul offline, werden alle zugehörigen Entitäten und das Sub-Device automatisch aus der HA-Geräteliste entfernt. Ein Diagnose-Sensor am Hub-Device zeigt, welche Module gerade offline sind.
 - 🧩 **Funktionsplan-Verwaltung & Backups:** Comexio-Funktionspläne (Logikpläne) direkt aus HA verwalten — Merker mit Web-IO-Befehlen verdrahten, Plan-Layouts sortieren und jeden Plan auf einen automatisch erfassten Backup-Snapshot zurücksetzen (Versionierung je Plan wie in SharePoint).
 - 🖼️ **Live-Logikplan-Vorschau:** Ein interaktives SVG-Diagramm jedes Funktionsplans im Original-Layout von Comexio Studio, mit Live-Drahtfarben, Suche und Debug-Konsole — dazu ein experimenteller Verdrahtungs-Check und ein Signalfluss-Diagramm.
+- 🔐 **Nur-Lese- & Trigger-Merker:** Markiere einen Merker mit `[RO]`, um ihn als reinen Nur-Lese-Sensor statt als beschreibbaren Switch/Number bereitzustellen — schützt sicherheitskritische Werte vor versehentlichem Überschreiben, durchgesetzt sowohl auf Entitäts-Ebene als auch im `set_value`-Service. Mit `[TRIG]` (oder dem Legacy-Alias `[TP]`) wird daraus stattdessen eine einmalig auslösende „virtuelle Taster"-Entität; der Merker setzt sich selbst über einen dediziert automatisch verwalteten `HA - TRIGGER`-Funktionsplan zurück, keine manuelle Verdrahtung nötig.
+- 🩺 **Web-IO Bereichs-Wächter:** Eine nächtliche Prüfung (plus ein Button zum manuellen Auslösen) gleicht Min/Max jedes analogen Web-IO-Befehls mit der Live-Konfiguration von Comexio ab und korrigiert automatisch jede Abweichung, inklusive Zusammenfassungs-Benachrichtigung über geprüfte/korrigierte/fehlgeschlagene Befehle.
 - 🔒 **Sichere Authentifizierung:** Volle Unterstützung für das moderne RSA-Login-Verfahren (v11) für administrative Aufgaben sowie Basic Auth für Standard-API-Aufrufe.
 
 ## 📦 Unterstützte Entitäten
@@ -241,6 +248,8 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `binary_sensor` | Digitale Eingänge | Auto-Erkennung von Bewegungsmeldern, Fenster- und Türkontakten anhand des Namens. |
 | `switch` | Digitale Ausgänge (Q) & Merker | Schaltet physische Relais (als Steckdose/Outlet klassifiziert) und digitale Merker. |
 | `number` | Analoge Merker | Setzt Sollwerte (Setpoints) mit automatischer Bereichsprüfung (z. B. Temp-Soll). |
+| `sensor` / `binary_sensor` | Nur-Lese-Merker (`[RO]`) | Analoge/digitale Merker mit `[RO]`-Tag werden als reine Nur-Lese-Sensoren statt als beschreibbare `number`/`switch`-Entitäten bereitgestellt. |
+| `button` | Trigger-Merker (`[TRIG]` / `[TP]`) | Einmalig auslösende „virtuelle Taster"-Entität für Trigger-markierte Merker; der Merker setzt sich selbst über einen dediziert automatisch verwalteten `HA - TRIGGER`-Funktionsplan zurück. |
 | `button` | System-Funktionen | Manueller "Smart-Sync" Abgleich und Abbruch direkt aus der HA-Geräteansicht. |
 | `select` | Funktionspläne | Listet alle Comexio-Funktionspläne; dient als Standard-Ziel für die Funktionsplan-Actions. |
 | `sensor` (Diagnose) | Integration | `Offline Extensions` — zeigt, wie viele Erweiterungsmodule gerade offline sind, und listet deren Namen als State-Attribut. |
@@ -248,6 +257,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `sensor` (Diagnose) | Integration | `Bus Workload` — interne Comexio Bus-/CPU-Auslastung in %, unabhängig alle 10 s abgefragt. |
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
+| `button` (Diagnose) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
 
 ## 🚀 Installation
 
