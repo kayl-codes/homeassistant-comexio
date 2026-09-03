@@ -9,6 +9,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ---
 
+## [0.9.2] — 2026-09-03
+
+### ✨ New Features
+- **Read-Only Markers (`[RO]`):** Tag a marker's title with `[RO]` to expose it as a read-only `sensor`/`binary_sensor` instead of a writable `number`/`switch` — protects security-critical values from accidental overwrites from the HA side. Enforced both at the entity level and in the `set_value` service, so a direct service call can't bypass it either.
+- **Trigger Markers (`[TRIG]` / `[TP]`):** Tag a marker with `[TRIG]` (or the legacy `[TP]` alias) to get a one-shot "virtual button" `button` entity instead of a persistent switch. The marker resets itself automatically via a dedicated, auto-managed `HA - TRIGGER` function plan — no manual wiring in Comexio Studio required.
+- **Web-IO Range Guard:** A nightly check (04:20 window) verifies and automatically corrects drift in the Min/Max values of eligible analog Web-IO commands with matching targets, command IDs, and device IDs. A new diagnostic `Web-IO Range Check` button lets you force the check on demand. Both paths post a summary notification of checked/fixed/failed commands, with excluded commands reported separately.
+
+### 🛠️ Core & Stability Improvements
+- **CI: mypy type-checking job:** A new, initially non-blocking `mypy` CI job (`continue-on-error`) using `homeassistant-stubs` reports type errors in the job summary without gating merges yet, to build up type coverage incrementally.
+- **CI: OSV-Scanner dependency vulnerability scanning:** A new CI job scans `requirements.txt` (auto-generated and synced from `manifest.json` via `scripts/generate_requirements.py`, enforced both by a pre-commit hook and a CI sync check) for known vulnerabilities in project dependencies. As part of this, the `cryptography` requirement floor was raised from `>=42.0.0` to `>=50.0.1` to clear a batch of advisories the scanner reports against the old floor version; the integration only uses stable RSA padding/primitives, so this carries no compatibility risk.
+
+### 🐛 Bug Fixes & Refactoring
+- **Web-IO default-max computation simplified:** Extracted a nested conditional in the IO default-max range calculation into a clearer, flatter form (SonarQube S3358), no behavior change.
+
 ## [0.9.1] — 2026-08-28
 
 ### ✨ New Features
