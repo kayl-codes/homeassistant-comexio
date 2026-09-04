@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes & Refactoring
+- **`cryptography` requirement floor lowered back to `>=42.0.0`:** The `>=50.0.1` floor introduced in 0.9.2 conflicts with Home Assistant's own exact-pinned `cryptography` version on some HA releases (e.g. `==48.0.1` on HA 2026.9.0), causing the integration's requirement install to fail outright and the integration to never load for affected users (#61). Restored to the last verified-compatible floor.
+
 ---
 
 ## [0.9.2] — 2026-09-03
@@ -18,7 +21,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ### 🛠️ Core & Stability Improvements
 - **CI: mypy type-checking job:** A new, initially non-blocking `mypy` CI job (`continue-on-error`) using `homeassistant-stubs` reports type errors in the job summary without gating merges yet, to build up type coverage incrementally.
-- **CI: OSV-Scanner dependency vulnerability scanning:** A new CI job scans `requirements.txt` (auto-generated and synced from `manifest.json` via `scripts/generate_requirements.py`, enforced both by a pre-commit hook and a CI sync check) for known vulnerabilities in project dependencies. As part of this, the `cryptography` requirement floor was raised from `>=42.0.0` to `>=50.0.1` to clear a batch of advisories the scanner reports against the old floor version; the integration only uses stable RSA padding/primitives, so this carries no compatibility risk.
+- **CI: OSV-Scanner dependency vulnerability scanning:** A new CI job scans `requirements.txt` (auto-generated and synced from `manifest.json` via `scripts/generate_requirements.py`, enforced both by a pre-commit hook and a CI sync check) for known vulnerabilities in project dependencies. As part of this, the `cryptography` requirement floor was raised from `>=42.0.0` to `>=50.0.1` to clear a batch of advisories the scanner reports against the old floor version.
+  - **Correction (0.9.3):** this bump conflicted with Home Assistant's own exact-pinned `cryptography` version on some HA releases and broke installation for affected users — see [Unreleased].
 
 ### 🐛 Bug Fixes & Refactoring
 - **Web-IO default-max computation simplified:** Extracted a nested conditional in the IO default-max range calculation into a clearer, flatter form (SonarQube S3358), no behavior change.
