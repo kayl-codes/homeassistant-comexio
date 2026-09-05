@@ -1,8 +1,9 @@
-# Version: 0.7.7
+# Version: 0.7.8
 import logging
 from typing import Any
 
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -33,10 +34,10 @@ def hub_device_id(coordinator: ComexioCoordinator) -> str | None:
 
 
 def build_device_info(
-    coordinator: ComexioCoordinator, identifiers: set[tuple[str, str]], name: str, model: str
-) -> dict[str, Any]:
-    """Build a sub-device's device_info dict, linked to the hub device via via_device_id."""
-    info: dict[str, Any] = {
+    coordinator: ComexioCoordinator, *, identifiers: set[tuple[str, str]], name: str, model: str
+) -> DeviceInfo:
+    """Build a sub-device's device_info, linked to the hub device via via_device_id."""
+    info: DeviceInfo = {
         "identifiers": identifiers,
         "name": name,
         "manufacturer": "Comexio",
@@ -64,12 +65,12 @@ class ComexioIOEntity(CoordinatorEntity):
         self._attr_name = io["ha_name"]
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            f"{self.coordinator.server_id} {self._ext_name}",
-            "Extension Module",
+            identifiers={(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
+            name=f"{self.coordinator.server_id} {self._ext_name}",
+            model="Extension Module",
         )
 
     @property
@@ -93,10 +94,10 @@ class ComexioMarkerEntity(CoordinatorEntity):
         self._attr_name = marker["ha_name"]
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            {(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            f"{self.coordinator.server_id} Markers",
-            "Marker Group",
+            identifiers={(DOMAIN, f"{self.coordinator.server_id}_markers")},
+            name=f"{self.coordinator.server_id} Markers",
+            model="Marker Group",
         )
