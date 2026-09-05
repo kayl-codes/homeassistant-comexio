@@ -1,4 +1,4 @@
-# Version: 0.8.0
+# Version: 0.8.1
 import asyncio
 from collections import deque
 import contextlib
@@ -1777,7 +1777,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 ent_reg.async_update_entity(entity_entry.entity_id, new_unique_id=new_uid)
 
         dev_reg = dr.async_get(self.hass)
-        old_device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{server_slug}_{old_name}".lower())})
+        old_device = dev_reg.async_get_device_by_identifier(
+            (DOMAIN, f"{server_slug}_{old_name}".lower()), self.config_entry.entry_id
+        )
         if old_device:
             dev_reg.async_update_device(
                 old_device.id,

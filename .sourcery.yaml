@@ -7,3 +7,4 @@ rule_settings:
 ignore:
   - ".github/"
   - "tests/"
+  - "requirements.txt"
