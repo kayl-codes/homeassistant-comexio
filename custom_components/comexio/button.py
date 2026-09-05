@@ -1,4 +1,4 @@
-# Version: 0.7.5
+# Version: 0.7.6
 import asyncio
 from collections.abc import Callable
 import contextlib
@@ -15,7 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_platform, entity_registry as er, issue_registry as ir
+from homeassistant.helpers import entity_platform, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -1156,8 +1156,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     @staticmethod
     async def _apply_delta_task(
         api: Any,
-        dev_reg: dr.DeviceRegistry,
-        server_id: str,
         base_id: str | None,
         class_dev_id: str | None,
         task: dict,
@@ -1172,10 +1170,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             await api.delete_single_command(item["id"], class_dev_id)
             result["removed"] += 1
         elif t_type == "type":
-            # Clean up entity from registry if type changed
-            device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{server_id}_{item['id']}")})
-            if device:
-                dev_reg.async_remove_device(device.id)
+            # A digital<->analog type change may move the entity to a different HA domain
+            # (e.g. switch -> number). No registry cleanup is needed here: the forced
+            # integration reload after every sync (_finalize_sync) re-runs __init__.py's
+            # expected_platform check, which already removes stale-domain entities based on
+            # the actual HA entity domain rather than this Comexio-side type signal alone.
             await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
             result["updated"] += 1
         elif t_type == "create":
@@ -1195,7 +1194,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     ) -> dict[str, int]:
         """Run the collected delta-sync tasks against the Comexio API, in order."""
         api = ctx.api
-        dev_reg = dr.async_get(self.hass)
         result: dict[str, Any] = {
             "added": 0,
             "removed": 0,
@@ -1222,7 +1220,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             if getattr(self.coordinator, "cancel_sync", False):
                 break
             on_progress(idx, task["item"]["name"], task["type"])
-            await self._apply_delta_task(api, dev_reg, self.server_id, base_id, class_dev_id, task, result)
+            await self._apply_delta_task(
+                api,
+                base_id,
+                class_dev_id,
+                task,
+                result,
+            )
         return result
 
     async def _sync_class(

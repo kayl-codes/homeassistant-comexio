@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, fw_update_signal
 from .coordinator import ComexioCoordinator
+from .entity import hub_device_id
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -102,13 +103,15 @@ class ComexioBaseFirmwareUpdate(ComexioFirmwareUpdateBase):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        return {
+        info: dict[str, Any] = {
             "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_BASE".lower())},
             "name": f"{self.coordinator.server_id} BASE",
             "manufacturer": "Comexio",
             "model": "Extension Module",
-            "via_device": (DOMAIN, self.coordinator.server_id),
         }
+        if via_id := hub_device_id(self.coordinator):
+            info["via_device_id"] = via_id
+        return info
 
 
 class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
@@ -121,10 +124,12 @@ class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        return {
+        info: dict[str, Any] = {
             "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
             "name": f"{self.coordinator.server_id} {self._ext_name}",
             "manufacturer": "Comexio",
             "model": "Extension Module",
-            "via_device": (DOMAIN, self.coordinator.server_id),
         }
+        if via_id := hub_device_id(self.coordinator):
+            info["via_device_id"] = via_id
+        return info

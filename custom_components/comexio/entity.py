@@ -1,10 +1,35 @@
-# Version: 0.7.5
+# Version: 0.7.6
+import logging
 from typing import Any
 
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import ComexioCoordinator
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def hub_device_id(coordinator: ComexioCoordinator) -> str | None:
+    """Resolve the hub device's registry id for via_device_id linkage.
+
+    Returns None (instead of raising) if the hub device isn't registered yet, so a
+    dependent entity still gets created — just without the via_device_id link — rather
+    than having its whole platform setup aborted by an uncaught ValueError.
+    """
+    try:
+        return dr.async_get_device_id_by_identifier(
+            coordinator.hass, (DOMAIN, coordinator.server_id), config_entry_id=coordinator.config_entry.entry_id
+        )
+    except ValueError:
+        _LOGGER.error(
+            "Hub device for server '%s' (entry %s) not found in the device registry; "
+            "affected entities will be created without a via_device_id link",
+            coordinator.server_id,
+            coordinator.config_entry.entry_id,
+        )
+        return None
 
 
 class ComexioIOEntity(CoordinatorEntity):
@@ -25,13 +50,15 @@ class ComexioIOEntity(CoordinatorEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        return {
+        info: dict[str, Any] = {
             "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
             "name": f"{self.coordinator.server_id} {self._ext_name}",
             "manufacturer": "Comexio",
             "model": "Extension Module",
-            "via_device": (DOMAIN, self.coordinator.server_id),
         }
+        if via_id := hub_device_id(self.coordinator):
+            info["via_device_id"] = via_id
+        return info
 
     @property
     def available(self) -> bool:
@@ -55,10 +82,12 @@ class ComexioMarkerEntity(CoordinatorEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        return {
+        info: dict[str, Any] = {
             "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
             "name": f"{self.coordinator.server_id} Markers",
             "manufacturer": "Comexio",
             "model": "Marker Group",
-            "via_device": (DOMAIN, self.coordinator.server_id),
         }
+        if via_id := hub_device_id(self.coordinator):
+            info["via_device_id"] = via_id
+        return info

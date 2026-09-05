@@ -8,7 +8,7 @@ A HACS custom integration for [Comexio IO-Server](https://www.comexio.com/) — 
 
 - **HACS domain:** `comexio`
 - **IoT class:** Local Push (webhooks from Comexio → HA)
-- **Minimum HA:** 2024.1.0
+- **Minimum HA:** 2026.8.0
 - **Python:** ≥ 3.12
 
 ## Development commands
