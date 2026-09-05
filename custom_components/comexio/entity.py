@@ -1,4 +1,4 @@
-# Version: 0.7.6
+# Version: 0.7.7
 import logging
 from typing import Any
 
@@ -32,6 +32,21 @@ def hub_device_id(coordinator: ComexioCoordinator) -> str | None:
         return None
 
 
+def build_device_info(
+    coordinator: ComexioCoordinator, identifiers: set[tuple[str, str]], name: str, model: str
+) -> dict[str, Any]:
+    """Build a sub-device's device_info dict, linked to the hub device via via_device_id."""
+    info: dict[str, Any] = {
+        "identifiers": identifiers,
+        "name": name,
+        "manufacturer": "Comexio",
+        "model": model,
+    }
+    if via_id := hub_device_id(coordinator):
+        info["via_device_id"] = via_id
+    return info
+
+
 class ComexioIOEntity(CoordinatorEntity):
     """Shared base for all IO entities attached to an extension module.
 
@@ -50,15 +65,12 @@ class ComexioIOEntity(CoordinatorEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        info: dict[str, Any] = {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            "name": f"{self.coordinator.server_id} {self._ext_name}",
-            "manufacturer": "Comexio",
-            "model": "Extension Module",
-        }
-        if via_id := hub_device_id(self.coordinator):
-            info["via_device_id"] = via_id
-        return info
+        return build_device_info(
+            self.coordinator,
+            {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
+            f"{self.coordinator.server_id} {self._ext_name}",
+            "Extension Module",
+        )
 
     @property
     def available(self) -> bool:
@@ -82,12 +94,9 @@ class ComexioMarkerEntity(CoordinatorEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        info: dict[str, Any] = {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            "name": f"{self.coordinator.server_id} Markers",
-            "manufacturer": "Comexio",
-            "model": "Marker Group",
-        }
-        if via_id := hub_device_id(self.coordinator):
-            info["via_device_id"] = via_id
-        return info
+        return build_device_info(
+            self.coordinator,
+            {(DOMAIN, f"{self.coordinator.server_id}_markers")},
+            f"{self.coordinator.server_id} Markers",
+            "Marker Group",
+        )

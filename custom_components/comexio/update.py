@@ -1,4 +1,4 @@
-# Version: 0.1.0
+# Version: 0.1.1
 from typing import Any
 
 from homeassistant.components.update import UpdateDeviceClass, UpdateEntity
@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, fw_update_signal
 from .coordinator import ComexioCoordinator
-from .entity import hub_device_id
+from .entity import build_device_info
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -103,15 +103,12 @@ class ComexioBaseFirmwareUpdate(ComexioFirmwareUpdateBase):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        info: dict[str, Any] = {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_BASE".lower())},
-            "name": f"{self.coordinator.server_id} BASE",
-            "manufacturer": "Comexio",
-            "model": "Extension Module",
-        }
-        if via_id := hub_device_id(self.coordinator):
-            info["via_device_id"] = via_id
-        return info
+        return build_device_info(
+            self.coordinator,
+            {(DOMAIN, f"{self.coordinator.server_id}_BASE".lower())},
+            f"{self.coordinator.server_id} BASE",
+            "Extension Module",
+        )
 
 
 class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
@@ -124,12 +121,9 @@ class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        info: dict[str, Any] = {
-            "identifiers": {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            "name": f"{self.coordinator.server_id} {self._ext_name}",
-            "manufacturer": "Comexio",
-            "model": "Extension Module",
-        }
-        if via_id := hub_device_id(self.coordinator):
-            info["via_device_id"] = via_id
-        return info
+        return build_device_info(
+            self.coordinator,
+            {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
+            f"{self.coordinator.server_id} {self._ext_name}",
+            "Extension Module",
+        )
