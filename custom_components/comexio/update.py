@@ -1,10 +1,11 @@
-# Version: 0.1.1
+# Version: 0.1.2
 from typing import Any
 
 from homeassistant.components.update import UpdateDeviceClass, UpdateEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -102,12 +103,12 @@ class ComexioBaseFirmwareUpdate(ComexioFirmwareUpdateBase):
         self._attr_unique_id = f"comexio_{server_id}_base_firmware_update"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            {(DOMAIN, f"{self.coordinator.server_id}_BASE".lower())},
-            f"{self.coordinator.server_id} BASE",
-            "Extension Module",
+            identifiers={(DOMAIN, f"{self.coordinator.server_id}_BASE".lower())},
+            name=f"{self.coordinator.server_id} BASE",
+            model="Extension Module",
         )
 
 
@@ -120,10 +121,10 @@ class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
         self._attr_unique_id = f"comexio_{server_id}_{ext_name}_firmware_update".lower()
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            {(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            f"{self.coordinator.server_id} {self._ext_name}",
-            "Extension Module",
+            identifiers={(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
+            name=f"{self.coordinator.server_id} {self._ext_name}",
+            model="Extension Module",
         )

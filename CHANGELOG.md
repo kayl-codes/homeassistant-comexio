@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+---
+
+## [0.9.3] — 2026-09-05
+
+### 🛠️ Core & Stability Improvements
+- **`build_device_info()` hardened:** Now returns Home Assistant's own `DeviceInfo` type instead of a generic dict, closing 4 pre-existing mypy Liskov-substitution errors, and its `identifiers`/`name`/`model` parameters are keyword-only to rule out an accidental positional mix-up between same-typed arguments. No functional change — verified live against the hub/sub-device `via_device_id` linkage.
+
 ### 🐛 Bug Fixes & Refactoring
 - **`cryptography` requirement floor lowered back to `>=42.0.0`:** The `>=50.0.1` floor introduced in 0.9.2 conflicts with Home Assistant's own exact-pinned `cryptography` version on some HA releases (e.g. `==48.0.1` on HA 2026.9.0), causing the integration's requirement install to fail outright and the integration to never load for affected users (#61). Restored to the last verified-compatible floor.
 
@@ -245,7 +252,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.7.5...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.3...HEAD
+[0.9.3]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.2...0.9.3
+[0.9.2]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.1...0.9.2
+[0.9.1]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.0...0.9.1
+[0.9.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.8.1...0.9.0
+[0.8.1]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.8.0...0.8.1
+[0.8.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.7.5...0.8.0
 [0.7.5]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.7.1...0.7.5
 [0.7.1]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.7.0...0.7.1
 [0.7.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.6.4...0.7.0
