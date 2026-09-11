@@ -1,7 +1,7 @@
 # Version: 0.7.5
 import asyncio
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
 import io
@@ -804,6 +804,17 @@ class ComexioAPI:
         y_max = self._CANVAS_REF_Y * (height_mm / self._CANVAS_REF_MM_SHORT) * (res / self._CANVAS_REF_RES)
         return x_max, y_max
 
+    @staticmethod
+    def _iter_group(group: Any) -> Iterable[tuple[str, Any]]:
+        """Iterate a Comexio id group as (id, member) pairs, ids normalized to str.
+
+        Comexio serializes a gap-free id group as a JSON array instead of an object
+        (observed for both $FubModules groups and Web-IO command groups) — the array
+        index then IS the id, so both shapes yield the same (id, member) pairs.
+        """
+        items = group.items() if isinstance(group, dict) else enumerate(group or [])
+        return ((str(gid), member) for gid, member in items)
+
     def _process_device_info(
         self,
         conf: dict[str, Any],
@@ -814,15 +825,28 @@ class ComexioAPI:
         """Process device info and webhooks for both Web-IO classes (marker/io)."""
         web_devices = conf.get("WebDevices", {})
         fub_10 = fub_modules.get("10", {})
+        fub_10_by_dev_id = dict(self._iter_group(fub_10))
 
         missing_classes = []
         for webio_class in WEBIO_CLASSES:
             target_dev_id = self._assign_webio_device_id(web_devices, data, webio_name, webio_class)
-            if target_dev_id and target_dev_id in fub_10:
-                for w_id, w_obj in fub_10[target_dev_id].items():
-                    self._add_webhook_command(data, w_id, w_obj, webio_class)
-            elif not target_dev_id:
+            if not target_dev_id:
                 missing_classes.append(webio_class)
+                continue
+            commands = fub_10_by_dev_id.get(target_dev_id)
+            if commands is None:
+                continue
+            for w_id, w_obj in self._iter_group(commands):
+                if not isinstance(w_obj, dict):
+                    _LOGGER.debug(
+                        "Skipping non-dict Web-IO command entry %s in device %s (webio_class=%s): %r",
+                        w_id,
+                        target_dev_id,
+                        webio_class,
+                        w_obj,
+                    )
+                    continue
+                self._add_webhook_command(data, w_id, w_obj, webio_class)
 
         if missing_classes and any(d.get("Name") == webio_name for d in web_devices.values()):
             # Pre-split installs have a single Web-IO device named exactly `webio_name`; it
@@ -876,18 +900,14 @@ class ComexioAPI:
         against the Netzteil plan). Kept separate from webio_commands on purpose — that dict
         drives the sync/audit logic and must only ever contain HA's own class.
         """
-        groups = fub_10.items() if isinstance(fub_10, dict) else enumerate(fub_10 or [])
-        for dev_id, dev_commands in groups:
+        for dev_id, dev_commands in self._iter_group(fub_10):
             prefix = f"{dev_id}. "
-            # Comexio serializes gap-free id groups as JSON arrays instead of objects
-            # (same quirk as $FubModules groups) — the array index then IS the webIoId.
-            items = dev_commands.items() if isinstance(dev_commands, dict) else enumerate(dev_commands or [])
-            for w_id, w_obj in items:
+            for w_id, w_obj in self._iter_group(dev_commands):
                 if not isinstance(w_obj, dict):
                     continue
                 name = w_obj.get("Name")
                 if name:
-                    data["webio_names"][str(w_id)] = {
+                    data["webio_names"][w_id] = {
                         "name": f"{prefix}{name}",
                         "analog": w_obj.get("TypeId") in {2, "2"},
                     }
