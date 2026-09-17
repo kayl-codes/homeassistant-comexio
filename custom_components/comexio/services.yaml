@@ -584,6 +584,39 @@ function_plan_preview_stop:
         config_entry:
           integration: comexio
 
+marker_delete:
+  name: Marker Delete
+  description: >
+    Permanently deletes one or more Markers directly on the Comexio server (not just from
+    a function plan's canvas — the Marker itself, including any wiring to it). Only markers
+    this integration created itself (e.g. KNX bridge markers) can be deleted — factory and
+    Studio-created markers are protected and the whole call is refused if any are included.
+    A marker id that does not (or no longer) exist is silently skipped, not reported as an
+    error — a genuine request failure (e.g. session drop) is still reported, never mistaken
+    for that. Limited to 200 markers per call. Requires "confirm" — without it, nothing is
+    deleted.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    marker_id:
+      name: Marker ID(s)
+      description: "A single ID (355), a comma-separated list (351,355), or an inclusive range (306-355). 'M' prefix optional."
+      required: true
+      selector:
+        text:
+    confirm:
+      name: Confirm deletion
+      description: "Must be enabled — otherwise nothing is deleted."
+      required: true
+      default: false
+      selector:
+        boolean:
+
 function_plan_search:
   name: Function Plan Search
   description: >

@@ -59,6 +59,7 @@ from .const import (
     category_by_fub_module_type,
     io_column_rows,
     io_sort_key,
+    source_category,
     webio_class_label,
     webio_class_name,
 )
@@ -1879,6 +1880,114 @@ class ComexioAPI:
             except Exception:
                 _LOGGER.exception("function_plan_delete_elements: failed to parse response")
                 return False
+
+    async def delete_marker(self, marker_id: int) -> bool | None:
+        """Delete a Marker directly from Comexio's marker list (not a function plan element).
+
+        POSTs to delete_element/ with elementId=<marker_id>, type=<Marker's fub_module_type,
+        "2">, full=true. Tri-state return so the caller (marker_delete service) can tell a
+        "nothing changed" outcome apart from a genuine request failure — collapsing both to
+        one bool would let a session/HTTP/parse failure be misreported as "marker already
+        absent" for what is an irreversible action:
+        - True: {"result": "1"} — deleted.
+        - False: request completed (HTTP 200, valid JSON object) but result wasn't "1" — most
+          often because the marker id doesn't (or no longer) exist, but the server could also
+          be reporting a rejection this way; the caller cross-checks against a fresh presence
+          lookup (get_marker_delete_eligibility's third return value) to tell those apart
+          rather than assuming this is always the harmless case.
+        - None: the request itself failed (non-200, unparsable or non-object JSON body,
+          transport error, timeout) — a real failure, must NOT be reported as "already absent".
+        """
+        url = f"{self._base_url}/admin/function_function_module/delete_element/"
+        payload = {
+            "elementId": str(marker_id),
+            "type": source_category(WEBIO_CLASS_MARKER).fub_module_type,
+            "full": "true",
+            "timestamp": _js_timestamp(),
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        try:
+            async with self.session.post(url, data=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("delete_marker: HTTP %s deleting marker_id=%s", resp.status, marker_id)
+                    return None
+                try:
+                    result = await resp.json(content_type=None)
+                except Exception:
+                    _LOGGER.exception("delete_marker: failed to parse response for marker_id=%s", marker_id)
+                    return None
+                if not isinstance(result, dict):
+                    _LOGGER.error("delete_marker: unexpected response shape for marker_id=%s: %r", marker_id, result)
+                    return None
+                success = str(result.get("result")) == "1"
+                _LOGGER.info("delete_marker: marker_id=%s result=%s", marker_id, success)
+                return success
+        except (aiohttp.ClientError, TimeoutError):
+            _LOGGER.exception("delete_marker: HTTP request error deleting marker_id=%s", marker_id)
+            return None
+
+    async def get_marker_delete_eligibility(self, marker_ids: list[int]) -> tuple[list[int], list[int], set[int]]:
+        """Split marker_ids into (deletable, protected, known_ids) using a fresh CategoryId lookup.
+
+        Safety gate for marker_delete (user requirement 2026-09-17): only markers this
+        integration created itself via the API carry CategoryId==1 and may be deleted.
+        CategoryId==0 covers both factory-provisioned markers (M1 "System rebooted", M2
+        "TRUE", M3 "FALSE" on a fresh install) and anything a human created via Comexio
+        Studio, and must never be reachable through this service.
+
+        A marker_id absent from the current config entirely (already deleted, or never
+        existed) is treated as deletable, not protected — it defaults to CategoryId 1 rather
+        than 0 here — so the existing "deleting an already-gone id is a routine no-op, not an
+        error" behavior (delete_marker returning False) is unaffected by this gate.
+
+        Deny-by-default on top of allow-by-CategoryId: an unrecognized CategoryId value (not
+        just 0 — nothing here guarantees the field stays a clean 0/1 flag, e.g. a scraped
+        string "1" fails the strict `!= 1` check below just like a real 0 would) is treated
+        as protected too. A config fetch that failed outright (get_raw_config() returns {} on
+        a failed HTTP fetch, a dict without FubModules if the JS block couldn't be parsed, or
+        a transport error/timeout — same convention as coordinator.py's "if not raw_config"
+        guard) refuses every requested id rather than defaulting them all to deletable — a
+        blind config fetch failure must never silently open this gate for an irreversible
+        action. The same applies if marker records exist but none has a usable integer Id
+        (e.g. a parsing regression upstream) — an empty `categories` map must not silently
+        make every requested id default to "deletable".
+
+        The third return value, `known_ids`, is the set of ids actually found (with a usable
+        Id) in this lookup — the caller uses it to tell a delete_marker "False" result that
+        followed a confirmed-absent id (harmless) apart from one that followed an id we just
+        saw present as CategoryId==1 (suspicious: the server accepted it as deletable a moment
+        ago but the delete call itself reported nothing changed).
+        """
+        try:
+            conf = await self.get_raw_config()
+        except (aiohttp.ClientError, TimeoutError):
+            _LOGGER.exception("get_marker_delete_eligibility: config fetch failed — refusing all ids")
+            return [], list(marker_ids), set()
+        fub_modules = conf.get("FubModules") or {}
+        group = fub_modules.get("2")
+        items = list(group.values()) if isinstance(group, dict) else list(group or [])
+        if not items:
+            _LOGGER.error("get_marker_delete_eligibility: no marker config available — refusing all ids")
+            return [], list(marker_ids), set()
+        categories: dict[int, Any] = {}
+        for m in items:
+            if not isinstance(m, dict):
+                continue
+            try:
+                item_id = int(m.get("Id"))
+            except (TypeError, ValueError):
+                _LOGGER.warning("get_marker_delete_eligibility: marker with non-numeric Id %r ignored", m.get("Id"))
+                continue
+            categories[item_id] = m.get("CategoryId", 0)
+        if not categories:
+            _LOGGER.error("get_marker_delete_eligibility: no marker had a usable Id — refusing all ids")
+            return [], list(marker_ids), set()
+        protected = [mid for mid in marker_ids if categories.get(mid, 1) != 1]
+        deletable = [mid for mid in marker_ids if mid not in protected]
+        return deletable, protected, set(categories)
 
     @staticmethod
     def _keyed_by_list_position(items: list[dict[str, Any]]) -> dict[str, Any]:
