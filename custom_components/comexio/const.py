@@ -368,6 +368,13 @@ MARKER_READ_ONLY_SUFFIX = "[RO]"
 # preferred name — both are recognized so existing [TP] markers don't need renaming.
 MARKER_TRIGGER_SUFFIXES = ("[TRIG]", "[TP]")
 
+# Safety cap for the marker_delete service's marker_id field (supports comma lists AND
+# inclusive ranges, e.g. "306-355") — a single typo'd range boundary (e.g. "306-3555")
+# would otherwise fire thousands of sequential, irreversible delete requests against the
+# live controller before the user notices. Confirm alone doesn't protect against this,
+# since it's checked once per call, not once per resolved id.
+MARKER_DELETE_MAX_COUNT = 200
+
 
 class MarkerKind(StrEnum):
     """How a marker is exposed to HA, derived from its Comexio-side title suffix."""

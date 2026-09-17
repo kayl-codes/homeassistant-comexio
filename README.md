@@ -168,6 +168,7 @@ The integration can manage Comexio **function plans** directly from Home Assista
 | `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Deletes one snapshot, all snapshots of a plan, or every stored backup — or, for purge, only the snapshots of plans that no longer exist. |
 | `comexio.function_plan_search` | Finds which plans contain elements matching a text query (same wildcard syntax as the preview card's search bar). |
 | `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimental:* flags likely wiring mistakes, and lays a plan out by signal-flow topology instead of its physical position. |
+| `comexio.marker_delete` | Permanently deletes Markers this integration created itself (e.g. leftover KNX bridge markers) — factory-provisioned and Studio-created Markers are always protected, regardless of ID. Accepts a single ID, a comma-separated list, or a `from-to` range; requires `confirm: true`. |
 
 📖 **[Function Plan Preview guide →](FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
 
@@ -372,6 +373,7 @@ Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwa
 | `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Löscht einen Snapshot, alle Snapshots eines Plans oder sämtliche Backups — bzw. beim Purge nur die Snapshots nicht mehr existierender Pläne. |
 | `comexio.function_plan_search` | Findet Pläne mit Elementen, die zu einem Suchtext passen (gleiche Platzhalter-Syntax wie die Suchleiste der Vorschau-Karte). |
 | `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimentell:* markiert wahrscheinliche Verdrahtungsfehler bzw. ordnet einen Plan nach Signalfluss statt nach physischer Position an. |
+| `comexio.marker_delete` | Löscht dauerhaft Merker, die die Integration selbst angelegt hat (z. B. übrig gebliebene KNX-Brücken-Merker) — werksseitige und in Comexio Studio angelegte Merker sind unabhängig von der ID immer geschützt. Akzeptiert eine einzelne ID, eine Komma-Liste oder einen Bereich `von-bis`; erfordert `confirm: true`. |
 
 📖 **[Logikplan-Vorschau — Anleitung →](FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
 
