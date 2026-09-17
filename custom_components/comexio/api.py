@@ -1958,7 +1958,10 @@ class ComexioAPI:
         non-iterable scalar — e.g. a bare int — straight into a list). The same applies if
         marker records exist but none has a usable integer Id (e.g. a parsing regression
         upstream) — an empty `categories` map must not silently make every requested id default
-        to "deletable".
+        to "deletable". The same reasoning applies even to a single unparseable record among
+        otherwise-fine ones: since we can't recover what id it was meant to be, we can't rule out
+        that it's a requested/protected marker, so one bad Id refuses the whole batch rather than
+        just being dropped and silently falling through to the absent-id default.
 
         The third return value, `known_ids`, is the set of ids actually found (with a usable
         Id) in this lookup — the caller uses it to tell a delete_marker "False" result that
@@ -1994,7 +1997,13 @@ class ComexioAPI:
         categories: dict[int, Any] = {}
         for m in items:
             if not isinstance(m, dict):
-                continue
+                # Same reasoning as the unparseable-Id case below: a non-dict entry (e.g. a bare
+                # int/string/null from a scraping regression) can't be read for an Id either, so
+                # a requested marker_id that belonged to it would just as silently fall through
+                # to the absent-id default — refuse the whole batch here too rather than
+                # dropping it unnoticed.
+                _LOGGER.error("get_marker_delete_eligibility: non-dict marker record %r — refusing all ids", m)
+                return [], list(marker_ids), set()
             raw_id = m.get("Id")
             # int() also accepts bools (True -> 1) and truncates fractional floats (1.9 -> 1),
             # either of which would silently alias a malformed record onto a real marker id and
@@ -2009,14 +2018,28 @@ class ComexioAPI:
             is_plausible_id = isinstance(raw_id, int) or (
                 isinstance(raw_id, str) and raw_id.isascii() and raw_id.isdecimal() and len(raw_id) <= 10
             )
+            # A record with an Id we can't parse can't be entered into `categories` at all —
+            # dropping it with just a warning and moving on (the earlier behavior) would let a
+            # requested id that actually belongs to THIS record fall through categories.get(mid,
+            # 1)'s default and be treated as "already deleted, so deletable" purely because we
+            # couldn't read its real (possibly CategoryId==0, protected) identity. There's no way
+            # to know in advance whether the unparseable record was for one of the requested ids
+            # or an unrelated one, so — same all-or-nothing posture as every other malformed-data
+            # case in this function — any single unparseable Id refuses the whole batch.
             if isinstance(raw_id, bool) or not is_plausible_id:
-                _LOGGER.warning("get_marker_delete_eligibility: marker with non-numeric Id %r ignored", raw_id)
-                continue
+                _LOGGER.error(
+                    "get_marker_delete_eligibility: marker record with non-numeric Id %r — refusing all ids",
+                    raw_id,
+                )
+                return [], list(marker_ids), set()
             try:
                 item_id = int(raw_id)
             except (ValueError, OverflowError):
-                _LOGGER.warning("get_marker_delete_eligibility: marker with non-numeric Id %r ignored", raw_id)
-                continue
+                _LOGGER.error(
+                    "get_marker_delete_eligibility: marker record with non-numeric Id %r — refusing all ids",
+                    raw_id,
+                )
+                return [], list(marker_ids), set()
             categories[item_id] = m.get("CategoryId", 0)
         if not categories:
             _LOGGER.error("get_marker_delete_eligibility: no marker had a usable Id — refusing all ids")
