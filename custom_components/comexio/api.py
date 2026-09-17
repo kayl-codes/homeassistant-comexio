@@ -1945,8 +1945,9 @@ class ComexioAPI:
 
         Deny-by-default on top of allow-by-CategoryId: an unrecognized CategoryId value (not
         just 0 — nothing here guarantees the field stays a clean 0/1 flag, e.g. a scraped
-        string "1" fails the strict `!= 1` check below just like a real 0 would) is treated
-        as protected too. A config fetch that failed outright (get_raw_config() returns {} on
+        string "1" fails the strict equality check below just like a real 0 would, and a
+        boolean `true` is rejected explicitly despite Python's `True == 1` — see the comment
+        below) is treated as protected too. A config fetch that failed outright (get_raw_config() returns {} on
         a failed HTTP fetch, a dict without FubModules or a FubModules value that isn't itself
         a dict if the JS block couldn't be parsed or came back malformed, or a transport
         error/timeout — same convention as coordinator.py's "if not raw_config" guard) refuses
@@ -2020,7 +2021,15 @@ class ComexioAPI:
         if not categories:
             _LOGGER.error("get_marker_delete_eligibility: no marker had a usable Id — refusing all ids")
             return [], list(marker_ids), set()
-        protected = [mid for mid in marker_ids if categories.get(mid, 1) != 1]
+        # Python's loose equality makes True == 1 and 1.0 == 1, so a plain "!= 1" check would
+        # let a malformed CategoryId (e.g. a scraped JSON boolean true) alias onto "1" the same
+        # way the Id parsing above had to guard against — only a genuine int, not a bool, is
+        # accepted as CategoryId==1; anything else (including 1.0) stays protected.
+        protected = []
+        for mid in marker_ids:
+            value = categories.get(mid, 1)
+            if not (isinstance(value, int) and not isinstance(value, bool) and value == 1):
+                protected.append(mid)
         deletable = [mid for mid in marker_ids if mid not in protected]
         return deletable, protected, set(categories)
 
