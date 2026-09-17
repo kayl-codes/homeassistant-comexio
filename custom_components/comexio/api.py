@@ -1994,10 +1994,27 @@ class ComexioAPI:
         for m in items:
             if not isinstance(m, dict):
                 continue
+            raw_id = m.get("Id")
+            # int() also accepts bools (True -> 1) and truncates fractional floats (1.9 -> 1),
+            # either of which would silently alias a malformed record onto a real marker id and
+            # let its CategoryId override that real marker's protection — only a genuine integer
+            # or a plain ASCII decimal-digit string is accepted (str.isdecimal() alone also
+            # passes non-ASCII digits, e.g. Arabic-Indic "١٢٣", which int() happily aliases the
+            # same way). int() on a non-finite float (e.g. a JSON "Infinity" literal, which
+            # json.loads accepts) raises OverflowError, and on a 4300+ digit string raises
+            # ValueError via CPython's integer string conversion limit — neither is a case this
+            # gate may crash on, so int() itself stays wrapped below rather than assumed safe
+            # just because the shape check passed.
+            is_plausible_id = isinstance(raw_id, int) or (
+                isinstance(raw_id, str) and raw_id.isascii() and raw_id.isdecimal() and len(raw_id) <= 10
+            )
+            if isinstance(raw_id, bool) or not is_plausible_id:
+                _LOGGER.warning("get_marker_delete_eligibility: marker with non-numeric Id %r ignored", raw_id)
+                continue
             try:
-                item_id = int(m.get("Id"))
-            except (TypeError, ValueError):
-                _LOGGER.warning("get_marker_delete_eligibility: marker with non-numeric Id %r ignored", m.get("Id"))
+                item_id = int(raw_id)
+            except (ValueError, OverflowError):
+                _LOGGER.warning("get_marker_delete_eligibility: marker with non-numeric Id %r ignored", raw_id)
                 continue
             categories[item_id] = m.get("CategoryId", 0)
         if not categories:
