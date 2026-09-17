@@ -1953,9 +1953,11 @@ class ComexioAPI:
         every requested id rather than defaulting them all to deletable — a blind config fetch
         failure must never silently open this gate for an irreversible action, and a malformed
         response must never crash the service call outright either (e.g. calling .get("2") on
-        a non-dict FubModules value). The same applies if marker records exist but none has a
-        usable integer Id (e.g. a parsing regression upstream) — an empty `categories` map
-        must not silently make every requested id default to "deletable".
+        a non-dict FubModules value, or converting a FubModules["2"] that came back as a
+        non-iterable scalar — e.g. a bare int — straight into a list). The same applies if
+        marker records exist but none has a usable integer Id (e.g. a parsing regression
+        upstream) — an empty `categories` map must not silently make every requested id default
+        to "deletable".
 
         The third return value, `known_ids`, is the set of ids actually found (with a usable
         Id) in this lookup — the caller uses it to tell a delete_marker "False" result that
@@ -1973,7 +1975,18 @@ class ComexioAPI:
             return [], list(marker_ids), set()
         fub_modules = conf["FubModules"]
         group = fub_modules.get("2")
-        items = list(group.values()) if isinstance(group, dict) else list(group or [])
+        if isinstance(group, dict):
+            items = list(group.values())
+        elif isinstance(group, (list, tuple)):
+            items = list(group)
+        elif group is None:
+            items = []
+        else:
+            _LOGGER.error(
+                "get_marker_delete_eligibility: malformed marker group (%s) — refusing all ids",
+                type(group).__name__,
+            )
+            return [], list(marker_ids), set()
         if not items:
             _LOGGER.error("get_marker_delete_eligibility: no marker config available — refusing all ids")
             return [], list(marker_ids), set()
