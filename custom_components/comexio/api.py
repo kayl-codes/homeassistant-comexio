@@ -1947,13 +1947,15 @@ class ComexioAPI:
         just 0 — nothing here guarantees the field stays a clean 0/1 flag, e.g. a scraped
         string "1" fails the strict `!= 1` check below just like a real 0 would) is treated
         as protected too. A config fetch that failed outright (get_raw_config() returns {} on
-        a failed HTTP fetch, a dict without FubModules if the JS block couldn't be parsed, or
-        a transport error/timeout — same convention as coordinator.py's "if not raw_config"
-        guard) refuses every requested id rather than defaulting them all to deletable — a
-        blind config fetch failure must never silently open this gate for an irreversible
-        action. The same applies if marker records exist but none has a usable integer Id
-        (e.g. a parsing regression upstream) — an empty `categories` map must not silently
-        make every requested id default to "deletable".
+        a failed HTTP fetch, a dict without FubModules or a FubModules value that isn't itself
+        a dict if the JS block couldn't be parsed or came back malformed, or a transport
+        error/timeout — same convention as coordinator.py's "if not raw_config" guard) refuses
+        every requested id rather than defaulting them all to deletable — a blind config fetch
+        failure must never silently open this gate for an irreversible action, and a malformed
+        response must never crash the service call outright either (e.g. calling .get("2") on
+        a non-dict FubModules value). The same applies if marker records exist but none has a
+        usable integer Id (e.g. a parsing regression upstream) — an empty `categories` map
+        must not silently make every requested id default to "deletable".
 
         The third return value, `known_ids`, is the set of ids actually found (with a usable
         Id) in this lookup — the caller uses it to tell a delete_marker "False" result that
@@ -1966,7 +1968,10 @@ class ComexioAPI:
         except (aiohttp.ClientError, TimeoutError):
             _LOGGER.exception("get_marker_delete_eligibility: config fetch failed — refusing all ids")
             return [], list(marker_ids), set()
-        fub_modules = conf.get("FubModules") or {}
+        if not isinstance(conf, dict) or not isinstance(conf.get("FubModules"), dict):
+            _LOGGER.error("get_marker_delete_eligibility: malformed config response — refusing all ids")
+            return [], list(marker_ids), set()
+        fub_modules = conf["FubModules"]
         group = fub_modules.get("2")
         items = list(group.values()) if isinstance(group, dict) else list(group or [])
         if not items:
