@@ -36,10 +36,21 @@ def _parse_marker_id_list(raw_input: str) -> tuple[list[int], list[str]]:
     """
     marker_ids: set[int] = set()
     invalid_tokens: list[str] = []
+    over_limit = False
     for token, parsed in parse_ignored_marker_tokens(raw_input):
         if parsed is None:
+            # Always collect invalid tokens, even after the safety limit is hit below —
+            # otherwise a token after an oversized range (e.g. "1-1000,abc") would never be
+            # looked at, and the caller would report only the "too many markers" error
+            # while silently dropping the fact that the input also had a bad token.
             invalid_tokens.append(token)
-        elif isinstance(parsed, tuple):
+            continue
+        if over_limit:
+            # Already over the safety limit — keep scanning for invalid tokens (above) but
+            # stop growing marker_ids further, so a huge range/token list can't inflate the
+            # set beyond what the caller's over-the-limit check already needs to trigger.
+            continue
+        if isinstance(parsed, tuple):
             start, end = parsed
             # Cap expansion at MARKER_DELETE_MAX_COUNT + 1 per range — enough for the
             # caller's over-the-limit check further down to still fire, without
@@ -50,7 +61,7 @@ def _parse_marker_id_list(raw_input: str) -> tuple[list[int], list[str]]:
         else:
             marker_ids.add(parsed)
         if len(marker_ids) > MARKER_DELETE_MAX_COUNT:
-            break
+            over_limit = True
     return sorted(marker_ids), invalid_tokens
 
 
