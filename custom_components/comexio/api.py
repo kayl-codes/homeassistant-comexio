@@ -4181,7 +4181,10 @@ class ComexioAPI:
         fub_modules, free_marker_ids, error = await self._prepare_knx_bridge_batch()
         if error:
             return [], [error], {}
-        assert fub_modules is not None  # guaranteed by error is None, see _prepare_knx_bridge_batch
+        if fub_modules is None:
+            # Only reachable if _prepare_knx_bridge_batch's error-is-None contract is
+            # violated — see its docstring. Fail loudly rather than silently proceed.
+            raise AssertionError("_prepare_knx_bridge_batch returned fub_modules=None with error=None")
 
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
