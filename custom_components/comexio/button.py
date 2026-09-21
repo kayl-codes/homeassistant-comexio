@@ -1601,7 +1601,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         Returns (bridge_marker_ids, errors) — a K id without a bridge marker yet (write
         bridge not created, e.g. mid-sync ordering issue) is reported as an error and
-        skipped rather than silently wiring nothing.
+        skipped rather than silently wiring nothing. A K id whose bridge Marker exists but
+        is missing from the wiring-derived map (see _knx_bridge_marker_id_by_title) still
+        resolves via its title instead of being dropped.
         """
         bridge_marker_by_k_id = self.coordinator._knx_bridge_marker_by_k_id()
         if bridge_marker_by_k_id is None:
@@ -1611,10 +1613,34 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         for k_id in k_ids:
             marker_id = bridge_marker_by_k_id.get(str(k_id))
             if marker_id is None:
+                marker_id = self._knx_bridge_marker_id_by_title(k_id)
+            if marker_id is None:
                 errors.append(f"K{k_id}: no write-path bridge marker yet, cannot wire trigger pair")
             else:
                 marker_ids.append(int(marker_id))
         return marker_ids, errors
+
+    def _knx_bridge_marker_id_by_title(self, k_id: int) -> int | None:
+        """Fallback bridge-Marker lookup via its title suffix "[K<k_id>]", for when
+        _knx_bridge_marker_by_k_id()'s plan-wiring-derived map has no entry for k_id.
+
+        That map is built from the KNX cluster plan's *connection* wiring (see
+        _plan_knx_bridge_pairs) — if that connection is removed or broken in Comexio
+        (manually, or by an external tool) while the bridge Marker itself is left behind,
+        still carrying its machine-set "[K<k_id>]" title (create_knx_bridge_marker,
+        MARKER_KNX_BRIDGE_SUFFIX_RE), the map lookup alone would make it permanently
+        invisible: a future orphan audit derives its own candidates from that very same
+        map (see coordinator._audit_trigger_pairs), so a K id dropped here would never be
+        reconsidered either, leaving its stale Marker+Flanke trigger-plan wiring stuck
+        forever. Scanning the coordinator's cached marker list directly (kind==KNX_BRIDGE,
+        the same classification MARKER_KNX_BRIDGE_SUFFIX_RE drives) sidesteps the
+        connection-wiring dependency entirely.
+        """
+        suffix = f"[K{k_id}]"
+        for m in self.coordinator.data.get("markers", []):
+            if m.get("kind") == MarkerKind.KNX_BRIDGE and (m.get("title") or "").rstrip().endswith(suffix):
+                return int(m["id"])
+        return None
 
     async def _add_trigger_pairs(self, ctx: _SyncContext, missing_ids: list[int], ref_type: int = 2) -> str:
         """Resolve/create the trigger plan and add the missing source+Flanke pairs.
