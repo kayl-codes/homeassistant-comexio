@@ -4108,6 +4108,48 @@ class ComexioAPI:
         )
         return None
 
+    async def _prepare_knx_bridge_batch(self, fub_id: int) -> tuple[dict[str, Any] | None, list[int], str | None]:
+        """Fetch config, locate the KNX bridge marker block, and collect reusable free markers.
+
+        Split out of function_plan_add_knx_bridge_pairs to keep its own cognitive complexity
+        within SonarQube S3776's limit. Returns (fub_modules, free_marker_ids, error) — on
+        failure fub_modules is None and error carries the message the caller returns verbatim.
+        """
+        conf = await self.get_raw_config()
+        fub_modules = conf.get("FubModules")
+        if not fub_modules:
+            # get_raw_config() returns {} on a failed HTTP fetch — proceeding with an empty
+            # $FubModules would make ensure_knx_bridge_block_start think NO marker exists yet
+            # and fill dozens of bogus filler markers to reach a wrong "boundary".
+            _LOGGER.error(
+                "function_plan_add_knx_bridge_pairs: could not fetch current Comexio config "
+                "(FubModules missing) — aborting"
+            )
+            return None, [], "could not fetch current Comexio config — aborting KNX bridge wiring, see log"
+        target = await self.ensure_knx_bridge_block_start(fub_modules)
+        if target is None:
+            return None, [], "failed to reach the KNX bridge marker block boundary — aborting, see log"
+
+        all_plans = await self.function_plan_load_all_plans()
+        if not all_plans:
+            # function_plan_load_all_plans() returns {} both when there are genuinely no
+            # plans yet AND on a failed/incomplete fetch (HTTP error, malformed response —
+            # see its own docstring) — the two are indistinguishable here, and treating a
+            # failed fetch as "nothing is placed anywhere" would let _free_marker_ids reuse
+            # a marker that IS actually wired into a plan this call just couldn't see.
+            # Fall back to always creating fresh markers instead (still correct, just
+            # skips the reuse optimization for this run).
+            _LOGGER.warning(
+                "function_plan_add_knx_bridge_pairs: function_plan_load_all_plans returned no "
+                "plans — skipping free-marker reuse for this run (creating fresh markers instead)"
+            )
+            return fub_modules, [], None
+
+        free_marker_ids = self._free_marker_ids(
+            fub_modules, all_plans, target, max_id=target + MARKER_KNX_BRIDGE_BLOCK_SIZE
+        )
+        return fub_modules, free_marker_ids, None
+
     async def function_plan_add_knx_bridge_pairs(
         self,
         fub_id: int,
@@ -4136,39 +4178,10 @@ class ComexioAPI:
         brand-new bridge immediately, in the same cycle, instead of re-auditing for the
         marker_id later (see _add_single_knx_bridge's docstring)).
         """
-        conf = await self.get_raw_config()
-        fub_modules = conf.get("FubModules")
-        if not fub_modules:
-            # get_raw_config() returns {} on a failed HTTP fetch — proceeding with an empty
-            # $FubModules would make ensure_knx_bridge_block_start think NO marker exists yet
-            # and fill dozens of bogus filler markers to reach a wrong "boundary".
-            _LOGGER.error(
-                "function_plan_add_knx_bridge_pairs: could not fetch current Comexio config "
-                "(FubModules missing) — aborting"
-            )
-            return [], ["could not fetch current Comexio config — aborting KNX bridge wiring, see log"], {}
-        target = await self.ensure_knx_bridge_block_start(fub_modules)
-        if target is None:
-            return [], ["failed to reach the KNX bridge marker block boundary — aborting, see log"], {}
-
-        all_plans = await self.function_plan_load_all_plans()
-        if all_plans:
-            free_marker_ids = self._free_marker_ids(
-                fub_modules, all_plans, target, max_id=target + MARKER_KNX_BRIDGE_BLOCK_SIZE
-            )
-        else:
-            # function_plan_load_all_plans() returns {} both when there are genuinely no
-            # plans yet AND on a failed/incomplete fetch (HTTP error, malformed response —
-            # see its own docstring) — the two are indistinguishable here, and treating a
-            # failed fetch as "nothing is placed anywhere" would let _free_marker_ids reuse
-            # a marker that IS actually wired into a plan this call just couldn't see.
-            # Fall back to always creating fresh markers instead (still correct, just
-            # skips the reuse optimization for this run).
-            _LOGGER.warning(
-                "function_plan_add_knx_bridge_pairs: function_plan_load_all_plans returned no "
-                "plans — skipping free-marker reuse for this run (creating fresh markers instead)"
-            )
-            free_marker_ids = []
+        fub_modules, free_marker_ids, error = await self._prepare_knx_bridge_batch(fub_id)
+        if error:
+            return [], [error], {}
+        assert fub_modules is not None  # guaranteed by error is None, see _prepare_knx_bridge_batch
 
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
