@@ -12,7 +12,7 @@ import time
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 
-from ..const import FUNCTION_PLAN_LAYOUT_Y_STEP, FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
+from ..const import FUNCTION_PLAN_KNX_LAYOUT_Y_STEP, FUNCTION_PLAN_LAYOUT_Y_STEP, FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
 from ..coordinator import ComexioCoordinator
 from ..function_plan_backup import snapshot_label_maps
 from ..function_plan_render import resolve_element_label
@@ -227,7 +227,7 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
 
 
 async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Sort all function plan elements by marker ID, snapping every element to exact grid."""
+    """Sort all function plan elements by marker/KNX ID, snapping every element to exact grid."""
     ctx = await _resolve_function_plan_context(hass, call, _TITLE_SORT_ERR)
     if ctx is None:
         return
@@ -256,7 +256,7 @@ async def async_sort_function_plan(
     notify: bool = True,
     was_active: bool | None = None,
 ) -> dict | None:
-    """Sort all plan elements by marker ID, snapping every element to the exact grid.
+    """Sort all plan elements by marker/KNX ID, snapping every element to the exact grid.
 
     Managed IO cluster plans ('{prefix} - IO [...]') are not marker-sorted — their
     deterministic extension-column grid (io_column_rows) is restored instead.
@@ -275,9 +275,18 @@ async def async_sort_function_plan(
     if was_active is None:
         was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
 
-    row_step = (
-        FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP if coordinator.is_trigger_plan(fub_id) else FUNCTION_PLAN_LAYOUT_Y_STEP
-    )
+    if coordinator.is_trigger_plan(fub_id):
+        row_step = FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
+    elif coordinator.is_knx_cluster_plan(fub_id):
+        # A KNX bridge pair's two WebIO hops already sit FUNCTION_PLAN_LAYOUT_ROW_HEIGHT apart
+        # (see _grid.py's _KNX_LOOPBACK_Y_OFFSET). Using that SAME value for the pair-to-pair
+        # row_step too (tried 2026-09-20) made every row in the plan perfectly equidistant, with
+        # no visual gap between one pair and the next — user report: "alles press an press".
+        # FUNCTION_PLAN_KNX_LAYOUT_Y_STEP keeps the within-pair hop gap tight while restoring a
+        # visibly larger gap between pairs (see its own docstring in const.py for the numbers).
+        row_step = FUNCTION_PLAN_KNX_LAYOUT_Y_STEP
+    else:
+        row_step = FUNCTION_PLAN_LAYOUT_Y_STEP
     canvas_label, x_max, rows_per_col, max_cols = _sort_canvas_bounds(api, fub_id, canvas_format, row_step)
 
     plan_data = await api.function_plan_load_elements(fub_id)
@@ -369,9 +378,15 @@ def _sort_compute_positions(
     else:
         pairs, orphans = _build_sorted_pairs(plan_data.get("elements", {}), plan_data.get("connections", {}))
         orphans = [eid for eid in orphans if eid not in pinned_ids]
-        new_positions = _assign_grid_positions(pairs, orphans, rows_per_col, max_cols, row_step) + pinned
-        n_pairs, n_single = len(pairs), len(orphans)
-        sort_line = f"{n_pairs} pairs sorted by marker ID + {n_single} single elements."
+        grid_positions, dropped_pairs, dropped_orphans = _assign_grid_positions(
+            pairs, orphans, rows_per_col, max_cols, row_step
+        )
+        new_positions = grid_positions + pinned
+        # len(pairs)/len(orphans) minus what _assign_grid_positions had to drop for lack of grid
+        # space (logged as a warning there) — reporting the pre-drop count here would silently
+        # overstate what was actually sorted (code-review finding, 2026-09-19).
+        n_pairs, n_single = len(pairs) - dropped_pairs, len(orphans) - dropped_orphans
+        sort_line = f"{n_pairs} pairs sorted by marker/KNX ID + {n_single} single elements."
     return new_positions, n_pairs, n_single, sort_line, header_slots, io_members
 
 

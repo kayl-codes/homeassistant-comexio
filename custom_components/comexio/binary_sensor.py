@@ -1,4 +1,5 @@
 # Version: 0.8.3
+import logging
 from typing import Any
 
 from homeassistant.components.binary_sensor import (
@@ -14,6 +15,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MarkerKind, bus_load_signal
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -42,6 +45,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         )
 
     # Read-only ("[RO]") digital KNX objects (blind, see project_knx_objects memory) — opt-in, default OFF
+    # DPT3.x composite members are skipped here — cover.py/light.py expose the pair as one
+    # composite entity instead (see project_knx_write_path_design memory, "Punkt 4, Hälfte (b)").
     if conf.get("import_knx", False):
         ignored_knx = coordinator.ignored_knx_ids
         entities.extend(
@@ -50,6 +55,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if knx["type"] == "digital"
             and knx.get("kind") == MarkerKind.READ_ONLY
             and int(knx["id"]) not in ignored_knx
+            and knx.get("knx_composite") is None
         )
 
     entities.append(ComexioSdCardSensor(coordinator, coordinator.server_id))
@@ -97,6 +103,25 @@ class ComexioMarkerBinarySensor(ComexioMarkerEntity, BinarySensorEntity):
 
 class ComexioKnxBinarySensor(ComexioKnxEntity, ComexioMarkerBinarySensor):
     """A read-only ("[RO]") digital Comexio KNX object (blind implementation, see project_knx_objects memory)."""
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, knx: dict[str, Any]) -> None:
+        super().__init__(coordinator, server_id, knx)
+        # DPT-derived device_class (KNX_DPT_DIGITAL_DEVICE_CLASS, see const.py) — mirrors
+        # ComexioKnxNumber's dpt_device_class handling for analog KNX items (number.py). Only
+        # meaningful here: SwitchDeviceClass (ComexioKnxSwitch) has no matching values, so a
+        # digital KNX item only gets a semantic device_class once it's "[RO]" and lands here.
+        if dpt_device_class := knx.get("dpt_device_class"):
+            try:
+                self._attr_device_class = BinarySensorDeviceClass(dpt_device_class)
+            except ValueError:
+                # Defensive only: dpt_device_class always comes from KNX_DPT_DIGITAL_DEVICE_CLASS,
+                # whose values are all valid BinarySensorDeviceClass members today — guards
+                # against a future typo there taking down the whole binary_sensor platform.
+                _LOGGER.debug(
+                    "KNX item %s: dpt_device_class '%s' is not a valid BinarySensorDeviceClass, ignoring",
+                    self._marker_id,
+                    dpt_device_class,
+                )
 
     @property
     def is_on(self) -> bool | None:

@@ -14,6 +14,7 @@ import voluptuous as vol
 from .const import (
     CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
+    CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
     DEFAULT_ENABLE_NOTIFICATIONS,
@@ -30,6 +31,8 @@ from .const import (
     ICON_RENAME,
     ICON_ROCKET,
     ICON_SYNC,
+    MARKER_READ_ONLY_SUFFIX,
+    MARKER_TRIGGER_SUFFIXES,
     SOURCE_CATEGORIES,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
@@ -38,12 +41,16 @@ from .const import (
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
     WEBIO_CLASS_KNX,
+    WebioClass,
+    expand_ignored_marker_ids,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 ACTION_FIX = "fix"
 ACTION_IGNORE = "ignore"
+ACTION_KNX_RO = "ro"
+ACTION_KNX_TRIG = "trig"
 
 
 def _is_knx_cluster_plan(plan_name: str) -> bool:
@@ -55,6 +62,18 @@ def _is_knx_cluster_plan(plan_name: str) -> bool:
     """
     knx_label = SOURCE_CATEGORIES[WEBIO_CLASS_KNX].label
     return f" - {knx_label} [" in plan_name
+
+
+def _add_knx_dpt_suffix_ignored_ids(existing_raw: str, new_ids: set[int]) -> str:
+    """Merge newly-ignored KNX ids into the CONF_KNX_DPT_SUFFIX_IGNORED option string.
+
+    Same comma/range-list format as CONF_IGNORED_MARKERS/CONF_IGNORED_KNX, reusing
+    expand_ignored_marker_ids for parsing so the two stay in sync if that format ever changes.
+    """
+    knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
+    ids = expand_ignored_marker_ids(existing_raw, knx_prefix + knx_prefix.lower())
+    ids.update(new_ids)
+    return ",".join(f"{knx_prefix}{i}" for i in sorted(ids))
 
 
 def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
@@ -146,6 +165,9 @@ class ComexioRepairFlow(RepairsFlow):
         if self.issue_id.startswith("uninstall_cleanup_"):
             _LOGGER.debug("Routing to async_step_uninstall_cleanup")
             return await self.async_step_uninstall_cleanup()
+        if self.issue_id.startswith("knx_dpt_ambiguous_"):
+            _LOGGER.debug("Routing to async_step_knx_dpt_suffix")
+            return await self.async_step_knx_dpt_suffix()
 
         _LOGGER.debug("Routing to fallback async_step_select_action")
         return await self.async_step_select_action()
@@ -394,6 +416,16 @@ class ComexioRepairFlow(RepairsFlow):
             # rather than needing a dedicated repair-dialog branch.
             lp_missing_c = counts.get("function_plan_missing", 0) + counts.get("function_plan_trigger_missing", 0)
             lp_dangling_c = counts.get("function_plan_dangling", 0) + counts.get("function_plan_trigger_orphan", 0)
+            kb_c = counts.get("knx_bridge_missing", 0)
+            # Phase 7: the API-Loopback fan-out gap is a distinct audit key from kb_c (a K-Element
+            # can already have its bridge Marker but still lack the loopback sink — see
+            # coordinator's knx_bridge_loopback_missing docstring), but button.py's
+            # knx_bridge_add_missing action fixes both legs (plus the read path, if still open)
+            # in one combined run (_wire_knx_full), so they share the same specific_options
+            # entry below. The ETA below is based on kb_c+kb_lb_c only — it doesn't additionally
+            # account for a read-path leg this same action would also close, since that gap is
+            # tracked/estimated separately under its own function_plan_missing issue.
+            kb_lb_c = counts.get("knx_bridge_loopback_missing", 0)
             lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
             # Fallback for stale issues created before the coordinator started storing an
             # exact estimate: approximate the affected-plan count from the detail split (one
@@ -410,7 +442,7 @@ class ComexioRepairFlow(RepairsFlow):
                 + SYNC_DURATION_FUNCTION_PLAN_FINALIZE * affected_plan_count,
             )
 
-            config_issues = t_c + m_c + r_c + o_c + ce_c + lp_missing_c + lp_dangling_c
+            config_issues = t_c + m_c + r_c + o_c + ce_c + lp_missing_c + lp_dangling_c + kb_c + kb_lb_c
             ha_count = placeholders.get("ha_count", "0")
             com_count = placeholders.get("com_count", "0")
 
@@ -436,6 +468,10 @@ class ComexioRepairFlow(RepairsFlow):
                 total_sec += lp_c * SYNC_DURATION_FUNCTION_PLAN_PLAN
             if lp_missing_c > 0:
                 total_sec += lp_missing_eta_sec
+            if kb_c > 0:
+                total_sec += kb_c * SYNC_DURATION_WRITE
+            if kb_lb_c > 0:
+                total_sec += kb_lb_c * SYNC_DURATION_WRITE
 
             # Build the dynamic summary text
             if config_issues == 0 and i_c > 0:
@@ -479,6 +515,17 @@ class ComexioRepairFlow(RepairsFlow):
                     lines.append(
                         f"* {ICON_DELETE} "
                         f"**{'Verwaiste Plan-Elemente' if is_de else 'Function Plan debris'}:** {lp_dangling_c}"
+                    )
+                if kb_c > 0:
+                    lines.append(
+                        f"* {ICON_LINK} "
+                        f"**{'KNX ohne Brücken-Merker' if is_de else 'KNX without bridge Marker'}:** {kb_c}"
+                    )
+                if kb_lb_c > 0:
+                    lines.append(
+                        f"* {ICON_LINK} "
+                        f"**{'KNX-Brücken ohne Rückkopplung' if is_de else 'KNX bridges without feedback loop'}:** "
+                        f"{kb_lb_c}"
                     )
                 if i_c > 0:
                     lines.append(
@@ -564,6 +611,21 @@ class ComexioRepairFlow(RepairsFlow):
                     lp_missing_c, lp_detail, lp_add_eta
                 )
 
+            if kb_c > 0 or kb_lb_c > 0:
+                # One action fixes both legs of Entwurf A "Merker-Brücke" in a single run
+                # (button.py's knx_bridge_add_missing, via _wire_knx_full — also closes the
+                # read path if that's open too) — share the combined count/ETA rather than a
+                # second dialog option, since a user pressing this expects "KNX write path
+                # fixed", not two separate near-identical buttons.
+                kb_total = kb_c + kb_lb_c
+                kb_t = get_time_for_count(kb_total)
+                label = (
+                    f"{ICON_LINK} Brücken-Merker + Rückkopplung für KNX anlegen"
+                    if is_de
+                    else f"{ICON_LINK} Create KNX bridge Markers + feedback loop"
+                )
+                specific_options["knx_bridge_add_missing"] = f"{label} ({kb_total}x{kb_t})"
+
             if counts.get("ip_mismatch", 0) > 0:
                 if is_de:
                     label = f"{ICON_NETWORK} HA Server-Adresse (IP:Port) aktualisieren"
@@ -583,6 +645,10 @@ class ComexioRepairFlow(RepairsFlow):
                 total_sec += lp_c * SYNC_DURATION_FUNCTION_PLAN_PLAN
             if lp_missing_c > 0:
                 total_sec += lp_missing_eta_sec
+            if kb_c > 0:
+                total_sec += kb_c * SYNC_DURATION_WRITE
+            if kb_lb_c > 0:
+                total_sec += kb_lb_c * SYNC_DURATION_WRITE
 
             t_full = format_time(total_sec)
 
@@ -727,3 +793,116 @@ class ComexioRepairFlow(RepairsFlow):
         await asyncio.sleep(0.5)
         _LOGGER.info("[%s] Reloading integration after uninstall cleanup...", coordinator.server_id)
         await self.hass.config_entries.async_reload(entry.entry_id)
+
+    async def async_step_knx_dpt_suffix(self, user_input=None):
+        """Handle the KNX DPT1.x ambiguous-classification repair flow.
+
+        One item at a time (rather than one combined form with a per-item field) because
+        the dynamic per-K-id field names a combined form would need have no static
+        translation entries — HA's selector translations only cover fixed field/step names.
+        self._knx_dpt_all_items/_knx_dpt_items/_knx_dpt_resolved are flow-instance state that
+        persists across the repeated calls to this same step as the user works through the list.
+        """
+        if not hasattr(self, "_knx_dpt_items"):
+            self._knx_dpt_all_items: dict[str, dict] = {
+                str(item["id"]): item for item in self.issue_data.get("items", [])
+            }
+            self._knx_dpt_items: list[dict] = list(self.issue_data.get("items", []))
+            self._knx_dpt_resolved: dict[str, str] = {}
+
+        if user_input is not None and self._knx_dpt_items:
+            current = self._knx_dpt_items.pop(0)
+            self._knx_dpt_resolved[str(current["id"])] = user_input["action"]
+
+        if self._knx_dpt_items:
+            current = self._knx_dpt_items[0]
+            return self.async_show_form(
+                step_id="knx_dpt_suffix",
+                description_placeholders={
+                    "name": current["name"],
+                    "remaining": str(len(self._knx_dpt_items) - 1),
+                },
+                data_schema=vol.Schema(
+                    {
+                        # Defaults to "ignore" (skip), not a rename action: this form pops
+                        # to the next K-id immediately after submit, so a default that
+                        # commits a rename (RO/Trigger) risks misclassifying an object if
+                        # the user clicks/confirms through the list too quickly. Skipping
+                        # is the safe no-op — it can be revisited later, a wrong suffix
+                        # rename cannot be undone by this flow.
+                        vol.Required("action", default=ACTION_IGNORE): SelectSelector(
+                            SelectSelectorConfig(
+                                options=[ACTION_KNX_RO, ACTION_KNX_TRIG, ACTION_IGNORE],
+                                mode=SelectSelectorMode.LIST,
+                                translation_key="knx_dpt_suffix_action",
+                            )
+                        )
+                    }
+                ),
+            )
+
+        return await self._async_apply_knx_dpt_suffix()
+
+    async def _async_apply_knx_dpt_suffix(self):
+        """Apply every classification collected by async_step_knx_dpt_suffix and close the issue."""
+        entry_id = self.issue_data.get("entry_id")
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        if not entry or not coordinator:
+            return self.async_abort(reason="entry_not_found")
+
+        suffix_by_action = {ACTION_KNX_RO: MARKER_READ_ONLY_SUFFIX, ACTION_KNX_TRIG: MARKER_TRIGGER_SUFFIXES[0]}
+        renamed_count = 0
+        failed: list[str] = []
+        newly_ignored: set[int] = set()
+
+        for k_id, action in self._knx_dpt_resolved.items():
+            if action == ACTION_IGNORE:
+                newly_ignored.add(int(k_id))
+                continue
+            item = self._knx_dpt_all_items[k_id]
+            new_title = f"{item['title']} {suffix_by_action[action]}"
+            if await coordinator.api.rename_knx_object(k_id, new_title):
+                renamed_count += 1
+            else:
+                failed.append(item["name"])
+
+        if newly_ignored:
+            # R2: request_options_update_without_reload (not a plain async_update_entry) so
+            # the listener-triggered reload it schedules doesn't race the explicit reload
+            # below (renamed_count case) or fire redundantly (ignore-only case, where the
+            # coordinator picks up the new option on its next regular poll without one).
+            new_options = dict(entry.options)
+            new_options[CONF_KNX_DPT_SUFFIX_IGNORED] = _add_knx_dpt_suffix_ignored_ids(
+                new_options.get(CONF_KNX_DPT_SUFFIX_IGNORED, ""), newly_ignored
+            )
+            coordinator.request_options_update_without_reload(new_options)
+
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        if renamed_count:
+            # A rename flips the item's MarkerKind, which changes which entity platform it
+            # belongs to (e.g. switch -> sensor) — entities are only built once, in each
+            # platform's async_setup_entry, so a reload (not just a coordinator refresh) is
+            # required for it to actually appear correctly. Mirrors button.py's sync-button
+            # reload (R2): give the listener a moment to see the skip flag before forcing our
+            # own explicit reload.
+            await asyncio.sleep(0.5)
+            await self.hass.config_entries.async_reload(entry.entry_id)
+        elif newly_ignored:
+            await coordinator.async_refresh()
+
+        is_de = self.hass.config.language == "de"
+        if is_de:
+            title = f"{renamed_count} umbenannt, {len(newly_ignored)} unverändert gelassen"
+        else:
+            title = f"{renamed_count} renamed, {len(newly_ignored)} left unchanged"
+        if failed:
+            # Name each failed item, not just a count — otherwise, in a multi-item batch, the
+            # user has no way to tell which one still needs attention short of grepping the
+            # log for rename_knx_object's error line. A failed item stays dpt_ambiguous and
+            # reappears in the next poll's audit, so nothing is silently lost — just re-open
+            # the issue and classify it again.
+            names = ", ".join(failed)
+            title += f" ({len(failed)} fehlgeschlagen: {names})" if is_de else f" ({len(failed)} failed: {names})"
+
+        return self.async_create_entry(title=title, data={})

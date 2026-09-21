@@ -22,6 +22,7 @@ from .const import (
     DOMAIN,
     SOURCE_CATEGORIES,
     MarkerKind,
+    WebioClass,
     webio_range_check_entity_id,
 )
 from .coordinator import ComexioCoordinator
@@ -29,7 +30,18 @@ from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["sensor", "switch", "number", "button", "binary_sensor", "select", "image", "update"]
+PLATFORMS = [
+    "sensor",
+    "switch",
+    "number",
+    "button",
+    "binary_sensor",
+    "select",
+    "image",
+    "update",
+    "cover",
+    "light",
+]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -192,9 +204,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # (registry-driven via SOURCE_CATEGORIES.range_clustered) share the "M{id}"/"K{id}" unique_id
     # shape; IO uses its own ext_name+identifier shape and is handled separately below.
     active_unique_ids = set()
+    # Bridge Markers (kind == KNX_BRIDGE, see MARKER_KNX_BRIDGE_SUFFIX_RE) get no HA entity on
+    # any platform — their uid is excluded from active_unique_ids below so the cleanup loop
+    # removes a stale entity if an existing, previously-normal marker gets manually renamed to
+    # append the bridge suffix. Tracked separately so that removal gets a specific, non-DEBUG
+    # log line instead of the generic "orphaned entity" one — an admin renaming a marker into a
+    # bridge is a deliberate, non-obvious cause for an entity to disappear.
+    bridge_reclassified_uids: set[str] = set()
+    # DPT3.x composite members (cover.py/light.py, see api._attach_knx_dpt3_composites) no
+    # longer get their own switch/number entity on this platform — switch.py/number.py skip
+    # any item with knx_composite set. Their old per-K-element uid must NOT stay in
+    # active_unique_ids, or the stale pre-upgrade switch/number registry entry never gets
+    # cleaned up (it neither fails the "not in active_unique_ids" orphan check nor the
+    # platform-mismatch check below, since nothing recomputes its expected platform either)
+    # and lingers forever as a permanently-unavailable zombie duplicate of the new composite
+    # entity. Tracked separately for the same reason as bridge_reclassified_uids: a specific
+    # log line beats the generic "orphaned entity" one for a deliberate reclassification.
+    composite_reclassified_uids: set[str] = set()
     for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered):
         for src in coordinator.data.get(category.data_key, []):
-            active_unique_ids.add(f"comexio_{server_id}_{category.unique_id_infix}{src['id']}".lower())
+            uid = f"comexio_{server_id}_{category.unique_id_infix}{src['id']}".lower()
+            if src.get("kind") == MarkerKind.KNX_BRIDGE:
+                bridge_reclassified_uids.add(uid)
+                continue
+            if src.get("knx_composite") is not None:
+                composite_reclassified_uids.add(uid)
+                continue
+            active_unique_ids.add(uid)
+
+    # DPT3.x composite cover/light entities (cover.py/light.py, see
+    # api._attach_knx_dpt3_composites) use their own two-K-element unique_id shape
+    # (ComexioKnxDpt3Entity.__init__) — distinct from the per-K-element uid excluded above,
+    # which both halves of a composite keep unused: they still exist as $FubModules["11"]
+    # entries, just without their own switch/number entity on this platform.
+    knx_infix = SOURCE_CATEGORIES[WebioClass.KNX].unique_id_infix
+    for knx_item in coordinator.data.get("knx", []):
+        composite = knx_item.get("knx_composite")
+        if composite and composite["role"] == "direction":
+            active_unique_ids.add(
+                f"comexio_{server_id}_{knx_infix}{knx_item['id']}_{knx_infix}{composite['partner_id']}".lower()
+            )
 
     include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
     for io in coordinator.data.get("io", []):
@@ -245,8 +294,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     expected_platform: dict[str, str] = {}
     for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered):
         for src in coordinator.data.get(category.data_key, []):
-            uid = f"comexio_{server_id}_{category.unique_id_infix}{src['id']}".lower()
             kind = src.get("kind")
+            if kind == MarkerKind.KNX_BRIDGE:
+                # No entity on any platform — already excluded from active_unique_ids above,
+                # so it is cleaned up as orphaned rather than via a platform-mismatch here.
+                continue
+            uid = f"comexio_{server_id}_{category.unique_id_infix}{src['id']}".lower()
             if kind == MarkerKind.READ_ONLY:
                 expected_platform[uid] = "binary_sensor" if src["type"] == "digital" else "sensor"
             elif kind == MarkerKind.TRIGGER:
@@ -282,7 +335,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
         uid = entity_entry.unique_id
         if uid not in active_unique_ids:
-            _LOGGER.debug("Cleaning up orphaned entity: %s (Unique ID: %s)", entity_entry.entity_id, uid)
+            if uid in bridge_reclassified_uids:
+                _LOGGER.info(
+                    "Removing entity %s: its Marker was renamed into a KNX write-path bridge "
+                    "('[K<id>]' title suffix) and no longer gets an HA entity (Unique ID: %s)",
+                    entity_entry.entity_id,
+                    uid,
+                )
+            else:
+                _LOGGER.debug("Cleaning up orphaned entity: %s (Unique ID: %s)", entity_entry.entity_id, uid)
             ent_reg.async_remove(entity_entry.entity_id)
         elif uid in expected_platform and entity_entry.domain != expected_platform[uid]:
             _LOGGER.debug(

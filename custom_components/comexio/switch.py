@@ -33,12 +33,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         )
 
     # 1b. Digital KNX objects (blind implementation, see project_knx_objects memory) — opt-in, default OFF
+    # DPT3.x composite members (the direction/control-bit half of a Dimmer/Blinds pair) are
+    # skipped here — cover.py/light.py expose the pair as one composite entity instead (see
+    # project_knx_write_path_design memory, "Punkt 4, Hälfte (b)").
     if conf.get("import_knx", False):
         ignored_knx = coordinator.ignored_knx_ids
         entities.extend(
             ComexioKnxSwitch(coordinator, coordinator.server_id, knx)
             for knx in coordinator.data.get("knx", [])
-            if knx["type"] == "digital" and int(knx["id"]) not in ignored_knx and knx.get("kind") == MarkerKind.NORMAL
+            if knx["type"] == "digital"
+            and int(knx["id"]) not in ignored_knx
+            and knx.get("kind") == MarkerKind.NORMAL
+            and knx.get("knx_composite") is None
         )
 
     # 2. Digital Outputs (Relays) — binary and writable (not an input)

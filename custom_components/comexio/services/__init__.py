@@ -13,6 +13,7 @@ multi-purpose") into thematic submodules:
   function_plan_activate handlers (act on a single live/snapshot plan).
 - `backup`    — function_plan_restore / function_plan_delete_backups /
   function_plan_purge_orphaned_backups / function_plan_list_backups handlers.
+- `marker_actions` — marker_delete handler (permanently deletes Markers on Comexio).
 - `misc`      — generate_web_io, set_value, function_plan_debug_session,
   function_plan_preview_extend, function_plan_preview_stop, function_plan_search — handlers
   that don't share enough with the above groups.
@@ -52,6 +53,7 @@ from .backup import (
 )
 from .connect import handle_function_plan_connect
 from .flow_diagram import _handle_function_plan_flow_diagram
+from .marker_actions import handle_marker_delete
 from .misc import (
     _handle_function_plan_debug_session,
     _handle_function_plan_preview_extend,
@@ -84,6 +86,7 @@ _LOGGER = logging.getLogger(__name__)
 _SIMPLE_SERVICES: tuple[tuple[str, Any, SupportsResponse | None], ...] = (
     ("set_value", _handle_set_value, SupportsResponse.OPTIONAL),
     ("generate_web_io", handle_generate_web_io, None),
+    ("marker_delete", handle_marker_delete, SupportsResponse.OPTIONAL),
     (_SVC_CONNECT, handle_function_plan_connect, None),
     (_SVC_VISUALIZE, handle_function_plan_visualize, SupportsResponse.OPTIONAL),
     (_SVC_ANALYZE, _handle_function_plan_analyze, SupportsResponse.OPTIONAL),

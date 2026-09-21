@@ -40,6 +40,12 @@ CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
 CONF_IGNORED_MARKERS = "ignored_markers"
 CONF_IGNORED_KNX = "ignored_knx"
 
+# Ids the user explicitly chose "leave as writable switch" for in the knx_dpt_ambiguous
+# repair flow (see repairs.py) — distinct from CONF_IGNORED_KNX (excludes a KNX object from
+# HA entirely); this only suppresses the classification nag for that one id. Same comma/
+# range string format, parsed with expand_ignored_marker_ids().
+CONF_KNX_DPT_SUFFIX_IGNORED = "knx_dpt_suffix_ignored"
+
 # The option-key VALUES below keep the legacy "logikplan" spelling — they are persisted
 # in entry.options (and mirrored as field keys in translations/*.json); renaming them
 # would silently drop every user's saved settings.
@@ -52,6 +58,16 @@ CONF_FUNCTION_PLAN_PLAN_PREFIX = "logikplan_plan_prefix"
 DEFAULT_FUNCTION_PLAN_PLAN_PREFIX = "HA"
 CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN = "logikplan_max_pairs_per_plan"
 DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN = 100
+# KNX cluster plans hard-cap at this size, ignoring CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN
+# entirely (user decision 2026-09-20) — a KNX bridge row needs its own K-object column plus a
+# wider WebIO column (services/_grid.py _KNX_COLUMN_WIDTH) and reserves two row-slots per pair
+# for the Phase 7 API-Loopback fan-out (_KNX_LOOPBACK_Y_OFFSET), so an A3-formatted canvas fits
+# 2 columns × 26 two-slot pairs = 52 pairs at the KNX-only row pitch (FUNCTION_PLAN_KNX_LAYOUT_Y_STEP)
+# — see _cluster_plan_name's docstring (coordinator.py) for the full math and its correction
+# history. Bucketing more than the canvas can hold under the generic (marker-sized) setting
+# silently overflowed it (dropped pairs, see _assign_grid_positions' overflow warnings) — the
+# plan's own name/range must reflect this real ceiling, not the marker-sized default of 100.
+FUNCTION_PLAN_KNX_CLUSTER_SIZE = 50
 # IO cluster plans: physical extension IOs wired to their Web-IO commands. Only extensions
 # whose names are listed here are managed (staged rollout — the user opts extensions in one
 # by one). Extensions-per-plan capacity derives from CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN:
@@ -336,7 +352,19 @@ SCAN_INTERVAL_OPTIONS = ["1", "5", "10", "15", "30", "45", "60", "120", "300", "
 
 # Per-request HTTP timeout for all Comexio API calls (seconds). Without this, a stalled
 # response hangs the calling coroutine indefinitely instead of failing fast.
-COMEXIO_HTTP_TIMEOUT_SEC = 30
+# Must stay comfortably above SYNC_DURATION_WRITE (the calibrated ETA for a single Web-IO
+# write/recreate call) -- at 30s it was tighter than that estimate itself, so a class recreate
+# (create_webio_device's saveDeviceWindow POST) reproducibly hit TimeoutError under normal
+# load on the live Comexio instance (observed repeatedly 20./21.09.2026, always at the same
+# call). 120s (raised from the initial 45s fix, 21.09.2026) gives headroom for larger
+# installations and for Comexio's own admin UI becoming slow for minutes after a heavy
+# write batch (user-observed) -- COMEXIO_PROGRESS_LOG_INTERVAL_SEC below keeps a long wait
+# like that visible instead of looking hung.
+COMEXIO_HTTP_TIMEOUT_SEC = 120
+# How often (seconds) a still-open Comexio HTTP request logs a "still waiting" progress line
+# (see api.py's request trace config). Purely a UI/log-visibility knob, independent of the
+# actual timeout above.
+COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
 # Outer safety net around the whole Function Plan backup cycle (bulk load + auto-backup +
 # paper backfill + purge): guarantees the cycle's lock is released even if some step hangs
 # in a way COMEXIO_HTTP_TIMEOUT_SEC doesn't cover, so a stuck cycle can't permanently block
@@ -368,6 +396,46 @@ MARKER_READ_ONLY_SUFFIX = "[RO]"
 # preferred name — both are recognized so existing [TP] markers don't need renaming.
 MARKER_TRIGGER_SUFFIXES = ("[TRIG]", "[TP]")
 
+# Auto-created write-path bridge Markers (Entwurf A "Merker-Brücke", see
+# project_knx_write_path_design memory) are titled "<K-Titel> [K<k_id>]" by
+# create_knx_bridge_marker() — purely internal wiring glue with no HA entity of its own and
+# no expected Web-IO command (the KNX object it feeds already gets its own K-entity/Web-IO).
+MARKER_KNX_BRIDGE_SUFFIX_RE = re.compile(r"\[K\d+\]$")
+
+# Round-boundary size the KNX bridge marker block is aligned to (user decision 2026-09-14,
+# see project_knx_write_path_design memory) — also caps how far _free_marker_ids() looks
+# above an already-established block's start when hunting for a reusable blank marker, so
+# an unrelated real marker created well above the block can never be swept up as "free" just
+# because the block's boundary is now reused indefinitely instead of recomputed every call.
+MARKER_KNX_BRIDGE_BLOCK_SIZE = 50
+
+# Phase 7 "API-Loopback" (see project_knx_write_path_design memory, "Phase 7" section): a
+# K-Element's read-path output already reaches an HA-webhook Web-IO command (the normal
+# source->Web-IO pair every category gets). This adds a SECOND Web-IO command per K-Element,
+# fanned out from the same K-Element output, whose Lua script GETs this same Comexio server's
+# own /api/?action=set endpoint to write the bridge Marker directly — closing the "Punkt 4"
+# stuck-bridge-marker loop entirely inside Comexio (no HA/AWL round trip involved), since an
+# out-of-band HTTP call — unlike a function-plan wire or AWL — never enters Comexio's
+# algebraic-loop plan-start dependency graph. Live-verified 17.09.2026 for both a digital
+# (K1->M300) and an analog (K10->M309) test pair. One class + one device, created once per
+# server (not per K-Element, unlike the per-category Marker/IO/KNX classes above) — every
+# K-Element just gets one more command in this same class/device.
+WEBIO_CLASS_NAME_KNX_LOOPBACK = "ComexioAPI"
+WEBIO_DEVICE_NAME_KNX_LOOPBACK = "Comexio API - KNX Loopback"
+
+
+def knx_loopback_command_name(k_id: int, marker_id: int) -> str:
+    """Web-IO command name for one K-Element's API-Loopback command, e.g. "KNX K1 to M300"."""
+    return f"KNX K{k_id} to M{marker_id}"
+
+
+# Safety cap for the marker_delete service's marker_id field (supports comma lists AND
+# inclusive ranges, e.g. "306-355") — a single typo'd range boundary (e.g. "306-3555")
+# would otherwise fire thousands of sequential, irreversible delete requests against the
+# live controller before the user notices. Confirm alone doesn't protect against this,
+# since it's checked once per call, not once per resolved id.
+MARKER_DELETE_MAX_COUNT = 200
+
 
 class MarkerKind(StrEnum):
     """How a marker is exposed to HA, derived from its Comexio-side title suffix."""
@@ -375,6 +443,7 @@ class MarkerKind(StrEnum):
     NORMAL = "normal"
     READ_ONLY = "read_only"
     TRIGGER = "trigger"
+    KNX_BRIDGE = "knx_bridge"
 
 
 # Analog markers have no configurable value range on the Comexio side, so their Web-IO
@@ -396,6 +465,216 @@ WEBIO_MARKER_ANALOG_MAX = 500_000
 # authentic Min or Max falls in this band gets widened to the same verified-safe
 # WEBIO_MARKER_ANALOG_MIN/MAX range before being sent as a Web-IO command.
 WEBIO_INT16_DANGER_ZONE = (30_000, 40_000)
+
+# KNX DPT (Datenpunkttyp) analog value ranges, keyed by the official KNX Association
+# datapoint type numbering (KnxBaseTypeId, KnxSubId) — e.g. (9, 7) = DPT9.007 Humidity.
+# Comexio's own $FubModules["11"]/$IOTypesBinary catalogs carry no usable value range for
+# KNX object types (min/max come back as a 0/0 placeholder), so the real range is instead
+# resolved per K-element via ComexioAPI.get_knx_dpt_catalog() (the $KnxDpt/$KnxDevices/
+# $KnxPoints chain scraped from /admin/knx_one_wire/knx/). This widens the HA Number entity's
+# own displayed/validated range, and is also used verbatim (see ComexioAPI._knx_webio_range) as
+# the Min/Max embedded in the two Web-IO commands built for a KNX object (the HA-webhook push
+# command and the Phase 7 API-Loopback command) instead of the generic WEBIO_MARKER_ANALOG_MIN/MAX
+# range — deliberately NOT capped to that range, even though Comexio itself still has an open
+# firmware bug (confirmed live by the user 2026-09-20, fix targeted for 11.1.4) that rounds/
+# corrupts analog values above ~1,000,000; see README for the documented limitation.
+# Composite DPTs (DPT3.x control+step, DPT18.001 control+scene number) split into two
+# Comexio Points from one Device; the binary half never reaches this table (it becomes a
+# switch/binary_sensor entity, not a Number), so only each composite's analog component is
+# listed here.
+# Deliberately excluded: DPT1 (binary, never reaches this table), DPT10/11/19 (Time/Date/
+# DateTime — Comexio itself refuses to create K-elements for these), and DPT14 (4-byte
+# float — no tighter KNX-standard-defined range than the IEEE754 span, so it falls back to
+# WEBIO_MARKER_ANALOG_MIN/MAX like any other unresolved KNX analog element).
+# The 4th tuple element is the HA Number entity's native_step (found missing entirely in
+# review 2026-09-20: ComexioKnxNumber never set a DPT-derived step, so every KNX number
+# entity silently inherited ComexioMarkerNumber's hardcoded 0.1 regardless of the underlying
+# encoding — wrong for every whole-number DPT below, e.g. a 2-octet counter got a 0.1 step
+# that doesn't exist in the actual 1-count resolution). Two kinds of encoding occur here:
+# - Raw N-octet integer values (DPT5.4/5.5/5.6/5.10, 6.x, 7.x, 8.x, 12.x, 13.x, 17.1, 18.1,
+#   and the DPT3.x step code): the wire value IS an integer 1:1, so step=1.
+# - KNX "scaled" 1-byte types (DPT5.1 Scaling, DPT5.3 Angle): the wire value is a raw byte
+#   0-255 linearly mapped onto the listed min..max span, so the real resolution is
+#   (max-min)/255 — using step=1 here would make the actual on-the-wire granularity
+#   unreachable via the HA slider/stepper, and using the old flat 0.1 doesn't line up with
+#   the grid either (see K7/DPT5.001 in dev-tools/knx_seed_test_matrix.py: raw byte 12 ->
+#   12*100/255 = 4.70588..., not a multiple of 0.1 — exactly the "enter a valid value, next
+#   are 4.7 and 4.8" glitch reported live 2026-09-20).
+# - DPT9 (2-octet float) keeps the pre-existing flat 0.1 default explicitly here (no simple
+#   universal resolution across its whole span) — unchanged behavior, just made explicit now
+#   that every entry must carry a step.
+# Format: {(base_type_id, sub_id): (min, max, unit, step)}
+KNX_DPT_ANALOG_RANGES: dict[tuple[int, int], tuple[float, float, str, float]] = {
+    # DPT3 - 1-Bit control + 3-Bit step code (Dimming/Blinds), analog half is the step value.
+    (3, 7): (0, 7, "", 1),
+    (3, 8): (0, 7, "", 1),
+    # DPT5 - 8-Bit unsigned value.
+    (5, 1): (0, 100, "%", 100 / 255),  # Scaling
+    (5, 3): (0, 360, "°", 360 / 255),  # Angle
+    (5, 4): (0, 255, "%", 1),  # Percent_U8
+    (5, 5): (0, 255, "", 1),  # DecimalFactor
+    (5, 6): (0, 254, "", 1),  # Tariff
+    (5, 10): (0, 255, "", 1),  # Value_1_Ucount (pulse counter)
+    # DPT6 - 8-Bit signed value.
+    (6, 1): (-128, 127, "%", 1),  # Percent_V8
+    (6, 10): (-128, 127, "", 1),  # Value_1_Count
+    # DPT7 - 2-Octet unsigned value.
+    (7, 1): (0, 65535, "", 1),
+    (7, 2): (0, 65535, "ms", 1),
+    (7, 3): (0, 65535, "10ms", 1),
+    (7, 4): (0, 65535, "100ms", 1),
+    (7, 5): (0, 65535, "s", 1),
+    (7, 6): (0, 65535, "min", 1),
+    (7, 7): (0, 65535, "h", 1),
+    (7, 10): (0, 65535, "", 1),
+    # DPT8 - 2-Octet signed value.
+    (8, 1): (-32768, 32767, "", 1),
+    (8, 2): (-32768, 32767, "ms", 1),
+    (8, 3): (-32768, 32767, "10ms", 1),
+    (8, 4): (-32768, 32767, "100ms", 1),
+    (8, 5): (-32768, 32767, "s", 1),
+    (8, 6): (-32768, 32767, "min", 1),
+    (8, 7): (-32768, 32767, "h", 1),
+    (8, 10): (-32768, 32767, "%", 1),
+    # DPT9 - 2-Octet float value (KNX floating-point-16, format range -671088.64..670760.96).
+    (9, 1): (-273, 670760, "°C", 0.1),  # Value_Temp
+    (9, 2): (-670760, 670760, "K", 0.1),  # Value_Tempd (temperature difference)
+    (9, 4): (0, 670760, "lx", 0.1),  # Value_Lux
+    (9, 5): (0, 670760, "m/s", 0.1),  # Value_Wsp
+    (9, 6): (0, 670760, "Pa", 0.1),  # Value_Pres
+    (9, 7): (0, 100, "%", 0.1),  # Value_Humidity (physically bounded)
+    (9, 8): (0, 670760, "ppm", 0.1),  # Value_AirQuality
+    (9, 20): (-670760, 670760, "V", 0.1),  # Value_Volt
+    (9, 21): (-670760, 670760, "mA", 0.1),  # Value_Curr
+    (9, 24): (-670760, 670760, "kW", 0.1),  # Power
+    # DPT12 - 4-Octet unsigned value.
+    (12, 1): (0, 4294967295, "", 1),
+    # DPT13 - 4-Octet signed value.
+    (13, 1): (-2147483648, 2147483647, "", 1),
+    (13, 10): (-2147483648, 2147483647, "Wh", 1),
+    (13, 11): (-2147483648, 2147483647, "VAh", 1),
+    (13, 12): (-2147483648, 2147483647, "VARh", 1),
+    (13, 13): (-2147483648, 2147483647, "kWh", 1),
+    (13, 14): (-2147483648, 2147483647, "kVAh", 1),
+    (13, 15): (-2147483648, 2147483647, "kVARh", 1),
+    (13, 100): (-2147483648, 2147483647, "s", 1),
+    # DPT17 - Scene number.
+    (17, 1): (0, 63, "", 1),
+    # DPT18 - Scene control (1-Bit learn/execute + 6-Bit scene number); analog half is the
+    # scene-number component.
+    (18, 1): (0, 63, "", 1),
+}
+
+# Value shared by both homeassistant.components.number.NumberDeviceClass.DURATION and
+# homeassistant.components.sensor.SensorDeviceClass.DURATION (verified identical, see
+# KNX_DPT_DEVICE_CLASS docstring below) — extracted to avoid the S1192 duplicated-literal
+# finding the raw string triggers at 8 occurrences.
+_DC_DURATION = "duration"
+
+# Device class (as its plain .value string, so this module doesn't have to import either
+# entity-platform's enum) for the DPTs above whose KNX_DPT_ANALOG_RANGES unit exactly matches
+# one of that device class's HA-allowed units — checked against both
+# homeassistant.components.number.const.DEVICE_CLASS_UNITS and
+# homeassistant.components.sensor.const.DEVICE_CLASS_UNITS (2026-09-20): every value below
+# resolves to the identical allowed-unit set on both platforms, so this one table serves
+# ComexioKnxNumber (NumberDeviceClass) and ComexioKnxSensor (SensorDeviceClass) alike.
+# Deliberately excludes every "%"-unit DPT (5.1 Scaling, 5.4 Percent_U8, 6.1 Percent_V8,
+# 8.10) — HUMIDITY is only correct for 9.7, and a shared "%" unit does not imply a shared
+# meaning. Also excludes the composite control DPTs (3.7/3.8), the *Ah/*ARh energy variants
+# (their unit casing/reactive vs. apparent split doesn't match any HA device class), and the
+# 10ms/100ms DPT7/8 sub-types (not valid HA duration units). Missing from this table ==
+# no device_class; the entity still gets its own icon regardless (ComexioKnxNumber always
+# sets "mdi:knx" unconditionally — a device_class here changes unit-conversion/statistics
+# behavior, not the icon).
+KNX_DPT_DEVICE_CLASS: dict[tuple[int, int], str] = {
+    (7, 2): _DC_DURATION,  # Value_2_Ucount, ms
+    (7, 5): _DC_DURATION,  # s
+    (7, 6): _DC_DURATION,  # min
+    (7, 7): _DC_DURATION,  # h
+    (8, 2): _DC_DURATION,  # ms
+    (8, 5): _DC_DURATION,  # s
+    (8, 6): _DC_DURATION,  # min
+    (8, 7): _DC_DURATION,  # h
+    (9, 1): "temperature",  # Value_Temp
+    (9, 2): "temperature_delta",  # Value_Tempd
+    (9, 4): "illuminance",  # Value_Lux
+    (9, 5): "wind_speed",  # Value_Wsp
+    (9, 6): "pressure",  # Value_Pres
+    (9, 7): "humidity",  # Value_Humidity
+    (9, 20): "voltage",  # Value_Volt
+    (9, 21): "current",  # Value_Curr
+    (9, 24): "power",  # Power
+    (13, 10): "energy",  # Wh
+    (13, 13): "energy",  # kWh
+    (13, 100): _DC_DURATION,  # LongDeltaTimeSec, s
+}
+
+# DPT1.x (Binary) digital device_class mapping — consumed only by ComexioKnxBinarySensor
+# (a plain HomeAssistant BinarySensorDeviceClass value string). A digital KNX K-element
+# defaults to ComexioKnxSwitch (writable) unless titled "[RO]" (see the MarkerKind title-
+# suffix heuristic in _process_source_items); SwitchDeviceClass has no matching values
+# (only SWITCH/OUTLET), so this table only ever applies once an item is read-only and lands
+# on the binary_sensor platform instead. Missing from this table == no device_class (plain
+# on/off) — same convention as KNX_DPT_DEVICE_CLASS above; covers Schalter/Bool/Freigabe/
+# Flanke/Binärwert (1.001-1.004/1.006), none of which carry HA-recognized semantics beyond
+# generic on/off (found missing entirely in review 2026-09-20, user needs these to set
+# entity types correctly — see project_knx_write_path_design memory).
+# DPT1.019 ("Tür/Fenster") can't be told apart from the DPT alone — KNX itself uses one type
+# for both door and window contacts — so DOOR is a best-effort default here, same limitation
+# ComexioBinarySensor's plain-IO name heuristic already has (see binary_sensor.py).
+KNX_DPT_DIGITAL_DEVICE_CLASS: dict[tuple[int, int], str] = {
+    (1, 5): "problem",  # Alarm
+    (1, 18): "occupancy",  # Anwesenheit
+    (1, 19): "door",  # Tür/Fenster (best-effort, see comment above)
+}
+
+# The remaining DPT1.x subtypes (Schalter/Bool/Freigabe/Flanke/Binärwert) are physically
+# ambivalent: KNX uses the identical DPT for a real toggle switch, a momentary push-button
+# ("Taster" -> HA "[TRIG]"), and a pure status readback ("[RO]") alike — the DPT alone
+# cannot decide which, only the installer knows the real wiring (user decision 2026-09-20,
+# see project_knx_write_path_design memory). Unlike KNX_DPT_DIGITAL_DEVICE_CLASS's 3 entries
+# (which api._auto_suffix_unambiguous_knx tags "[RO]" automatically, no user input needed),
+# a digital item whose DPT is in this set instead raises a Repair issue
+# (coordinator._audit_knx_dpt_ambiguous) letting the user classify it manually.
+KNX_DPT_DIGITAL_AMBIGUOUS: set[tuple[int, int]] = {(1, 1), (1, 2), (1, 3), (1, 4), (1, 6)}
+
+# How many consecutive poll cycles coordinator._auto_suffix_unambiguous_knx retries a KNX
+# object whose rename_knx_object() call failed, before giving up on it for the rest of this
+# coordinator's runtime. Bounds a transient failure (e.g. a momentary HTTP error while Comexio
+# is restarting) to a few retries instead of one permanent strike, while still capping a
+# genuinely persistent failure (stale admin session, name collision) to a handful of attempts
+# rather than hammering the API every ~15 min forever.
+KNX_DPT_AUTOTAG_MAX_RETRIES = 3
+
+# DPT3.x (Dimmer 3.007 / Blinds 3.008) composite objects: Comexio splits each into two
+# K-elements sharing one KnxDeviceId — a digital control bit (direction) and an analog
+# 3-bit step code (0=break, 1-7=move), see dev-tools/knx_seed_test_matrix.py's
+# save_device()/points[0]/points[1]. api._attach_knx_dpt3_composites() tags both halves so
+# cover.py/light.py can expose the pair as one composite entity instead of two disconnected
+# generic switch/number entities (see project_knx_write_path_design memory, "Punkt 4,
+# Hälfte (b)"). Sync/audit/wiring logic (button.py, coordinator.py) is untouched by this —
+# both K-elements keep their own bridge Marker exactly as before.
+KNX_DPT3_COMPOSITE_DOMAIN: dict[tuple[int, int], str] = {
+    (3, 7): "light",
+    (3, 8): "cover",
+}
+
+# KNX Association DPT3 control-bit encoding (public standard, not Comexio-specific).
+KNX_DPT3_COVER_DIRECTION_UP = 0
+KNX_DPT3_COVER_DIRECTION_DOWN = 1
+KNX_DPT3_LIGHT_DIRECTION_DECREASE = 0
+KNX_DPT3_LIGHT_DIRECTION_INCREASE = 1
+KNX_DPT3_STEPCODE_BREAK = 0
+KNX_DPT3_STEPCODE_MOVE = 1
+
+# Best-effort Dimmer (DPT3.007) brightness tracking (see light.ComexioKnxLight): DPT3.007
+# carries no absolute value at all, only relative increase/decrease telegrams — assumed
+# time in seconds for one continuous move telegram to travel the full 0..255 brightness
+# range, used to derive how long to hold the move telegram before sending the break
+# telegram. Can only ever approximate the real actuator's own ramp time (user-accepted
+# trade-off, 2026-09-20 — see project_knx_write_path_design memory). Tunable here rather
+# than inline, see [[feedback_thresholds_in_const]].
+KNX_DPT3_LIGHT_FULL_RANGE_SECONDS = 3.0
 
 DEFAULT_HOST = "192.168.1.100"
 
@@ -542,9 +821,42 @@ FUNCTION_PLAN_MANAGED_PLAN_COMMENT = "! Administrated by HomeAssistant, dont del
 # direct grid placement in api.function_plan_add_marker_pairs / _add_io_pairs.
 FUNCTION_PLAN_LAYOUT_X_MARKER = 15.0  # left margin of the source (marker/IO) column
 FUNCTION_PLAN_LAYOUT_X_WEBIO = 210.0  # marker + 195 gap
+# KNX write bridge (Entwurf A "Merker-Brücke"): a K-object sits at X_WEBIO itself — matching
+# wire_knx_bridge_pair's own fresh-plan placement (api.function_plan_add_knx_bridge_pairs),
+# so a sort run reproduces exactly the row a freshly created triad already gets — and its own
+# downstream Web-IO (the read-path pair every K-object also has) gets this third column, one
+# more 195-unit pitch further out. Confirmed live 2026-09-16: without a dedicated column here,
+# the generic marker->Web-IO sort pass treats the K-object as if IT were the Web-IO partner
+# (it's the direct output of the Marker->K connection) and orphans the real Web-IO element
+# into an unrelated parking row elsewhere on the plan.
+FUNCTION_PLAN_LAYOUT_X_KNX_WEBIO = 405.0  # bridge K-object (at X_WEBIO) + 195 gap
+# Phase 7 API-Loopback Web-IO (see WEBIO_CLASS_NAME_KNX_LOOPBACK above): used only as the
+# off-canvas parking x (see api.function_plan_add_knx_bridge_loopback_pairs) before the
+# mandatory follow-up sort pass places it — the sort pass (services/_grid.py) puts the
+# Loopback Web-IO in the SAME column as the read-path Web-IO (X_KNX_WEBIO), one row below,
+# not a further-right column of its own (changed 2026-09-19 per user feedback: wanted both
+# stacked in one column, not spread across two).
+FUNCTION_PLAN_LAYOUT_X_KNX_LOOPBACK = 600.0
 FUNCTION_PLAN_LAYOUT_Y_START = 30.0  # first data row — leaves room for the managed-plan comment
 FUNCTION_PLAN_LAYOUT_COMMENT_Y = 7.5  # the managed-plan comment sits above the first data row
 FUNCTION_PLAN_LAYOUT_Y_STEP = 22.5
+# Studio's own port-row pitch (function_plan_render_constants._ROW_H mirrors this same value
+# for the renderer) — two elements this far apart sit directly adjacent with zero visual gap,
+# unlike FUNCTION_PLAN_LAYOUT_Y_STEP above (1.5 rows: the extra half-row is deliberate
+# breathing room between DIFFERENT marker/KNX pairs, not wanted WITHIN one pair's own hops —
+# see services/_grid.py's _KNX_LOOPBACK_Y_OFFSET, user request 2026-09-20).
+FUNCTION_PLAN_LAYOUT_ROW_HEIGHT = 15.0
+# Pair-to-pair row pitch used ONLY for KNX cluster plans (see coordinator.is_knx_cluster_plan /
+# services/plan_actions.py's row_step selection) — a KNX bridge pair reserves 2 row-slots
+# (FUNCTION_PLAN_LAYOUT_ROW_HEIGHT each, one per WebIO hop), so using that same 15.0 value for
+# the pair-to-pair pitch too made every row in the plan perfectly equidistant (15 units), with
+# no visual distinction between the WITHIN-pair hop gap and the gap to the NEXT pair — user
+# feedback 2026-09-20 ("alles press an press") after testing that live. 18.75 keeps the
+# within-pair hop gap tight (still FUNCTION_PLAN_LAYOUT_ROW_HEIGHT, unchanged) while leaving a
+# visibly larger gap after each pair (22.5 units: 2*18.75-15) than within one (15) — a
+# user-chosen compromise between the 15.0 that felt cramped and the generic 22.5 that felt too
+# spread out. See _cluster_plan_name's docstring for the resulting cluster-size capacity math.
+FUNCTION_PLAN_KNX_LAYOUT_Y_STEP = 18.75
 FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH = 450.0  # x-distance between column groups
 FUNCTION_PLAN_LAYOUT_GRID_SNAP = 7.5  # Studio snaps element positions to half the 15-unit raster
 

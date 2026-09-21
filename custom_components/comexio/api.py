@@ -1,6 +1,7 @@
 # Version: 0.7.5
 import asyncio
 import base64
+from collections import defaultdict
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ from multidict import MultiDict
 # Mandatory DOMAIN import for Audit logic
 from .const import (
     COMEXIO_HTTP_TIMEOUT_SEC,
+    COMEXIO_PROGRESS_LOG_INTERVAL_SEC,
     CONF_SCHEMA_IO,
     CONF_SCHEMA_KNX,
     CONF_SCHEMA_MARKER,
@@ -35,6 +37,7 @@ from .const import (
     FLANKE_PORT_OUT_RISING,
     FUB_BASE_REF_ID_FLANKE,
     FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH,
+    FUNCTION_PLAN_LAYOUT_X_KNX_LOOPBACK,
     FUNCTION_PLAN_LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_X_WEBIO,
     FUNCTION_PLAN_LAYOUT_Y_START,
@@ -46,12 +49,21 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     KNOWN_DOMAINS,
+    KNX_DPT3_COMPOSITE_DOMAIN,
+    KNX_DPT_ANALOG_RANGES,
+    KNX_DPT_DEVICE_CLASS,
+    KNX_DPT_DIGITAL_AMBIGUOUS,
+    KNX_DPT_DIGITAL_DEVICE_CLASS,
+    MARKER_KNX_BRIDGE_BLOCK_SIZE,
+    MARKER_KNX_BRIDGE_SUFFIX_RE,
     MARKER_READ_ONLY_SUFFIX,
     MARKER_TRIGGER_SUFFIXES,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
+    WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_CLASSES,
+    WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     WEBIO_INT16_DANGER_ZONE,
     WEBIO_MARKER_ANALOG_MAX,
     WEBIO_MARKER_ANALOG_MIN,
@@ -59,6 +71,8 @@ from .const import (
     category_by_fub_module_type,
     io_column_rows,
     io_sort_key,
+    knx_loopback_command_name,
+    source_category,
     webio_class_label,
     webio_class_name,
 )
@@ -168,6 +182,10 @@ def _extract_js_object_literal(script_text: str, start_index: int) -> tuple[str 
 
 _LOGGER = logging.getLogger(__name__)
 
+# get_live_states' dashboard/refresh request/response key prefix for KNX objects ($FubModules
+# type "11") — distinguishes them from markers, which share the same plain numeric id space.
+_KNX_LIVE_KEY_PREFIX = "knxIo_11_"
+
 
 def _is_extension_offline(identifier: str) -> bool:
     """Return True when identifier indicates an offline extension module.
@@ -177,6 +195,70 @@ def _is_extension_offline(identifier: str) -> bool:
     An empty string (missing field) is also treated as offline.
     """
     return "-" not in identifier
+
+
+async def _tick_comexio_request_progress(method: str, path: str) -> None:
+    """Log a 'still waiting' line every COMEXIO_PROGRESS_LOG_INTERVAL_SEC until cancelled.
+
+    Cancelled by _on_comexio_request_end/_exception as soon as the request finishes, so a
+    normal, fast call never logs anything -- only a request still open after the first
+    interval does. This is what makes a long, otherwise-silent wait (e.g. a Comexio admin
+    call that gets slow after a heavy write batch) visible instead of looking hung.
+    """
+    elapsed = 0
+    while True:
+        await asyncio.sleep(COMEXIO_PROGRESS_LOG_INTERVAL_SEC)
+        elapsed += COMEXIO_PROGRESS_LOG_INTERVAL_SEC
+        _LOGGER.info("Warte weiterhin auf Antwort von Comexio: %s %s (%ds)", method, path, elapsed)
+
+
+async def _on_comexio_request_start(_session: aiohttp.ClientSession, trace_ctx: Any, params: Any) -> None:
+    trace_ctx.progress_task = asyncio.ensure_future(_tick_comexio_request_progress(params.method, params.url.path))
+
+
+async def _cancel_comexio_progress_task(trace_ctx: Any) -> None:
+    task = trace_ctx.progress_task
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _on_comexio_request_end(_session: aiohttp.ClientSession, trace_ctx: Any, _params: Any) -> None:
+    await _cancel_comexio_progress_task(trace_ctx)
+
+
+async def _on_comexio_request_exception(_session: aiohttp.ClientSession, trace_ctx: Any, _params: Any) -> None:
+    await _cancel_comexio_progress_task(trace_ctx)
+
+
+def _build_comexio_trace_config() -> aiohttp.TraceConfig:
+    """TraceConfig that logs a periodic 'still waiting' line for any slow Comexio HTTP call.
+
+    A single instance is shared by the whole session; aiohttp gives each individual request
+    its own trace_ctx, so concurrent requests never interfere with each other's timers.
+    """
+    trace_config = aiohttp.TraceConfig()
+    trace_config.on_request_start.append(_on_comexio_request_start)
+    trace_config.on_request_end.append(_on_comexio_request_end)
+    trace_config.on_request_exception.append(_on_comexio_request_exception)
+    return trace_config
+
+
+def _balanced_rows_per_col(n_items: int, max_rows_per_col: int) -> int:
+    """Rows per column that splits n_items evenly across the minimum number of columns.
+
+    max_rows_per_col is how many rows physically fit in one column (canvas-height driven).
+    Greedily filling each column to that capacity before spilling into the next (plain
+    divmod(n, max_rows_per_col)) produces an uneven split for exact multiples — e.g. a
+    50-item block in a 26-row-capacity column becomes 26/24 instead of the expected 25/25
+    (user-reported live, 2026-09-21, in a fresh "HA - KNX [1-50]" cluster plan). This first
+    picks the minimum column count that still fits (ceil(n_items / max_rows_per_col)), then
+    divides n_items evenly across exactly that many columns.
+    """
+    if n_items <= 0:
+        return max(1, max_rows_per_col)
+    n_cols = -(-n_items // max_rows_per_col)
+    return -(-n_items // n_cols)
 
 
 class ComexioAPI:
@@ -237,6 +319,13 @@ class ComexioAPI:
 
         # Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
         self.comexio_version: str | None = None
+        # KNX DPT catalog cache (get_knx_dpt_catalog) — $KnxDevices/$KnxPoints only change on
+        # an ETS edit and $KnxDpt is a firmware-static table, so refetching this admin
+        # sub-page on every poll would be pointless load on a server that serializes requests
+        # (see project_logikplan_api memory). Invalidated whenever comexio_version changes,
+        # same pattern as LogikplanCatalogManager's own version-tracked cache.
+        self._knx_dpt_catalog: dict[str, Any] | None = None
+        self._knx_dpt_catalog_version: str | None = None
         # io_types: TypeId → {binary, min, max, unit}  (from $ioTypes or $IOTypesBinary)
         self.io_types: dict[str, Any] = {}
         # io_input_types: TypeId → {input: bool}  (from $IOInputTypes)
@@ -252,7 +341,10 @@ class ComexioAPI:
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
-        session_kwargs: dict[str, Any] = {"timeout": aiohttp.ClientTimeout(total=COMEXIO_HTTP_TIMEOUT_SEC)}
+        session_kwargs: dict[str, Any] = {
+            "timeout": aiohttp.ClientTimeout(total=COMEXIO_HTTP_TIMEOUT_SEC),
+            "trace_configs": [_build_comexio_trace_config()],
+        }
         if _is_local_address(self.host):
             session_kwargs["cookie_jar"] = aiohttp.CookieJar(unsafe=True)
         return session_kwargs
@@ -502,6 +594,16 @@ class ComexioAPI:
         if version_match := _COMEXIO_VERSION_RE.search(html):
             self.comexio_version = version_match.group(1)
 
+        return self._scrape_js_vars(html, page_label="function module")
+
+    @staticmethod
+    def _scrape_js_vars(html: str, *, page_label: str) -> dict[str, Any]:
+        """Extract every top-level `var $Name = {...}` JS object literal from an HTML page.
+
+        Shared between get_raw_config (function module page) and get_knx_dpt_catalog (KNX
+        admin page) — both pages embed their config as inline script-block JS objects in the
+        same style.
+        """
         # Restrict search to script tags to avoid scanning entire HTML with a single DOTALL regex
         script_blocks = _SCRIPT_BLOCK_RE.findall(html)
 
@@ -524,21 +626,139 @@ class ComexioAPI:
                     result[var_name] = json.loads(normalized_obj)
                 except json.JSONDecodeError as exc:
                     _LOGGER.warning(
-                        "Failed to decode JSON for variable $%s on function module page: %s",
+                        "Failed to decode JSON for variable $%s on %s page: %s",
                         var_name,
+                        page_label,
                         exc,
                     )
                     continue
         return result
 
-    async def get_live_states(self, marker_count: int) -> dict[str, Any]:
-        """Fetches current live values for markers from the dashboard refresh endpoint."""
+    async def get_knx_dpt_catalog(self) -> dict[str, Any]:
+        """Fetch $KnxPoints/$KnxDevices/$KnxDpt from the KNX admin page.
+
+        Resolves each existing K-element's real KNX DPT (KnxBaseTypeId.KnxSubId) via the
+        Point -> Device -> Dpt chain (see _resolve_knx_dpt) — neither $FubModules["11"] nor
+        $IOTypesBinary carry a usable analog value range for KNX objects (both report a
+        min=max=0 placeholder, see KNX_DPT_ANALOG_RANGES in const.py). Returns the last
+        known-good catalog (or {} if none exists yet) on HTTP failure or connection error;
+        callers then fall back to the generic WEBIO_MARKER_ANALOG_MIN/MAX range, same as for
+        an unresolved DPT — a transient network hiccup on this opt-in sub-page must not fail
+        the whole coordinator poll (found in review 2026-09-20: the bare aiohttp call
+        previously let a connection error propagate uncaught into _async_update_data's
+        poll-wide try/except). Falling back to the stale cache instead of {} matters
+        specifically for DPT3.x composite pairing (_attach_knx_dpt3_composites): an empty
+        catalog means no item gets tagged knx_composite this poll, which drops the
+        composite's unique_id from __init__.py's active_unique_ids whitelist and gets its
+        cover/light entity permanently deleted from the registry — a single transient
+        failure (e.g. right at HA startup) must not have that effect (found in review
+        2026-09-20).
+
+        Cached on the instance and only re-fetched when comexio_version changes (see
+        _knx_dpt_catalog docstring) — this method's only caller is once per poll in
+        coordinator._async_update_data, but the underlying data is effectively static.
+        """
+        if self._knx_dpt_catalog is not None and self._knx_dpt_catalog_version == self.comexio_version:
+            return self._knx_dpt_catalog
+
+        url = f"{self._base_url}/admin/knx_one_wire/knx/"
+        try:
+            async with self.session.get(url) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("Failed to fetch KNX DPT catalog (HTTP %s)", resp.status)
+                    return self._knx_dpt_catalog or {}
+                html = await resp.text()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.warning("Failed to fetch KNX DPT catalog: %s", err)
+            return self._knx_dpt_catalog or {}
+        result = self._scrape_js_vars(html, page_label="KNX DPT catalog")
+        _LOGGER.debug(
+            "KNX DPT catalog: %d points, %d devices, %d dpt entries",
+            len(result.get("KnxPoints", {})),
+            len(result.get("KnxDevices", {})),
+            len(result.get("KnxDpt", {})),
+        )
+        self._knx_dpt_catalog = result
+        self._knx_dpt_catalog_version = self.comexio_version
+        return result
+
+    @staticmethod
+    def _resolve_knx_dpt(knx_dpt_catalog: dict[str, Any], k_id: str) -> tuple[int, int] | None:
+        """Resolve a K-element's real KNX DPT (KnxBaseTypeId, KnxSubId) via Point -> Device -> Dpt.
+
+        knx_dpt_catalog is get_knx_dpt_catalog()'s raw dict ($KnxPoints/$KnxDevices/$KnxDpt,
+        each id-keyed like Comexio's other JS-object dumps — a K-element's own id IS its
+        $KnxPoints entry's id, confirmed against $FubModules["11"]). Returns None if any link
+        in the chain is missing or malformed, so callers can fall back to the generic range
+        rather than crash on an unexpected shape.
+
+        Unlike $FubModules groups (see _process_source_items), these three never need the
+        JSON-array-vs-object handling: their ids are 1-based with gaps (verified against
+        comexio-KNX-data.trace.txt 2026-09-20, e.g. $KnxDpt skips id 11), so the "keys are
+        exactly 0..N-1" shape PHP's json_encode needs to emit an array can't occur here.
+        """
+        points = knx_dpt_catalog.get("KnxPoints")
+        devices = knx_dpt_catalog.get("KnxDevices")
+        dpts = knx_dpt_catalog.get("KnxDpt")
+        if not isinstance(points, dict) or not isinstance(devices, dict) or not isinstance(dpts, dict):
+            return None
+
+        point = points.get(k_id)
+        if not isinstance(point, dict):
+            return None
+        device = devices.get(str(point.get("KnxDeviceId")))
+        if not isinstance(device, dict):
+            return None
+        dpt = dpts.get(str(device.get("KnxDptId")))
+        if not isinstance(dpt, dict):
+            return None
+
+        base_type_id, sub_id = dpt.get("KnxBaseTypeId"), dpt.get("KnxSubId")
+        if not isinstance(base_type_id, int) or not isinstance(sub_id, int):
+            return None
+        return base_type_id, sub_id
+
+    async def get_live_states(
+        self, marker_count: int, knx_max_id: int = 0
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Fetches current live values for markers AND KNX objects, in a single dashboard
+        refresh request.
+
+        Markers and KNX objects share the same plain numeric id space (a marker and a KNX
+        object can both be "5"), so their live values are kept in two separate returned dicts
+        even though this is one HTTP round-trip — merging them into one id-keyed dict would
+        silently let e.g. KNX object 5 pick up marker 5's value. Marker entries keep the
+        long-standing bare-numeric-id request key ("5": {...}); KNX entries use a
+        f"{_KNX_LIVE_KEY_PREFIX}<id>" request key instead specifically so the response can be
+        split back apart by prefix afterwards. "11" is $FubModules' own KNX module type id
+        (see _process_knx) — a Comexio-wide constant, not per-installation.
+
+        Live-tested against a real KNX-equipped Comexio instance (2026-09-20, see
+        project_knx_write_path_design memory): a bare "KnxIo": "K<id>" key returns that
+        object's own value, confirmed distinct from the same numeric marker id — the "no known
+        bulk live-value endpoint for KNX" assumption the KNX-objects feature originally
+        shipped with (_process_knx docstring) was simply never tested against real hardware.
+
+        Returns (None, None) on any fetch/parse failure — never ({}, {}) — so callers can tell
+        "endpoint failed this cycle" apart from "nothing to report" and keep last-known values
+        instead of overwriting them with a default (found in review 2026-09-20: an empty dict
+        here made every marker/KNX value silently collapse to 0/off on a single transient
+        HTTP hiccup, indistinguishable from a real reading).
+        """
         url = f"{self._base_url}/board/dashboard/refresh/"
-        markers_dict = {str(i): {"action": "get", "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)}
-        markers_dict["messages"] = {"action": "messages"}
+        refresh_dict: dict[str, Any] = {
+            str(i): {"action": "get", "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)
+        }
+        refresh_dict.update(
+            {
+                f"{_KNX_LIVE_KEY_PREFIX}{i}": {"action": "get", "KnxIo": f"K{i}", "Unit": "any"}
+                for i in range(1, knx_max_id + 1)
+            }
+        )
+        refresh_dict["messages"] = {"action": "messages"}
 
         form_data = aiohttp.FormData()
-        form_data.add_field("json", json.dumps(markers_dict))
+        form_data.add_field("json", json.dumps(refresh_dict))
 
         headers = {
             "X-Requested-With": "XMLHttpRequest",
@@ -550,23 +770,39 @@ class ComexioAPI:
             async with self.session.post(url, data=form_data, headers=headers) as resp:
                 if resp.status != 200:
                     _LOGGER.error("Live states fetch failed with HTTP status: %s", resp.status)
-                    return {}
+                    return None, None
                 try:
                     data = await resp.json(content_type=None)
-                    return data.get("result", {})
+                    result = data.get("result", {})
                 except Exception:
                     raw_text = await resp.text()
                     _LOGGER.exception(
                         "Failed to parse live states response as JSON; raw response: %s",
                         raw_text,
                     )
-                    return {}
+                    return None, None
         except aiohttp.ClientError as err:
             _LOGGER.exception("HTTP request error fetching live states: %s", err)
-            return {}
+            return None, None
         except Exception as e:
             _LOGGER.exception("Unexpected error fetching live states: %s", e)
-            return {}
+            return None, None
+
+        if not isinstance(result, dict):
+            _LOGGER.error("Live states response had an unexpected shape: %r", type(result))
+            return None, None
+
+        knx_states = {
+            key.removeprefix(_KNX_LIVE_KEY_PREFIX): value
+            for key, value in result.items()
+            if key.startswith(_KNX_LIVE_KEY_PREFIX)
+        }
+        marker_states = {
+            key: value
+            for key, value in result.items()
+            if key != "messages" and not key.startswith(_KNX_LIVE_KEY_PREFIX)
+        }
+        return marker_states, knx_states
 
     async def get_function_plan_connection_values(
         self, fub_id: int, session: aiohttp.ClientSession | None = None
@@ -655,10 +891,16 @@ class ComexioAPI:
         conf: dict[str, Any],
         live_states: dict[str, Any] | None = None,
         referenced_markers: set[str] | None = None,
+        knx_live_states: dict[str, Any] | None = None,
+        knx_dpt_catalog: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Processes the raw configuration and performs a technical audit.
         Uses dynamic IO type mapping to determine binary vs analog states and units.
+
+        live_states and knx_live_states are kept as two separate params (both id-keyed) rather
+        than one merged dict — see get_live_states' docstring for why merging them would be
+        unsafe (markers and KNX objects share the same plain numeric id space).
         """
         data = {
             "markers": [],
@@ -698,9 +940,8 @@ class ComexioAPI:
         # 5. Process KNX objects (opt-in via import_knx; coordinator drops the list when disabled).
         # No "wired but unnamed" import for KNX: marker and KNX ids share a numeric space, so the
         # marker reference set cannot be reused here without cross-contamination. A KNX object is
-        # imported only when it carries a real Comexio label. See _process_knx for why it doesn't
-        # receive live_states either.
-        self._process_knx(data, schema_knx, server_alias, fub_modules)
+        # imported only when it carries a real Comexio label.
+        self._process_knx(data, schema_knx, server_alias, fub_modules, knx_live_states, knx_dpt_catalog)
 
         _LOGGER.info(
             "Audit: %d Markers, %d IOs, %d KNX, %d Webhooks in Comexio for %s",
@@ -973,32 +1214,140 @@ class ComexioAPI:
         schema_knx: str,
         server_alias: str,
         fub_modules: dict[str, Any],
+        live_states: dict[str, Any] | None = None,
+        knx_dpt_catalog: dict[str, Any] | None = None,
     ) -> None:
         """Process KNX objects from config ($FubModules["11"], "knxIo" per $FubTypes).
 
         Structurally modeled 1:1 on markers (see _process_markers) — same title-suffix kind
-        heuristic ([RO]/[TRIG]/[TP]), same analog/digital Type mapping. Built blind against
-        the marker schema pending real KNX hardware.
+        heuristic ([RO]/[TRIG]/[TP]), same analog/digital Type mapping.
 
-        No live_states here on purpose: get_live_states() only ever queries marker values
-        ("MarkerName": f"M{i}"), keyed by the same plain numeric id KNX objects use — passing
-        it through would silently hand e.g. KNX object 5 marker 5's live value. There is no
-        known bulk live-value endpoint for KNX objects (BLIND GUESS), so the real value only
-        arrives via the next webhook push; until then the entities report "unknown" rather
-        than this placeholder 0 (see ComexioKnx* is_on/native_value).
+        live_states here is the SEPARATE knx-keyed dict get_live_states() now also returns
+        (its "knxIo_11_<id>" query, live-tested 2026-09-20 against a real KNX-equipped
+        Comexio instance — see project_knx_write_path_design memory) — never the marker dict,
+        since markers and KNX objects share the same plain numeric id space and mixing them
+        would silently hand e.g. KNX object 5 marker 5's live value.
+
+        knx_dpt_catalog (get_knx_dpt_catalog()'s result, only fetched when import_knx is on)
+        is used to attach each analog item's real KNX-standard value range AND step (native
+        resolution) — see _resolve_knx_dpt / KNX_DPT_ANALOG_RANGES. Items whose DPT can't be
+        resolved, or whose DPT has no entry in the table, are left without dpt_min/dpt_max/
+        dpt_unit/dpt_step so ComexioKnxNumber falls back to its generic heuristic. The same
+        resolved DPT also drives dpt_device_class — KNX_DPT_DEVICE_CLASS (a plain HA
+        NumberDeviceClass value string) for analog items, or KNX_DPT_DIGITAL_DEVICE_CLASS (a
+        plain HA BinarySensorDeviceClass value string, only meaningful once ComexioKnxBinarySensor
+        picks it up for a "[RO]" item) for digital ones — absent from either when the DPT has no
+        matching device class (e.g. the DPT3.x step/direction values). A digital item whose DPT
+        is instead one of the physically ambivalent DPT1.x subtypes (KNX_DPT_DIGITAL_AMBIGUOUS)
+        gets dpt_ambiguous=True — see coordinator._auto_suffix_unambiguous_knx /
+        _audit_knx_dpt_ambiguous for what consumes these two flags.
         """
-        data["knx"].extend(
-            self._process_source_items(
-                fub_modules,
-                module_key="11",
-                schema=schema_knx,
-                id_prefix="K",
-                id_placeholder="KnxId",
-                title_placeholder="KnxTitle",
-                server_alias=server_alias,
-                live_states={},
-            )
+        items = self._process_source_items(
+            fub_modules,
+            module_key="11",
+            schema=schema_knx,
+            id_prefix="K",
+            id_placeholder="KnxId",
+            title_placeholder="KnxTitle",
+            server_alias=server_alias,
+            live_states=live_states or {},
         )
+        if knx_dpt_catalog:
+            for item in items:
+                dpt = self._resolve_knx_dpt(knx_dpt_catalog, item["id"])
+                if dpt is None:
+                    _LOGGER.debug("KNX item %s: could not resolve DPT chain, using generic fallback", item["id"])
+                    continue
+                if item["type"] != "analog":
+                    if device_class := KNX_DPT_DIGITAL_DEVICE_CLASS.get(dpt):
+                        item["dpt_device_class"] = device_class
+                    elif dpt in KNX_DPT_DIGITAL_AMBIGUOUS:
+                        # Physically ambivalent DPT1.x subtype (see KNX_DPT_DIGITAL_AMBIGUOUS
+                        # docstring) — flagged for coordinator._audit_knx_dpt_ambiguous rather
+                        # than auto-classified.
+                        item["dpt_ambiguous"] = True
+                    continue
+                dpt_range = KNX_DPT_ANALOG_RANGES.get(dpt)
+                if dpt_range is None:
+                    _LOGGER.debug(
+                        "KNX item %s: resolved DPT%s.%s has no entry in KNX_DPT_ANALOG_RANGES, "
+                        "using generic fallback range",
+                        item["id"],
+                        dpt[0],
+                        dpt[1],
+                    )
+                    continue
+                item["dpt_min"], item["dpt_max"], item["dpt_unit"], item["dpt_step"] = dpt_range
+                if device_class := KNX_DPT_DEVICE_CLASS.get(dpt):
+                    item["dpt_device_class"] = device_class
+            self._attach_knx_dpt3_composites(items, knx_dpt_catalog)
+        data["knx"].extend(items)
+
+    def _attach_knx_dpt3_composites(self, items: list[dict[str, Any]], knx_dpt_catalog: dict[str, Any]) -> None:
+        """Tag DPT3.x (Dimmer 3.007 / Blinds 3.008) K-element pairs with composite metadata.
+
+        Comexio splits each DPT3.x KNX object into two K-elements sharing one KnxDeviceId —
+        a digital control bit (direction) and an analog 3-bit step code (0=break, 1-7=move),
+        see dev-tools/knx_seed_test_matrix.py's save_device()/points[0]/points[1]. Tags each
+        item in place with a "knx_composite" dict ({"role": "direction"|"stepcode", "domain":
+        "light"|"cover", "partner_id": <other K-element's id>}) so cover.py/light.py can build
+        one composite entity per pair, and switch.py/number.py can skip the pair's individual
+        generic entities. Only annotates `items` — sync/audit/wiring logic (button.py,
+        coordinator.py) is untouched, since both K-elements keep their own bridge Marker
+        exactly as before.
+        """
+        points = knx_dpt_catalog.get("KnxPoints")
+        if not isinstance(points, dict):
+            return
+
+        by_device: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in items:
+            point = points.get(item["id"])
+            device_id = point.get("KnxDeviceId") if isinstance(point, dict) else None
+            if device_id is not None:
+                by_device[str(device_id)].append(item)
+
+        for device_id, pair in by_device.items():
+            if len(pair) != 2:
+                if len(pair) > 2:
+                    _LOGGER.debug(
+                        "KNX device %s has %d points sharing one KnxDeviceId (expected at most 2), "
+                        "skipping composite grouping",
+                        device_id,
+                        len(pair),
+                    )
+                continue
+            dpt = self._resolve_knx_dpt(knx_dpt_catalog, pair[0]["id"])
+            domain = KNX_DPT3_COMPOSITE_DOMAIN.get(dpt) if dpt else None
+            if domain is None:
+                _LOGGER.debug(
+                    "KNX device %s has 2 points but resolved DPT %s isn't a DPT3.x composite, "
+                    "skipping composite grouping",
+                    device_id,
+                    dpt,
+                )
+                continue
+            direction_item = next((i for i in pair if i["type"] == "digital"), None)
+            stepcode_item = next((i for i in pair if i["type"] == "analog"), None)
+            if direction_item is None or stepcode_item is None:
+                _LOGGER.debug(
+                    "KNX device %s resolved to DPT%s.%s but its 2 points aren't one digital + "
+                    "one analog K-element, skipping composite grouping",
+                    device_id,
+                    dpt[0],
+                    dpt[1],
+                )
+                continue
+            direction_item["knx_composite"] = {
+                "role": "direction",
+                "domain": domain,
+                "partner_id": stepcode_item["id"],
+            }
+            stepcode_item["knx_composite"] = {
+                "role": "stepcode",
+                "domain": domain,
+                "partner_id": direction_item["id"],
+            }
 
     def _process_source_items(
         self,
@@ -1036,7 +1385,17 @@ class ComexioAPI:
                 continue
 
             type_raw = raw.get("Type", 1)
-            type_str = "analog" if type_raw in [2, 3] else "digital"
+            if module_key == "11":
+                # KNX ($FubModules["11"]): Type is a rich catalog code (same value space as
+                # normal IOs' $IOTypesBinary), NOT the simple {1,2,3} scale markers use — the
+                # marker-only heuristic below would e.g. misclassify Type=121 (DPT17 scene
+                # number, analog) as digital. Reuse the same self.io_types lookup
+                # _add_io_entry() already uses for IOs (confirmed live 2026-09-14 against real
+                # KNX wiring on a function plan — see project_knx_write_path_design memory).
+                is_binary = self.io_types.get(str(type_raw), {}).get("binary", False)
+                type_str = "digital" if is_binary else "analog"
+            else:
+                type_str = "analog" if type_raw in [2, 3] else "digital"
             title = raw.get("Name") or self._NO_NAME_MARKER_TITLE
 
             ha_name = schema.format_map(
@@ -1048,25 +1407,46 @@ class ComexioAPI:
                     "id": item_id,
                     "ha_name": " ".join(ha_name.split()),
                     "name": f"{id_prefix}{item_id} {title}",
+                    # Bare Comexio title, without the id prefix "name" carries — needed e.g.
+                    # by create_knx_bridge_marker() to build the bridge marker's own title.
+                    "title": title,
                     # Unnamed-but-referenced item ("#nn"): the plan preview greys it out
                     # like an inactive IO as a visual hint that it has no label in Comexio.
                     "no_name": not has_name,
                     "type": type_str,
                     "type_raw": type_raw,
                     "value": self._clean_value(live_states.get(item_id, 0)),
-                    "kind": self._marker_kind(title),
+                    "kind": self._marker_kind(title, module_key=module_key),
                 }
             )
         return items
 
     @staticmethod
-    def _marker_kind(m_title: str) -> MarkerKind:
-        """Derive a marker's HA exposure kind from its Comexio-side title suffix.
+    def _marker_kind(m_title: str, *, module_key: str) -> MarkerKind:
+        """Derive a source item's HA exposure kind from its Comexio-side title suffix.
 
-        "[RO]" wins over a simultaneous "[TRIG]"/"[TP]" suffix (nonsensical combination,
-        but must resolve to exactly one kind rather than crash).
+        A trailing "[K<id>]" (auto-created write-path bridge Marker, see
+        MARKER_KNX_BRIDGE_SUFFIX_RE) is checked first: it is machine-titled by
+        create_knx_bridge_marker() as "<k_title> [K<k_id>]", and since all three suffix
+        checks below are end-anchored they're mutually exclusive anyway — the ordering
+        itself has no effect on a Marker. It matters only for module_key: this classification
+        is Marker-only (module_key "2") — a KNX object (module_key "11") can never itself be
+        a bridge, only be fed by one, so a KNX object whose own (user/ETS-given) title
+        happens to end in the same bracket-and-digits shape must not be swept into
+        KNX_BRIDGE, which would silently drop it from the audit and from every HA platform.
+        Failing that, "[RO]" wins over a simultaneous "[TRIG]"/"[TP]" suffix (nonsensical
+        combination, but must resolve to exactly one kind rather than crash).
         """
         title = m_title.rstrip()
+        if MARKER_KNX_BRIDGE_SUFFIX_RE.search(title):
+            if module_key != "2":
+                _LOGGER.warning(
+                    "KNX object '%s' has a title ending in '[K<id>]' — that suffix is reserved for "
+                    "auto-created write-path bridge Markers and is ignored here (treating as normal).",
+                    title,
+                )
+            else:
+                return MarkerKind.KNX_BRIDGE
         if title.endswith(MARKER_READ_ONLY_SUFFIX):
             if any(suffix in title for suffix in MARKER_TRIGGER_SUFFIXES):
                 _LOGGER.warning("Marker '%s' has both [RO] and a trigger suffix — treating as read-only.", title)
@@ -1362,6 +1742,13 @@ class ComexioAPI:
         """
         Adds or updates a single command in an existing device (Delta Sync).
         If existing_cmd_id is provided, an UPDATE is performed.
+
+        header_modifier/post_get/authentication are read from cmd_payload (defaulting to the
+        JSON-POST-no-auth shape every HA-webhook command uses) rather than hardcoded — the
+        Phase 7 API-Loopback command needs PostGet=0/Authentication=1/no header modifier
+        instead (see _build_knx_loopback_webio_command), and reusing this method unmodified
+        for it would silently strip that combination back to the auth-less POST shape,
+        reproducing the exact 401 Unauthorized bug the Phase 7 field combination fixes.
         """
         _LOGGER.info("Applying command: %s (Update: %s)", cmd_payload.get("Name"), existing_cmd_id is not None)
         url = f"{self._base_url}/admin/web_io/save_command"
@@ -1379,11 +1766,11 @@ class ComexioAPI:
             "dlg_web_device_id": str(device_id),
             "protocol": 0,
             "parameter": cmd_payload["Parameter"],
-            "header_modifier": _CONTENT_TYPE_JSON,
+            "header_modifier": cmd_payload.get("HeaderModifier", _CONTENT_TYPE_JSON),
             "data": cmd_payload["Data"],
             "port": "",
-            "post_get": 1,
-            "authentication": 0,
+            "post_get": cmd_payload.get("PostGet", 1),
+            "authentication": cmd_payload.get("Authentication", 0),
             "req_freq": "",
             "reply_interpreter": "",
             "id_cmd_io_0": cmd_id_b64,
@@ -1526,7 +1913,7 @@ class ComexioAPI:
 
     @staticmethod
     def _webio_command(
-        *, name: str, type_id: int, min_v: int, max_v: int, data: str, webhook_path: str
+        *, name: str, type_id: int, min_v: float, max_v: float, data: str, webhook_path: str
     ) -> dict[str, Any]:
         """Build a Web-IO command dict, filling in the fields shared by markers and IOs."""
         return {
@@ -1554,6 +1941,72 @@ class ComexioAPI:
         }
 
     @staticmethod
+    def _knx_webio_range(dpt_min: float | None, dpt_max: float | None) -> tuple[float, float]:
+        """Resolve the Min/Max to embed in an analog KNX Web-IO command from a resolved DPT range.
+
+        Uses the real DPT range verbatim (only the pre-existing _safe_webio_range int16
+        danger-zone guard still applies) rather than capping it to WEBIO_MARKER_ANALOG_MIN/MAX —
+        deliberate per user decision 2026-09-20 after live-testing both ends of the scale: K8
+        (DPT9.004, 0..670760) round-trips fine, K5 (DPT12.001, 0..4294967295) gets corrupted by a
+        still-open Comexio firmware bug that rounds analog values above ~1,000,000 (see README for
+        the documented limitation). Capping the range here would dodge that bug silently today but
+        would need undoing again once Comexio ships a fix — the user chose to expose the true DPT
+        range and document the caveat instead ("dann sind wir damit aus dem Boot").
+        None (DPT unresolved, see _resolve_knx_dpt) falls back to the fully generic
+        WEBIO_MARKER_ANALOG_MIN/MAX range, unchanged from before this method existed.
+        """
+        if dpt_min is None or dpt_max is None:
+            return WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
+        return ComexioAPI._safe_webio_range(dpt_min, dpt_max)
+
+    def _resolve_knx_loopback_range(self, k_id: int, marker_id: int) -> tuple[float, float]:
+        """Resolve the Min/Max for one analog K-Element's Phase 7 loopback Web-IO command.
+
+        Unlike _build_marker_webio_command's KNX branch (which reads dpt_min/dpt_max already
+        resolved during the current poll, via _process_knx), this command is built from
+        on-demand Sync-button wiring code, so it must resolve the DPT itself against whatever
+        self._knx_dpt_catalog happens to hold right now — which can be None (no poll has ever
+        populated it yet) or stale (comexio_version has moved on since the cached fetch; see
+        get_knx_dpt_catalog's own freshness check, not applied by _resolve_knx_dpt itself).
+        Both degrade to the generic WEBIO_MARKER_ANALOG_MIN/MAX range rather than risk trusting
+        a stale chain, same as a genuinely-unresolvable DPT — but each case is logged
+        separately (mirroring _process_knx's own split for the identical situation on the HA
+        Number entity's side, found missing here in review 2026-09-20) since this path creates
+        a permanent Web-IO command that nothing later re-checks against a fresher catalog.
+        """
+        catalog = self._knx_dpt_catalog
+        catalog_fresh = catalog is not None and self._knx_dpt_catalog_version == self.comexio_version
+        dpt = self._resolve_knx_dpt(catalog or {}, str(k_id)) if catalog_fresh else None
+        if dpt is None:
+            if catalog is None:
+                reason = "catalog not yet fetched"
+            elif not catalog_fresh:
+                reason = "catalog stale (comexio_version changed since last fetch)"
+            else:
+                reason = "DPT chain resolution failed"
+            _LOGGER.debug(
+                "KNX loopback command K%s->M%s: could not resolve DPT (%s), using generic fallback range",
+                k_id,
+                marker_id,
+                reason,
+            )
+            return WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
+
+        dpt_range = KNX_DPT_ANALOG_RANGES.get(dpt)
+        if dpt_range is None:
+            _LOGGER.debug(
+                "KNX loopback command K%s->M%s: resolved DPT%s.%s has no entry in "
+                "KNX_DPT_ANALOG_RANGES, using generic fallback range",
+                k_id,
+                marker_id,
+                dpt[0],
+                dpt[1],
+            )
+            return WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
+
+        return self._knx_webio_range(dpt_range[0], dpt_range[1])
+
+    @staticmethod
     def _build_marker_webio_command(
         m: dict[str, Any], webhook_path: str, source_type: str = WEBIO_CLASS_MARKER
     ) -> dict[str, Any]:
@@ -1561,19 +2014,74 @@ class ComexioAPI:
 
         source_type is the literal written into the webhook Lua payload's ``type=`` field
         ("marker" or "knx"); it decides which coordinator update path the pushed value hits.
+        For a KNX object, m may already carry dpt_min/dpt_max (set by _process_knx) — see
+        _knx_webio_range for how those replace the generic ±500,000 range with the real DPT range.
         """
         is_ana = m["type"] == "analog"
+        if is_ana and source_type == WEBIO_CLASS_KNX:
+            min_v, max_v = ComexioAPI._knx_webio_range(m.get("dpt_min"), m.get("dpt_max"))
+        elif is_ana:
+            min_v, max_v = WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
+        else:
+            min_v, max_v = 0, 1
         safe_id = ComexioAPI._lua_escape(m["id"])
         safe_type = ComexioAPI._lua_escape(source_type)
         lua = ComexioAPI._webio_data_lua(f'id="{safe_id}", value=a, type="{safe_type}"')
         return ComexioAPI._webio_command(
             name=f"HA {m['name']}",
             type_id=2 if is_ana else 1,
-            min_v=WEBIO_MARKER_ANALOG_MIN if is_ana else 0,
-            max_v=WEBIO_MARKER_ANALOG_MAX if is_ana else 1,
+            min_v=min_v,
+            max_v=max_v,
             data=lua,
             webhook_path=webhook_path,
         )
+
+    def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
+        """Build the Web-IO command dict for one K-Element's Phase 7 API-Loopback command.
+
+        Unlike _webio_command's HA-webhook shape (POST, JSON body, no auth, target = HA's own
+        webhook), this command GETs Comexio's OWN /api/?action=set endpoint on every change of
+        the wired K-Element's output, writing the bridge Marker directly and closing the
+        "Punkt 4" stuck-marker loop entirely inside Comexio (see WEBIO_CLASS_NAME_KNX_LOOPBACK
+        in const.py for the full rationale). Field combination confirmed live 17.09.2026 after
+        three rounds of debugging (see project_knx_write_path_design memory, "Phase 7"):
+          - PostGet=0 (GET, not POST)
+          - Authentication=1 ("Ja") — the actual root cause found; without it the device's
+            Basic-Auth credentials (see create_webio_device) never attach to this command's
+            own outgoing request, even with the class Login=3 and correct device credentials
+            (401 Unauthorized).
+        Min/Max: resolved via _resolve_knx_loopback_range, same DPT chain and _knx_webio_range
+        logic as _build_marker_webio_command's KNX branch — see that method's own docstring for
+        exactly which situations fall back to the generic WEBIO_MARKER_ANALOG_MIN/MAX range, and
+        why each is logged.
+        """
+        min_v: float
+        max_v: float
+        min_v, max_v = (0, 1) if not is_analog else self._resolve_knx_loopback_range(k_id, marker_id)
+        param_lua = f'function parameter(a)\r\n  return "/api/?action=set&marker=M{marker_id}&value="..a\r\nend'
+        return {
+            "Name": knx_loopback_command_name(k_id, marker_id),
+            "TypeId": 2 if is_analog else 1,
+            "Min": min_v,
+            "Max": max_v,
+            "Parameter": param_lua,
+            "HeaderModifier": "",
+            "Data": "",
+            "Protocol": 0,
+            "PostGet": 0,
+            "WebDeviceId": 0,
+            "Authentication": 1,
+            "Input": 1,
+            "ReqFreq": "",
+            "ReplyInterpreter": "",
+            "Port": "",
+            "SendOnOne": 0,
+            "Changed": 1,
+            "BaseId": 0,
+            "DefaultValue": "",
+            "DefaultActive": 1,
+            "io": [],
+        }
 
     @staticmethod
     def _safe_webio_range(v_min: float, v_max: float) -> tuple[float, float]:
@@ -1649,14 +2157,37 @@ class ComexioAPI:
         form.add_field("set_name", webio_name)
         headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
         async with self.session.post(url, data=form, headers=headers) as resp:
+            raw_text = await resp.text()
+            # TEMPORARY diagnostic (18.09.2026): a KNX class upload was reported successful here
+            # (ok=True/base_id returned) yet neither the class nor its device ever showed up on the
+            # live server afterward — logged unconditionally (not just on the failure branch below)
+            # to see the exact body Comexio sent back on the "successful" call too. Remove once the
+            # KNX Web-IO class creation gap (see create_webio_device below) is understood.
+            _LOGGER.debug("upload_web_io('%s'): HTTP %s, body=%r", webio_name, resp.status, raw_text)
             if resp.status == 200:
-                result = await resp.json(content_type=None)
+                try:
+                    result = json.loads(raw_text)
+                except (json.JSONDecodeError, TypeError):
+                    return False, raw_text
                 if result.get("ok"):
                     return True, result.get("base_id")
-            return False, await resp.text()
+            return False, raw_text
 
-    async def create_webio_device(self, name: str, base_id: str | int, ha_address: str | None = None) -> bool:
-        """Creates a device instance. Automatically determines HA address if not provided."""
+    async def create_webio_device(
+        self,
+        name: str,
+        base_id: str | int,
+        ha_address: str | None = None,
+        username: str = "",
+        password: str = "",  # nosec B105
+    ) -> bool:
+        """Creates a device instance. Automatically determines HA address if not provided.
+
+        username/password default to empty, matching every existing HA-webhook device (which
+        needs no Basic-Auth on its own commands). The Phase 7 API-Loopback device is the first
+        caller to pass real credentials — gated on the Web-IO class' own Login=3 ("vom Geraet
+        abhaengig") setting, see ensure_knx_loopback_webio.
+        """
         if not ha_address:
             ha_address = await self.get_ha_address()
 
@@ -1666,15 +2197,173 @@ class ComexioAPI:
             "name": name,
             "ip": ha_address,
             "web_device_base": base_id,
-            "username": "",
-            "password": "",  # nosec B105
+            "username": username,
+            "password": password,
             "web_device_base_sample": "none",
             "identifier": "",
             "form_login": "2",
         }
 
         async with self.session.post(url, data=payload, headers={"X-Requested-With": "XMLHttpRequest"}) as resp:
+            # TEMPORARY diagnostic (18.09.2026): see upload_web_io's comment above — this call only
+            # ever checked resp.status, never the body, so a server-side rejection returned as HTTP
+            # 200 (e.g. validation error, name/slot conflict) would silently read as success. Logging
+            # the raw body unconditionally to find out what a real failure here actually looks like
+            # before deciding how to validate it properly. Remove once that's known.
+            raw_text = await resp.text()
+            _LOGGER.debug(
+                "create_webio_device('%s', base_id=%s): HTTP %s, body=%r", name, base_id, resp.status, raw_text
+            )
             return resp.status == 200
+
+    @staticmethod
+    def _knx_loopback_class_json(commands: list[dict[str, Any]] | None = None) -> str:
+        """Upload-ready JSON for the ComexioAPI Loopback Web-IO class.
+
+        Login=3 ("vom Geraet abhaengig") is required so the device's own username/password
+        (see create_webio_device) get attached as Basic-Auth to this class' commands — gated
+        additionally by each individual command's own Authentication=1 field (see
+        _build_knx_loopback_webio_command's docstring for why both are needed).
+
+        commands: the full initial command set to embed right away, same bulk-upload
+        pattern every per-category Marker/IO/KNX class uses (generate_webio_json ->
+        upload_web_io) — see ensure_knx_loopback_webio, whose caller already knows every
+        K-Element that needs a command at bootstrap time. Defaults to empty only for a
+        caller with nothing to embed yet; growing an existing class afterward still goes
+        through save_single_command one command at a time (button.py's Delta-Sync), same
+        as every other Web-IO class.
+        """
+        return json.dumps(
+            {
+                "data": "web_io",
+                "format": 1,
+                "base": {"Identifier": WEBIO_CLASS_NAME_KNX_LOOPBACK, "UseCookies": 0, "Login": 3, "BaseId": 0},
+                "commands": commands or [],
+            }
+        )
+
+    async def ensure_knx_loopback_webio(
+        self,
+        api_username: str,
+        api_password: str,
+        bridges: list[tuple[int, int, bool]] | None = None,
+    ) -> tuple[str, bool] | None:
+        """Idempotently create the once-per-server ComexioAPI Loopback Web-IO class + device.
+
+        Unlike the per-category Marker/IO/KNX classes (one per opted-in source category,
+        generated via generate_webio_json/upload_web_io and pointed at HA's own webhook), this
+        class/device is created ONCE per Comexio server and points back at the server's OWN
+        address (self.host, not HA).
+
+        bridges (k_id, marker_id, binary triples), if given, are embedded as the class' full
+        initial command set on first creation ONLY — the same bulk-upload pattern every other
+        Web-IO class uses, instead of creating an empty class and adding every command one at
+        a time afterwards via save_single_command (measured live 17.09.2026: >5 min for 10
+        K-Elements vs. instant bulk upload for the other classes — see
+        project_knx_write_path_design memory). Ignored once the class already exists; growing
+        an existing class with newly-added bridges still goes through save_single_command in
+        the caller (function_plan_add_knx_bridge_loopback_pairs), same as every other class'
+        Delta-Sync.
+
+        Returns (base_id, freshly_created) on success — freshly_created tells the caller
+        whether bridges was just bulk-embedded (so it must wait for the commands to become
+        visible via reload rather than re-creating them one by one) or the class already
+        existed beforehand. Returns None if api_username/api_password aren't configured, the
+        class upload or device creation call reports failure (server-side "no", not a network
+        error), or the device is confirmed present while its class cannot be found/verified
+        (get_webio_base_info's check failed transiently — see the inline comment where this is
+        decided; aborting here avoids a duplicate class upload that would orphan the existing
+        one's already-embedded commands). A connection-level failure (timeout, unreachable
+        host) during any of the base/device checks or the upload/create calls propagates as an
+        exception instead of returning None — matching how every other Web-IO class's own
+        bootstrap path (button.py's `_recreate_class`) behaves; the top-level sync handler is
+        the catch-all for that case, same as for them.
+
+        Known limitations:
+        - The device-confirmed-present guard above only catches one direction: it cannot tell
+          "class genuinely never existed" apart from "class check failed while the device
+          itself was independently deleted" (device and class are deletable independently —
+          see delete_webio_device vs. delete_webio_base). That combination is treated as
+          genuinely fresh and would re-embed only the current batch's bridges. Accepted as a
+          rare double-failure edge case rather than adding another unverifiable branch here.
+        - Once the device exists, this never re-checks its username/password/ip against the
+          current config — unlike WEBIO_CLASSES devices, this class isn't covered by the
+          IP-mismatch/credential audit (it isn't a member of WEBIO_CLASSES), so a later
+          api_username/api_password rotation or host change leaves the loopback device silently
+          writing with stale credentials (401s with no repair issue raised). Tracked as an open
+          Phase 7 follow-up (project_knx_write_path_design memory).
+        """
+        if not api_username or not api_password:
+            _LOGGER.warning(
+                "ensure_knx_loopback_webio: api_username/api_password not configured — cannot "
+                "create the ComexioAPI Loopback Web-IO (Phase 7 KNX write-path)"
+            )
+            return None
+
+        try:
+            device_id = await self.get_webio_device_info(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
+        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+            # get_webio_device_info raises RuntimeError on a non-200 response, precisely so
+            # callers don't mistake "couldn't check" for "genuinely absent" — see its own
+            # docstring. Its own session.get() call is unwrapped though, so a connection
+            # failure/timeout propagates as aiohttp.ClientError/TimeoutError instead — must not
+            # let either escape uncaught out of a tuple[str, bool] | None-returning helper.
+            _LOGGER.error("ensure_knx_loopback_webio: device check failed: %s", err)
+            return None
+
+        base_info = await self.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
+        # Unlike get_webio_device_info above, get_webio_base_info returns None on BOTH genuine
+        # absence AND a transient HTTP failure of its own check (see its own docstring — no
+        # raise path exists there). device_id, just resolved above via the raise-based check,
+        # is the reliable anchor: a device can only exist if create_webio_device below already
+        # succeeded for it once, which itself requires a base_id from a prior successful class
+        # creation — so device_id is not None makes a None base_info here the flaky case, not
+        # genuine absence. Abort rather than risk treating a still-existing class as brand new:
+        # that would bulk-upload only *this* call's bridges and orphan any others the class
+        # already carries from an earlier bootstrap run.
+        if device_id is not None and base_info is None:
+            _LOGGER.error(
+                "ensure_knx_loopback_webio: device '%s' exists but its Web-IO class '%s' could "
+                "not be found/verified — aborting rather than risking a duplicate class upload, "
+                "see log above",
+                WEBIO_DEVICE_NAME_KNX_LOOPBACK,
+                WEBIO_CLASS_NAME_KNX_LOOPBACK,
+            )
+            return None
+
+        freshly_created = base_info is None
+        if base_info:
+            base_id, _deletable = base_info
+        else:
+            initial_commands = [
+                self._build_knx_loopback_webio_command(k_id=k_id, marker_id=marker_id, is_analog=not binary)
+                for k_id, marker_id, binary in (bridges or [])
+            ]
+            success, res_id = await self.upload_web_io(
+                "knx_loopback", WEBIO_CLASS_NAME_KNX_LOOPBACK, self._knx_loopback_class_json(initial_commands)
+            )
+            if not success:
+                _LOGGER.error("ensure_knx_loopback_webio: class upload failed: %s", res_id)
+                return None
+            base_id = res_id
+            _LOGGER.info(
+                "ensure_knx_loopback_webio: class '%s' created with %d initial command(s) (base_id=%s)",
+                WEBIO_CLASS_NAME_KNX_LOOPBACK,
+                len(initial_commands),
+                base_id,
+            )
+
+        if device_id is None:
+            if not await self.create_webio_device(
+                WEBIO_DEVICE_NAME_KNX_LOOPBACK, base_id, self.host, username=api_username, password=api_password
+            ):
+                _LOGGER.error("ensure_knx_loopback_webio: device creation failed (base_id=%s)", base_id)
+                return None
+            _LOGGER.info(
+                "ensure_knx_loopback_webio: device '%s' created @ %s", WEBIO_DEVICE_NAME_KNX_LOOPBACK, self.host
+            )
+
+        return str(base_id), freshly_created
 
     # --- LOGIKPLAN (FUNCTION PLAN) ---
 
@@ -1758,6 +2447,7 @@ class ComexioAPI:
         value_type: str = "binary",
         input_pos: int = 0,
         input_inverted: bool = False,
+        existing_conn_id: int | None = None,
     ) -> int | None:
         """Draw a wire (or fan-out) from input_elem (source) to one or more output elements.
 
@@ -1770,6 +2460,18 @@ class ComexioAPI:
         both wires to silently vanish for IO/Constant sources (confirmed live 2026-08-22 on a
         restored copy of a real plan; catalog function-block sources tolerated it, IO/Constant
         sources did not), so every sink for a given source must be sent in a single call.
+        existing_conn_id: pass the EXISTING connection's id when this call is re-saving a
+        source's outputs (e.g. unioning a new sink onto ones already there) rather than
+        creating a brand-new wire — omit (None) only for a source that has no connection yet.
+        Sending "id":"new" for a source that already has a connection makes Comexio fold the
+        new save into the existing record (same id kept, outputs correctly merged) but silently
+        drop that record's "input" field entirely, leaving a connection with valid outputs but
+        no recorded source — breaks both the visual wire in Comexio Studio and our own
+        visualizer ("TypNone ref=?"). Confirmed live 2026-09-18 on a throwaway test plan:
+        resaving with "id":"new" twice from the same source reproduced the missing-"input"
+        connection 1:1; resaving the second time with the real id instead preserved it.
+        Callers that read an existing connection via _function_plan_find_connection_by_source
+        MUST pass its id back here.
         Returns the connection ID assigned by the server, or None on failure.
         """
         url = f"{self._base_url}/admin/function_function_module/saveconnection/"
@@ -1778,9 +2480,14 @@ class ComexioAPI:
             str(i): {"element": str(dst), "pos": str(pos), "inverted": inverted}
             for i, (dst, pos, inverted) in enumerate(outputs)
         }
+        # Logged verbatim below on both the error and success path — a save that resends "new"
+        # for a source that already HAS a connection is exactly the corrupting case this whole
+        # existing_conn_id mechanism exists to prevent, so a failure here is materially riskier
+        # (see function_plan_save_connection's docstring) than a failure creating a fresh wire.
+        mode = "new" if existing_conn_id is None else f"update(id={existing_conn_id})"
         conn_json = json.dumps(
             {
-                "id": "new",
+                "id": "new" if existing_conn_id is None else str(existing_conn_id),
                 "fub_id": fub_id,
                 "input": {"element": str(input_elem_id), "pos": str(input_pos), "inverted": input_inverted},
                 "type": value_type,
@@ -1797,26 +2504,44 @@ class ComexioAPI:
         async with self.session.post(url, data=payload, headers=headers) as resp:
             if resp.status != 200:
                 _LOGGER.error(
-                    "function_plan_save_connection failed (HTTP %s, fub=%s, %s→%s)",
+                    "function_plan_save_connection failed (HTTP %s, fub=%s, %s→%s, mode=%s)",
                     resp.status,
                     fub_id,
                     input_elem_id,
                     dst_ids,
+                    mode,
                 )
                 return None
             try:
                 result = await resp.json(content_type=None)
-                conn_id = result.get("id")
+                saved_conn_id = result.get("id")
+                if saved_conn_id is None:
+                    # HTTP 200 with a parseable body but no "id" — Comexio accepted the request
+                    # but didn't return a connection id (e.g. a rejected/invalid save). Distinct
+                    # from the except-block below (which is a genuine parse failure): log the
+                    # raw body at ERROR so this is diagnosable later instead of looking identical
+                    # to a normal successful save on DEBUG.
+                    _LOGGER.error(
+                        "function_plan_save_connection: HTTP 200 but no 'id' in response "
+                        "(fub=%s, %s→%s, mode=%s, body=%r)",
+                        fub_id,
+                        input_elem_id,
+                        dst_ids,
+                        mode,
+                        result,
+                    )
+                    return None
                 _LOGGER.debug(
-                    "function_plan_save_connection: fub=%s %s→%s conn_id=%s",
+                    "function_plan_save_connection: fub=%s %s→%s mode=%s conn_id=%s",
                     fub_id,
                     input_elem_id,
                     dst_ids,
-                    conn_id,
+                    mode,
+                    saved_conn_id,
                 )
-                return int(conn_id) if conn_id is not None else None
+                return int(saved_conn_id)
             except Exception:
-                _LOGGER.exception("function_plan_save_connection: failed to parse response")
+                _LOGGER.exception("function_plan_save_connection: failed to parse response (mode=%s)", mode)
                 return None
 
     async def function_plan_save_elements_pos(self, positions: list[tuple[int, float, float]]) -> bool:
@@ -1867,22 +2592,131 @@ class ComexioAPI:
             "Referer": f"{self._base_url}/admin/function_function_module/home",
         }
         _LOGGER.info("function_plan_delete_elements: %d Elemente löschen: %s", len(elem_ids), elem_ids)
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("function_plan_delete_elements failed (HTTP %s)", resp.status)
-                return False
-            try:
-                result = await resp.json(content_type=None)
-                success = result.get("delete") is True
-                _LOGGER.info("function_plan_delete_elements: result=%s", success)
+        try:
+            async with self.session.post(url, data=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("function_plan_delete_elements failed (HTTP %s)", resp.status)
+                    return False
+                try:
+                    result = await resp.json(content_type=None)
+                    success = result.get("delete") is True
+                    _LOGGER.info("function_plan_delete_elements: result=%s", success)
+                    return success
+                except Exception:
+                    _LOGGER.exception("function_plan_delete_elements: failed to parse response")
+                    return False
+        except aiohttp.ClientError:
+            _LOGGER.exception("function_plan_delete_elements: HTTP request error")
+            return False
+
+    async def delete_marker(self, marker_id: int) -> bool | None:
+        """Delete a Marker directly from Comexio's marker list (not a function plan element).
+
+        POSTs to delete_element/ with elementId=<marker_id>, type=<Marker's fub_module_type,
+        "2">, full=true. Tri-state return so the caller (marker_delete service) can tell a
+        confirmed "nothing to delete" apart from a genuine request failure — collapsing both
+        to one bool would let a session/HTTP/parse failure be misreported as "marker already
+        absent" for what is an irreversible action:
+        - True: {"result": "1"} — deleted.
+        - False: request completed (HTTP 200, valid JSON object) but result wasn't "1" — the
+          marker id doesn't (or no longer) exist. Expected/routine in batch/range use, not an error.
+        - None: the request itself failed (non-200, unparsable or non-object JSON body,
+          transport error) — a real failure, must NOT be reported as "already absent".
+        """
+        url = f"{self._base_url}/admin/function_function_module/delete_element/"
+        payload = {
+            "elementId": str(marker_id),
+            "type": source_category(WEBIO_CLASS_MARKER).fub_module_type,
+            "full": "true",
+            "timestamp": _js_timestamp(),
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/function_function_module/home",
+        }
+        try:
+            async with self.session.post(url, data=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("delete_marker: HTTP %s deleting marker_id=%s", resp.status, marker_id)
+                    return None
+                try:
+                    result = await resp.json(content_type=None)
+                except Exception:
+                    _LOGGER.exception("delete_marker: failed to parse response for marker_id=%s", marker_id)
+                    return None
+                if not isinstance(result, dict):
+                    _LOGGER.error("delete_marker: unexpected response shape for marker_id=%s: %r", marker_id, result)
+                    return None
+                success = str(result.get("result")) == "1"
+                _LOGGER.info("delete_marker: marker_id=%s result=%s", marker_id, success)
                 return success
-            except Exception:
-                _LOGGER.exception("function_plan_delete_elements: failed to parse response")
-                return False
+        except aiohttp.ClientError:
+            _LOGGER.exception("delete_marker: HTTP request error deleting marker_id=%s", marker_id)
+            return None
+
+    async def get_marker_delete_eligibility(self, marker_ids: list[int]) -> tuple[list[int], list[int]]:
+        """Split marker_ids into (deletable, protected) using a fresh CategoryId lookup.
+
+        Safety gate for marker_delete (user requirement 2026-09-17): only markers this
+        integration created itself via the API — CategoryId==1, e.g. create_knx_bridge_marker
+        — may be deleted. CategoryId==0 covers both factory-provisioned markers (M1 "System
+        rebooted", M2 "TRUE", M3 "FALSE" on a fresh install) and anything a human created via
+        Comexio Studio, and must never be reachable through this service (see
+        _highest_marker_id's only_original_titled for the same CategoryId convention).
+
+        A marker_id absent from the current config entirely (already deleted, or never
+        existed) is treated as deletable, not protected — it defaults to CategoryId 1 rather
+        than 0 here — so the existing "deleting an already-gone id is a routine no-op, not an
+        error" behavior (delete_marker returning False) is unaffected by this gate.
+
+        Deny-by-default on top of allow-by-CategoryId: an unrecognized CategoryId value (not
+        just 0 — nothing here guarantees the field stays a clean 0/1 flag, e.g. a scraped
+        string "1" fails the strict `!= 1` check below just like a real 0 would) is treated
+        as protected too. A config fetch that failed outright (get_raw_config() returns {} on
+        a failed HTTP fetch, a dict without FubModules if the JS block couldn't be parsed, or
+        a transport error/timeout — same fallback function_plan_add_knx_bridge_pairs guards
+        against, see its "FubModules missing" check) refuses every requested id rather than
+        defaulting them all to deletable — a blind config fetch failure must never silently
+        open this gate for an irreversible action.
+        """
+        try:
+            conf = await self.get_raw_config()
+        except (aiohttp.ClientError, TimeoutError):
+            _LOGGER.exception("get_marker_delete_eligibility: config fetch failed — refusing all ids")
+            return [], list(marker_ids)
+        fub_modules = conf.get("FubModules") or {}
+        group = fub_modules.get("2")
+        items = list(group.values()) if isinstance(group, dict) else list(group or [])
+        if not items:
+            _LOGGER.error("get_marker_delete_eligibility: no marker config available — refusing all ids")
+            return [], list(marker_ids)
+        categories: dict[int, Any] = {}
+        for m in items:
+            if not isinstance(m, dict):
+                continue
+            try:
+                item_id = int(m.get("Id"))
+            except (TypeError, ValueError):
+                _LOGGER.warning("get_marker_delete_eligibility: marker with non-numeric Id %r ignored", m.get("Id"))
+                continue
+            categories[item_id] = m.get("CategoryId", 0)
+        protected = [mid for mid in marker_ids if categories.get(mid, 1) != 1]
+        deletable = [mid for mid in marker_ids if mid not in protected]
+        return deletable, protected
 
     @staticmethod
     def _keyed_by_list_position(items: list[dict[str, Any]]) -> dict[str, Any]:
-        """Re-key a list-shaped loadelements collection back into an {id: item} dict."""
+        """Re-key a list-shaped loadelements collection back into an {id: item} dict.
+
+        For connections (no "id" field of their own, see the caller below), the resulting key
+        IS the real connection id — PHP only serializes an associative array as a JSON list when
+        its keys are exactly 0..n-1, so enumerate() here reproduces the server's original ids
+        1:1. This used to matter only for display; since Bug #2's fix (2026-09-18) that key is
+        also fed straight back into function_plan_save_connection's existing_conn_id (see
+        _function_plan_find_connection_by_source) — a future change here that broke this
+        invariant would silently start corrupting connections instead of just mislabeling them
+        (code-reviewer finding, 2026-09-18).
+        """
         return {str(item.get("id", i)): item for i, item in enumerate(items)}
 
     async def function_plan_load_elements(self, fub_id: int) -> dict | None:
@@ -2035,20 +2869,26 @@ class ComexioAPI:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self._base_url}/admin/function_function_module/home",
         }
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("function_plan_add_comment_element failed (HTTP %s, fub=%s)", resp.status, fub_id)
-                return None
-            try:
-                result = await resp.json(content_type=None)
-                elem_id = result.get("id")
-                if elem_id is None:
-                    _LOGGER.error("function_plan_add_comment_element: no id in response (fub=%s): %s", fub_id, result)
+        try:
+            async with self.session.post(url, data=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("function_plan_add_comment_element failed (HTTP %s, fub=%s)", resp.status, fub_id)
                     return None
-                _LOGGER.debug("function_plan_add_comment_element: fub=%s → elem_id=%s", fub_id, elem_id)
-            except Exception:
-                _LOGGER.exception("function_plan_add_comment_element: failed to parse response")
-                return None
+                try:
+                    result = await resp.json(content_type=None)
+                    elem_id = result.get("id")
+                    if elem_id is None:
+                        _LOGGER.error(
+                            "function_plan_add_comment_element: no id in response (fub=%s): %s", fub_id, result
+                        )
+                        return None
+                    _LOGGER.debug("function_plan_add_comment_element: fub=%s → elem_id=%s", fub_id, elem_id)
+                except Exception:
+                    _LOGGER.exception("function_plan_add_comment_element: failed to parse response")
+                    return None
+        except aiohttp.ClientError:
+            _LOGGER.exception("function_plan_add_comment_element: HTTP request error (fub=%s)", fub_id)
+            return None
         # add_element has no width parameter — the width lives in the comment
         # properties dialog, saved via a separate endpoint.
         await self._function_plan_set_comment_width(int(elem_id), text)
@@ -2116,15 +2956,19 @@ class ComexioAPI:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self._base_url}/admin/function_function_module/home",
         }
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.warning("savefupcommentelement failed (HTTP %s, elem=%s)", resp.status, elem_id)
-                return False
-            try:
-                result = await resp.json(content_type=None)
-            except Exception:
-                _LOGGER.exception("savefupcommentelement: failed to parse response (elem=%s)", elem_id)
-                return False
+        try:
+            async with self.session.post(url, data=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("savefupcommentelement failed (HTTP %s, elem=%s)", resp.status, elem_id)
+                    return False
+                try:
+                    result = await resp.json(content_type=None)
+                except Exception:
+                    _LOGGER.exception("savefupcommentelement: failed to parse response (elem=%s)", elem_id)
+                    return False
+        except aiohttp.ClientError:
+            _LOGGER.exception("savefupcommentelement: HTTP request error (elem=%s)", elem_id)
+            return False
         if result.get("result") != 1:
             _LOGGER.warning("savefupcommentelement rejected (elem=%s): %s", elem_id, result)
             return False
@@ -2315,6 +3159,1076 @@ class ComexioAPI:
         )
         return True
 
+    async def create_marker(self, binary: bool) -> int | None:
+        """Create a new marker ('flag') and return its server-assigned numeric ID.
+
+        Wraps POST /admin/flag/add/. The new marker starts unlabeled (empty Name,
+        default value 0) — use rename_marker() afterwards to give it a title.
+
+        IMPORTANT: the server assigns the new ID strictly sequentially (next free
+        integer) — there is no way to request a specific target ID (confirmed live
+        2026-09-14). Callers that need a specific ID (e.g. to align a block of
+        bridge markers on a round boundary) must consume IDs one at a time via
+        repeated calls until the desired ID comes back.
+
+        binary: True for a digital marker (type=1), False for analog (type=2).
+
+        Returns the new marker's Id, or None on failure.
+        """
+        url = f"{self._base_url}/admin/flag/add/"
+        payload = {"type": "1" if binary else "2"}
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/flag/home",
+        }
+        try:
+            async with self.session.post(url, data=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("create_marker: flag/add failed (HTTP %s, binary=%s)", resp.status, binary)
+                    return None
+                result = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("create_marker: HTTP request error (binary=%s): %s", binary, err)
+            return None
+        except Exception:
+            _LOGGER.exception("create_marker: failed to parse response (binary=%s)", binary)
+            return None
+
+        if not result.get("ok"):
+            _LOGGER.error("create_marker: server rejected flag/add (binary=%s): %s", binary, result)
+            return None
+        marker_id = result.get("saved")
+        if marker_id is None:
+            _LOGGER.error("create_marker: no 'saved' id in response (binary=%s): %s", binary, result)
+            return None
+        _LOGGER.info("create_marker: created marker M%s (binary=%s)", marker_id, binary)
+        return int(marker_id)
+
+    async def rename_marker(self, marker_id: int, name: str, binary: bool) -> bool:
+        """Set an existing marker's title via Comexio's own save flow.
+
+        Mirrors what Comexio's own admin UI does when saving a marker:
+        1. POST /admin/_helper/isunique to check the name isn't already taken.
+        2. POST /admin/flag/saveOne with the full form payload — Comexio's saveOne
+           looks like a full form save rather than a title-only patch, so
+           default/store_memory/value_<id> must be sent along even though we only
+           intend to change the name.
+
+        Only safe to call on a marker whose current state is already known (e.g.
+        one just created via create_marker()). Do NOT call this on a pre-existing
+        user marker without first reading its live default/store_memory values —
+        this would silently reset them to the values sent here.
+
+        binary: True for digital (type=1), False for analog (type=2) — must match
+        the marker's actual type; it is not looked up here.
+
+        Returns True on success.
+        """
+        marker_type = "1" if binary else "2"
+
+        url_check = f"{self._base_url}/admin/_helper/isunique"
+        check_payload = {"model": "memory", "field": "name", "value": name, "id": str(marker_id)}
+        try:
+            async with self.session.post(url_check, data=check_payload) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("rename_marker: isunique check failed (HTTP %s, id=%s)", resp.status, marker_id)
+                    return False
+                result = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("rename_marker: isunique HTTP error (id=%s): %s", marker_id, err)
+            return False
+        except Exception:
+            _LOGGER.exception("rename_marker: isunique request failed (id=%s)", marker_id)
+            return False
+
+        if not result.get("result"):
+            _LOGGER.error("rename_marker: name '%s' already in use (id=%s)", name, marker_id)
+            return False
+
+        url_save = f"{self._base_url}/admin/flag/saveOne"
+        save_payload = {
+            "id": str(marker_id),
+            "default_default": "0",
+            "default_type": marker_type,
+            "name": name,
+            "type": marker_type,
+            f"value_{marker_id}": "0",
+            "default": "0",
+            "store_memory": "0",
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/flag/home",
+        }
+        try:
+            async with self.session.post(url_save, data=save_payload, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("rename_marker: saveOne failed (HTTP %s, id=%s)", resp.status, marker_id)
+                    return False
+                result = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("rename_marker: saveOne HTTP error (id=%s): %s", marker_id, err)
+            return False
+        except Exception:
+            _LOGGER.exception("rename_marker: saveOne request failed (id=%s)", marker_id)
+            return False
+
+        if str(result.get("saved")) != str(marker_id):
+            _LOGGER.error("rename_marker: saveOne response mismatch (id=%s): %s", marker_id, result)
+            return False
+
+        _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, name, binary)
+        return True
+
+    async def rename_knx_object(self, k_id: str | int, name: str) -> bool:
+        """Set an existing KNX object's ("K-Element") title via Comexio's own save flow.
+
+        Mirrors rename_marker but targets the KNX one-wire object endpoint instead:
+        1. POST /admin/_helper/isunique (model=oneWire) to check the name isn't already taken.
+        2. POST /admin/knx_one_wire/saveKnx/ with field=name&value=<name> — unlike
+           flag/saveOne this is a genuine single-field patch, not a full-form save, so no
+           other K-Element state needs to be read/resent first.
+
+        Only ever called with the existing title plus a trailing "[RO]"/"[TRIG]" suffix
+        (see coordinator._auto_suffix_unambiguous_knx / _audit_knx_dpt_ambiguous), never a
+        full rename — collisions should be rare in practice, but this still guards against
+        one exactly like Comexio's own admin UI would.
+
+        Returns True on success.
+        """
+        url_check = f"{self._base_url}/admin/_helper/isunique"
+        check_payload = {"model": "oneWire", "field": "name", "value": name, "id": str(k_id)}
+        try:
+            async with self.session.post(url_check, data=check_payload) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("rename_knx_object: isunique check failed (HTTP %s, id=%s)", resp.status, k_id)
+                    return False
+                result = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("rename_knx_object: isunique HTTP error (id=%s): %s", k_id, err)
+            return False
+        except Exception:
+            _LOGGER.exception("rename_knx_object: isunique request failed (id=%s)", k_id)
+            return False
+
+        if not isinstance(result, dict) or not result.get("result"):
+            _LOGGER.error("rename_knx_object: name '%s' already in use (id=%s): %s", name, k_id, result)
+            return False
+
+        url_save = f"{self._base_url}/admin/knx_one_wire/saveKnx/"
+        save_payload = {"id": str(k_id), "field": "name", "value": name}
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{self._base_url}/admin/knx_one_wire/home",
+        }
+        try:
+            async with self.session.post(url_save, data=save_payload, headers=headers) as resp:
+                if resp.status != 200:
+                    _LOGGER.error("rename_knx_object: saveKnx failed (HTTP %s, id=%s)", resp.status, k_id)
+                    return False
+                result = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("rename_knx_object: saveKnx HTTP error (id=%s): %s", k_id, err)
+            return False
+        except Exception:
+            _LOGGER.exception("rename_knx_object: saveKnx request failed (id=%s)", k_id)
+            return False
+
+        if not isinstance(result, dict) or str(result.get("Ok")) != "1":
+            _LOGGER.error("rename_knx_object: saveKnx response mismatch (id=%s): %s", k_id, result)
+            return False
+
+        _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, name)
+        return True
+
+    @staticmethod
+    def _highest_marker_id(fub_modules: dict[str, Any], *, only_original_titled: bool = False) -> int:
+        """Highest marker Id currently present in $FubModules["2"].
+
+        only_original_titled=True restricts to 'original' (CategoryId==0, factory-
+        provisioned) markers that also carry a real title — used to find the KNX bridge
+        block's boundary basis (see _next_block_boundary). False (default) considers every
+        marker regardless of category/title, including ones this integration itself created
+        (CategoryId==1) — used to know how many ids are actually already consumed.
+        """
+        group = fub_modules.get("2")
+        items = group.values() if isinstance(group, dict) else (group or [])
+        highest = 0
+        for m in items:
+            if not isinstance(m, dict):
+                continue
+            marker_id = m.get("Id")
+            if not isinstance(marker_id, int):
+                continue
+            if only_original_titled and (m.get("CategoryId", 0) != 0 or not m.get("Name")):
+                continue
+            highest = max(highest, marker_id)
+        return highest
+
+    @staticmethod
+    def _next_block_boundary(highest_id: int, block_size: int = MARKER_KNX_BRIDGE_BLOCK_SIZE) -> int:
+        """Round up to the next multiple of block_size strictly greater than highest_id.
+
+        E.g. 252 -> 300, 201 -> 250, 250 -> 300 — a marker sitting exactly AT a boundary
+        still rounds up to the NEXT one, the boundary itself is reserved for the bridge
+        block (user decision 2026-09-14, see project_knx_write_path_design memory).
+        """
+        return ((highest_id // block_size) + 1) * block_size
+
+    @staticmethod
+    def _existing_knx_bridge_block_start(fub_modules: dict[str, Any]) -> int | None:
+        """Round-50 boundary of the already-established KNX bridge marker block, or None if
+        no bridge marker (title matching MARKER_KNX_BRIDGE_SUFFIX_RE) exists anywhere yet.
+
+        ensure_knx_bridge_block_start() uses this to tell "the block already exists, keep
+        using its boundary" apart from "no block yet, pick a fresh one" — without it, every
+        call recomputes _next_block_boundary from whatever the highest ORIGINAL marker
+        happens to be *right now*, which only ever grows as unrelated real markers get
+        created elsewhere. Confirmed live 2026-09-16: an established M300-M305 bridge block
+        (from an earlier session) had room to simply continue at M306, but the highest
+        original marker had since grown past M300, pushing the recomputed boundary to M350
+        and burning 39 marker ids (M311-M349) as pure blank filler just to reach it.
+        """
+        group = fub_modules.get("2")
+        items = group.values() if isinstance(group, dict) else (group or [])
+        bridge_ids = [
+            m["Id"]
+            for m in items
+            if isinstance(m, dict)
+            and isinstance(m.get("Id"), int)
+            and MARKER_KNX_BRIDGE_SUFFIX_RE.search(m.get("Name") or "")
+        ]
+        return None if not bridge_ids else (min(bridge_ids) // 50) * 50
+
+    @staticmethod
+    def _marker_id_by_title(fub_modules: dict[str, Any], title: str) -> int | None:
+        """Id of an existing marker with this exact title, if any ($FubModules["2"] scan).
+
+        Used by create_knx_bridge_marker to recognize an unwired remnant of an earlier,
+        partially-failed bridge attempt (create_marker + rename_marker both succeeded, but
+        the subsequent wire_knx_bridge_pair call failed) — rename_marker enforces title
+        uniqueness, so blindly creating another marker with the same bridge title would
+        just fail every retry forever instead of finishing the original attempt.
+        """
+        group = fub_modules.get("2")
+        items = group.values() if isinstance(group, dict) else (group or [])
+        for m in items:
+            if isinstance(m, dict) and m.get("Name") == title:
+                marker_id = m.get("Id")
+                return marker_id if isinstance(marker_id, int) else None
+        return None
+
+    @staticmethod
+    def _free_marker_ids(
+        fub_modules: dict[str, Any],
+        all_plans: dict[int, dict],
+        min_id: int,
+        ref_type: int = 2,
+        max_id: int | None = None,
+    ) -> list[int]:
+        """Ascending ids in [min_id, max_id) of markers that are 'free': no title AND not
+        placed as an element in any function plan.
+
+        Mirrors the same relevant-vs-free distinction Comexio's own Studio validation uses
+        (see project_knx_write_path_design memory, 15.09.2026 discussion): a blank, unplaced
+        marker left over from an earlier create_knx_bridge_marker attempt (its plan since
+        deleted or its title cleared) is safe to rename and reuse. Without this, every
+        create/reset test cycle would permanently burn a fresh block of sequential ids —
+        Comexio hands them out strictly sequentially server-side and never reclaims one on
+        its own (confirmed live 2026-09-14/15).
+
+        max_id (exclusive) matters since ensure_knx_bridge_block_start() started reusing an
+        already-established block's boundary indefinitely (2026-09-16 fix) instead of
+        recomputing a fresh one above every current marker on each call: min_id can now stay
+        low for a long time while unrelated real markers keep accumulating above it, so an
+        unbounded scan would risk sweeping up a blank, unplaced marker the user created for
+        an entirely different purpose. Callers pass the block size as max_id - min_id to keep
+        reuse confined to the bridge block itself.
+        """
+        group = fub_modules.get("2")
+        items = group.values() if isinstance(group, dict) else (group or [])
+        candidate_ids = {
+            m["Id"]
+            for m in items
+            if isinstance(m, dict)
+            and isinstance(m.get("Id"), int)
+            and m["Id"] >= min_id
+            and (max_id is None or m["Id"] < max_id)
+            and not m.get("Name")
+        }
+        if not candidate_ids:
+            return []
+        placed_ids: set[int] = set()
+        for plan_data in all_plans.values():
+            for elem in (plan_data.get("elements") or {}).values():
+                if not isinstance(elem, dict):
+                    continue
+                ref = elem.get("reference") or {}
+                if str(ref.get("type")) != str(ref_type):
+                    continue
+                with suppress(TypeError, ValueError):
+                    placed_ids.add(int(ref.get("ref_id")))
+        return sorted(candidate_ids - placed_ids)
+
+    async def _fill_marker_gap(self, current_highest_id: int, target_id: int) -> int:
+        """Consume marker ids via blank create_marker() calls until the next created
+        marker would land exactly on target_id.
+
+        Comexio assigns marker ids strictly sequentially, server-side — there is no way to
+        request target_id directly (confirmed live 2026-09-14), so every id in the gap must
+        be actively created as an untitled filler marker ("fehlende müssen angelegt werden
+        (ohne Werte)!" — explicit user requirement, not a side effect to avoid).
+
+        Returns the number of filler markers actually created. Stops early (with a logged
+        error) if create_marker() ever fails, or if it ever returns an id that does not
+        strictly increase — Comexio is documented to hand out ids sequentially, but trusting
+        that blindly would turn a server-side glitch into an infinite loop here.
+        """
+        created = 0
+        highest = current_highest_id
+        while highest < target_id - 1:
+            new_id = await self.create_marker(binary=True)
+            if new_id is None:
+                _LOGGER.error(
+                    "_fill_marker_gap: create_marker failed after %d filler(s) (highest=%s, target=%s)",
+                    created,
+                    highest,
+                    target_id,
+                )
+                break
+            if new_id <= highest:
+                _LOGGER.error(
+                    "_fill_marker_gap: create_marker returned non-increasing id %s (highest=%s, target=%s) — "
+                    "aborting to avoid an infinite loop",
+                    new_id,
+                    highest,
+                    target_id,
+                )
+                break
+            created += 1
+            highest = new_id
+        return created
+
+    async def ensure_knx_bridge_block_start(self, fub_modules: dict[str, Any]) -> int | None:
+        """Make sure the next marker created via create_marker() lands on/past the KNX
+        bridge block's round-50 boundary, filling any gap with blank filler markers first.
+
+        Idempotent/safe to call before every bridge-marker creation, not just the first:
+        once the boundary has been reached or passed — whether by a bridge marker created
+        earlier, or by a marker the user happened to create manually in the meantime — this
+        is a no-op, since Comexio hands out ids sequentially regardless of who asked.
+
+        The boundary itself is only ever *freshly computed* (via _next_block_boundary) for
+        the very first bridge marker a Comexio instance ever gets — once a block already
+        exists (_existing_knx_bridge_block_start finds a marker titled [K<id>] anywhere),
+        its boundary is reused as-is instead. Recomputing a fresh boundary every time would
+        keep chasing whatever the highest ORIGINAL marker happens to be at that moment, which
+        only ever grows as unrelated real markers get created — pushing an established,
+        far-from-full block onto a brand new boundary and burning every id in between as
+        blank filler for nothing (see _existing_knx_bridge_block_start's own docstring for
+        the live incident this fixes).
+
+        Returns the boundary marker id (informational/for logging) once actually reached,
+        or None if _fill_marker_gap stopped short of it (its own error is already logged) —
+        callers must treat None as "abort", since creating a bridge marker right after would
+        silently land it off the intended round-50 boundary instead of on it.
+        """
+        existing_block_start = self._existing_knx_bridge_block_start(fub_modules)
+        target = (
+            existing_block_start
+            if existing_block_start is not None
+            else self._next_block_boundary(self._highest_marker_id(fub_modules, only_original_titled=True))
+        )
+        _LOGGER.debug(
+            "ensure_knx_bridge_block_start: target=M%d (source=%s)",
+            target,
+            "existing block" if existing_block_start is not None else "freshly computed",
+        )
+        current_highest = self._highest_marker_id(fub_modules)
+        if current_highest >= target - 1:
+            _LOGGER.debug(
+                "ensure_knx_bridge_block_start: boundary M%d already reached/passed (highest=M%d)",
+                target,
+                current_highest,
+            )
+            return target
+        filled = await self._fill_marker_gap(current_highest, target)
+        if current_highest + filled < target - 1:
+            _LOGGER.error(
+                "ensure_knx_bridge_block_start: failed to reach boundary M%d (stuck at M%d) — aborting",
+                target,
+                current_highest + filled,
+            )
+            return None
+        _LOGGER.info("ensure_knx_bridge_block_start: filled %d gap marker(s) to reach boundary M%d", filled, target)
+        return target
+
+    async def create_knx_bridge_marker(
+        self,
+        k_id: int,
+        k_title: str,
+        k_type_raw: int,
+        fub_modules: dict[str, Any],
+        free_marker_ids: list[int] | None = None,
+    ) -> tuple[int, str] | None:
+        """Create + title a bridge marker for one K-element (Entwurf A — see
+        project_knx_write_path_design memory).
+
+        binary/analog is derived from k_type_raw via the same $IOTypesBinary catalog
+        lookup _process_source_items() uses for KNX classification (self.io_types) — the
+        bridge marker's type must match the K-element's own pin class, nothing else is
+        wireable onto it (confirmed live 2026-09-14).
+
+        Reuses an existing marker with the exact bridge title, if one is already sitting
+        in fub_modules unwired: an earlier attempt for the same K-element can have created
+        and titled the marker successfully but then failed at the wire_knx_bridge_pair
+        step, and rename_marker enforces title uniqueness — without this check, every
+        retry would call create_marker again, rename would collide with that leftover
+        marker's title, and the K-element could never be bridged.
+
+        Failing that, pops the lowest id off free_marker_ids (see _free_marker_ids) if the
+        caller supplied one — a blank, unplaced leftover marker from an earlier attempt or
+        test cycle — and renames it instead of calling create_marker(), so repeated
+        create/reset cycles reuse the existing block instead of permanently consuming new
+        sequential ids (2026-09-15 design fix). Callers must pop from the SAME list object
+        across every item of a batch so two K-elements never race for the same free id.
+
+        Does NOT wire the marker to the K-element or create its Web-IO — that FUP-wiring
+        step is a separate piece (see wire_knx_bridge_pair).
+
+        Caller is responsible for calling ensure_knx_bridge_block_start() once before the
+        very first bridge marker of a session, so a newly-created one (no free id available)
+        lands on the round-50 boundary rather than wherever the marker pool currently ends.
+
+        Returns (marker_id, title) on success, None on failure (create or rename failed).
+        """
+        binary = self.io_types.get(str(k_type_raw), {}).get("binary", False)
+        title = f"{k_title} [K{k_id}]"
+
+        existing_id = self._marker_id_by_title(fub_modules, title)
+        if existing_id is not None:
+            _LOGGER.info(
+                "create_knx_bridge_marker: reusing existing M%s '%s' for K%s (unwired remnant of an earlier attempt)",
+                existing_id,
+                title,
+                k_id,
+            )
+            return existing_id, title
+
+        if free_marker_ids:
+            marker_id = free_marker_ids.pop(0)
+            _LOGGER.info(
+                "create_knx_bridge_marker: reusing free M%s for K%s instead of creating a new marker",
+                marker_id,
+                k_id,
+            )
+        else:
+            marker_id = await self.create_marker(binary)
+            if marker_id is None:
+                _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, k_title)
+                return None
+
+        if not await self.rename_marker(marker_id, title, binary):
+            _LOGGER.error(
+                "create_knx_bridge_marker: rename_marker failed for M%s -> '%s' (K%s)", marker_id, title, k_id
+            )
+            return None
+
+        _LOGGER.info("create_knx_bridge_marker: M%s '%s' created for K%s (binary=%s)", marker_id, title, k_id, binary)
+        return marker_id, title
+
+    async def wire_knx_bridge_pair(
+        self,
+        fub_id: int,
+        marker_id: int,
+        k_id: int,
+        binary: bool,
+        pos: tuple[float, float, float],
+        existing_by_ref: dict[tuple[int, int], int] | None = None,
+        conn_endpoints: list[set[int]] | None = None,
+        plan_data: dict | None = None,
+    ) -> str | None:
+        """Wire a bridge Marker (source) to its K-Element/KNX object (sink) on a plan.
+
+        This is the write-path counterpart of _function_plan_wire_ref_pair (which wires a
+        Source->Web-IO pair for the read path): here the Marker is the source and the KNX
+        object (type=11) is the sink, so Comexio pushes the marker's value onto the bus.
+        Existing elements are reused, mirroring _function_plan_wire_ref_pair's orphan-pair
+        handling; pass a pre-loaded existing_by_ref/conn_endpoints/plan_data (from
+        _function_plan_existing_refs / function_plan_load_elements) when wiring several pairs
+        on the same plan to avoid reloading it for every pair.
+        plan_data: needed to union onto the marker's CURRENT sinks (silent-failure-hunter
+        finding, 2026-09-18) whenever elem_marker turns out to be a REUSED element — e.g. an
+        "unwired remnant" left over from a previous failed/partial run — which can already
+        carry its own connection record from something else, regardless of whether the
+        K-element side is reused or freshly created. An earlier version of this function only
+        checked this when BOTH sides pre-existed, silently missing the (more common) case of a
+        reused marker paired with a brand-new K-element; that gap is now closed by resolving
+        elem_marker/elem_knx first and always doing the existing-connection lookup on
+        elem_marker afterward — a freshly created elem_marker simply has no match, so the same
+        code path is safe for both cases. Reload happens whenever plan_data itself is missing
+        (checked independently of existing_by_ref/conn_endpoints, code-reviewer finding
+        2026-09-18 — a caller supplying those two but forgetting plan_data would otherwise
+        silently disable this check instead of erroring). Passing conn_id="new" onto a marker
+        that already has a connection would hit the exact Comexio server quirk
+        function_plan_save_connection's docstring documents: the new save merges into the
+        existing record but silently drops that record's "input" field.
+        Returns None on success, "" if the pair is already wired (skip, not an error), or an
+        error message.
+        """
+        x_marker, x_knx, y = pos
+        conn_type = "binary" if binary else "analog"
+        label = f"KNX bridge M{marker_id}->K{k_id}"
+
+        if plan_data is None:
+            plan_data = await self.function_plan_load_elements(fub_id)
+        if existing_by_ref is None or conn_endpoints is None:
+            existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
+
+        existing_marker_elem = existing_by_ref.get((2, marker_id))
+        existing_knx_elem = existing_by_ref.get((11, k_id))
+
+        # Fast path: both elements already existed and are already wired together — nothing to do.
+        # is not None (not truthy) to stay consistent with _resolve_or_create_element below — an
+        # element id of 0 would otherwise be misread as "doesn't exist" (silent-failure-hunter /
+        # code-reviewer finding, 2026-09-18, Round 4). Harmless here specifically (the success
+        # path below always runs elem_marker/elem_knx through _function_plan_union_sink
+        # regardless of reuse-vs-fresh), but kept consistent anyway.
+        if (
+            existing_marker_elem is not None
+            and existing_knx_elem is not None
+            and any(existing_marker_elem in eps and existing_knx_elem in eps for eps in conn_endpoints)
+        ):
+            _LOGGER.info("%s already wired on fub=%s, skipping", label, fub_id)
+            return ""
+
+        elem_marker = await self._resolve_or_create_element(
+            fub_id, existing_marker_elem, marker_id, 2, x_marker, y, label, "marker"
+        )
+        if isinstance(elem_marker, str):
+            return elem_marker
+
+        elem_knx = await self._resolve_or_create_element(fub_id, existing_knx_elem, k_id, 11, x_knx, y, label, "KNX")
+        if isinstance(elem_knx, str):
+            return elem_knx
+
+        # Union-safe save: elem_marker may be a reused element that already carries a
+        # connection from something else (see docstring above) — fold this sink into it rather
+        # than blind-resaving with conn_id="new". A brand-new elem_marker naturally has no
+        # match here, so this is safe for both the reuse and fresh-create case.
+        union = self._function_plan_union_sink(plan_data, elem_marker, elem_knx, label, fub_id)
+        if union is None:
+            return ""
+        if isinstance(union, str):
+            return union
+        outputs, input_pos, input_inverted, existing_conn_id = union
+
+        conn_id = await self.function_plan_save_connection(
+            fub_id,
+            elem_marker,
+            outputs,
+            conn_type,
+            input_pos=input_pos,
+            input_inverted=input_inverted,
+            existing_conn_id=existing_conn_id,
+        )
+        if conn_id is None:
+            return f"{label}: save_connection failed"
+
+        _LOGGER.info(
+            "%s wired (fub=%s, marker_elem=%s, knx_elem=%s, conn=%s)",
+            label,
+            fub_id,
+            elem_marker,
+            elem_knx,
+            conn_id,
+        )
+        return None
+
+    async def wire_knx_bridge_loopback(
+        self,
+        fub_id: int,
+        k_id: int,
+        marker_id: int,
+        loopback_web_ref_id: int,
+        existing_by_ref: dict[tuple[int, int], int],
+        plan_data: dict | None,
+        pos: tuple[float, float],
+    ) -> str | None:
+        """Fan the K-Element's EXISTING read-path wire out to ALSO include the API-Loopback Web-IO.
+
+        Phase 7 (see project_knx_write_path_design memory): besides the K-Element (source,
+        type=11) -> HA-Web-IO (sink) wire _function_plan_wire_ref_pair already drew
+        (function_plan_add_marker_pairs, ref_type=11), the same K-Element output must ALSO
+        reach a second Web-IO whose command writes the bridge Marker directly via Comexio's
+        own /api/ endpoint — closing the "Punkt 4" stuck-marker loop entirely inside Comexio.
+
+        Must NOT call _function_plan_wire_ref_pair a second time for the same K-Element:
+        function_plan_save_connection replaces the FULL sink list for a source pin on every
+        save (see its own docstring) rather than adding to it — a second single-sink call
+        would silently drop the existing HA-Web-IO wire, breaking the read-path entity. Instead
+        this reads the K-Element's CURRENT connection (_function_plan_find_connection_by_source),
+        keeps its type and existing sinks, adds the loopback Web-IO as one more, and saves that
+        union in a single call.
+
+        The reverse hazard (an unrelated later run of the read-path repair silently overwriting
+        this fan-out back down to the HA-Web-IO sink alone) is closed on the caller side:
+        _function_plan_wire_ref_pair's orphan-pair AND element-recreate branches read the
+        K-Element's current sinks via plan_data and save the union, same technique as here.
+        All three _function_plan_add_single_*_pair batch callers (Marker/IO/KNX, ref_type=2/1/11)
+        now thread plan_data through unconditionally — the IO path used to be the one exception
+        (silent-failure-hunter finding, 2026-09-18: it always called with plan_data=None, which
+        would have reproduced Bug #2 for an IO source that already had a connection, not just
+        skipped a no-op union) and has since been fixed to match the other two.
+
+        Requires the K-Element's read-path wire to already exist — this only ever EXTENDS it,
+        it never creates it from scratch (run the normal KNX bridge repair first if missing).
+        Also serves as the retrofit path for bridges predating Phase 7 (e.g. M300-M306): the
+        caller just needs to already know their k_id/marker_id, the wiring itself is identical.
+        Returns None on success, "" if the loopback sink is already present (skip, not an
+        error), or an error message.
+        """
+        x_webio, y = pos
+        label = f"KNX loopback K{k_id}->M{marker_id}"
+
+        k_elem = existing_by_ref.get((11, k_id))
+        if k_elem is None:
+            return f"{label}: K-Element not found in plan (read-path wire missing, run KNX bridge repair first)"
+
+        try:
+            found = self._function_plan_find_connection_by_source(plan_data, k_elem)
+        except ValueError as exc:
+            return f"{label}: {exc}, aborting to avoid resaving it as a brand-new connection"
+        if found is None:
+            return f"{label}: K-Element has no existing connection (read-path wire missing, run repair first)"
+        existing_conn_id, conn = found
+        # loadelements' raw shape uses CamelCase IOPos/Inverted (as opposed to the plain
+        # pos/inverted keys function_plan_save_connection's own payload uses on save) — same
+        # load/save key asymmetry _rebuild_one_connection already accounts for. Getting this
+        # wrong wouldn't show up against a single-sink source like today's live test (falls
+        # back to the same pos=0/inverted=False either way), only once a source fans out to a
+        # non-default input port or an inverted sink.
+        conn_type = "analog" if conn.get("type") in (1, "analog") else "binary"
+
+        existing_outputs = self._read_connection_outputs(conn, label, fub_id)
+        if existing_outputs is None:
+            # Parsing already logged which sink was malformed — saving a truncated union here
+            # would permanently drop the existing read-path wire this method exists to preserve.
+            return f"{label}: existing connection has a malformed sink, aborting to avoid dropping it"
+
+        loopback_elem = existing_by_ref.get((10, loopback_web_ref_id))
+        if loopback_elem is not None and any(dst == loopback_elem for dst, _p, _i in existing_outputs):
+            _LOGGER.info("%s already wired on fub=%s, skipping", label, fub_id)
+            return ""
+
+        if loopback_elem is None:
+            loopback_elem = await self.function_plan_add_element(
+                fub_id=fub_id, ref_id=loopback_web_ref_id, element_type=10, x=x_webio, y=y
+            )
+            if loopback_elem is None:
+                return f"{label}: add_element (Loopback Web-IO, webIoId={loopback_web_ref_id}) failed"
+
+        outputs = [*existing_outputs, (int(loopback_elem), 0, False)]
+        input_pos, input_inverted = self._connection_input_pin(conn)
+        conn_id = await self.function_plan_save_connection(
+            fub_id,
+            k_elem,
+            outputs,
+            conn_type,
+            input_pos=input_pos,
+            input_inverted=input_inverted,
+            existing_conn_id=existing_conn_id,
+        )
+        if conn_id is None:
+            return f"{label}: save_connection (fan-out union, {len(outputs)} sinks) failed"
+
+        _LOGGER.info(
+            "%s added (fub=%s, k_elem=%s, loopback_elem=%s, conn_id=%s, total_sinks=%d)",
+            label,
+            fub_id,
+            k_elem,
+            loopback_elem,
+            conn_id,
+            len(outputs),
+        )
+        return None
+
+    async def function_plan_add_knx_bridge_pairs(
+        self,
+        fub_id: int,
+        missing_items: list[dict[str, Any]],
+        fresh_plan: bool = False,
+        progress_cb: Callable[[int, int], None] | None = None,
+    ) -> tuple[list[int], list[str], dict[int, tuple[int, bool]]]:
+        """Create a bridge Marker + wire it to its KNX object, for every item, on a stopped plan.
+
+        Write-path counterpart of function_plan_add_marker_pairs (Entwurf A "Merker-Brücke"):
+        unlike that read-path pairing, the source element does not exist yet — a fresh
+        bridge Marker is created per K-element (ensure_knx_bridge_block_start once per call
+        keeps the whole batch on/after the round-50 boundary, then create_knx_bridge_marker
+        per item, reusing free markers already sitting in the block before creating new ones
+        — see _free_marker_ids) before wire_knx_bridge_pair draws the Marker->KNX connection.
+        Reusing a stale existing_by_ref/conn_endpoints snapshot across the loop is safe here
+        — every item gets a distinct marker_id (newly created, or popped from
+        free_marker_ids, which only ever contains markers placed on no plan at all) and
+        targets a different k_id, so no lookup in this batch can collide with one from an
+        earlier item in the same batch.
+        missing_items are {"ref_id", "title", "type_raw"} dicts (coordinator's
+        knx_bridge_missing audit items). fresh_plan=True places pairs at their final grid
+        slots (no later sort pass needed); progress_cb(done, total) fires after each item.
+        Returns (added K ref_ids, error messages, {k_id: (marker_id, binary)} for every
+        newly-added K — the caller uses this to wire the API-Loopback fan-out (leg 3) for a
+        brand-new bridge immediately, in the same cycle, instead of re-auditing for the
+        marker_id later (see _add_single_knx_bridge's docstring)).
+        """
+        conf = await self.get_raw_config()
+        fub_modules = conf.get("FubModules")
+        if not fub_modules:
+            # get_raw_config() returns {} on a failed HTTP fetch — proceeding with an empty
+            # $FubModules would make ensure_knx_bridge_block_start think NO marker exists yet
+            # and fill dozens of bogus filler markers to reach a wrong "boundary".
+            _LOGGER.error(
+                "function_plan_add_knx_bridge_pairs: could not fetch current Comexio config "
+                "(FubModules missing) — aborting"
+            )
+            return [], ["could not fetch current Comexio config — aborting KNX bridge wiring, see log"]
+        target = await self.ensure_knx_bridge_block_start(fub_modules)
+        if target is None:
+            return [], ["failed to reach the KNX bridge marker block boundary — aborting, see log"]
+
+        all_plans = await self.function_plan_load_all_plans()
+        if all_plans:
+            free_marker_ids = self._free_marker_ids(
+                fub_modules, all_plans, target, max_id=target + MARKER_KNX_BRIDGE_BLOCK_SIZE
+            )
+        else:
+            # function_plan_load_all_plans() returns {} both when there are genuinely no
+            # plans yet AND on a failed/incomplete fetch (HTTP error, malformed response —
+            # see its own docstring) — the two are indistinguishable here, and treating a
+            # failed fetch as "nothing is placed anywhere" would let _free_marker_ids reuse
+            # a marker that IS actually wired into a plan this call just couldn't see.
+            # Fall back to always creating fresh markers instead (still correct, just
+            # skips the reuse optimization for this run).
+            _LOGGER.warning(
+                "function_plan_add_knx_bridge_pairs: function_plan_load_all_plans returned no "
+                "plans — skipping free-marker reuse for this run (creating fresh markers instead)"
+            )
+            free_marker_ids = []
+
+        plan_data = await self.function_plan_load_elements(fub_id)
+        existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
+
+        items = sorted(missing_items, key=lambda it: int(it["ref_id"])) if fresh_plan else missing_items
+        _, y_max = self.get_fub_canvas_bounds(fub_id)
+        max_rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+        rows_per_col = _balanced_rows_per_col(len(items), max_rows_per_col)
+
+        def _pair_pos(n_added: int, n_loop: int) -> tuple[float, float, float]:
+            """(x_marker, x_knx, y): final grid slot for fresh plans, placeholder otherwise."""
+            if fresh_plan:
+                col, row = divmod(n_added, rows_per_col)
+                x_off = col * FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH
+                return (
+                    FUNCTION_PLAN_LAYOUT_X_MARKER + x_off,
+                    FUNCTION_PLAN_LAYOUT_X_WEBIO + x_off,
+                    FUNCTION_PLAN_LAYOUT_Y_START + row * FUNCTION_PLAN_LAYOUT_Y_STEP,
+                )
+            # Off-canvas parking row: the follow-up sort pass assigns the real slots.
+            return (
+                FUNCTION_PLAN_LAYOUT_X_MARKER,
+                FUNCTION_PLAN_LAYOUT_X_WEBIO,
+                10000.0 + n_loop * FUNCTION_PLAN_LAYOUT_Y_STEP,
+            )
+
+        added: list[int] = []
+        errors: list[str] = []
+        bridged: dict[int, tuple[int, bool]] = {}
+        for i, item in enumerate(items):
+            k_id = int(item["ref_id"])
+            marker_id, err = await self._add_single_knx_bridge(
+                fub_id,
+                k_id,
+                item["title"],
+                item["type_raw"],
+                fub_modules,
+                existing_by_ref,
+                conn_endpoints,
+                _pair_pos(len(added), i),
+                free_marker_ids,
+                plan_data=plan_data,
+            )
+            if err is None:
+                added.append(k_id)
+                # marker_id is only None on the create_knx_bridge_marker failure branch, which
+                # always pairs with a non-None err — see _add_single_knx_bridge's contract.
+                assert marker_id is not None
+                binary = self.io_types.get(str(item["type_raw"]), {}).get("binary", False)
+                bridged[k_id] = (marker_id, binary)
+            elif err:
+                errors.append(err)
+            if progress_cb:
+                progress_cb(i + 1, len(items))
+
+        return added, errors, bridged
+
+    async def _add_single_knx_bridge(
+        self,
+        fub_id: int,
+        k_id: int,
+        k_title: str,
+        k_type_raw: int,
+        fub_modules: dict[str, Any],
+        existing_by_ref: dict[tuple[int, int], int],
+        conn_endpoints: list[set[int]],
+        pos: tuple[float, float, float],
+        free_marker_ids: list[int],
+        plan_data: dict | None = None,
+    ) -> tuple[int | None, str | None]:
+        """Create (or reuse an unwired remnant/free marker for) the bridge Marker for one
+        K-element, then wire it in.
+
+        free_marker_ids is shared (and mutated via pop) across the whole batch — see
+        create_knx_bridge_marker. plan_data is passed through to wire_knx_bridge_pair's
+        orphan-pair branch, which needs it to union onto an already-wired reused marker
+        instead of resaving with conn_id="new" (see that function's docstring).
+
+        Returns (marker_id, error). marker_id is the bridge Marker's id whenever
+        create_knx_bridge_marker succeeded (even on a later wire failure, so the caller can
+        still log which marker a failed wire left behind); the caller only trusts it once
+        error is None. error is None on success, "" if a reused marker turned out to already
+        be fully wired (stale audit entry — skip, not an error), else an error message.
+        Returning marker_id here (instead of the caller re-discovering it via a fresh audit
+        later) is what lets function_plan_add_knx_bridge_pairs' caller wire the API-Loopback
+        fan-out (leg 3) for a brand-new bridge in the SAME stop/write/sort cycle — see that
+        function's docstring.
+        """
+        created = await self.create_knx_bridge_marker(k_id, k_title, k_type_raw, fub_modules, free_marker_ids)
+        if created is None:
+            return None, f"KNX bridge K{k_id}: create_knx_bridge_marker failed — see log"
+        marker_id, _title = created
+        binary = self.io_types.get(str(k_type_raw), {}).get("binary", False)
+        err = await self.wire_knx_bridge_pair(
+            fub_id,
+            marker_id,
+            k_id,
+            binary,
+            pos,
+            existing_by_ref=existing_by_ref,
+            conn_endpoints=conn_endpoints,
+            plan_data=plan_data,
+        )
+        return marker_id, err
+
+    async def _ensure_knx_loopback_commands(
+        self,
+        bridges: list[tuple[int, int, bool]],
+        device_id: str | int,
+        base_id: str | int,
+        existing_full_names: set[str],
+        freshly_created: bool,
+    ) -> tuple[dict[str, tuple[int, int]], set[str], list[str]]:
+        """Resolve which loopback Web-IO commands still need creating for this batch.
+
+        freshly_created=True: every bridge's command SHOULD already be bulk-embedded in the
+        class' initial upload (see ensure_knx_loopback_webio) — but freshly_created can also be
+        a false positive (see ensure_knx_loopback_webio's own docstring on the device-vs-class
+        cross-check it now runs before reporting this), so existing_full_names is still checked
+        first rather than assuming every name is new. Never calls save_single_command in this
+        branch — that would duplicate whatever the bulk upload already created.
+        freshly_created=False: per-bridge existing-check + save_single_command fallback, same
+        as growing any other Web-IO class' Delta-Sync.
+
+        Returns (pending: cmd_name -> (k_id, marker_id), names_to_confirm: full_names not yet
+        proven present in the caller's already-fetched config, errors).
+        """
+        pending: dict[str, tuple[int, int]] = {}
+        names_to_confirm: set[str] = set()
+        errors: list[str] = []
+        for k_id, marker_id, binary in bridges:
+            cmd_name = knx_loopback_command_name(k_id, marker_id)
+            full_name = f"{device_id}. {cmd_name}"
+            if full_name in existing_full_names:
+                pending[cmd_name] = (k_id, marker_id)
+                continue
+            if freshly_created:
+                pending[cmd_name] = (k_id, marker_id)
+                names_to_confirm.add(full_name)
+                continue
+            command = self._build_knx_loopback_webio_command(k_id=k_id, marker_id=marker_id, is_analog=not binary)
+            if await self.save_single_command(base_id, device_id, command):
+                pending[cmd_name] = (k_id, marker_id)
+                names_to_confirm.add(full_name)
+            else:
+                errors.append(f"KNX loopback K{k_id}->M{marker_id}: save_single_command failed")
+        return pending, names_to_confirm, errors
+
+    async def function_plan_add_knx_bridge_loopback_pairs(
+        self,
+        fub_id: int,
+        bridges: list[tuple[int, int, bool]],
+        api_username: str,
+        api_password: str,
+        fresh_plan: bool = False,
+        progress_cb: Callable[[int, int], None] | None = None,
+    ) -> tuple[list[int], list[int], list[str]]:
+        """Add the Phase 7 API-Loopback Web-IO fan-out for a batch of already-wired KNX bridges.
+
+        bridges: (k_id, marker_id, binary) triples for K-Elements whose Marker<->K-Element wire
+        (write path, wire_knx_bridge_pair) and K-Element->HA-Web-IO wire (read path,
+        function_plan_add_marker_pairs ref_type=11) already exist — this call only ADDS the
+        loopback fan-out via wire_knx_bridge_loopback, it never creates the bridge itself. Also
+        doubles as the retrofit path for bridges predating Phase 7 (e.g. M300-M306): pass
+        their existing (k_id, marker_id, binary) triples the same way as for freshly created
+        ones.
+
+        Bootstraps the once-per-server ComexioAPI Loopback Web-IO class/device first (see
+        ensure_knx_loopback_webio) and aborts the whole batch if that fails — no loopback
+        command can be created without it. On first bootstrap (class didn't exist yet), every
+        bridge's command was already bulk-embedded in that class' initial upload, so this
+        skips save_single_command entirely and just waits for the reload below to confirm
+        them. Otherwise (class already existed), skips save_single_command for any bridge
+        whose command already exists (idempotent against retries/retrofits — without this, a
+        repeated call would keep creating same-named duplicate commands, since this class
+        isn't part of the normal orphan/rename audit that would otherwise catch that).
+
+        The Phase 7 Loopback class lives outside WEBIO_CLASSES, so its commands are never
+        keys of parse_config()'s webio_commands (that dict only ever holds HA's own Marker/IO/
+        KNX classes — see _build_webio_name_lexicon's docstring). Existence/readiness checks
+        here go through webio_names instead (the all-devices lexicon), matched by the Studio
+        pill-label convention "{deviceId}. {commandName}".
+
+        fresh_plan=True places the pairs at FUNCTION_PLAN_LAYOUT_X_KNX_LOOPBACK as an interim
+        column, same as the fresh_plan=False off-canvas parking case below — this is NEVER the
+        final column, a follow-up sort pass (see services/_grid.py) always runs afterward and
+        moves each Loopback Web-IO into the SAME column as its read-path sibling, one row
+        below it. progress_cb(done, total) fires after each item.
+        Returns (added K ref_ids, already-wired K ref_ids skipped as a routine no-op, error
+        messages) — len(added) + len(skipped) + len(errors) always accounts for every item in
+        bridges once the batch reaches the per-item wiring loop.
+        """
+        # Sort by (k_id, marker_id) before anything below reads bridges — both the bulk
+        # initial-embed order (ensure_knx_loopback_webio, fresh class) and the per-item
+        # save_single_command append order (_ensure_knx_loopback_commands, existing class)
+        # follow this list's order verbatim, unlike the HA-webhook KNX class whose commands
+        # come pre-sorted straight out of parse_config's admin-page scrape order. Only sorts
+        # *this batch* among itself — Comexio has no reorder-in-place API, so a batch added to
+        # an already-populated class still lands after whatever an earlier, differently-ordered
+        # batch created (only a full class recreate could fix that retroactively); flagged as
+        # cosmetic by the user 2026-09-20 after recreating all test bridges in one batch.
+        bridges = sorted(bridges, key=lambda b: (b[0], b[1]))
+        bootstrap = await self.ensure_knx_loopback_webio(api_username, api_password, bridges)
+        if bootstrap is None:
+            return [], [], ["ComexioAPI Loopback Web-IO class/device not available — aborting, see log"]
+        base_id, freshly_created = bootstrap
+        try:
+            device_id = await self.get_webio_device_info(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
+        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+            # get_webio_device_info raises RuntimeError on a non-200 response — see its own
+            # docstring — but its session.get() call is unwrapped, so a connection failure/
+            # timeout propagates as aiohttp.ClientError/TimeoutError instead. Must not let
+            # either escape this (added, skipped, errors)-returning batch as an unhandled
+            # exception.
+            return [], [], [f"ComexioAPI Loopback Web-IO device check failed: {err}"]
+        if device_id is None:
+            return [], [], ["ComexioAPI Loopback Web-IO device not found after bootstrap — aborting, see log"]
+
+        def _present_names(data: dict) -> set[str]:
+            return {info["name"] for info in data.get("webio_names", {}).values()}
+
+        raw_config = await self.get_raw_config()
+        if not raw_config.get("FubModules"):
+            # Mirrors function_plan_add_knx_bridge_pairs' own guard: get_raw_config() returns {}
+            # on a failed HTTP fetch, which would otherwise make existing_full_names look like
+            # "nothing exists yet" and cause every already-created loopback command in this
+            # batch to be silently duplicated via save_single_command below.
+            _LOGGER.error(
+                "function_plan_add_knx_bridge_loopback_pairs: could not fetch current Comexio config — aborting"
+            )
+            return [], [], ["could not fetch current Comexio config — aborting KNX loopback wiring, see log"]
+        current = self.parse_config(raw_config)
+        existing_full_names = _present_names(current)
+
+        pending, names_to_confirm, errors = await self._ensure_knx_loopback_commands(
+            bridges, device_id, base_id, existing_full_names, freshly_created
+        )
+
+        if not pending:
+            return [], [], errors or ["no loopback Web-IO command could be saved — aborting, see log"]
+
+        fresh_data = (
+            await self._reload_config_until_commands_ready(lambda _d: names_to_confirm, _present_names)
+            if names_to_confirm
+            else current
+        )
+        name_to_id = {info["name"]: wid for wid, info in fresh_data.get("webio_names", {}).items()}
+
+        plan_data = await self.function_plan_load_elements(fub_id)
+        if plan_data is None:
+            # function_plan_load_elements returns None (and already logs the real cause) on a
+            # failed fetch — treating that as "no elements exist" would make every bridge below
+            # get the misleading "K-Element not found, run repair first" error instead of the
+            # actual "couldn't load the plan" one. Prepend, don't replace: `errors` may already
+            # hold per-item save_single_command failures from the loop above — losing those here
+            # would under-report the batch's real error count to the caller/sync summary.
+            return [], [], [*errors, f"could not load function plan {fub_id} — aborting KNX loopback wiring, see log"]
+        existing_by_ref, _ = self._function_plan_existing_refs(plan_data)
+        _, y_max = self.get_fub_canvas_bounds(fub_id)
+        rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+
+        def _pos(n: int) -> tuple[float, float]:
+            if fresh_plan:
+                _col, row = divmod(n, rows_per_col)
+                y = FUNCTION_PLAN_LAYOUT_Y_START + row * FUNCTION_PLAN_LAYOUT_Y_STEP
+                return FUNCTION_PLAN_LAYOUT_X_KNX_LOOPBACK, y
+            # Off-canvas parking row — the follow-up sort pass assigns the real slot, same
+            # convention as function_plan_add_knx_bridge_pairs' own non-fresh-plan branch.
+            return FUNCTION_PLAN_LAYOUT_X_KNX_LOOPBACK, 10000.0 + n * FUNCTION_PLAN_LAYOUT_Y_STEP
+
+        added: list[int] = []
+        skipped: list[int] = []
+        for i, (cmd_name, (k_id, marker_id)) in enumerate(pending.items()):
+            webio_id = name_to_id.get(f"{device_id}. {cmd_name}")
+            err = await self._add_single_knx_bridge_loopback(
+                fub_id, k_id, marker_id, webio_id, existing_by_ref, plan_data, _pos(i)
+            )
+            if err is None:
+                added.append(k_id)
+            elif err:
+                errors.append(err)
+            else:
+                skipped.append(k_id)  # "" == already wired, a routine no-op, not an error
+            if progress_cb:
+                progress_cb(i + 1, len(pending))
+
+        return added, skipped, errors
+
+    async def _add_single_knx_bridge_loopback(
+        self,
+        fub_id: int,
+        k_id: int,
+        marker_id: int,
+        webio_id: str | int | None,
+        existing_by_ref: dict[tuple[int, int], int],
+        plan_data: dict | None,
+        pos: tuple[float, float],
+    ) -> str | None:
+        """Fan one already-resolved loopback command's webIoId out onto its K-Element's wire.
+
+        Converts any unexpected exception (e.g. a non-numeric webio_id from a malformed
+        webio_names entry) into an error string rather than letting it propagate and abort the
+        whole batch in function_plan_add_knx_bridge_loopback_pairs, discarding every result
+        already collected for earlier, successfully-processed bridges in the same run.
+        """
+        if webio_id is None:
+            return f"KNX loopback K{k_id}->M{marker_id}: Web-IO command not found after config reload"
+        try:
+            return await self.wire_knx_bridge_loopback(
+                fub_id, k_id, marker_id, int(webio_id), existing_by_ref, plan_data, pos
+            )
+        except Exception:
+            _LOGGER.exception("KNX loopback K%s->M%s: unexpected error while wiring", k_id, marker_id)
+            return f"KNX loopback K{k_id}->M{marker_id}: unexpected error, see log"
+
     async def function_plan_run_fup(self, fub_id: int, plan_data: dict | None = None) -> bool:
         """Save and activate a function plan (run_fup).
 
@@ -2359,14 +4273,26 @@ class ComexioAPI:
             _LOGGER.exception("function_plan_run_fup: fub_id=%s failed", fub_id)
             return False
 
-    async def _reload_config_until_commands_ready(self, expected_names_fn: Callable[[dict], set[str]]) -> dict:
-        """Reload Comexio config, retrying with backoff until webio_commands is ready.
+    async def _reload_config_until_commands_ready(
+        self,
+        expected_names_fn: Callable[[dict], set[str]],
+        present_names_fn: Callable[[dict], set[str]] | None = None,
+    ) -> dict:
+        """Reload Comexio config, retrying with backoff until the expected names are ready.
 
         A freshly uploaded Web-IO command does not always appear in the very next
         `/admin/function_function_module/home` response — Comexio seems to regenerate
         that page on its own cycle rather than synchronously per write. expected_names_fn
         derives the Web-IO command names to wait for from each reload's own parsed data
         (marker names/IO identifiers are stable; only webio_commands is expected to lag).
+
+        present_names_fn overrides what counts as "already visible" — defaults to
+        webio_commands' keys (HA's own Marker/IO/KNX classes only, see
+        _build_webio_name_lexicon's docstring for why that dict is scoped that way). A
+        command living in a Web-IO class HA doesn't own the audit for (e.g. the Phase 7
+        API-Loopback class) is never a key of webio_commands and would wait out every retry
+        here regardless of how fast it actually appears — such callers must pass a
+        present_names_fn reading webio_names (the all-devices lexicon) instead.
         Returns the last parsed config regardless of outcome — callers report per-item
         errors for any names still missing after the final attempt.
         """
@@ -2375,7 +4301,8 @@ class ComexioAPI:
         for attempt in range(FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS):
             raw = await self.get_raw_config()
             fresh_data = self.parse_config(raw)
-            missing = expected_names_fn(fresh_data) - fresh_data.get("webio_commands", {}).keys()
+            present = present_names_fn(fresh_data) if present_names_fn else fresh_data.get("webio_commands", {}).keys()
+            missing = expected_names_fn(fresh_data) - present
             if not missing:
                 return fresh_data
             if attempt < FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS - 1:
@@ -2405,6 +4332,51 @@ class ComexioAPI:
             return None
 
     @staticmethod
+    def _read_connection_outputs(conn: dict, label: str, fub_id: int) -> list[tuple[int, int, bool]] | None:
+        """Parse an existing connection's sinks into (dst_elem_id, pos, inverted) tuples.
+
+        Shared by wire_knx_bridge_loopback and _function_plan_wire_ref_pair's orphan-pair
+        repair path — both must UNION a new sink onto a source's existing ones rather than
+        overwrite, since function_plan_save_connection always replaces the full sink list for
+        a source pin (see its own docstring). Uses loadelements' raw CamelCase keys
+        (FubElementId/IOPos/Inverted) — NOT the lowercase element/pos/inverted keys
+        function_plan_save_connection's own payload uses on save (same load/save key
+        asymmetry _rebuild_one_connection already accounts for).
+        Returns None (not []) if any sink can't be parsed, so the caller aborts instead of
+        silently saving a truncated sink list that would drop that wire.
+        """
+        outputs_raw = conn.get("output") or []
+        if isinstance(outputs_raw, dict):
+            outputs_raw = list(outputs_raw.values())
+        outputs: list[tuple[int, int, bool]] = []
+        for sink in outputs_raw:
+            dst_id = ComexioAPI._function_plan_elem_id(sink.get("FubElementId"))
+            if dst_id is None:
+                _LOGGER.warning(
+                    "%s: existing sink has unparsable FubElementId %r on fub=%s — refusing to "
+                    "save (would silently drop this wire)",
+                    label,
+                    sink.get("FubElementId"),
+                    fub_id,
+                )
+                return None
+            outputs.append((dst_id, sink.get("IOPos", 0), bool(sink.get("Inverted", False))))
+        return outputs
+
+    @staticmethod
+    def _connection_input_pin(conn: dict) -> tuple[int, bool]:
+        """(input_pos, input_inverted) of an existing connection's INPUT pin, loadelements shape.
+
+        Sibling of _read_connection_outputs for the one field that helper deliberately leaves
+        alone (the source side, not the sinks). A read-then-union save that only carries the new
+        sink list forward but not this would silently reset a non-default input port or an
+        inverted input wire back to (0, False) on every union-save — same CamelCase IOPos/
+        Inverted raw shape as the output sinks, same load/save key asymmetry.
+        """
+        input_pin = conn.get("input") or {}
+        return input_pin.get("IOPos", 0), bool(input_pin.get("Inverted", False))
+
+    @staticmethod
     def _function_plan_existing_refs(plan_data: dict | None) -> tuple[dict[tuple[int, int], int], list[set[int]]]:
         """Index a plan's elements by (ref_type, ref_id) and collect connection endpoint sets.
 
@@ -2428,6 +4400,121 @@ class ComexioAPI:
                     endpoints.add(int(endpoint["FubElementId"]))
             conn_endpoints.append(endpoints)
         return existing_by_ref, conn_endpoints
+
+    @staticmethod
+    def _function_plan_find_connection_by_source(plan_data: dict | None, src_elem_id: int) -> tuple[int, dict] | None:
+        """(conn_id, raw connection record) whose input pin is src_elem_id, or None if none exists.
+
+        A source pin has at most one outgoing connection record in Comexio (see
+        function_plan_save_connection's docstring — fan-out is modeled as multiple "output"
+        entries on ONE record, never as several records from the same source) — its "type"
+        and "output" fields are exactly what a fan-out extension (wire_knx_bridge_loopback)
+        must read and preserve before adding one more sink. The id (the dict's own key in
+        plan_data["connections"], not part of the record's value) MUST be threaded back into
+        function_plan_save_connection's conn_id param on the resave — see that function's
+        docstring for the silently-dropped-"input" bug this avoids. Returns None if no such
+        connection (or plan_data) exists.
+
+        Raises ValueError if a connection DOES match but its own dict key can't be parsed as an
+        id — deliberately NOT folded into the "no connection" None case (silent-failure-hunter
+        finding, 2026-09-18): treating an unparsable-but-matched connection as "none exists"
+        would make callers fall back to conn_id=None ("id":"new"), resaving over a connection
+        that already exists and reproducing the exact silently-dropped-"input" corruption this
+        whole conn_id mechanism exists to prevent. Callers must catch and turn this into an
+        explicit abort, same shape as the existing "malformed sink" guards below.
+        """
+        if not plan_data:
+            return None
+        for conn_id_str, conn in (plan_data.get("connections") or {}).items():
+            if ComexioAPI._function_plan_elem_id((conn.get("input") or {}).get("FubElementId")) == src_elem_id:
+                conn_id = ComexioAPI._function_plan_elem_id(conn_id_str)
+                if conn_id is None:
+                    raise ValueError(
+                        f"connection matched for src_elem_id={src_elem_id} but its own key "
+                        f"{conn_id_str!r} is unparsable"
+                    )
+                return conn_id, conn
+        return None
+
+    async def _resolve_or_create_element(
+        self,
+        fub_id: int,
+        existing_elem: int | None,
+        ref_id: int,
+        element_type: int,
+        x: float,
+        y: float,
+        label: str,
+        kind: str,
+    ) -> int | str:
+        """Reuse existing_elem if it's already in the plan, else create a fresh element_type element.
+
+        Extracted (code-reviewer finding, 2026-09-18) from the "reuse-or-create" pattern repeated
+        in wire_knx_bridge_pair (marker/KNX) and _function_plan_wire_ref_pair (source/Web-IO) —
+        pure boilerplate around function_plan_add_element, but its inlined if/error-check was
+        contributing to both functions' cognitive complexity overshoot past the project's budget
+        of 15.
+        Returns the resolved element id, or an f"{label}: add_element ({kind}) failed" error string.
+        """
+        if existing_elem is not None:
+            return int(existing_elem)
+        elem = await self.function_plan_add_element(fub_id=fub_id, ref_id=ref_id, element_type=element_type, x=x, y=y)
+        if elem is None:
+            return f"{label}: add_element ({kind}) failed"
+        return int(elem)
+
+    @staticmethod
+    def _function_plan_union_sink(
+        plan_data: dict | None, src_elem: int, sink_elem: int, label: str, fub_id: int
+    ) -> tuple[list[tuple[int, int, bool]], int, bool, int | None] | str | None:
+        """Fold sink_elem into src_elem's existing connection (if any), ready to hand straight
+        to function_plan_save_connection.
+
+        Single implementation of the "never resave conn_id='new' over a source that already has
+        a connection" rule established live 2026-09-18 (Bug #2) — extracted (code-reviewer
+        finding, 2026-09-18) after the same ~15-line try/except+union block got copy-pasted into
+        four places (wire_knx_bridge_pair, wire_knx_bridge_loopback, _function_plan_wire_ref_pair
+        ×2), pushing two of those functions' cognitive complexity past the project's budget of 15
+        and duplicating both the logic and its error strings (S1192). Three of the four now
+        delegate here; wire_knx_bridge_loopback (code-reviewer finding, 2026-09-18, Round 4) keeps
+        its own inline variant because it must hard-error when the source has NO existing
+        connection yet (this helper instead falls back to a fresh single-sink pair in that case —
+        wrong semantics for a function whose whole job is extending an existing fan-out). Callers
+        now do only a two-way dispatch: `if union is None: return ""`,
+        `if isinstance(union, str): return union`, else unpack the tuple into
+        function_plan_save_connection's input_pos/input_inverted/existing_conn_id kwargs.
+
+        Returns:
+        - (outputs, input_pos, input_inverted, existing_conn_id): pass straight through to
+          function_plan_save_connection. If src_elem had no existing connection, this is a
+          fresh single-sink pair (outputs=[sink_elem], existing_conn_id=None); otherwise
+          sink_elem is appended to the existing sinks and the source's input pin is preserved.
+        - None if src_elem already has a connection that already includes sink_elem — the pair is
+          already wired; this is logged here (single canonical message, code-reviewer finding
+          2026-09-18: the three call sites used to each log their own copy of one of two near-
+          identical literals, tripping S1192 on both). Callers just return "" (skip, not an
+          error) without logging again.
+        - a non-empty str error message if the existing connection couldn't be safely read (a
+          malformed sink, or an unparsable connection id) — callers must also return this
+          verbatim rather than falling back to conn_id="new", which would reproduce the exact
+          silently-dropped-"input" corruption this whole mechanism exists to prevent.
+        """
+        try:
+            found = ComexioAPI._function_plan_find_connection_by_source(plan_data, src_elem)
+        except ValueError as exc:
+            return f"{label}: {exc}, aborting to avoid resaving it as a brand-new connection"
+        if found is None:
+            return [(sink_elem, 0, False)], 0, False, None
+        existing_conn_id, existing_conn = found
+        existing_outputs = ComexioAPI._read_connection_outputs(existing_conn, label, fub_id)
+        if existing_outputs is None:
+            return f"{label}: existing connection has a malformed sink, aborting to avoid dropping it"
+        if any(dst == sink_elem for dst, _p, _i in existing_outputs):
+            _LOGGER.info("%s: sink already present on existing connection (fub=%s), skipping", label, fub_id)
+            return None
+        outputs = [*existing_outputs, (sink_elem, 0, False)]
+        input_pos, input_inverted = ComexioAPI._connection_input_pin(existing_conn)
+        return outputs, input_pos, input_inverted, existing_conn_id
 
     @staticmethod
     def _function_plan_elem_ref(elements: dict, elem_id: int) -> dict:
@@ -2486,6 +4573,7 @@ class ComexioAPI:
         existing_by_ref: dict[tuple[int, int], int],
         conn_endpoints: list[set[int]],
         pos: tuple[float, float, float],
+        plan_data: dict | None = None,
     ) -> str | None:
         """Wire one source element (Marker type=2 / IO type=1) to its Web-IO (type=10) element.
 
@@ -2495,45 +4583,63 @@ class ComexioAPI:
         FubElementId endpoint set of every existing connection to detect that case.
         Returns None on success, "" when the pair is already wired in the plan
         (skip, not an error), or an error message.
+
+        plan_data: needed to avoid the exact Bug #2 corruption (function_plan_save_connection's
+        docstring) whenever src_ref_id already carries a connection — not just for the
+        KNX-specific "reverse hazard" (see wire_knx_bridge_loopback's docstring) where a
+        K-Element can carry a SECOND sink (the Phase-7 API-Loopback Web-IO). A Marker/IO source
+        never has a second sink today, but it CAN still already have its ordinary single-sink
+        connection (e.g. a reused/orphaned element from a previous partial run) — omitting
+        plan_data there doesn't just skip a no-op union, it disables the existing-connection
+        lookup entirely and lets a resave fall back to conn_id="new", silently dropping that
+        connection's "input" field. An earlier version of this docstring claimed the omission
+        was safe for Marker/IO precisely because of that "no second sink" reasoning, which
+        conflated "no second sink" with "no existing connection at all"; the IO-pairs callers
+        (function_plan_add_io_pairs → _function_plan_add_single_io_pair) had accordingly never
+        threaded plan_data through at all until this was caught (silent-failure-hunter finding,
+        2026-09-18) — always pass plan_data when available. None (the pre-Phase-7 callers/tests)
+        falls back to the original single-sink save.
         """
         x_src, x_webio, y = pos
 
         existing_src_elem = existing_by_ref.get((src_type, src_ref_id))
         existing_webio_elem = existing_by_ref.get((10, web_ref_id))
-        if existing_src_elem and existing_webio_elem:
-            if any(existing_src_elem in eps and existing_webio_elem in eps for eps in conn_endpoints):
-                _LOGGER.info("function plan pair %s already wired in plan fub=%s, skipping", label, fub_id)
-                return ""
-            # Orphan pair: both elements exist but the wire is missing — draw only the connection
-            conn_id = await self.function_plan_save_connection(
-                fub_id, existing_src_elem, [(existing_webio_elem, 0, False)], conn_type
-            )
-            if conn_id is None:
-                return f"{label}: save_connection between existing elements failed"
-            _LOGGER.info(
-                "function plan pair %s rewired existing elements %s→%s (fub=%s, conn_id=%s)",
-                label,
-                existing_src_elem,
-                existing_webio_elem,
-                fub_id,
-                conn_id,
-            )
-            return None
 
-        elem_src = existing_src_elem or await self.function_plan_add_element(
-            fub_id=fub_id, ref_id=src_ref_id, element_type=src_type, x=x_src, y=y
+        # is not None (not truthy) everywhere below, matching _resolve_or_create_element's own
+        # check (silent-failure-hunter / code-reviewer finding, 2026-09-18, Round 4): the two
+        # branches below this ("existing_webio_elem" and the final fresh-conn_payload fallback)
+        # assume elem_src is guaranteed freshly created and skip _function_plan_union_sink
+        # entirely — an element id of 0 misread as falsy-"doesn't exist" would have sent that
+        # element's real existing connection through the unprotected "id":"new" path,
+        # reproducing Bug #2 with no error, no log, and no entry in the batch's errors list.
+        if existing_src_elem is not None and existing_webio_elem is not None:
+            return await self._wire_ref_pair_orphan(
+                fub_id, existing_src_elem, existing_webio_elem, conn_type, label, conn_endpoints, plan_data
+            )
+
+        elem_src = await self._resolve_or_create_element(
+            fub_id, existing_src_elem, src_ref_id, src_type, x_src, y, label, f"source, type={src_type}"
         )
-        if elem_src is None:
-            return f"{label}: add_element (source, type={src_type}) failed"
+        if isinstance(elem_src, str):
+            return elem_src
 
-        if existing_webio_elem:
-            # Web-IO element already in the plan — wire the (possibly fresh) source to it
+        if existing_webio_elem is not None:
+            # Web-IO element already in the plan — wire the (possibly fresh) source to it.
+            # Reaching this branch with existing_src_elem also non-None is impossible (that
+            # combination is fully handled, and returned from, by the orphan-pair branch
+            # above) — elem_src here is always a source freshly created a few lines up,
+            # so it cannot carry any pre-existing sinks a single-sink save would clobber.
             conn_id = await self.function_plan_save_connection(
-                fub_id, int(elem_src), [(existing_webio_elem, 0, False)], conn_type
+                fub_id, elem_src, [(existing_webio_elem, 0, False)], conn_type
             )
             if conn_id is None:
                 return f"{label}: save_connection to existing Web-IO element failed"
             return None
+
+        if existing_src_elem is not None:
+            return await self._wire_ref_pair_reattach_source(
+                fub_id, existing_src_elem, web_ref_id, conn_type, label, x_webio, y, plan_data
+            )
 
         conn_payload = {
             "0": {
@@ -2565,6 +4671,112 @@ class ComexioAPI:
         )
         return None
 
+    async def _wire_ref_pair_orphan(
+        self,
+        fub_id: int,
+        existing_src_elem: int,
+        existing_webio_elem: int,
+        conn_type: str,
+        label: str,
+        conn_endpoints: list[set[int]],
+        plan_data: dict | None,
+    ) -> str | None:
+        """Both source and Web-IO elements already exist in the plan — draw/repair the wire.
+
+        Extracted from _function_plan_wire_ref_pair (code-reviewer finding, 2026-09-18:
+        cognitive complexity ~28, split into per-branch sub-coroutines to get under the
+        project's budget of 15). Covers the ordinary orphan-pair case (wire lost, e.g. during a
+        restore cycle) plus the "already wired, conn_endpoints just didn't reflect it" edge case
+        _function_plan_union_sink itself detects and logs.
+        """
+        if any(existing_src_elem in eps and existing_webio_elem in eps for eps in conn_endpoints):
+            _LOGGER.info("function plan pair %s already wired in plan fub=%s, skipping", label, fub_id)
+            return ""
+        # Unioned onto any sinks already present (e.g. a KNX loopback fan-out) rather than
+        # replacing them, since function_plan_save_connection always saves the FULL sink list.
+        union = self._function_plan_union_sink(plan_data, existing_src_elem, existing_webio_elem, label, fub_id)
+        if union is None:
+            return ""
+        if isinstance(union, str):
+            return union
+        outputs, input_pos, input_inverted, existing_conn_id = union
+        conn_id = await self.function_plan_save_connection(
+            fub_id,
+            existing_src_elem,
+            outputs,
+            conn_type,
+            input_pos=input_pos,
+            input_inverted=input_inverted,
+            existing_conn_id=existing_conn_id,
+        )
+        if conn_id is None:
+            return f"{label}: save_connection between existing elements failed"
+        _LOGGER.info(
+            "function plan pair %s rewired existing elements %s→%s (fub=%s, conn_id=%s, total_sinks=%d)",
+            label,
+            existing_src_elem,
+            existing_webio_elem,
+            fub_id,
+            conn_id,
+            len(outputs),
+        )
+        return None
+
+    async def _wire_ref_pair_reattach_source(
+        self,
+        fub_id: int,
+        existing_src_elem: int,
+        web_ref_id: int,
+        conn_type: str,
+        label: str,
+        x_webio: float,
+        y: float,
+        plan_data: dict | None,
+    ) -> str | None:
+        """Source element already exists but its Web-IO is missing — place a fresh one and reattach.
+
+        Extracted from _function_plan_wire_ref_pair (see _wire_ref_pair_orphan's docstring for
+        why). E.g. the Web-IO class was deleted+recreated under a new webIoId, orphaning the plan
+        element for the old one. existing_src_elem may already carry other sinks (a KNX loopback
+        fan-out), so the new Web-IO element is placed bare first, then unioned onto whatever
+        connection the source already has — baking the connection into the same add_element call
+        (like the fresh-source case) would hand Comexio a second, separate connection record for
+        this source pin (function_plan_save_connection's docstring documents that as destructive).
+        """
+        elem_webio = await self.function_plan_add_element(
+            fub_id=fub_id, ref_id=web_ref_id, element_type=10, x=x_webio, y=y
+        )
+        if elem_webio is None:
+            return f"{label}: add_element (Web-IO, webIoId={web_ref_id}) failed"
+        union = self._function_plan_union_sink(plan_data, existing_src_elem, int(elem_webio), label, fub_id)
+        if union is None:
+            return ""
+        if isinstance(union, str):
+            return union
+        outputs, input_pos, input_inverted, existing_conn_id = union
+        conn_id = await self.function_plan_save_connection(
+            fub_id,
+            existing_src_elem,
+            outputs,
+            conn_type,
+            input_pos=input_pos,
+            input_inverted=input_inverted,
+            existing_conn_id=existing_conn_id,
+        )
+        if conn_id is None:
+            return f"{label}: save_connection to newly placed Web-IO element failed"
+        _LOGGER.info(
+            "function plan pair %s → existing src_elem=%s, newly placed webio_elem=%s "
+            "(fub=%s, conn_type=%s, total_sinks=%d)",
+            label,
+            existing_src_elem,
+            elem_webio,
+            fub_id,
+            conn_type,
+            len(outputs),
+        )
+        return None
+
     async def function_plan_add_marker_pairs(
         self,
         fub_id: int,
@@ -2579,7 +4791,7 @@ class ComexioAPI:
         retrying with backoff (see _reload_config_until_commands_ready) since a
         just-uploaded command does not always show up on the very next reload.
         fresh_plan=True places the pairs directly at their final grid positions
-        (sorted by marker ID) — no sort pass is needed afterwards. Otherwise the
+        (sorted by marker/KNX ID) — no sort pass is needed afterwards. Otherwise the
         elements get placeholder positions and a sort run must follow.
         progress_cb(done, total) is invoked after every processed marker.
         ref_type selects the source category (marker=2 / KNX=11 — blind guess),
@@ -2602,7 +4814,14 @@ class ComexioAPI:
         if fresh_plan:
             marker_ids = sorted(marker_ids)
         _, y_max = self.get_fub_canvas_bounds(fub_id)
-        rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+        # Always the generic pitch, even for a fresh KNX read-only cluster plan (ref_type=11) —
+        # unlike async_sort_function_plan's is_knx_cluster_plan branch, that tighter pitch
+        # (FUNCTION_PLAN_KNX_LAYOUT_Y_STEP) exists only to close the gap the write-bridge's extra
+        # Phase-7-loopback slot leaves per pair. A read-only pair here takes exactly one row slot,
+        # so the generic pitch already places it with no gap — reviewed and confirmed harmless
+        # 2026-09-20, not a bug to fix.
+        max_rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+        rows_per_col = _balanced_rows_per_col(len(marker_ids), max_rows_per_col)
 
         def _pair_pos(n_added: int, n_loop: int) -> tuple[float, float, float]:
             """(x_marker, x_webio, y): final grid slot for fresh plans, placeholder otherwise."""
@@ -2633,6 +4852,7 @@ class ComexioAPI:
                 conn_endpoints,
                 _pair_pos(len(added), i),
                 ref_type,
+                plan_data,
             )
             if err is None:
                 added.append(marker_id)
@@ -2653,10 +4873,19 @@ class ComexioAPI:
         conn_endpoints: list[set[int]],
         pos: tuple[float, float, float],
         ref_type: int = 2,
+        plan_data: dict | None = None,
     ) -> str | None:
         """Add one Marker/KNX+Web-IO pair at pos=(x_marker, x_webio, y).
 
         Return semantics as _function_plan_wire_ref_pair (None = added, "" = already wired).
+        plan_data: see _function_plan_wire_ref_pair — needed for every ref_type, not just KNX:
+        the source may already carry an ordinary single-sink connection (a reused/orphaned
+        element from a previous partial run), and omitting plan_data disables the
+        existing-connection lookup entirely, reproducing Bug #2 (code-reviewer finding,
+        2026-09-18, caught after an earlier version of this docstring made the same "only
+        relevant for ref_type=11" claim _function_plan_wire_ref_pair's own docstring was just
+        corrected for). ref_type=11 (KNX) additionally needs it for the Phase-7 API-Loopback
+        fan-out this repair must not clobber.
         """
         label = f"{category_by_fub_module_type(ref_type).audit_key_prefix}{marker_id}"
         marker = markers_by_id.get(marker_id)
@@ -2675,7 +4904,16 @@ class ComexioAPI:
 
         conn_type = "binary" if marker["type"] == "digital" else "analog"
         return await self._function_plan_wire_ref_pair(
-            fub_id, ref_type, marker_id, int(web_ref_id), conn_type, label, existing_by_ref, conn_endpoints, pos
+            fub_id,
+            ref_type,
+            marker_id,
+            int(web_ref_id),
+            conn_type,
+            label,
+            existing_by_ref,
+            conn_endpoints,
+            pos,
+            plan_data,
         )
 
     async def function_plan_add_trigger_pairs(
@@ -2692,7 +4930,7 @@ class ComexioAPI:
         plan, a separate fub_id. See MARKER_TRIGGER_SUFFIXES / FUNCTION_PLAN_TRIGGER_PLAN_NAME
         in const.py for why the two are kept apart.
         fresh_plan=True places the pairs directly at their final grid positions
-        (sorted by marker ID), matching function_plan_add_marker_pairs.
+        (sorted by marker/KNX ID), matching function_plan_add_marker_pairs.
         Returns (added_marker_ids, error_messages).
         """
         plan_data = await self.function_plan_load_elements(fub_id)
@@ -2701,7 +4939,8 @@ class ComexioAPI:
         if fresh_plan:
             marker_ids = sorted(marker_ids)
         _, y_max = self.get_fub_canvas_bounds(fub_id)
-        rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP))
+        max_rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP))
+        rows_per_col = _balanced_rows_per_col(len(marker_ids), max_rows_per_col)
 
         def _pair_pos(n_added: int, n_loop: int) -> tuple[float, float, float]:
             """(x_marker, x_flanke, y): final grid slot for fresh plans, placeholder otherwise.
@@ -2971,6 +5210,7 @@ class ComexioAPI:
                 existing_by_ref,
                 conn_endpoints,
                 (rows.get(ident, 0), column_index, rows_per_col),
+                plan_data,
             )
             if err is None:
                 added.append(ident)
@@ -2991,10 +5231,17 @@ class ComexioAPI:
         existing_by_ref: dict[tuple[int, int], int],
         conn_endpoints: list[set[int]],
         slot: tuple[int, int, int],
+        plan_data: dict | None = None,
     ) -> str | None:
         """Add one IO+Web-IO pair at its deterministic slot=(row, column_index, rows_per_col).
 
         Return semantics as _function_plan_wire_ref_pair (None = added, "" = already wired).
+        plan_data: see _function_plan_wire_ref_pair — needed so the orphan-pair/reattach branches
+        there union onto the IO source's CURRENT sinks instead of resaving conn_id="new" over an
+        existing connection (silent-failure-hunter finding, 2026-09-18: this path used to omit
+        plan_data entirely, reproducing Bug #2 for IO sources even though the structurally
+        identical Marker/KNX path — function_plan_add_marker_pairs/_function_plan_add_single_pair
+        — already threaded it through).
         """
         label = f"{ext_name} {ident}"
         io_entry = ext_ios.get(ident)
@@ -3026,7 +5273,7 @@ class ComexioAPI:
         )
         conn_type = "binary" if io_entry.get("is_binary") else "analog"
         return await self._function_plan_wire_ref_pair(
-            fub_id, 1, io_ref_id, int(web_ref_id), conn_type, label, existing_by_ref, conn_endpoints, pos
+            fub_id, 1, io_ref_id, int(web_ref_id), conn_type, label, existing_by_ref, conn_endpoints, pos, plan_data
         )
 
     async def function_plan_rebuild_plan_from_snapshot(

@@ -14,6 +14,8 @@ from ..const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH as _LAYOUT_COLUMN_WIDTH,
     FUNCTION_PLAN_LAYOUT_COMMENT_Y as _LAYOUT_COMMENT_Y,
+    FUNCTION_PLAN_LAYOUT_ROW_HEIGHT as _LAYOUT_ROW_HEIGHT,
+    FUNCTION_PLAN_LAYOUT_X_KNX_WEBIO as _LAYOUT_X_KNX_WEBIO,
     FUNCTION_PLAN_LAYOUT_X_MARKER as _LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_X_WEBIO as _LAYOUT_X_WEBIO,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
@@ -26,6 +28,11 @@ from ..const import (
 from ..coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# reference type codes for element kinds this module's sort logic distinguishes
+_REF_TYPE_MARKER = 2
+_REF_TYPE_KNX = 11
+_REF_TYPE_WEBIO = 10
 
 # Comment-element (type=14) reference type, and the pinned managed-plan marker comment.
 _COMMENT_REF_TYPE = "14"
@@ -51,11 +58,88 @@ def _connection_outputs(conn: dict) -> list[dict]:
     return list(raw_outputs.values()) if isinstance(raw_outputs, dict) else raw_outputs
 
 
+def _outputs_by_input(connections: dict) -> dict[int, list[int]]:
+    """elem_id -> the FubElementIds it connects to (input -> every output), across all
+    connections regardless of element type — shared by _build_sorted_pairs to walk both
+    hops of a Marker->K->WebIO KNX bridge chain without a second connections scan.
+    """
+    outputs: dict[int, list[int]] = {}
+    for conn in connections.values():
+        inp_eid_raw = conn.get("input", {}).get("FubElementId")
+        if inp_eid_raw is None:
+            continue
+        inp_eid = int(inp_eid_raw)
+        for out in _connection_outputs(conn):
+            out_eid_raw = out.get("FubElementId")
+            if out_eid_raw is None:
+                continue
+            outputs.setdefault(inp_eid, []).append(int(out_eid_raw))
+    return outputs
+
+
+def _resolve_bridge_hop(
+    elem_ref: dict[int, dict], outputs_by_input: dict[int, list[int]], out_eid: int
+) -> tuple[list[int], int | None]:
+    """Follow a Marker connection's direct output one more hop if it lands on a KNX
+    (type 11) element — Entwurf A "Merker-Brücke" wires Marker->K->WebIO as two chained
+    connections, not one, so the K-object itself is never the pair's true WebIO partner.
+
+    Returns (webio_elem_ids, knx_elem_id): the direct output unchanged as a single-item list
+    with knx_elem_id=None for a plain Marker->WebIO pair, or (the K-object's downstream
+    WebIOs, the K-object) once such a second hop exists. A K-object can fan out to MORE THAN
+    ONE downstream WebIO (Phase 7 "API-Loopback": wire_knx_bridge_loopback unions a second
+    WebIO onto the same connection's existing output list, alongside the original read-path
+    WebIO) — every downstream WebIO is returned, sorted by elem_id for a stable, deterministic
+    column assignment across repeated sort runs. Bug found + fixed 2026-09-19: this used to
+    pick only the FIRST downstream WebIO via next(...), silently dropping any further fan-out
+    sink from the pair entirely — _build_sorted_pairs then treated it as an unrelated orphan
+    and parked it far away from its K/Marker pair, looking un-wired even though the underlying
+    connection was intact.
+
+    Falls back to the K-object itself (no downstream WebIO found at all — e.g. not wired yet)
+    so it's still placed somewhere on the grid instead of vanishing; that fallback is logged
+    (debug) since it's expected only briefly, right after a bridge is freshly created and
+    before its own read-path pair is wired — a review (2026-09-16) found it would otherwise
+    "repair" a stuck/broken read-path wire into a plausible-looking position with zero trace
+    of the underlying gap.
+    """
+    if elem_ref.get(out_eid, {}).get("type") != _REF_TYPE_KNX:
+        return [out_eid], None
+    webio_eids = sorted(
+        eid for eid in outputs_by_input.get(out_eid, []) if elem_ref.get(eid, {}).get("type") == _REF_TYPE_WEBIO
+    )
+    if not webio_eids:
+        _LOGGER.debug(
+            "KNX bridge K-object %d has no downstream Web-IO wired yet — placing it without a "
+            "dedicated Web-IO column this run; investigate if this persists across sort runs",
+            out_eid,
+        )
+        return [out_eid], out_eid
+    return webio_eids, out_eid
+
+
 def _build_sorted_pairs(
     elements: dict,
     connections: dict,
-) -> tuple[list[tuple[int, int, int]], list[int]]:
-    """Return marker→WebIO pairs sorted by marker ref_id and a list of orphan element IDs.
+) -> tuple[list[tuple[int, int, list[int], int | None]], list[int]]:
+    """Return marker→WebIO pairs sorted for display and a list of orphan element IDs.
+
+    Each pair is (sort_key, marker_elem_id, webio_elem_ids, knx_elem_id) — knx_elem_id
+    is None for the common direct Marker->WebIO case, and the intermediate K-object's elem_id
+    for a KNX write-bridge chain (see _resolve_bridge_hop); webio_elem_ids can hold more than
+    one entry for such a chain (Phase 7 API-Loopback fan-out); _assign_grid_positions gives
+    the K-object and each of its WebIOs their own dedicated column so none of them gets
+    mistaken for — or lost behind — the pair's other elements.
+
+    sort_key is the Marker's own ref_id (M-number) for a plain pair, but the KNX object's
+    ref_id (K-number) for a bridge pair — a bridge Marker's M-number reflects only the
+    historical order its marker happened to be created/reused in (see
+    function_plan_add_knx_bridge_pairs' free-marker reuse), which can drift arbitrarily far
+    from K order (e.g. K5 created after K6/K7 ends up with a HIGHER-numbered marker than
+    both — K5 -> M306 while K6/K7 got M304/M305 — so it sorts after them). Sorting those
+    rows by M-number instead of K-number then visibly scrambles the K column even though
+    the actual K objects are numbered sequentially (user report, 2026-09-20: K5 rendered
+    between K7 and K8 on a "HA - KNX [1-100]" plan).
 
     Comment/text blocks (type 14) are excluded from the orphans — they keep their
     position and are never moved by the sort (the managed-plan comment is separately
@@ -68,26 +152,22 @@ def _build_sorted_pairs(
         }
         for eid, e in elements.items()
     }
+    outputs_by_input = _outputs_by_input(connections)
     seen: set[tuple[int, int]] = set()
-    pairs: list[tuple[int, int, int]] = []  # (marker_ref_id, marker_elem_id, webio_elem_id)
-    for conn in connections.values():
-        inp_eid_raw = conn.get("input", {}).get("FubElementId")
-        if inp_eid_raw is None:
-            continue
-        inp_eid = int(inp_eid_raw)
-        if elem_ref.get(inp_eid, {}).get("type") != 2:
+    pairs: list[tuple[int, int, list[int], int | None]] = []
+    for inp_eid, out_eids in outputs_by_input.items():
+        if elem_ref.get(inp_eid, {}).get("type") != _REF_TYPE_MARKER:
             continue
         marker_ref_id = int(elem_ref[inp_eid].get("ref_id", 0))
-        for out in _connection_outputs(conn):
-            out_eid_raw = out.get("FubElementId")
-            if out_eid_raw is None:
+        for out_eid in out_eids:
+            if (inp_eid, out_eid) in seen:
                 continue
-            out_eid = int(out_eid_raw)
-            if (inp_eid, out_eid) not in seen:
-                seen.add((inp_eid, out_eid))
-                pairs.append((marker_ref_id, inp_eid, out_eid))
+            seen.add((inp_eid, out_eid))
+            webio_eids, knx_eid = _resolve_bridge_hop(elem_ref, outputs_by_input, out_eid)
+            sort_key = int(elem_ref[knx_eid].get("ref_id", 0)) if knx_eid is not None else marker_ref_id
+            pairs.append((sort_key, inp_eid, webio_eids, knx_eid))
     pairs.sort(key=lambda p: p[0])
-    paired: set[int] = {eid for _, m, w in pairs for eid in (m, w)}
+    paired: set[int] = {eid for _, m, ws, k in pairs for eid in ([m, k, *ws]) if eid is not None}
     orphans = [eid for eid, ref in elem_ref.items() if eid not in paired and not _is_comment_ref_type(ref["type"])]
     return pairs, orphans
 
@@ -123,35 +203,273 @@ def _find_first_free_grid_position(
     return None
 
 
+# Every downstream WebIO of a K-object — read-path (hop 0) and Phase 7 API-Loopback fan-out
+# (hop 1+, see _resolve_bridge_hop) — shares this SAME column; only the row (see
+# _KNX_LOOPBACK_Y_OFFSET below) tells hops apart. Kept as its own name (not just reusing
+# _LAYOUT_X_KNX_WEBIO inline) so _place_pair_row and _KNX_COLUMN_WIDTH read as "the one KNX
+# WebIO column" rather than duplicating the const.py import path. Originally hop 1 got its
+# own further-right column (X_KNX_LOOPBACK) instead — user feedback, 2026-09-19, after the
+# Y-offset fix below had already resolved the renderer's collinearity bug: wanted the Loopback
+# pill directly under the read-path pill, in the same column, purely a layout preference (the
+# render-correctness issue was already fully fixed by the Y-offset alone — see
+# _KNX_LOOPBACK_Y_OFFSET's docstring).
+_KNX_WEBIO_X = _LAYOUT_X_KNX_WEBIO
+_KNX_WEBIO_STEP = _LAYOUT_X_WEBIO - _LAYOUT_X_MARKER
+
+# A KNX bridge row spans from X_MARKER to one WebIO-column's-worth past X_KNX_WEBIO — wider
+# than the standard _LAYOUT_COLUMN_WIDTH (450) used for plain marker/WebIO pairs, since a KNX
+# row additionally reserves the K-object's own column between marker and WebIO. Packing KNX
+# columns at the standard pitch would let one column's WebIO collide with the next column
+# (dual-review finding, 2026-09-19). Plans containing at least one KNX bridge pair use this
+# wider pitch for every column instead — see _assign_grid_positions.
+#
+# _KNX_WEBIO_X + _KNX_WEBIO_STEP - _LAYOUT_X_MARKER (585) is the exact minimum span with NO
+# margin — the next column's marker pillar would land only 15 units past this column's WebIO
+# pillar (vs. 75 units in the standard non-KNX layout, per _PILL_WIDTH=180 in
+# function_plan_render_constants.py), so two adjacent KNX columns visually read as barely
+# separated (user-reported, 2026-09-21 screenshots: "der rechte Block ist immer noch nicht
+# verschoben"). A first fix (585->600, +15 margin) was still not visually distinct enough
+# (same user, same day, re-tested). _KNX_COLUMN_MARGIN=215 (total width 800) matches the gap
+# the user manually tested live in Comexio Studio and confirmed renders correctly (screenshot
+# + element-position JSON, 2026-09-21: shifted an entire second-column block by +195 units,
+# landing its rightmost WebIO pill's right edge at x=1380 — clearly past this integration's
+# own get_fub_canvas_bounds-derived x_max~=1230 for A3/90dpi — and reported "und gut ist").
+# That result disproves the assumption the previous (585..607) ceiling was built on: x_max is
+# apparently NOT a hard clipping/rendering bound on Comexio's live editable canvas (it is
+# derived from paper-format mm size and DPI, and may only matter for print/export sizing, not
+# the on-screen SVG canvas) — see _KNX_MAX_COLS below for the column-count consequence.
+_KNX_COLUMN_MARGIN = 215.0
+_KNX_COLUMN_WIDTH = _KNX_WEBIO_X + _KNX_WEBIO_STEP - _LAYOUT_X_MARKER + _KNX_COLUMN_MARGIN
+
+# Fixed column count for any plan containing at least one KNX bridge pair — no longer derived
+# from x_max/column_width (see _KNX_COLUMN_WIDTH's docstring for why that derivation was
+# dropped: the user's live test showed x_max is not an actual canvas limit, so a formula built
+# on it was both wrong in practice and, for a wide pitch like 800, wrongly floored to 1 column,
+# silently halving capacity). 2 is not a heuristic guess — it is the fixed design every KNX
+# cluster plan is built against: FUNCTION_PLAN_KNX_CLUSTER_SIZE=50 in const.py buckets markers
+# into cluster plans specifically sized for "2 columns x ~26 two-slot pairs" (see that
+# constant's comment), and every KNX cluster plan is created at the fixed _MANAGED_PLAN_PAPER
+# ("A3", coordinator.py) — so there is no dynamic paper-format case to size this against here.
+_KNX_MAX_COLS = 2
+
+# hop_index>=1 (Phase 7 loopback and any further hop) is pushed this many units BELOW the
+# K-object's own row, one sub-row per extra hop. Without ANY offset, hop 0 and hop 1 sit on
+# the exact same row/y as their shared source K — verified against the Studio-clone renderer
+# (function_plan_render_wiring.py): _edge_route treats two same-row sinks as "stays on row"
+# for BOTH branches (no lane-change column, no vertical run), and _junction_points then never
+# emits a T-junction dot for a same-row-only fan-out. The result is two flat, fully
+# overlapping straight lines from the K-object's output pin to each sink, rendered with no
+# visible branch point — indistinguishable on screen from a serial chain K -> hop0 -> hop1,
+# since hop0's pill sits geometrically between K and hop1 on that same line (bug reported
+# 2026-09-19: user's Comexio Studio screenshot showed exactly this "all in series" look right
+# after the sort-pass fan-out fix, even though function_plan_analyze/function_plan_flow_diagram
+# already confirmed the underlying connection data was correctly parallel).
+#
+# Originally set to the full _LAYOUT_Y_STEP (22.5, one pair-to-pair row pitch) to fix that —
+# any offset clears the renderer's 0.75-unit same-row threshold, so that full pitch was never
+# required for correctness, only convenient to reuse. It visibly left a blank row's worth of
+# gap between the two WebIO pills, which the user asked to close (2026-09-20, "Abstand ... auf
+# 0 ... so dass sie aneinander liegen"). Now uses _LAYOUT_ROW_HEIGHT (15, Studio's own
+# port-row pitch — the same value used for two elements stacked with zero gap elsewhere) so
+# the pills sit directly adjacent instead of one full row apart, while still comfortably
+# clearing the 0.75-unit threshold. Deliberately independent of _assign_grid_positions' own
+# row_step (the pair-to-pair slot pitch, e.g. 22.5, or the trigger plan's 90.0 — never
+# actually exercised here since trigger and KNX-bridge plans never share a fub_id): that
+# pitch still reserves a FULL row-slot per hop (pair_slots = len(w_eids) in
+# _assign_grid_positions), so tightening this pixel offset only shrinks the gap WITHIN that
+# already-reserved footprint and can never collide with the next pair's own row.
+_KNX_LOOPBACK_Y_OFFSET = _LAYOUT_ROW_HEIGHT
+
+
+def _place_pair_row(
+    positions: dict[int, tuple[float, float]],
+    m_eid: int,
+    w_eids: list[int],
+    k_eid: int | None,
+    col: int,
+    y: float,
+    column_width: float = _LAYOUT_COLUMN_WIDTH,
+    hop_step: float = _KNX_LOOPBACK_Y_OFFSET,
+) -> None:
+    """Place one pair's marker/(K-object)/WebIO elements on their row (see _assign_grid_positions).
+
+    column_width overrides the column pitch (default: the standard marker/WebIO pitch) —
+    _assign_grid_positions passes the wider _KNX_COLUMN_WIDTH for a plan containing KNX
+    bridge pairs, since their WebIO fan-out is wider than the standard pitch (see
+    _KNX_COLUMN_WIDTH's docstring).
+
+    hop_step is the Y distance between consecutive WebIO hops of ONE pair (default:
+    _KNX_LOOPBACK_Y_OFFSET, the Studio port-row height — hops sit directly adjacent, no
+    visual gap). Deliberately NOT tied to _assign_grid_positions' own row_step (the
+    pair-to-pair slot pitch, which stays whatever it was) — that pitch still reserves a full
+    row-slot per hop (pair_slots = len(w_eids) there), so this only tightens the pixel gap
+    WITHIN that already-reserved footprint; it can never grow past what _assign_grid_positions
+    reserved without also growing row_step itself, so a caller-supplied hop_step this small
+    can never collide with the next pair's own row (see _KNX_LOOPBACK_Y_OFFSET's docstring for
+    the full history — this used to be the row_step itself, until 2026-09-20).
+
+    A pair's K-object (knx_elem_id, KNX write-bridge chain only — see _resolve_bridge_hop)
+    goes to its own column at X_WEBIO, matching where a freshly wired bridge triad already
+    lands (api.function_plan_add_knx_bridge_pairs); the pair's real WebIO partner(s) all
+    share ONE further column at X_KNX_WEBIO (see _KNX_WEBIO_X) — a K-object can have more
+    than one downstream WebIO (Phase 7 API-Loopback fan-out, see _resolve_bridge_hop), and
+    every one of them is placed in that same column, one row each (see _KNX_LOOPBACK_Y_OFFSET),
+    so none of them collide or get dropped (bug found + fixed 2026-09-19: the single-w_eid
+    version of this function could only ever place the one WebIO its caller already picked,
+    silently losing any further fan-out sink to the general orphan area — see
+    _resolve_bridge_hop's docstring). Each hop beyond the first is pushed one hop_step below
+    the row's y — see _KNX_LOOPBACK_Y_OFFSET's docstring for why a same-row fan-out renders as
+    a false serial chain. _assign_grid_positions reserves one extra row-slot per extra hop so
+    this sub-row never collides with the next pair's own row.
+
+    Each K-object should belong to exactly one bridge Marker (Entwurf A design) — it should
+    never legitimately show up in more than one pair, so k_eid already being placed always
+    means a second marker references the same K-object; a review (2026-09-16) found the
+    "already placed" guard below would otherwise silently drop the second marker's row into
+    an unexplained gap. Logged as a warning instead of silently orphaning it, since this
+    points at a wiring bug upstream. (A narrower `k_eid not in w_eids` variant of this guard
+    was tried during the 2026-09-19 fan-out fix but dual-review found it could itself
+    silently suppress the warning for the one duplicate-marker case it exists to catch —
+    dropped again in favor of the unconditional check.)
+    """
+    x_off = col * column_width
+    if m_eid not in positions:
+        positions[m_eid] = (_LAYOUT_X_MARKER + x_off, y)
+    if k_eid is not None:
+        if k_eid in positions:
+            _LOGGER.warning(
+                "KNX bridge K-object %d is already placed by another marker pair — marker %d "
+                "also references it; check for a duplicate bridge Marker",
+                k_eid,
+                m_eid,
+            )
+        else:
+            positions[k_eid] = (_LAYOUT_X_WEBIO + x_off, y)
+    webio_x = _KNX_WEBIO_X if k_eid is not None else _LAYOUT_X_WEBIO
+    for hop_index, w_eid in enumerate(w_eids):
+        if w_eid in positions:
+            continue
+        webio_y = y + hop_index * hop_step
+        positions[w_eid] = (webio_x + x_off, webio_y)
+
+
+def _balanced_rows_per_col(total_slots: int, max_rows_per_col: int, max_cols: int) -> int:
+    """Rows per column that spreads total_slots evenly across the columns actually needed.
+
+    _get_canvas_grid_dims derives rows_per_col purely from canvas HEIGHT (how many rows
+    physically fit), independent of how many pairs/orphans are actually being sorted. Filling
+    column 0 to that full physical capacity before spilling into column 1 (plain greedy
+    col/slot fill below) produces an uneven split for an exact multiple — e.g. 50 KNX pairs
+    in a 26-row-capacity column becomes 26/24 instead of the expected 25/25 (user-reported
+    live, 2026-09-21, sorting a fresh 'HA - KNX [1-50]' cluster plan — api.py's own
+    _balanced_rows_per_col, applied to the *fresh-plan direct-placement* branch of
+    function_plan_add_knx_bridge_pairs, never actually ran here: that leg always calls with
+    fresh_plan=False, see button.py's _wire_knx_leg_bridge docstring, so every KNX cluster
+    plan is placed via this sort path instead).
+
+    Unlike api.py's variant, max_cols here is a hard physical cap (how many columns fit on
+    this canvas at the current column pitch), not unbounded — so the ideal column count is
+    additionally capped to it. When placing total_slots would genuinely need more columns
+    than fit, this falls back to max_rows_per_col unchanged and lets the existing per-item
+    overflow warnings in the loops below do their job exactly as before.
+    """
+    if total_slots <= 0 or max_cols <= 0:
+        return max(1, max_rows_per_col)
+    ideal_cols = min(max_cols, -(-total_slots // max_rows_per_col) or 1)
+    return min(max_rows_per_col, -(-total_slots // ideal_cols))
+
+
 def _assign_grid_positions(
-    pairs: list[tuple[int, int, int]],
+    pairs: list[tuple[int, int, list[int], int | None]],
     orphans: list[int],
     rows_per_col: int,
     max_cols: int,
     row_step: float = _LAYOUT_Y_STEP,
-) -> list[tuple[int, float, float]]:
+) -> tuple[list[tuple[int, float, float]], int, int]:
     """Calculate exact grid positions for sorted pairs and orphan elements.
 
     row_step overrides the row pitch (default: the generic single-row-tall marker/WebIO
     pitch) — pass the caller's own step when the pair's second element renders taller
     (e.g. the trigger plan's Flanke block), or consecutive rows would visually overlap.
+
+    A plan containing KNX bridge pairs overrides max_cols to the fixed _KNX_MAX_COLS instead
+    of the caller's canvas-derived value, since it also switches to the wider _KNX_COLUMN_WIDTH
+    pitch (see both constants' docstrings for why this is a fixed design constant rather than
+    something derived from canvas x_max).
+
+    Each pair consumes as many row-slots as it has WebIOs (normally 1; a KNX bridge pair
+    with a Phase 7 loopback fan-out consumes 2 — see _KNX_LOOPBACK_Y_OFFSET) instead of a
+    fixed one, so a multi-hop pair's extra sub-row is reserved space, not an overlap with the
+    next pair's own row. A running (col, slot) cursor replaces the old uniform row_idx
+    indexing for this reason; orphans continue from wherever that cursor left off, one slot
+    each, on the same cursor.
+
+    A variable pair_slots also means the pairs loop can hit column overflow sooner/more
+    unpredictably than the old fixed-1-slot scheme (a multi-slot pair wastes the last
+    partial slot of a column rather than splitting across it — a plan of all-2-slot KNX
+    pairs fits only half as many per column as the old fixed-1-slot scheme did) — both
+    overflow cases (a single pair too tall for rows_per_col regardless of column, and the
+    grid running out of columns generally) now warn with how many pairs are dropped,
+    mirroring the orphans loop's existing warning (silent-failure-hunter finding,
+    2026-09-19: the old code silently dropped every remaining pair with zero log output
+    once either happened).
+
+    Returns (positions, dropped_pairs, dropped_orphans) — the two counts are how many
+    trailing pairs/orphans this call could NOT place (0 unless one of the two overflow
+    warnings above fired), so the caller can report an accurate "N sorted" count instead of
+    the pre-drop len(pairs)/len(orphans) (code-review finding, 2026-09-19: the halved KNX
+    capacity above makes the caller's stale count reachable at a realistic ~16 KNX bridges
+    on a single-column canvas format, not just a theoretical edge case).
     """
+    column_width = _LAYOUT_COLUMN_WIDTH
+    if any(k_eid is not None for _, _, _, k_eid in pairs):
+        column_width = _KNX_COLUMN_WIDTH
+        max_cols = _KNX_MAX_COLS
+    total_slots = sum(len(w_eids) for _, _, w_eids, _ in pairs) + len(orphans)
+    rows_per_col = _balanced_rows_per_col(total_slots, rows_per_col, max_cols)
     positions: dict[int, tuple[float, float]] = {}
-    pairs_placed = 0
-    for row_idx, (_, m_eid, w_eid) in enumerate(pairs):
-        col = row_idx // rows_per_col
-        if col >= max_cols:
+    col = 0
+    slot = 0
+    dropped_pairs = 0
+    for i, (_, m_eid, w_eids, k_eid) in enumerate(pairs):
+        pair_slots = len(w_eids)
+        if pair_slots > rows_per_col:
+            # Can never fit regardless of column (every column has the same rows_per_col) —
+            # a distinct, clearer warning than the generic "grid full" one below, since this
+            # is a canvas/row-height mismatch, not the grid actually running out of columns
+            # (silent-failure-hunter finding, 2026-09-19: without this, a KNX bridge pair on
+            # a small canvas format — rows_per_col floors to 1 — vanished with zero trace,
+            # even on an otherwise-empty grid).
+            _LOGGER.warning(
+                "KNX bridge pair (marker %d) needs %d row-slots but only %d fit per column "
+                "(canvas too small) — dropping it and %d remaining pair(s)",
+                m_eid,
+                pair_slots,
+                rows_per_col,
+                len(pairs) - i - 1,
+            )
+            dropped_pairs = len(pairs) - i
             break
-        row_in_col = row_idx % rows_per_col
-        y = _LAYOUT_Y_START + row_in_col * row_step
-        if m_eid not in positions:
-            positions[m_eid] = (_LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH, y)
-        if w_eid not in positions:
-            positions[w_eid] = (_LAYOUT_X_WEBIO + col * _LAYOUT_COLUMN_WIDTH, y)
-        pairs_placed += 1
+        if slot + pair_slots > rows_per_col:
+            col += 1
+            slot = 0
+        if col >= max_cols:
+            _LOGGER.warning(
+                "Grid layout full (%d cols × %d rows): %d pair(s) left unsorted",
+                max_cols,
+                rows_per_col,
+                len(pairs) - i,
+            )
+            dropped_pairs = len(pairs) - i
+            break
+        y = _LAYOUT_Y_START + slot * row_step
+        _place_pair_row(positions, m_eid, w_eids, k_eid, col, y, column_width)
+        slot += pair_slots
+    dropped_orphans = 0
     for i, eid in enumerate(orphans):
-        row_idx = pairs_placed + i
-        col = row_idx // rows_per_col
+        if slot >= rows_per_col:
+            col += 1
+            slot = 0
         if col >= max_cols:
             _LOGGER.warning(
                 "Grid layout full (%d cols × %d rows): %d orphan element(s) left unsorted",
@@ -159,11 +477,12 @@ def _assign_grid_positions(
                 rows_per_col,
                 len(orphans) - i,
             )
+            dropped_orphans = len(orphans) - i
             break
-        row_in_col = row_idx % rows_per_col
-        y = _LAYOUT_Y_START + row_in_col * row_step
-        positions[eid] = (_LAYOUT_X_MARKER + col * _LAYOUT_COLUMN_WIDTH, y)
-    return [(eid, x, y) for eid, (x, y) in positions.items()]
+        y = _LAYOUT_Y_START + slot * row_step
+        positions[eid] = (_LAYOUT_X_MARKER + col * column_width, y)
+        slot += 1
+    return [(eid, x, y) for eid, (x, y) in positions.items()], dropped_pairs, dropped_orphans
 
 
 # --- MANAGED IO CLUSTER PLAN GRID ---

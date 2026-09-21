@@ -71,6 +71,13 @@
         "ignore": "🔇 Suppress this message"
       }
     },
+    "knx_dpt_suffix_action": {
+      "options": {
+        "ro": "🔒 Sensor de solo lectura (añadir [RO])",
+        "trig": "🔘 Pulsador / Taster (añadir [TRIG])",
+        "ignore": "🔇 Dejar como interruptor escribible"
+      }
+    },
     "function_plan_max_pairs_per_plan": {
       "options": {
         "50": "50 pares / 1 extensión",
@@ -114,7 +121,7 @@
           "schema_knx": "Variables disponibles: '{{KnxId}}', '{{KnxTitle}}'",
           "schema_io": "Variables disponibles: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "logikplan_plan_prefix": "Prefijo de los planes de clúster creados automáticamente. Los planes se llamarán, por ejemplo: HA - Marker [1-100].",
-          "logikplan_max_pairs_per_plan": "Cuántos pares de Web-IO y marcador caben en un plan gestionado antes de crear un nuevo plan de clúster. Para los planes de clúster de IO esto equivale a 1 (50), 2 (100) o 3 (150) extensiones por plan.",
+          "logikplan_max_pairs_per_plan": "Cuántos pares de Web-IO y marcador caben en un plan gestionado antes de crear un nuevo plan de clúster. Para los planes de clúster de IO esto equivale a 1 (50), 2 (100) o 3 (150) extensiones por plan. Los planes de clúster KNX ignoran este ajuste y siempre usan un tamaño fijo de 50.",
           "logikplan_io_extensions": "Los IO de cada extensión seleccionada se cablean en un plan de clúster de IO gestionado (p. ej. HA - IO [Ext]), una columna por extensión. Empiece con una sola extensión para probar y añada las demás después.",
           "ignored_markers": "IDs de marcadores y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'M' (p. ej. '123, 456; 789' o 'M123, M456' o '8-12'). Solo se pueden excluir marcadores con descripción.",
           "ignored_knx": "IDs de objetos KNX y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'K' (p. ej. '123, 456; 789' o 'K123, K456' o '8-12'). Solo se pueden excluir objetos KNX con descripción.",
@@ -276,6 +283,17 @@
     "duplicate_plan_names": {
       "title": "Nombres de plan Comexio duplicados",
       "description": "Dos o más planes de función comparten exactamente el mismo nombre: {plans}.\n\nComexio no exige nombres de plan únicos — solo el ID interno del plan es realmente único — pero esta integración resuelve los planes por nombre en varios lugares (Connect, Sort, Restore, …). Con nombres duplicados, una búsqueda por nombre podría apuntar silenciosamente al plan equivocado.\n\nTécnicamente puedes dejarlo así y hoy no se rompe nada, pero es un riesgo latente — sobre todo para `function_plan_restore`, si ese plan llega a eliminarse y necesita restaurarse. **Recomendación: renombra uno de los duplicados en Comexio Studio** para eliminar la ambigüedad de forma definitiva."
+    },
+    "knx_dpt_ambiguous": {
+      "title": "Objetos KNX pendientes de clasificar ({count})",
+      "fix_flow": {
+        "step": {
+          "knx_dpt_suffix": {
+            "title": "Clasificar objeto KNX",
+            "description": "**{name}** ({remaining} más después de este) usa un subtipo KNX DPT1.x (Schalter/Bool/Freigabe/Flanke/Binärwert) que KNX permite cablear tanto como un interruptor real, un pulsador (Taster) o una simple lectura de estado — el tipo de punto de datos por sí solo no permite saber cuál es, solo tú conoces el cableado real.\n\n¿Cómo debe tratarse este objeto?"
+          }
+        }
+      }
     }
   }
 }
