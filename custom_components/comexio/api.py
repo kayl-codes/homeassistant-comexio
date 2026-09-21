@@ -4108,7 +4108,7 @@ class ComexioAPI:
         )
         return None
 
-    async def _prepare_knx_bridge_batch(self, fub_id: int) -> tuple[dict[str, Any] | None, list[int], str | None]:
+    async def _prepare_knx_bridge_batch(self) -> tuple[dict[str, Any] | None, list[int], str | None]:
         """Fetch config, locate the KNX bridge marker block, and collect reusable free markers.
 
         Split out of function_plan_add_knx_bridge_pairs to keep its own cognitive complexity
@@ -4178,7 +4178,7 @@ class ComexioAPI:
         brand-new bridge immediately, in the same cycle, instead of re-auditing for the
         marker_id later (see _add_single_knx_bridge's docstring)).
         """
-        fub_modules, free_marker_ids, error = await self._prepare_knx_bridge_batch(fub_id)
+        fub_modules, free_marker_ids, error = await self._prepare_knx_bridge_batch()
         if error:
             return [], [error], {}
         assert fub_modules is not None  # guaranteed by error is None, see _prepare_knx_bridge_batch
