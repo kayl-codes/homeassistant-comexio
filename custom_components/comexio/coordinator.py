@@ -1517,13 +1517,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not device_id:
             return
         base_info = await self.api.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
-        base_id = base_info[0] if base_info else None
+        if not base_info:
+            # get_webio_base_info returns None both when the class genuinely doesn't exist
+            # AND on a failed HTTP fetch (same ambiguity get_webio_device_info's docstring
+            # warns about) — deleting the device first and treating this as "no class to
+            # delete" would orphan the class on a transient failure. Skip everything instead.
+            skipped["knx_loopback"] = "get_webio_base_info returned no class"
+            return
+        base_id = base_info[0]
         if not await self.api.delete_webio_device(device_id):
             skipped["knx_loopback"] = "delete_webio_device failed"
             return
         devices["knx_loopback"] = str(device_id)
-        if not base_id:
-            return
         if await self.api.delete_webio_base(base_id):
             classes["knx_loopback"] = str(base_id)
         else:
@@ -4078,6 +4083,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Split out to keep _audit_knx_bridge_items' own cognitive complexity within SonarQube
         S3776's limit — see that method's docstring for the full semantics.
+
+        Known limitation: "complete" is decided by sink COUNT (>=2) alone, not by verifying
+        one sink is actually the API-Loopback device's own command — a K-element with two
+        ordinary/non-loopback Web-IO connections would suppress this repair indefinitely.
+        Fixing this needs a live identity lookup of which webIoId belongs to the loopback
+        class' commands (it's deliberately outside WEBIO_CLASSES, so there's no cached
+        per-poll mapping for it yet — see ensure_knx_loopback_webio's docstring). Tracked as
+        an open Phase 7 follow-up (Sourcery finding, review 2026-09-21), not fixed here.
         """
         sink_counts: dict[str, int] = {}
         for k_ref_id, _webio_ref_id in wired_knx_webio_pairs:

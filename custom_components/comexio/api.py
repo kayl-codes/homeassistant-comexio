@@ -707,6 +707,13 @@ class ComexioAPI:
             _LOGGER.warning("Failed to fetch KNX DPT catalog: %s", err)
             return self._knx_dpt_catalog or {}
         result = self._scrape_js_vars(html, page_label="KNX DPT catalog")
+        if not result:
+            # HTTP 200 with no parseable `var $Name = {...}` block (changed/malformed page) —
+            # same "couldn't get a real catalog this time" outcome as the HTTP-failure branches
+            # above. Caching {} here would overwrite the last known-good catalog and, worse,
+            # tag it as current for this comexio_version so a later poll never retries.
+            _LOGGER.warning("KNX DPT catalog: HTTP 200 but no parseable data — keeping last known-good catalog")
+            return self._knx_dpt_catalog or {}
         _LOGGER.debug(
             "KNX DPT catalog: %d points, %d devices, %d dpt entries",
             len(result.get("KnxPoints", {})),
