@@ -261,6 +261,41 @@ def _balanced_rows_per_col(n_items: int, max_rows_per_col: int) -> int:
     return -(-n_items // n_cols)
 
 
+def _blank_marker_id_candidates(items: Any, min_id: int, max_id: int | None) -> set[int]:
+    """Untitled marker ids in [min_id, max_id) among $FubModules["2"]'s items.
+
+    Split out of ComexioAPI._free_marker_ids to keep its own cognitive complexity within
+    SonarQube S3776's limit — see that method's docstring for the reuse semantics.
+    """
+    candidates: set[int] = set()
+    for m in items:
+        if not isinstance(m, dict) or not isinstance(m.get("Id"), int) or m.get("Name"):
+            continue
+        m_id = m["Id"]
+        if m_id >= min_id and (max_id is None or m_id < max_id):
+            candidates.add(m_id)
+    return candidates
+
+
+def _placed_marker_ids(all_plans: dict[int, dict], ref_type: int) -> set[int]:
+    """Marker ids referenced as a plan element of the given reference type, across all_plans.
+
+    Split out of ComexioAPI._free_marker_ids to keep its own cognitive complexity within
+    SonarQube S3776's limit — see that method's docstring for the reuse semantics.
+    """
+    placed_ids: set[int] = set()
+    for plan_data in all_plans.values():
+        for elem in (plan_data.get("elements") or {}).values():
+            if not isinstance(elem, dict):
+                continue
+            ref = elem.get("reference") or {}
+            if str(ref.get("type")) != str(ref_type):
+                continue
+            with suppress(TypeError, ValueError):
+                placed_ids.add(int(ref.get("ref_id")))
+    return placed_ids
+
+
 class ComexioAPI:
     """
     Detailed interface to communicate with the Comexio API.
@@ -1254,34 +1289,41 @@ class ComexioAPI:
         )
         if knx_dpt_catalog:
             for item in items:
-                dpt = self._resolve_knx_dpt(knx_dpt_catalog, item["id"])
-                if dpt is None:
-                    _LOGGER.debug("KNX item %s: could not resolve DPT chain, using generic fallback", item["id"])
-                    continue
-                if item["type"] != "analog":
-                    if device_class := KNX_DPT_DIGITAL_DEVICE_CLASS.get(dpt):
-                        item["dpt_device_class"] = device_class
-                    elif dpt in KNX_DPT_DIGITAL_AMBIGUOUS:
-                        # Physically ambivalent DPT1.x subtype (see KNX_DPT_DIGITAL_AMBIGUOUS
-                        # docstring) — flagged for coordinator._audit_knx_dpt_ambiguous rather
-                        # than auto-classified.
-                        item["dpt_ambiguous"] = True
-                    continue
-                dpt_range = KNX_DPT_ANALOG_RANGES.get(dpt)
-                if dpt_range is None:
-                    _LOGGER.debug(
-                        "KNX item %s: resolved DPT%s.%s has no entry in KNX_DPT_ANALOG_RANGES, "
-                        "using generic fallback range",
-                        item["id"],
-                        dpt[0],
-                        dpt[1],
-                    )
-                    continue
-                item["dpt_min"], item["dpt_max"], item["dpt_unit"], item["dpt_step"] = dpt_range
-                if device_class := KNX_DPT_DEVICE_CLASS.get(dpt):
-                    item["dpt_device_class"] = device_class
+                self._apply_knx_dpt_metadata(item, knx_dpt_catalog)
             self._attach_knx_dpt3_composites(items, knx_dpt_catalog)
         data["knx"].extend(items)
+
+    def _apply_knx_dpt_metadata(self, item: dict[str, Any], knx_dpt_catalog: dict[str, Any]) -> None:
+        """Resolve one KNX item's DPT and attach unit/device_class/ambiguous metadata in place.
+
+        Split out of _process_knx to keep its own cognitive complexity within SonarQube
+        S3776's limit — see _process_knx's docstring for the full semantics implemented here.
+        """
+        dpt = self._resolve_knx_dpt(knx_dpt_catalog, item["id"])
+        if dpt is None:
+            _LOGGER.debug("KNX item %s: could not resolve DPT chain, using generic fallback", item["id"])
+            return
+        if item["type"] != "analog":
+            if device_class := KNX_DPT_DIGITAL_DEVICE_CLASS.get(dpt):
+                item["dpt_device_class"] = device_class
+            elif dpt in KNX_DPT_DIGITAL_AMBIGUOUS:
+                # Physically ambivalent DPT1.x subtype (see KNX_DPT_DIGITAL_AMBIGUOUS
+                # docstring) — flagged for coordinator._audit_knx_dpt_ambiguous rather
+                # than auto-classified.
+                item["dpt_ambiguous"] = True
+            return
+        dpt_range = KNX_DPT_ANALOG_RANGES.get(dpt)
+        if dpt_range is None:
+            _LOGGER.debug(
+                "KNX item %s: resolved DPT%s.%s has no entry in KNX_DPT_ANALOG_RANGES, using generic fallback range",
+                item["id"],
+                dpt[0],
+                dpt[1],
+            )
+            return
+        item["dpt_min"], item["dpt_max"], item["dpt_unit"], item["dpt_step"] = dpt_range
+        if device_class := KNX_DPT_DEVICE_CLASS.get(dpt):
+            item["dpt_device_class"] = device_class
 
     def _attach_knx_dpt3_composites(self, items: list[dict[str, Any]], knx_dpt_catalog: dict[str, Any]) -> None:
         """Tag DPT3.x (Dimmer 3.007 / Blinds 3.008) K-element pairs with composite metadata.
@@ -1308,46 +1350,54 @@ class ComexioAPI:
                 by_device[str(device_id)].append(item)
 
         for device_id, pair in by_device.items():
-            if len(pair) != 2:
-                if len(pair) > 2:
-                    _LOGGER.debug(
-                        "KNX device %s has %d points sharing one KnxDeviceId (expected at most 2), "
-                        "skipping composite grouping",
-                        device_id,
-                        len(pair),
-                    )
-                continue
-            dpt = self._resolve_knx_dpt(knx_dpt_catalog, pair[0]["id"])
-            domain = KNX_DPT3_COMPOSITE_DOMAIN.get(dpt) if dpt else None
-            if domain is None:
+            self._tag_knx_dpt3_pair(device_id, pair, knx_dpt_catalog)
+
+    def _tag_knx_dpt3_pair(self, device_id: str, pair: list[dict[str, Any]], knx_dpt_catalog: dict[str, Any]) -> None:
+        """Tag one KnxDeviceId's 2-point group with knx_composite metadata, if it qualifies.
+
+        Split out of _attach_knx_dpt3_composites to keep its own cognitive complexity within
+        SonarQube S3776's limit — see that method's docstring for the full DPT3.x pairing
+        semantics.
+        """
+        if len(pair) != 2:
+            if len(pair) > 2:
                 _LOGGER.debug(
-                    "KNX device %s has 2 points but resolved DPT %s isn't a DPT3.x composite, "
+                    "KNX device %s has %d points sharing one KnxDeviceId (expected at most 2), "
                     "skipping composite grouping",
                     device_id,
-                    dpt,
+                    len(pair),
                 )
-                continue
-            direction_item = next((i for i in pair if i["type"] == "digital"), None)
-            stepcode_item = next((i for i in pair if i["type"] == "analog"), None)
-            if direction_item is None or stepcode_item is None:
-                _LOGGER.debug(
-                    "KNX device %s resolved to DPT%s.%s but its 2 points aren't one digital + "
-                    "one analog K-element, skipping composite grouping",
-                    device_id,
-                    dpt[0],
-                    dpt[1],
-                )
-                continue
-            direction_item["knx_composite"] = {
-                "role": "direction",
-                "domain": domain,
-                "partner_id": stepcode_item["id"],
-            }
-            stepcode_item["knx_composite"] = {
-                "role": "stepcode",
-                "domain": domain,
-                "partner_id": direction_item["id"],
-            }
+            return
+        dpt = self._resolve_knx_dpt(knx_dpt_catalog, pair[0]["id"])
+        domain = KNX_DPT3_COMPOSITE_DOMAIN.get(dpt) if dpt else None
+        if domain is None:
+            _LOGGER.debug(
+                "KNX device %s has 2 points but resolved DPT %s isn't a DPT3.x composite, skipping composite grouping",
+                device_id,
+                dpt,
+            )
+            return
+        direction_item = next((i for i in pair if i["type"] == "digital"), None)
+        stepcode_item = next((i for i in pair if i["type"] == "analog"), None)
+        if direction_item is None or stepcode_item is None:
+            _LOGGER.debug(
+                "KNX device %s resolved to DPT%s.%s but its 2 points aren't one digital + "
+                "one analog K-element, skipping composite grouping",
+                device_id,
+                dpt[0],
+                dpt[1],
+            )
+            return
+        direction_item["knx_composite"] = {
+            "role": "direction",
+            "domain": domain,
+            "partner_id": stepcode_item["id"],
+        }
+        stepcode_item["knx_composite"] = {
+            "role": "stepcode",
+            "domain": domain,
+            "partner_id": direction_item["id"],
+        }
 
     def _process_source_items(
         self,
@@ -1384,42 +1434,80 @@ class ComexioAPI:
             if not has_name and item_id not in referenced_ids:
                 continue
 
-            type_raw = raw.get("Type", 1)
-            if module_key == "11":
-                # KNX ($FubModules["11"]): Type is a rich catalog code (same value space as
-                # normal IOs' $IOTypesBinary), NOT the simple {1,2,3} scale markers use — the
-                # marker-only heuristic below would e.g. misclassify Type=121 (DPT17 scene
-                # number, analog) as digital. Reuse the same self.io_types lookup
-                # _add_io_entry() already uses for IOs (confirmed live 2026-09-14 against real
-                # KNX wiring on a function plan — see project_knx_write_path_design memory).
-                is_binary = self.io_types.get(str(type_raw), {}).get("binary", False)
-                type_str = "digital" if is_binary else "analog"
-            else:
-                type_str = "analog" if type_raw in [2, 3] else "digital"
-            title = raw.get("Name") or self._NO_NAME_MARKER_TITLE
-
-            ha_name = schema.format_map(
-                SafeDict(ServerAlias=server_alias, **{id_placeholder: item_id, title_placeholder: title})
-            )
-
             items.append(
-                {
-                    "id": item_id,
-                    "ha_name": " ".join(ha_name.split()),
-                    "name": f"{id_prefix}{item_id} {title}",
-                    # Bare Comexio title, without the id prefix "name" carries — needed e.g.
-                    # by create_knx_bridge_marker() to build the bridge marker's own title.
-                    "title": title,
-                    # Unnamed-but-referenced item ("#nn"): the plan preview greys it out
-                    # like an inactive IO as a visual hint that it has no label in Comexio.
-                    "no_name": not has_name,
-                    "type": type_str,
-                    "type_raw": type_raw,
-                    "value": self._clean_value(live_states.get(item_id, 0)),
-                    "kind": self._marker_kind(title, module_key=module_key),
-                }
+                self._build_source_item(
+                    raw,
+                    item_id=item_id,
+                    has_name=has_name,
+                    module_key=module_key,
+                    schema=schema,
+                    id_prefix=id_prefix,
+                    id_placeholder=id_placeholder,
+                    title_placeholder=title_placeholder,
+                    server_alias=server_alias,
+                    live_states=live_states,
+                )
             )
         return items
+
+    def _build_source_item(
+        self,
+        raw: dict[str, Any],
+        *,
+        item_id: str,
+        has_name: bool,
+        module_key: str,
+        schema: str,
+        id_prefix: str,
+        id_placeholder: str,
+        title_placeholder: str,
+        server_alias: str,
+        live_states: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build one Marker/KNX item dict from its raw $FubModules entry.
+
+        Split out of _process_source_items to keep its own cognitive complexity within
+        SonarQube S3776's limit — see that method's docstring for the shared semantics.
+        """
+        type_raw = raw.get("Type", 1)
+        type_str = self._source_item_type(module_key, type_raw)
+        title = raw.get("Name") or self._NO_NAME_MARKER_TITLE
+
+        ha_name = schema.format_map(
+            SafeDict(ServerAlias=server_alias, **{id_placeholder: item_id, title_placeholder: title})
+        )
+
+        return {
+            "id": item_id,
+            "ha_name": " ".join(ha_name.split()),
+            "name": f"{id_prefix}{item_id} {title}",
+            # Bare Comexio title, without the id prefix "name" carries — needed e.g.
+            # by create_knx_bridge_marker() to build the bridge marker's own title.
+            "title": title,
+            # Unnamed-but-referenced item ("#nn"): the plan preview greys it out
+            # like an inactive IO as a visual hint that it has no label in Comexio.
+            "no_name": not has_name,
+            "type": type_str,
+            "type_raw": type_raw,
+            "value": self._clean_value(live_states.get(item_id, 0)),
+            "kind": self._marker_kind(title, module_key=module_key),
+        }
+
+    def _source_item_type(self, module_key: str, type_raw: Any) -> str:
+        """digital/analog classification for one raw Marker/KNX Type value.
+
+        Split out of _process_source_items for SonarQube S3776.
+        """
+        if module_key == "11":
+            # KNX ($FubModules["11"]): Type is a rich catalog code (same value space as
+            # normal IOs' $IOTypesBinary), NOT the simple {1,2,3} scale markers use — the
+            # marker-only heuristic below would e.g. misclassify Type=121 (DPT17 scene
+            # number, analog) as digital. Reuse the same self.io_types lookup
+            # _add_io_entry() already uses for IOs (confirmed live 2026-09-14 against real
+            # KNX wiring on a function plan — see project_knx_write_path_design memory).
+            is_binary = self.io_types.get(str(type_raw), {}).get("binary", False)
+            return "digital" if is_binary else "analog"
+        return "analog" if type_raw in [2, 3] else "digital"
 
     @staticmethod
     def _marker_kind(m_title: str, *, module_key: str) -> MarkerKind:
@@ -2308,7 +2396,7 @@ class ComexioAPI:
             # docstring. Its own session.get() call is unwrapped though, so a connection
             # failure/timeout propagates as aiohttp.ClientError/TimeoutError instead — must not
             # let either escape uncaught out of a tuple[str, bool] | None-returning helper.
-            _LOGGER.error("ensure_knx_loopback_webio: device check failed: %s", err)
+            _LOGGER.warning("ensure_knx_loopback_webio: device check failed: %s", err)
             return None
 
         base_info = await self.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
@@ -3571,27 +3659,10 @@ class ComexioAPI:
         """
         group = fub_modules.get("2")
         items = group.values() if isinstance(group, dict) else (group or [])
-        candidate_ids = {
-            m["Id"]
-            for m in items
-            if isinstance(m, dict)
-            and isinstance(m.get("Id"), int)
-            and m["Id"] >= min_id
-            and (max_id is None or m["Id"] < max_id)
-            and not m.get("Name")
-        }
+        candidate_ids = _blank_marker_id_candidates(items, min_id, max_id)
         if not candidate_ids:
             return []
-        placed_ids: set[int] = set()
-        for plan_data in all_plans.values():
-            for elem in (plan_data.get("elements") or {}).values():
-                if not isinstance(elem, dict):
-                    continue
-                ref = elem.get("reference") or {}
-                if str(ref.get("type")) != str(ref_type):
-                    continue
-                with suppress(TypeError, ValueError):
-                    placed_ids.add(int(ref.get("ref_id")))
+        placed_ids = _placed_marker_ids(all_plans, ref_type)
         return sorted(candidate_ids - placed_ids)
 
     async def _fill_marker_gap(self, current_highest_id: int, target_id: int) -> int:
@@ -4015,10 +4086,10 @@ class ComexioAPI:
                 "function_plan_add_knx_bridge_pairs: could not fetch current Comexio config "
                 "(FubModules missing) — aborting"
             )
-            return [], ["could not fetch current Comexio config — aborting KNX bridge wiring, see log"]
+            return [], ["could not fetch current Comexio config — aborting KNX bridge wiring, see log"], {}
         target = await self.ensure_knx_bridge_block_start(fub_modules)
         if target is None:
-            return [], ["failed to reach the KNX bridge marker block boundary — aborting, see log"]
+            return [], ["failed to reach the KNX bridge marker block boundary — aborting, see log"], {}
 
         all_plans = await self.function_plan_load_all_plans()
         if all_plans:
@@ -4083,9 +4154,11 @@ class ComexioAPI:
             )
             if err is None:
                 added.append(k_id)
-                # marker_id is only None on the create_knx_bridge_marker failure branch, which
-                # always pairs with a non-None err — see _add_single_knx_bridge's contract.
-                assert marker_id is not None
+                if marker_id is None:
+                    # Only reachable if _add_single_knx_bridge's err-is-None contract is
+                    # violated — see its docstring. Fail loudly rather than silently drop
+                    # this K-element out of the returned `bridged` map.
+                    raise AssertionError(f"_add_single_knx_bridge returned marker_id=None with err=None for K{k_id}")
                 binary = self.io_types.get(str(item["type_raw"]), {}).get("binary", False)
                 bridged[k_id] = (marker_id, binary)
             elif err:
@@ -4296,6 +4369,29 @@ class ComexioAPI:
             # would under-report the batch's real error count to the caller/sync summary.
             return [], [], [*errors, f"could not load function plan {fub_id} — aborting KNX loopback wiring, see log"]
         existing_by_ref, _ = self._function_plan_existing_refs(plan_data)
+
+        return await self._wire_knx_bridge_loopback_batch(
+            fub_id, pending, name_to_id, device_id, existing_by_ref, plan_data, errors, fresh_plan, progress_cb
+        )
+
+    async def _wire_knx_bridge_loopback_batch(
+        self,
+        fub_id: int,
+        pending: dict[str, tuple[int, int]],
+        name_to_id: dict[str, Any],
+        device_id: str | int,
+        existing_by_ref: dict[tuple[int, int], int],
+        plan_data: dict,
+        errors: list[str],
+        fresh_plan: bool,
+        progress_cb: Callable[[int, int], None] | None,
+    ) -> tuple[list[int], list[int], list[str]]:
+        """Place and wire each pending loopback command's function-plan element.
+
+        Split out of function_plan_add_knx_bridge_loopback_pairs to keep its own cognitive
+        complexity within SonarQube S3776's limit — see that method's docstring for the full
+        semantics (grid placement convention, added/skipped/errors contract).
+        """
         _, y_max = self.get_fub_canvas_bounds(fub_id)
         rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
 

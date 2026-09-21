@@ -851,21 +851,7 @@ class ComexioRepairFlow(RepairsFlow):
         if not entry or not coordinator:
             return self.async_abort(reason="entry_not_found")
 
-        suffix_by_action = {ACTION_KNX_RO: MARKER_READ_ONLY_SUFFIX, ACTION_KNX_TRIG: MARKER_TRIGGER_SUFFIXES[0]}
-        renamed_count = 0
-        failed: list[str] = []
-        newly_ignored: set[int] = set()
-
-        for k_id, action in self._knx_dpt_resolved.items():
-            if action == ACTION_IGNORE:
-                newly_ignored.add(int(k_id))
-                continue
-            item = self._knx_dpt_all_items[k_id]
-            new_title = f"{item['title']} {suffix_by_action[action]}"
-            if await coordinator.api.rename_knx_object(k_id, new_title):
-                renamed_count += 1
-            else:
-                failed.append(item["name"])
+        renamed_count, failed, newly_ignored = await self._apply_knx_dpt_classifications(coordinator.api)
 
         if newly_ignored:
             # R2: request_options_update_without_reload (not a plain async_update_entry) so
@@ -891,6 +877,37 @@ class ComexioRepairFlow(RepairsFlow):
         elif newly_ignored:
             await coordinator.async_refresh()
 
+        title = self._knx_dpt_suffix_result_title(renamed_count, newly_ignored, failed)
+        return self.async_create_entry(title=title, data={})
+
+    async def _apply_knx_dpt_classifications(self, api):
+        """Rename or ignore every K-element per its collected classification.
+
+        Split out of _async_apply_knx_dpt_suffix to keep its own cognitive complexity within
+        SonarQube S3776's limit. Returns (renamed_count, failed item names, newly-ignored K ids).
+        """
+        suffix_by_action = {ACTION_KNX_RO: MARKER_READ_ONLY_SUFFIX, ACTION_KNX_TRIG: MARKER_TRIGGER_SUFFIXES[0]}
+        renamed_count = 0
+        failed: list[str] = []
+        newly_ignored: set[int] = set()
+        for k_id, action in self._knx_dpt_resolved.items():
+            if action == ACTION_IGNORE:
+                newly_ignored.add(int(k_id))
+                continue
+            item = self._knx_dpt_all_items[k_id]
+            new_title = f"{item['title']} {suffix_by_action[action]}"
+            if await api.rename_knx_object(k_id, new_title):
+                renamed_count += 1
+            else:
+                failed.append(item["name"])
+        return renamed_count, failed, newly_ignored
+
+    def _knx_dpt_suffix_result_title(self, renamed_count: int, newly_ignored: set[int], failed: list[str]) -> str:
+        """Build the localized repair-result title.
+
+        Split out of _async_apply_knx_dpt_suffix to keep its own cognitive complexity within
+        SonarQube S3776's limit.
+        """
         is_de = self.hass.config.language == "de"
         if is_de:
             title = f"{renamed_count} umbenannt, {len(newly_ignored)} unverändert gelassen"
@@ -904,5 +921,4 @@ class ComexioRepairFlow(RepairsFlow):
             # the issue and classify it again.
             names = ", ".join(failed)
             title += f" ({len(failed)} fehlgeschlagen: {names})" if is_de else f" ({len(failed)} failed: {names})"
-
-        return self.async_create_entry(title=title, data={})
+        return title

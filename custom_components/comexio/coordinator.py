@@ -3999,7 +3999,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._lp_missing_recheck_pending = True
             return knx_bridge_missing_items, knx_bridge_loopback_missing_items
         knx_category = category_by_fub_module_type("11")
-        knx_by_id = {str(k["id"]): k for k in knx_objects}
         for k in knx_objects:
             k_id = str(k["id"])
             if source_audit_key(knx_category, k["id"]) not in ha_map:
@@ -4020,6 +4019,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._lp_missing_recheck_pending = True
             return knx_bridge_missing_items, knx_bridge_loopback_missing_items
 
+        knx_by_id = {str(k["id"]): k for k in knx_objects}
+        knx_bridge_loopback_missing_items = self._audit_knx_bridge_loopback_items(
+            knx_bridge_marker_by_k_id, knx_by_id, wired_knx_webio_pairs, mismatches
+        )
+        return knx_bridge_missing_items, knx_bridge_loopback_missing_items
+
+    def _audit_knx_bridge_loopback_items(
+        self,
+        knx_bridge_marker_by_k_id: dict[str, str],
+        knx_by_id: dict[str, dict[str, Any]],
+        wired_knx_webio_pairs: set[tuple[str, str]],
+        mismatches: set[str],
+    ) -> list[dict[str, Any]]:
+        """Phase 7 API-Loopback fan-out audit half of _audit_knx_bridge_items.
+
+        Split out to keep _audit_knx_bridge_items' own cognitive complexity within SonarQube
+        S3776's limit — see that method's docstring for the full semantics.
+        """
         sink_counts: dict[str, int] = {}
         for k_ref_id, _webio_ref_id in wired_knx_webio_pairs:
             sink_counts[k_ref_id] = sink_counts.get(k_ref_id, 0) + 1
@@ -4030,6 +4047,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # check once, not per candidate.
         has_api_credentials = self._api_credentials_configured()
         unfixable_without_credentials: list[str] = []
+        knx_bridge_loopback_missing_items: list[dict[str, Any]] = []
         for k_id, marker_id in knx_bridge_marker_by_k_id.items():
             # Not in sink_counts at all -> the read-path wire itself is missing, a different,
             # already-audited gap (knx_bridge_missing/function_plan_missing) — nothing to fan
@@ -4056,7 +4074,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 len(unfixable_without_credentials),
                 ", K".join(sorted(unfixable_without_credentials)),
             )
-        return knx_bridge_missing_items, knx_bridge_loopback_missing_items
+        return knx_bridge_loopback_missing_items
 
     @staticmethod
     def _knx_bridge_loopback_missing_item(k: dict[str, Any] | None, k_id: str, marker_id: str) -> dict[str, Any]:
