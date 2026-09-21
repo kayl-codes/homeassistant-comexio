@@ -454,6 +454,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._watchdog_started_at: datetime = dt_util.utcnow()
         self.watchdog_history: list[dict[str, Any]] = []
         self._watchdog_history_store: Store = Store(hass, 1, f"{DOMAIN}_watchdog_history_{self.server_id}")
+        # KNX DPT catalog: persisted so a fresh ComexioAPI instance (created on every restart
+        # AND every config-entry reload, not just a full HA restart) still has a fallback
+        # catalog if its very first live fetch fails — without this, api.get_knx_dpt_catalog's
+        # own in-process stale-cache fallback can't help yet (nothing has been fetched in this
+        # process), so a transient failure right after a reload would return {} and silently
+        # drop knx_composite tagging for that poll (Sourcery finding, review 2026-09-21; see
+        # async_load_knx_dpt_catalog).
+        self._knx_dpt_catalog_store: Store = Store(hass, 1, f"{DOMAIN}_knx_dpt_catalog_{self.server_id}")
+        self._last_persisted_knx_dpt_catalog_version: str | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
@@ -520,6 +529,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # failure), so an unreachable/failed fetch just leaves every KNX analog item on its
             # generic fallback range rather than failing this whole poll.
             knx_dpt_catalog = await self.api.get_knx_dpt_catalog() if import_knx else None
+            if import_knx and knx_dpt_catalog:
+                await self._maybe_persist_knx_dpt_catalog()
             parsed_data = self.api.parse_config(
                 raw_config, live_states, referenced_markers, knx_live_states, knx_dpt_catalog
             )
@@ -2115,6 +2126,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not stored:
             return
         self.extension_registry = stored.get("extensions", {})
+
+    async def async_load_knx_dpt_catalog(self) -> None:
+        """Restore the last known-good KNX DPT catalog from disk (called once at setup).
+
+        Seeds api.ComexioAPI's in-memory cache before the first poll so its own fetch-failure
+        fallback (get_knx_dpt_catalog: "return self._knx_dpt_catalog or {}") has something
+        real to fall back to even on a fresh instance — see _knx_dpt_catalog_store's docstring
+        for why that matters on every reload, not just a full HA restart.
+        """
+        stored = await self._knx_dpt_catalog_store.async_load()
+        if not stored:
+            return
+        self.api.seed_knx_dpt_catalog(stored.get("catalog", {}), stored.get("version"))
+        self._last_persisted_knx_dpt_catalog_version = stored.get("version")
+
+    async def _maybe_persist_knx_dpt_catalog(self) -> None:
+        """Persist the KNX DPT catalog when a freshly fetched version differs from disk.
+
+        Only called after a non-empty knx_dpt_catalog was returned this poll (see
+        _async_update_data) — version-gated like the other *_store saves in this class so an
+        unchanged catalog (the common case, see get_knx_dpt_catalog's own version-cache check)
+        doesn't hit disk every poll.
+        """
+        snapshot = self.api.get_knx_dpt_catalog_snapshot()
+        if snapshot is None:
+            return
+        catalog, version = snapshot
+        if version == self._last_persisted_knx_dpt_catalog_version:
+            return
+        await self._knx_dpt_catalog_store.async_save({"catalog": catalog, "version": version})
+        self._last_persisted_knx_dpt_catalog_version = version
 
     async def async_load_watchdog_history(self) -> None:
         """Restore the persisted Bus-Load-Watchdog event history (called once at setup)."""

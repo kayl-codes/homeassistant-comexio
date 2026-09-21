@@ -69,6 +69,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     interval = conf.get("scan_interval", 15)
     coordinator.update_interval = timedelta(minutes=interval)
 
+    # Seed the KNX DPT catalog from disk before the first refresh below — that first poll is
+    # exactly the case api.seed_knx_dpt_catalog exists to protect: a freshly created api
+    # instance has nothing cached yet, so if its very first live catalog fetch fails, this
+    # restores last known-good data instead of leaving DPT3.x composite pairs untagged.
+    await coordinator.async_load_knx_dpt_catalog()
+
     try:
         if not await api.login():
             if api.last_login_error == "connection":

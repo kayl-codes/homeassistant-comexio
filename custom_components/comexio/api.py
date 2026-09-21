@@ -717,6 +717,25 @@ class ComexioAPI:
         self._knx_dpt_catalog_version = self.comexio_version
         return result
 
+    def get_knx_dpt_catalog_snapshot(self) -> tuple[dict[str, Any], str | None] | None:
+        """Current in-memory KNX DPT catalog + its comexio_version tag, or None if never fetched.
+
+        Used by the coordinator to persist the last known-good catalog to disk (see
+        seed_knx_dpt_catalog and coordinator.async_load_knx_dpt_catalog) — closes the
+        cold-start gap where a freshly created instance's very first fetch failing would
+        otherwise return {} instead of falling back to a real catalog, since the in-process
+        fallback above has nothing cached yet on a fresh instance (Sourcery finding, review
+        2026-09-21).
+        """
+        if self._knx_dpt_catalog is None:
+            return None
+        return self._knx_dpt_catalog, self._knx_dpt_catalog_version
+
+    def seed_knx_dpt_catalog(self, catalog: dict[str, Any], version: str | None) -> None:
+        """Restore a persisted KNX DPT catalog before the first poll (see get_knx_dpt_catalog_snapshot)."""
+        self._knx_dpt_catalog = catalog
+        self._knx_dpt_catalog_version = version
+
     @staticmethod
     def _resolve_knx_dpt(knx_dpt_catalog: dict[str, Any], k_id: str) -> tuple[int, int] | None:
         """Resolve a K-element's real KNX DPT (KnxBaseTypeId, KnxSubId) via Point -> Device -> Dpt.
@@ -1275,7 +1294,11 @@ class ComexioAPI:
         matching device class (e.g. the DPT3.x step/direction values). A digital item whose DPT
         is instead one of the physically ambivalent DPT1.x subtypes (KNX_DPT_DIGITAL_AMBIGUOUS)
         gets dpt_ambiguous=True — see coordinator._auto_suffix_unambiguous_knx /
-        _audit_knx_dpt_ambiguous for what consumes these two flags.
+        _audit_knx_dpt_ambiguous for what consumes these two flags. An item whose raw Type
+        has no entry at all in self.io_types (_source_item_type's dpt_type_unresolved) also
+        gets dpt_ambiguous=True unconditionally, routing it into the same human-review repair
+        flow instead of _build_source_item silently guessing "analog" for a possibly-digital
+        object (Sourcery finding, review 2026-09-21).
         """
         items = self._process_source_items(
             fub_modules,
@@ -1287,6 +1310,16 @@ class ComexioAPI:
             server_alias=server_alias,
             live_states=live_states or {},
         )
+        for item in items:
+            if item.pop("dpt_type_unresolved", False):
+                # Set by _source_item_type: no $IOTypesBinary entry at all for this KNX
+                # object's raw Type, so its digital/analog split is genuinely unknown rather
+                # than merely unresolved-but-analog. Routed into the same human-review repair
+                # flow as a physically ambivalent DPT1.x subtype (_audit_knx_dpt_ambiguous)
+                # regardless of knx_dpt_catalog availability below — that catalog is unrelated
+                # to io_types, and this must not depend on a second, independent fetch
+                # succeeding too.
+                item["dpt_ambiguous"] = True
         if knx_dpt_catalog:
             for item in items:
                 self._apply_knx_dpt_metadata(item, knx_dpt_catalog)
@@ -1299,6 +1332,14 @@ class ComexioAPI:
         Split out of _process_knx to keep its own cognitive complexity within SonarQube
         S3776's limit — see _process_knx's docstring for the full semantics implemented here.
         """
+        if item.get("dpt_ambiguous"):
+            # Already forced True in _process_knx because io_types had no entry for this
+            # object's raw Type at all (dpt_type_unresolved) — a device_class this DPT chain
+            # might independently resolve to is not corroborating evidence worth auto-tagging
+            # on (KNX_DPT_DIGITAL_DEVICE_CLASS below would otherwise make it eligible for
+            # coordinator._auto_suffix_unambiguous_knx's auto-rename, racing the human-review
+            # repair flow this item is already queued for). Leave it on the generic fallback.
+            return
         dpt = self._resolve_knx_dpt(knx_dpt_catalog, item["id"])
         if dpt is None:
             _LOGGER.debug("KNX item %s: could not resolve DPT chain, using generic fallback", item["id"])
@@ -1470,14 +1511,14 @@ class ComexioAPI:
         SonarQube S3776's limit — see that method's docstring for the shared semantics.
         """
         type_raw = raw.get("Type", 1)
-        type_str = self._source_item_type(module_key, type_raw)
+        type_str, type_unresolved = self._source_item_type(module_key, type_raw)
         title = raw.get("Name") or self._NO_NAME_MARKER_TITLE
 
         ha_name = schema.format_map(
             SafeDict(ServerAlias=server_alias, **{id_placeholder: item_id, title_placeholder: title})
         )
 
-        return {
+        item = {
             "id": item_id,
             "ha_name": " ".join(ha_name.split()),
             "name": f"{id_prefix}{item_id} {title}",
@@ -1492,11 +1533,20 @@ class ComexioAPI:
             "value": self._clean_value(live_states.get(item_id, 0)),
             "kind": self._marker_kind(title, module_key=module_key),
         }
+        if type_unresolved:
+            # Only ever True for module_key=="11" (see _source_item_type) — a transient
+            # signal, popped by _process_knx right after building these items (converted into
+            # dpt_ambiguous=True there) and never present on a marker item.
+            item["dpt_type_unresolved"] = True
+        return item
 
-    def _source_item_type(self, module_key: str, type_raw: Any) -> str:
+    def _source_item_type(self, module_key: str, type_raw: Any) -> tuple[str, bool]:
         """digital/analog classification for one raw Marker/KNX Type value.
 
-        Split out of _process_source_items for SonarQube S3776.
+        Returns (type_str, unresolved) — unresolved is only ever True for a KNX item whose
+        raw Type has no entry at all in self.io_types (Comexio hasn't provided an
+        $IOTypesBinary entry for it yet, e.g. a very new/uncommon DPT). Split out of
+        _process_source_items for SonarQube S3776.
         """
         if module_key == "11":
             # KNX ($FubModules["11"]): Type is a rich catalog code (same value space as
@@ -1505,9 +1555,19 @@ class ComexioAPI:
             # number, analog) as digital. Reuse the same self.io_types lookup
             # _add_io_entry() already uses for IOs (confirmed live 2026-09-14 against real
             # KNX wiring on a function plan — see project_knx_write_path_design memory).
-            is_binary = self.io_types.get(str(type_raw), {}).get("binary", False)
-            return "digital" if is_binary else "analog"
-        return "analog" if type_raw in [2, 3] else "digital"
+            entry = self.io_types.get(str(type_raw))
+            if entry is None:
+                # Genuinely unresolved, not just "resolved and analog" — defaulting to
+                # "analog" here would silently expose a possibly-digital object as a
+                # writable number entity (Sourcery finding, review 2026-09-21). "digital"
+                # is the safer default of the two: it only risks a spurious switch/[RO]
+                # sensor rather than pushing an out-of-range analog write to what might
+                # be a binary KNX datapoint, and dpt_type_unresolved=True routes it
+                # through the same human-review repair flow as a physically ambivalent
+                # DPT1.x subtype either way.
+                return "digital", True
+            return ("digital" if entry.get("binary", False) else "analog"), False
+        return ("analog" if type_raw in [2, 3] else "digital"), False
 
     @staticmethod
     def _marker_kind(m_title: str, *, module_key: str) -> MarkerKind:
