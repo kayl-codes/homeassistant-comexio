@@ -2614,14 +2614,17 @@ class ComexioAPI:
 
         POSTs to delete_element/ with elementId=<marker_id>, type=<Marker's fub_module_type,
         "2">, full=true. Tri-state return so the caller (marker_delete service) can tell a
-        confirmed "nothing to delete" apart from a genuine request failure — collapsing both
-        to one bool would let a session/HTTP/parse failure be misreported as "marker already
+        "nothing changed" outcome apart from a genuine request failure — collapsing both to
+        one bool would let a session/HTTP/parse failure be misreported as "marker already
         absent" for what is an irreversible action:
         - True: {"result": "1"} — deleted.
-        - False: request completed (HTTP 200, valid JSON object) but result wasn't "1" — the
-          marker id doesn't (or no longer) exist. Expected/routine in batch/range use, not an error.
+        - False: request completed (HTTP 200, valid JSON object) but result wasn't "1" — most
+          often because the marker id doesn't (or no longer) exist, but the server could also
+          be reporting a rejection this way; the caller cross-checks against a fresh presence
+          lookup (get_marker_delete_eligibility's third return value) to tell those apart
+          rather than assuming this is always the harmless case.
         - None: the request itself failed (non-200, unparsable or non-object JSON body,
-          transport error) — a real failure, must NOT be reported as "already absent".
+          transport error, timeout) — a real failure, must NOT be reported as "already absent".
         """
         url = f"{self._base_url}/admin/function_function_module/delete_element/"
         payload = {
@@ -2650,19 +2653,18 @@ class ComexioAPI:
                 success = str(result.get("result")) == "1"
                 _LOGGER.info("delete_marker: marker_id=%s result=%s", marker_id, success)
                 return success
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, TimeoutError):
             _LOGGER.exception("delete_marker: HTTP request error deleting marker_id=%s", marker_id)
             return None
 
-    async def get_marker_delete_eligibility(self, marker_ids: list[int]) -> tuple[list[int], list[int]]:
-        """Split marker_ids into (deletable, protected) using a fresh CategoryId lookup.
+    async def get_marker_delete_eligibility(self, marker_ids: list[int]) -> tuple[list[int], list[int], set[int]]:
+        """Split marker_ids into (deletable, protected, known_ids) using a fresh CategoryId lookup.
 
         Safety gate for marker_delete (user requirement 2026-09-17): only markers this
-        integration created itself via the API — CategoryId==1, e.g. create_knx_bridge_marker
-        — may be deleted. CategoryId==0 covers both factory-provisioned markers (M1 "System
-        rebooted", M2 "TRUE", M3 "FALSE" on a fresh install) and anything a human created via
-        Comexio Studio, and must never be reachable through this service (see
-        _highest_marker_id's only_original_titled for the same CategoryId convention).
+        integration created itself via the API carry CategoryId==1 and may be deleted.
+        CategoryId==0 covers both factory-provisioned markers (M1 "System rebooted", M2
+        "TRUE", M3 "FALSE" on a fresh install) and anything a human created via Comexio
+        Studio, and must never be reachable through this service.
 
         A marker_id absent from the current config entirely (already deleted, or never
         existed) is treated as deletable, not protected — it defaults to CategoryId 1 rather
@@ -2671,38 +2673,160 @@ class ComexioAPI:
 
         Deny-by-default on top of allow-by-CategoryId: an unrecognized CategoryId value (not
         just 0 — nothing here guarantees the field stays a clean 0/1 flag, e.g. a scraped
-        string "1" fails the strict `!= 1` check below just like a real 0 would) is treated
-        as protected too. A config fetch that failed outright (get_raw_config() returns {} on
-        a failed HTTP fetch, a dict without FubModules if the JS block couldn't be parsed, or
-        a transport error/timeout — same fallback function_plan_add_knx_bridge_pairs guards
-        against, see its "FubModules missing" check) refuses every requested id rather than
-        defaulting them all to deletable — a blind config fetch failure must never silently
-        open this gate for an irreversible action.
+        string "1" fails the strict equality check below just like a real 0 would, and a
+        boolean `true` is rejected explicitly despite Python's `True == 1` — see the comment
+        below) is treated as protected too. A config fetch that failed outright (get_raw_config() returns {} on
+        a failed HTTP fetch, a dict without FubModules or a FubModules value that isn't itself
+        a dict if the JS block couldn't be parsed or came back malformed, or a transport
+        error/timeout — same convention as coordinator.py's "if not raw_config" guard) refuses
+        every requested id rather than defaulting them all to deletable — a blind config fetch
+        failure must never silently open this gate for an irreversible action, and a malformed
+        response must never crash the service call outright either (e.g. calling .get("2") on
+        a non-dict FubModules value, or converting a FubModules["2"] that came back as a
+        non-iterable scalar — e.g. a bare int — straight into a list). The same applies if
+        marker records exist but none has a usable integer Id (e.g. a parsing regression
+        upstream) — an empty `categories` map must not silently make every requested id default
+        to "deletable". The same reasoning applies even to a single unparseable record among
+        otherwise-fine ones: since we can't recover what id it was meant to be, we can't rule out
+        that it's a requested/protected marker, so one bad Id refuses the whole batch rather than
+        just being dropped and silently falling through to the absent-id default. The same is
+        true if two records resolve to the same Id (duplicate/malformed config): whichever one's
+        CategoryId ends up "winning" would be a silent, arbitrary choice, so a duplicate Id also
+        refuses the whole batch rather than letting one record overwrite the other.
+
+        The third return value, `known_ids`, is the set of ids actually found (with a usable
+        Id) in this lookup — the caller uses it to tell a delete_marker "False" result that
+        followed a confirmed-absent id (harmless) apart from one that followed an id we just
+        saw present as CategoryId==1 (suspicious: the server accepted it as deletable a moment
+        ago but the delete call itself reported nothing changed).
         """
         try:
             conf = await self.get_raw_config()
         except (aiohttp.ClientError, TimeoutError):
             _LOGGER.exception("get_marker_delete_eligibility: config fetch failed — refusing all ids")
-            return [], list(marker_ids)
-        fub_modules = conf.get("FubModules") or {}
-        group = fub_modules.get("2")
-        items = list(group.values()) if isinstance(group, dict) else list(group or [])
+            return [], list(marker_ids), set()
+        categories = self._parse_marker_categories(conf)
+        if categories is None:
+            return [], list(marker_ids), set()
+        # Python's loose equality makes True == 1 and 1.0 == 1, so a plain "!= 1" check would
+        # let a malformed CategoryId (e.g. a scraped JSON boolean true) alias onto "1" the same
+        # way the Id parsing above had to guard against — only a genuine int, not a bool, is
+        # accepted as CategoryId==1; anything else (including 1.0) stays protected.
+        protected = []
+        for mid in marker_ids:
+            value = categories.get(mid, 1)
+            if not (isinstance(value, int) and not isinstance(value, bool) and value == 1):
+                protected.append(mid)
+        deletable = [mid for mid in marker_ids if mid not in protected]
+        return deletable, protected, set(categories)
+
+    @staticmethod
+    def _marker_group_items(group: Any) -> list[Any] | None:
+        """Normalize FubModules["2"] into a flat list of marker records, or None if unusable.
+
+        The group is a dict keyed by Id under normal conditions, but a gap-free 0-based
+        group can come back from Comexio as a JSON array instead (see the WebIO Command-Group
+        array quirk elsewhere in this file) — accept list/tuple too. A missing group (None)
+        is not itself malformed, just empty. Any other shape (e.g. a bare scalar) is refused
+        rather than crashing on `list(group)`.
+        """
+        if isinstance(group, dict):
+            return list(group.values())
+        if isinstance(group, (list, tuple)):
+            return list(group)
+        if group is None:
+            return []
+        _LOGGER.error(
+            "get_marker_delete_eligibility: malformed marker group (%s) — refusing all ids",
+            type(group).__name__,
+        )
+        return None
+
+    @staticmethod
+    def _parse_marker_categories(conf: dict) -> dict[int, Any] | None:
+        """Extract {marker_id: CategoryId} from a raw config dict, or None if unusable.
+
+        Split out of get_marker_delete_eligibility to keep that function's cognitive
+        complexity in check (SonarQube S3776) — this is a self-contained parse step with
+        the same all-or-nothing fail-closed contract as the rest of that gate: any
+        malformed shape anywhere in the marker group (bad FubModules type, non-iterable
+        group, a non-dict record, an unparseable or duplicate Id) returns None rather
+        than a partial dict, which the caller treats identically to a config fetch
+        failure — refusing every requested id rather than guessing from incomplete data.
+        """
+        if not isinstance(conf, dict) or not isinstance(conf.get("FubModules"), dict):
+            _LOGGER.error("get_marker_delete_eligibility: malformed config response — refusing all ids")
+            return None
+        items = ComexioAPI._marker_group_items(conf["FubModules"].get("2"))
+        if items is None:
+            return None
         if not items:
             _LOGGER.error("get_marker_delete_eligibility: no marker config available — refusing all ids")
-            return [], list(marker_ids)
+            return None
         categories: dict[int, Any] = {}
         for m in items:
             if not isinstance(m, dict):
-                continue
-            try:
-                item_id = int(m.get("Id"))
-            except (TypeError, ValueError):
-                _LOGGER.warning("get_marker_delete_eligibility: marker with non-numeric Id %r ignored", m.get("Id"))
-                continue
+                # A non-dict entry (e.g. a bare int/string/null from a scraping regression)
+                # can't be read for an Id either, so a requested marker_id that belonged to it
+                # would just as silently fall through to the absent-id default — refuse the
+                # whole batch here too rather than dropping it unnoticed.
+                _LOGGER.error("get_marker_delete_eligibility: non-dict marker record %r — refusing all ids", m)
+                return None
+            item_id = ComexioAPI._parse_plausible_marker_id(m.get("Id"))
+            if item_id is None:
+                # A record with an Id we can't parse can't be entered into `categories` at all —
+                # dropping it with just a warning and moving on would let a requested id that
+                # actually belongs to THIS record fall through categories.get(mid, 1)'s default
+                # and be treated as "already deleted, so deletable" purely because we couldn't
+                # read its real (possibly CategoryId==0, protected) identity. There's no way to
+                # know in advance whether the unparseable record was for one of the requested
+                # ids or an unrelated one, so — same all-or-nothing posture as every other
+                # malformed-data case here — any single unparseable Id refuses the whole batch.
+                _LOGGER.error(
+                    "get_marker_delete_eligibility: marker record with non-numeric Id %r — refusing all ids",
+                    m.get("Id"),
+                )
+                return None
+            if item_id in categories:
+                # Two marker records resolving to the same Id (malformed config / upstream
+                # parsing regression) would otherwise let whichever one is iterated last win —
+                # if a protected CategoryId==0 record is silently overwritten by a duplicate
+                # CategoryId==1 record for the same Id, the protected marker ends up classified
+                # as deletable. Can't tell which of the two (if either) is the real record, so
+                # — same all-or-nothing posture as every other malformed-data case here — a
+                # duplicate Id refuses the whole batch rather than picking one silently.
+                _LOGGER.error("get_marker_delete_eligibility: duplicate marker Id %r — refusing all ids", item_id)
+                return None
             categories[item_id] = m.get("CategoryId", 0)
-        protected = [mid for mid in marker_ids if categories.get(mid, 1) != 1]
-        deletable = [mid for mid in marker_ids if mid not in protected]
-        return deletable, protected
+        if not categories:
+            _LOGGER.error("get_marker_delete_eligibility: no marker had a usable Id — refusing all ids")
+            return None
+        return categories
+
+    @staticmethod
+    def _parse_plausible_marker_id(raw_id: Any) -> int | None:
+        """Parse a marker record's raw Id field into a plain int, or None if unparseable.
+
+        int() also accepts bools (True -> 1) and truncates fractional floats (1.9 -> 1),
+        either of which would silently alias a malformed record onto a real marker id and
+        let its CategoryId override that real marker's protection — only a genuine integer
+        or a plain ASCII decimal-digit string is accepted (str.isdecimal() alone also
+        passes non-ASCII digits, e.g. Arabic-Indic "١٢٣", which int() happily aliases the
+        same way). int() on a non-finite float (e.g. a JSON "Infinity" literal, which
+        json.loads accepts) raises OverflowError, and on a 4300+ digit string raises
+        ValueError via CPython's integer string conversion limit — neither is a case this
+        gate may crash on, so int() itself stays wrapped below rather than assumed safe
+        just because the shape check passed.
+        """
+        is_plausible_id = isinstance(raw_id, int) or (
+            isinstance(raw_id, str) and raw_id.isascii() and raw_id.isdecimal() and len(raw_id) <= 10
+        )
+        if isinstance(raw_id, bool) or not is_plausible_id:
+            return None
+        try:
+            return int(raw_id)
+        except (ValueError, OverflowError):
+            return None
 
     @staticmethod
     def _keyed_by_list_position(items: list[dict[str, Any]]) -> dict[str, Any]:
