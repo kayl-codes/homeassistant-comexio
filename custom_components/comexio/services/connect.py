@@ -57,13 +57,24 @@ def _resolve_requested_marker_ids(
             continue
         if mid not in ignored_ids:
             marker_ids.append(mid)
-    return marker_ids, invalid_tokens
+    # Dedupe (code-reviewer finding, 2026-09-19): a repeated id in the explicit list (e.g.
+    # "2,2") would otherwise process the same marker twice against one static plan_data/
+    # connected_pairs snapshot taken before the loop — the second pass wouldn't see the
+    # connection the first pass just created and would resave over it with id="new" again,
+    # reproducing Bug #2. dict.fromkeys preserves first-seen order while dropping duplicates.
+    return list(dict.fromkeys(marker_ids)), invalid_tokens
 
 
 async def _load_connect_poc_topology(
     api, fub_id: int, rows_per_col: int, max_cols: int
-) -> tuple[dict[tuple[int, int], int], set[tuple[int, int]], set[tuple[int, int]]]:
-    """Load current plan elements/connections and derive existing-element refs, wired pairs, occupied grid slots."""
+) -> tuple[dict[tuple[int, int], int], set[tuple[int, int]], set[tuple[int, int]], dict | None]:
+    """Load current plan elements/connections and derive existing-element refs, wired pairs, occupied grid slots.
+
+    Also returns the raw plan_data itself (code-reviewer finding, 2026-09-19, Bug #2 follow-up):
+    needed by _get_or_create_webio_element to union onto a reused marker's CURRENT sinks instead
+    of resaving conn_id="new" over an existing connection — same fix already applied to the
+    managed function_plan_add_marker_pairs/_add_io_pairs paths in api.py.
+    """
     plan_data = await api.function_plan_load_elements(fub_id)
     existing_by_ref: dict[tuple[int, int], int] = {}
     connected_pairs: set[tuple[int, int]] = set()
@@ -71,7 +82,7 @@ async def _load_connect_poc_topology(
 
     if not plan_data:
         _LOGGER.warning("Function Plan Connect: loadelements failed, continuing without plan state")
-        return existing_by_ref, connected_pairs, occupied_slots
+        return existing_by_ref, connected_pairs, occupied_slots, plan_data
 
     for elem_id_str, elem in plan_data.get("elements", {}).items():
         ref = elem.get("reference", {})
@@ -80,20 +91,27 @@ async def _load_connect_poc_topology(
             existing_by_ref[(int(ref_type), int(ref_id))] = int(elem_id_str)
     for conn in plan_data.get("connections", {}).values():
         inp = conn.get("input", {})
-        for out in conn.get("output", []):
+        # output may serialize as a dict (gap-free command group) or a list (code-reviewer
+        # finding, 2026-09-19) — same Comexio quirk api.py already normalizes for elsewhere
+        # (_function_plan_existing_refs, _connection_output_ids, ...). Iterating a dict here
+        # unnormalized would crash on out.get(...) once out is a plain string key.
+        outputs = conn.get("output") or []
+        if isinstance(outputs, dict):
+            outputs = list(outputs.values())
+        for out in outputs:
             inp_id, out_id = inp.get("FubElementId"), out.get("FubElementId")
             if inp_id is not None and out_id is not None:
                 connected_pairs.add((int(inp_id), int(out_id)))
     occupied_slots = _get_occupied_grid_slots(plan_data.get("elements", {}), rows_per_col, max_cols)
     _LOGGER.info("Function Plan Connect: Plan fub=%s — %d occupied grid slots found", fub_id, len(occupied_slots))
-    return existing_by_ref, connected_pairs, occupied_slots
+    return existing_by_ref, connected_pairs, occupied_slots, plan_data
 
 
 async def _get_or_create_marker_element(
     api, fub_id: int, marker_id: int, existing_marker_elem: int | None, x: float, y: float
 ) -> tuple[int | None, str | None]:
     """Reuse an existing canvas marker element, or create a new one. Returns (elem_id, error)."""
-    if existing_marker_elem:
+    if existing_marker_elem is not None:
         _LOGGER.info(
             "Function Plan Connect: M%s — marker element already exists: elem_id=%s", marker_id, existing_marker_elem
         )
@@ -117,19 +135,55 @@ async def _get_or_create_webio_element(
     existing_webio_elem: int | None,
     x: float,
     y: float,
-) -> tuple[int | None, str | None]:
-    """Reuse an existing canvas WebIO element (wiring it up if needed), or create + connect a new one."""
-    if existing_webio_elem:
+    plan_data: dict | None,
+) -> tuple[int | None, str | None, bool]:
+    """Reuse an existing canvas WebIO element (wiring it up if needed), or create + connect a new one.
+
+    Returns (elem_id, error, already_wired) — already_wired is True only for the no-op case
+    where elem_marker turned out to already carry a connection to existing_webio_elem (see
+    _function_plan_union_sink's `None` case below); the caller routes that to the skipped
+    bucket instead of reporting a fresh connection that was never actually drawn (silent-
+    failure-hunter finding, 2026-09-19: the naive `return existing_webio_elem, None` used here
+    before was indistinguishable, at the call site, from an actual new save_connection).
+    """
+    label = f"M{marker_id}"
+    if existing_webio_elem is not None:
         _LOGGER.info(
             "Function Plan Connect: M%s — WebIO element already exists: elem_id=%s", marker_id, existing_webio_elem
         )
-        # Reused elements aren't connected yet (already_connected would have skipped this
-        # marker otherwise), so the wire has to be drawn explicitly here.
+        # Reused elements aren't connected to EACH OTHER yet (already_connected would have
+        # skipped this marker otherwise) — but elem_marker itself may already carry a connection
+        # to something else entirely (e.g. a remnant left over from a previous partial run).
+        # Union onto that instead of blind-resaving with conn_id="new" (code-reviewer finding,
+        # 2026-09-19): this POC service used to do exactly that, hitting the same Comexio server
+        # quirk function_plan_save_connection's docstring documents (Bug #2, 2026-09-18) — a
+        # resave with conn_id="new" over a source that already has a connection merges into the
+        # existing record but silently drops that record's "input" field. Uses the same
+        # _function_plan_union_sink helper the managed function_plan_add_marker_pairs/
+        # _add_io_pairs paths in api.py already rely on.
+        union = api._function_plan_union_sink(plan_data, elem_marker, existing_webio_elem, label, fub_id)
+        if union is None:
+            _LOGGER.info(
+                "Function Plan Connect: M%s — elem %s→%s already wired, no-op",
+                marker_id,
+                elem_marker,
+                existing_webio_elem,
+            )
+            return existing_webio_elem, None, True
+        if isinstance(union, str):
+            return None, union, False
+        outputs, input_pos, input_inverted, existing_conn_id = union
         conn_id = await api.function_plan_save_connection(
-            fub_id, elem_marker, [(existing_webio_elem, 0, False)], conn_type
+            fub_id,
+            elem_marker,
+            outputs,
+            conn_type,
+            input_pos=input_pos,
+            input_inverted=input_inverted,
+            existing_conn_id=existing_conn_id,
         )
         if conn_id is None:
-            return None, f"M{marker_id}: save_connection (elem {elem_marker}→{existing_webio_elem}) failed"
+            return None, f"M{marker_id}: save_connection (elem {elem_marker}→{existing_webio_elem}) failed", False
         _LOGGER.info(
             "Function Plan Connect: M%s — connection drawn: elem %s→%s (conn_id=%s)",
             marker_id,
@@ -137,7 +191,7 @@ async def _get_or_create_webio_element(
             existing_webio_elem,
             conn_id,
         )
-        return existing_webio_elem, None
+        return existing_webio_elem, None, False
 
     _LOGGER.info("Function Plan Connect: M%s → add_element+connect (WebIO, x=%.1f, y=%.1f)", marker_id, x, y)
     conn_payload = {
@@ -158,9 +212,9 @@ async def _get_or_create_webio_element(
         connection=conn_payload,
     )
     if elem_webio is None:
-        return None, f"M{marker_id}: add_element (WebIO, webIoId={web_ref_id}) failed"
+        return None, f"M{marker_id}: add_element (WebIO, webIoId={web_ref_id}) failed", False
     _LOGGER.info("Function Plan Connect: M%s — WebIO+connection created: elem_id=%s", marker_id, elem_webio)
-    return elem_webio, None
+    return elem_webio, None, False
 
 
 async def _connect_marker_to_webio(
@@ -175,6 +229,7 @@ async def _connect_marker_to_webio(
     rows_per_col: int,
     max_cols: int,
     canvas_format: str,
+    plan_data: dict | None,
 ) -> tuple[str | None, str | None, str | None]:
     """Connect a single marker to its WebIO command on the canvas.
 
@@ -202,9 +257,14 @@ async def _connect_marker_to_webio(
     existing_marker_elem = existing_by_ref.get((2, int(marker_id)))
     existing_webio_elem = existing_by_ref.get((10, int(web_ref_id)))
 
-    # Skip if already connected in this specific plan
+    # Skip if already connected in this specific plan.
+    # is not None (not truthy) for both — matching the same fix applied elsewhere for this
+    # class of bug (code-reviewer/silent-failure-hunter finding, 2026-09-18/19): an element id
+    # of 0 would otherwise be misread as "doesn't exist yet".
     already_connected = (
-        existing_marker_elem and existing_webio_elem and (existing_marker_elem, existing_webio_elem) in connected_pairs
+        existing_marker_elem is not None
+        and existing_webio_elem is not None
+        and (existing_marker_elem, existing_webio_elem) in connected_pairs
     )
     if already_connected:
         _LOGGER.info("Function Plan Connect: M%s — already connected in plan, skipped", marker_id)
@@ -235,11 +295,17 @@ async def _connect_marker_to_webio(
     if err:
         return None, None, err
 
-    elem_webio, err = await _get_or_create_webio_element(
-        api, fub_id, marker_id, elem_marker, web_ref_id, conn_type, existing_webio_elem, x_webio_cur, y_new
+    elem_webio, err, already_wired = await _get_or_create_webio_element(
+        api, fub_id, marker_id, elem_marker, web_ref_id, conn_type, existing_webio_elem, x_webio_cur, y_new, plan_data
     )
     if err:
         return None, None, err
+    if already_wired:
+        return (
+            None,
+            f"M{marker_id} ({marker['name']}): already wired (elem {elem_marker}→{elem_webio}), no new connection",
+            None,
+        )
 
     result = (
         f"M{marker_id} ({marker['name']}) → elem={elem_marker} | "
@@ -328,7 +394,7 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
     )
 
     # Load current plan state: existing elements + connections
-    existing_by_ref, connected_pairs, occupied_slots = await _load_connect_poc_topology(
+    existing_by_ref, connected_pairs, occupied_slots, plan_data = await _load_connect_poc_topology(
         api, fub_id, rows_per_col, max_cols
     )
 
@@ -352,6 +418,7 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
             rows_per_col,
             max_cols,
             canvas_format,
+            plan_data,
         )
         if result:
             results.append(result)

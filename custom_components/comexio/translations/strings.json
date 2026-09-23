@@ -71,6 +71,13 @@
         "ignore": "🔇 Suppress this message"
       }
     },
+    "knx_dpt_suffix_action": {
+      "options": {
+        "ro": "🔒 Read-only sensor (append [RO])",
+        "trig": "🔘 Push-button / Taster (append [TRIG])",
+        "ignore": "🔇 Leave as a writable switch"
+      }
+    },
     "function_plan_max_pairs_per_plan": {
       "options": {
         "50": "50 pairs / 1 extension",
@@ -115,7 +122,7 @@
           "schema_io": "Available variables: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)",
           "logikplan_plan_prefix": "Prefix for auto-created cluster plans. Plans are named like: HA - Marker [1-100].",
-          "logikplan_max_pairs_per_plan": "How many Web-IO + marker pairs fit into one managed plan before a new cluster plan is created. For IO cluster plans this maps to 1 (50), 2 (100) or 3 (150) extensions per plan.",
+          "logikplan_max_pairs_per_plan": "How many Web-IO + marker pairs fit into one managed plan before a new cluster plan is created. For IO cluster plans this maps to 1 (50), 2 (100) or 3 (150) extensions per plan. KNX cluster plans ignore this setting and always use a fixed size of 50.",
           "logikplan_io_extensions": "Each selected extension gets its IOs wired into a managed IO cluster plan (e.g. HA - IO [Ext]), one column per extension. Start with a single extension to test, then add the others.",
           "ignored_markers": "Comma-, semicolon-, space- or dot-separated marker IDs and ranges, with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456' or '8-12'). Only markers with a description can be ignored.",
           "ignored_knx": "Comma-, semicolon-, space- or dot-separated KNX object IDs and ranges, with or without 'K' prefix (e.g. '123, 456; 789' or 'K123, K456' or '8-12'). Only KNX objects with a description can be ignored.",
@@ -276,6 +283,17 @@
     "duplicate_plan_names": {
       "title": "Duplicate Comexio plan names",
       "description": "Two or more function plans share the exact same name: {plans}.\n\nComexio doesn't enforce unique plan names — only the internal plan ID actually is unique — but this integration resolves plans by name in several places (Connect, Sort, Restore, …). With duplicate names, a name-based lookup could silently target the wrong plan.\n\nYou can technically leave it like this and nothing breaks today, but it's a latent risk — especially for `function_plan_restore`, if that plan is ever deleted and needs restoring. **Recommendation: rename one of the duplicates in Comexio Studio** to remove the ambiguity for good."
+    },
+    "knx_dpt_ambiguous": {
+      "title": "KNX objects need classification ({count})",
+      "fix_flow": {
+        "step": {
+          "knx_dpt_suffix": {
+            "title": "Classify KNX object",
+            "description": "**{name}** ({remaining} more after this one) uses a KNX DPT1.x subtype (Schalter/Bool/Freigabe/Flanke/Binärwert) that KNX allows to wire as a real toggle switch, a momentary push-button (Taster), or a read-only status readback — the datapoint type alone can't tell which, only you know the actual wiring.\n\nHow should this object be treated?"
+          }
+        }
+      }
     }
   }
 }

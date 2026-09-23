@@ -45,6 +45,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `switch` | Digital Outputs (Q) & Markers | Switches physical relays (classified as outlets) and digital markers. |
 | `number` | Analog Markers | Sets setpoints with automatic range checking (e.g., target temperature). |
 | `sensor` / `binary_sensor` | Read-Only Markers (`[RO]`) | Analog/digital markers tagged `[RO]` are exposed as read-only sensors instead of writable `number`/`switch` entities. |
+| `switch`/`number`/`sensor`/`binary_sensor`/`cover`/`light` | KNX Objects (opt-in) | See the **[KNX Objects guide](KNX.md)** — automatic unit/device-class detection, dimmer/blind (`cover`/`light`) support, and DPT-based classification. |
 | `button` | Trigger Markers (`[TRIG]` / `[TP]`) | One-shot "virtual button" entity for trigger-tagged markers; the marker resets itself via a dedicated, auto-managed `HA - TRIGGER` function plan. |
 | `button` | System Functions | Manual "Smart-Sync" trigger and cancel button directly from the HA device view. |
 | `select` | Function Plans | Lists all Comexio function plans; used as the default target for the function-plan services. |
@@ -160,7 +161,7 @@ The integration can manage Comexio **function plans** directly from Home Assista
 | Action | What it does |
 | :--- | :--- |
 | `comexio.function_plan_connect` | Wires markers to their Web-IO commands in a plan (single IDs, lists, or `*` for all). |
-| `comexio.function_plan_sort` | Sorts all plan elements by marker ID and snaps them to exact grid positions. |
+| `comexio.function_plan_sort` | Sorts all plan elements by marker/KNX ID and snaps them to exact grid positions. |
 | `comexio.function_plan_visualize` | Shows a text overview of all connections and unconnected elements. |
 | `comexio.function_plan_stop` / `..._activate` | Manual plan lifecycle control (stop / save + activate). |
 | `comexio.function_plan_restore` | Rolls a plan back to a stored backup snapshot — optionally as an independent copy instead of overwriting the source. |
@@ -187,11 +188,18 @@ Function plans are backed up automatically — no configuration needed:
 
 For large installations, marker/Web-IO pairs can be distributed across auto-managed plans named like `HA - Marker [1-100]`. The plan name prefix and the maximum number of marker pairs per plan are configurable in the integration options. Managed plans are labelled with a comment element inside Comexio so they are easy to recognise.
 
+## 🔌 KNX Objects
+
+Comexio's KNX/EIB gateway objects ("K-Elements") can be imported as HA entities like Markers and IOs — opt in via **Create entities for KNX objects** in the integration options (off by default). Digital objects are automatically classified by their KNX datapoint type, with a Repair-issue-driven flow for genuinely ambiguous DPTs.
+
+📖 **[KNX Objects guide →](KNX.md)** — naming, automatic unit/device-class detection, dimmer & blind (`cover`/`light`) support, DPT classification, the classification Repair flow, and known limitations.
+
 ## 🐛 Troubleshooting
 
 - **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a function plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
 - **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu.
 - **Extension entities don't reappear after coming back online:** Reload the integration via *Settings → Devices & Services → Comexio → ⋮ → Reload*. The coordinator will re-detect the extension as online and restore all its entities.
+- **KNX analog values above ~1,000,000 get rounded/corrupted:** See the [KNX Objects guide](KNX.md#9-known-limitations) — this is a Comexio firmware bug, not an integration issue.
 
 ## 🤝 Contributing
 Pull Requests are highly welcome! If you find bugs or have feature requests, please create an issue in the GitHub repository.
@@ -250,6 +258,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `switch` | Digitale Ausgänge (Q) & Merker | Schaltet physische Relais (als Steckdose/Outlet klassifiziert) und digitale Merker. |
 | `number` | Analoge Merker | Setzt Sollwerte (Setpoints) mit automatischer Bereichsprüfung (z. B. Temp-Soll). |
 | `sensor` / `binary_sensor` | Nur-Lese-Merker (`[RO]`) | Analoge/digitale Merker mit `[RO]`-Tag werden als reine Nur-Lese-Sensoren statt als beschreibbare `number`/`switch`-Entitäten bereitgestellt. |
+| `switch`/`number`/`sensor`/`binary_sensor`/`cover`/`light` | KNX-Objekte (Opt-in) | Siehe die **[Anleitung KNX-Objekte](KNX.md#-deutsch)** — automatische Einheiten-/Device-Class-Erkennung, Dimmer-/Jalousie-Unterstützung (`cover`/`light`) und DPT-basierte Klassifizierung. |
 | `button` | Trigger-Merker (`[TRIG]` / `[TP]`) | Einmalig auslösende „virtuelle Taster"-Entität für Trigger-markierte Merker; der Merker setzt sich selbst über einen dediziert automatisch verwalteten `HA - TRIGGER`-Funktionsplan zurück. |
 | `button` | System-Funktionen | Manueller "Smart-Sync" Abgleich und Abbruch direkt aus der HA-Geräteansicht. |
 | `select` | Funktionspläne | Listet alle Comexio-Funktionspläne; dient als Standard-Ziel für die Funktionsplan-Actions. |
@@ -365,7 +374,7 @@ Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwa
 | Action | Funktion |
 | :--- | :--- |
 | `comexio.function_plan_connect` | Verdrahtet Merker mit ihren Web-IO-Befehlen im Plan (einzelne IDs, Listen oder `*` für alle). |
-| `comexio.function_plan_sort` | Sortiert alle Plan-Elemente nach Merker-ID und richtet sie exakt am Raster aus. |
+| `comexio.function_plan_sort` | Sortiert alle Plan-Elemente nach Merker-/KNX-ID und richtet sie exakt am Raster aus. |
 | `comexio.function_plan_visualize` | Zeigt eine Text-Übersicht aller Verbindungen und unverbundenen Elemente. |
 | `comexio.function_plan_stop` / `..._activate` | Manuelle Lifecycle-Steuerung (Stoppen / Speichern + Aktivieren). |
 | `comexio.function_plan_restore` | Setzt einen Plan auf einen gespeicherten Backup-Snapshot zurück — optional als unabhängige Kopie statt Überschreiben des Original-Plans. |
@@ -392,11 +401,18 @@ Funktionspläne werden automatisch gesichert — ganz ohne Konfiguration:
 
 Für große Installationen können Merker/Web-IO-Paare auf automatisch verwaltete Pläne mit Namen wie `HA - Marker [1-100]` verteilt werden. Präfix und maximale Paar-Anzahl je Plan sind in den Integrations-Optionen einstellbar. Verwaltete Pläne werden in Comexio mit einem Kommentar-Element gekennzeichnet und sind so leicht erkennbar.
 
+## 🔌 KNX-Objekte
+
+Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs als HA-Entitäten importieren — Opt-in über **KNX-Objekte als Entitäten anlegen** in den Integrations-Optionen (standardmäßig aus). Digitale Objekte werden automatisch anhand ihres KNX-Datenpunkttyps klassifiziert, für echte mehrdeutige DPTs gibt es einen Repair-Issue-gestützten Flow.
+
+📖 **[Anleitung KNX-Objekte →](KNX.md#-deutsch)** — Benennung, automatische Einheiten-/Device-Class-Erkennung, Dimmer- & Jalousie-Unterstützung (`cover`/`light`), DPT-Klassifizierung, der Klassifizierungs-Reparatur-Flow und bekannte Einschränkungen.
+
 ## 🐛 Fehlerbehebung (Troubleshooting)
 
 - **"Web-IO Gerät ist blockiert (in use)":** Du versuchst, einen *Full Sync* zu machen, aber das Web-IO Gerät ist in Comexio bereits in einem Logikplan verbunden. Die Integration erkennt das und fällt automatisch und sicher auf den *Delta-Sync* zurück, um nur die Einzelbefehle zu patchen.
 - **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten.
 - **Extension-Entitäten erscheinen nach Wiederherstellung nicht:** Lade die Integration über *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu laden* neu. Der Coordinator erkennt das Modul als online und legt alle Entitäten neu an.
+- **KNX-Analogwerte oberhalb von ca. 1.000.000 werden gerundet/verfälscht:** Siehe die [Anleitung KNX-Objekte](KNX.md#9-bekannte-einschränkungen) — das ist ein Comexio-Firmware-Bug, kein Integrations-Problem.
 
 ## 🤝 Mitwirken
 Pull Requests sind herzlich willkommen! Wenn du Fehler findest oder Feature-Wünsche hast, erstelle bitte ein Issue im GitHub Repository.

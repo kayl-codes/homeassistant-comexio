@@ -1,5 +1,6 @@
 # Version: 0.7.5
 from datetime import datetime
+import logging
 from typing import Any
 from urllib.parse import quote
 
@@ -20,9 +21,17 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MARKER_TYPE_INTERVAL, MarkerKind, bus_load_signal
+from .const import (
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    DOMAIN,
+    MARKER_TYPE_INTERVAL,
+    MarkerKind,
+    bus_load_signal,
+)
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity
+
+_LOGGER = logging.getLogger(__name__)
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -64,12 +73,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         )
 
     # Read-only ("[RO]") analog KNX objects (blind implementation, see project_knx_objects memory) — opt-in, default OFF
+    # DPT3.x composite members are skipped here — cover.py/light.py expose the pair as one
+    # composite entity instead (see project_knx_write_path_design memory, "Punkt 4, Hälfte (b)").
     if conf.get("import_knx", False):
         ignored_knx = coordinator.ignored_knx_ids
         entities.extend(
             ComexioKnxSensor(coordinator, coordinator.server_id, knx)
             for knx in coordinator.data.get("knx", [])
-            if knx["type"] == "analog" and knx.get("kind") == MarkerKind.READ_ONLY and int(knx["id"]) not in ignored_knx
+            if knx["type"] == "analog"
+            and knx.get("kind") == MarkerKind.READ_ONLY
+            and int(knx["id"]) not in ignored_knx
+            and knx.get("knx_composite") is None
         )
 
     entities.extend(
@@ -164,6 +178,28 @@ class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):
 
 class ComexioKnxSensor(ComexioKnxEntity, ComexioMarkerSensor):
     """A read-only ("[RO]") analog Comexio KNX object (blind implementation, see project_knx_objects memory)."""
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, knx: dict[str, Any]) -> None:
+        super().__init__(coordinator, server_id, knx)
+
+        # Same DPT-over-name-heuristic precedence as ComexioKnxNumber (see its own comment,
+        # number.py) — a read-only KNX object must not inherit ComexioMarkerSensor's
+        # "soll/temp/setpoint" name guess when the resolved DPT says otherwise (or says
+        # nothing at all, e.g. an unresolved/unmapped DPT keeps the name heuristic instead).
+        if knx.get("dpt_min") is not None and knx.get("dpt_max") is not None:
+            self._attr_native_unit_of_measurement = knx.get("dpt_unit") or None
+            self._attr_device_class = None
+            if dpt_device_class := knx.get("dpt_device_class"):
+                try:
+                    self._attr_device_class = SensorDeviceClass(dpt_device_class)
+                except ValueError:
+                    # Defensive only — see ComexioKnxNumber's identical guard for why.
+                    _LOGGER.debug(
+                        "KNX item %s: dpt_device_class '%s' is not a valid SensorDeviceClass, ignoring",
+                        self._marker_id,
+                        dpt_device_class,
+                    )
+            self._attr_icon = "mdi:knx"
 
 
 class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):

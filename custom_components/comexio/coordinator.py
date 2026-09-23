@@ -1,7 +1,6 @@
 # Version: 0.8.1
 import asyncio
 from collections import deque
-import contextlib
 from datetime import datetime, timedelta
 import logging
 import pathlib
@@ -9,6 +8,7 @@ import re
 import socket
 from typing import Any
 
+import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State
@@ -45,6 +45,7 @@ from .const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
     CONF_HOST,
+    CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
@@ -65,6 +66,7 @@ from .const import (
     FIRMWARE_CHECK_MINUTE,
     FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC,
     FUNCTION_PLAN_FUB_ID_AUTO,
+    FUNCTION_PLAN_KNX_CLUSTER_SIZE,
     FUNCTION_PLAN_LAYOUT_COMMENT_Y,
     FUNCTION_PLAN_LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
@@ -77,6 +79,8 @@ from .const import (
     ICON_NETWORK,
     ICON_RENAME,
     ICON_WARNING,
+    KNX_DPT_AUTOTAG_MAX_RETRIES,
+    MARKER_READ_ONLY_SUFFIX,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -92,7 +96,9 @@ from .const import (
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
+    WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_CLASSES,
+    WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     WEBIO_RANGE_CHECK_HOUR,
     WEBIO_RANGE_CHECK_MINUTE,
     MarkerKind,
@@ -133,6 +139,15 @@ _MANAGED_PLAN_PAPER = "A3"
 _ORIENT_LANDSCAPE = "landscape"
 _ORIENT_PORTRAIT = "portrait"
 _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
+
+# Marks a function_plan_plans[fub_id] entry seeded by _create_managed_plan (verified-empty at
+# creation time) rather than loaded from a real function_plan_load_all_plans()/loadelements()
+# response. _relevant_plans_loaded()-style "is this fub_id known at all" checks treat a seeded
+# entry the same as real data (accurate, since it genuinely was empty at seed time) — but
+# _load_function_plan_check_data() must NOT: its contract is "cache miss -> live fetch", and a
+# seeded entry can already be stale by the time it's consulted (real wiring written afterward,
+# e.g. by function_plan_add_marker_pairs, never gets mirrored back into this cache).
+_SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
 
 # Debounce for live plan-preview refreshes: webhook bursts (e.g. a dimmer ramp) collapse
 # into one re-render at most every ~0.5 s; single value pushes still show up promptly.
@@ -316,6 +331,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # namespace, so the category tag keeps the cleanup button routing them apart.
         self._cleanup_entity_ids: list[tuple[str, int]] = []
         self._cleanup_function_plan_count: int = 0
+        # fub_ids a _verify_new_plan_is_empty() check rejected as contaminated/unverifiable
+        # AND couldn't fully un-register (delete_fup failed). A plain cache pop isn't durable
+        # here — the very next parse_config() (every poll, and the reload every sync ends
+        # with) repopulates fub_data wholesale from Comexio's still-live $Fubs listing, which
+        # would let _resolve_single_cluster_plan's by-name scan silently re-adopt the same
+        # poisoned plan. Session-local only (cleared on HA restart, same as every other
+        # in-memory coordinator field) — a human still needs to clean it up in Comexio Studio.
+        self._distrusted_fub_ids: set[int] = set()
         self.cancel_sync: bool = False
         self.entity_id_mismatches: list[dict[str, str]] = []
         self.orphaned_statistics: list[str] = []
@@ -344,12 +367,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # reloads anyway instead of being silently swallowed. See
         # request_options_update_without_reload().
         self._skip_next_listener_reload_options: dict[str, Any] | None = None
-        # R1: Track which markers/IOs received a webhook update during the last API fetch.
-        # No KNX counterpart: KNX never has an authoritative freshly-parsed value to race
-        # against (see the KNX branch of the R1 merge in _async_update_data), so there is
-        # nothing for a KNX version of this set to disambiguate.
+        # Per-id consecutive-failure count for _auto_suffix_unambiguous_knx's rename attempts.
+        # A transient error (momentary HTTP hiccup) gets a few retries across the next few
+        # polls; only once an id reaches KNX_DPT_AUTOTAG_MAX_RETRIES is it treated as
+        # permanently stuck (stale admin session, name collision, ...) and skipped for the
+        # rest of this coordinator's lifetime — reset by an integration reload/restart, which
+        # is also how the user is expected to recover after fixing the underlying cause.
+        self._knx_dpt_autotag_fail_counts: dict[int, int] = {}
+        # Debounce handle for _schedule_knx_dpt_reload (Any: same async_call_later() cancel
+        # callable type as _preview_refresh_cancel below) — at most one pending reload timer
+        # no matter how many KNX objects get auto-tagged within the same poll or across
+        # consecutive polls before the first timer fires.
+        self._knx_dpt_reload_cancel: Any = None
+        # R1: Track which markers/IOs/KNX objects received a webhook update during the last
+        # API fetch — see the R1 merge in _async_update_data. KNX gained a real per-object
+        # live-value query (get_live_states) 2026-09-20; before that it had no authoritative
+        # freshly-parsed value to race against, so this set is a recent addition for KNX.
         self._webhook_updated_markers: set[str] = set()
         self._webhook_updated_io_ids: set[str] = set()
+        self._webhook_updated_knx_ids: set[str] = set()
         self.last_plan_preview: dict[str, Any] | None = None
         # In-memory copy of the last rendered preview SVG, served directly by the
         # image entity (image.py) without touching the config/www file.
@@ -418,6 +454,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._watchdog_started_at: datetime = dt_util.utcnow()
         self.watchdog_history: list[dict[str, Any]] = []
         self._watchdog_history_store: Store = Store(hass, 1, f"{DOMAIN}_watchdog_history_{self.server_id}")
+        # KNX DPT catalog: persisted so a fresh ComexioAPI instance (created on every restart
+        # AND every config-entry reload, not just a full HA restart) still has a fallback
+        # catalog if its very first live fetch fails — without this, api.get_knx_dpt_catalog's
+        # own in-process stale-cache fallback can't help yet (nothing has been fetched in this
+        # process), so a transient failure right after a reload would return {} and silently
+        # drop knx_composite tagging for that poll (Sourcery finding, review 2026-09-21; see
+        # async_load_knx_dpt_catalog).
+        self._knx_dpt_catalog_store: Store = Store(hass, 1, f"{DOMAIN}_knx_dpt_catalog_{self.server_id}")
+        self._last_persisted_knx_dpt_catalog_version: str | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
@@ -431,6 +476,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # the HTTP round-trips are tracked and win over the (older) API snapshot.
         self._webhook_updated_markers.clear()
         self._webhook_updated_io_ids.clear()
+        self._webhook_updated_knx_ids.clear()
 
         try:
             conf = {**self.config_entry.data, **self.config_entry.options}
@@ -439,12 +485,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
             kw_str = str(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
             self.cover_keywords = [kw.strip().lower() for kw in kw_str.split(",") if kw.strip()]
 
+            import_markers = conf.get("import_markers", True)
+            import_ios = conf.get("import_ios", True)
+            import_knx = conf.get("import_knx", False)
+
             # Fetch current raw configuration from the Comexio API
             raw_config = await self.api.get_raw_config()
             marker_data = raw_config.get("FubModules", {}).get("2", {})
             max_id = max(int(m.get("Id", 0)) for m in marker_data.values()) if marker_data else 0
 
-            live_states = await self.api.get_live_states(max_id)
+            # KNX groups are frequently small and gap-free (e.g. K1-K10), which is exactly the
+            # shape Comexio serializes as a JSON array instead of an object (see
+            # api._process_source_items's docstring) — handle both shapes, unlike marker_data
+            # above, which has never been observed as an array in practice.
+            knx_group = raw_config.get("FubModules", {}).get("11", {})
+            knx_items = knx_group.values() if isinstance(knx_group, dict) else (knx_group or [])
+            # Same per-item guard as api._process_source_items, which parses this exact group:
+            # a malformed entry (non-dict, or Id missing/None) must be skipped here too, or a
+            # single bad KNX record raises out of this comprehension and fails the entire poll.
+            knx_max_id = max(
+                (int(k["Id"]) for k in knx_items if isinstance(k, dict) and k.get("Id") is not None),
+                default=0,
+            )
+
+            live_states, knx_live_states = await self.api.get_live_states(max_id, knx_max_id)
+            if live_states is None:
+                # Fetch/parse failure this cycle (see get_live_states' docstring) — keep last
+                # known values instead of letting parse_config default every item to 0/off.
+                _LOGGER.warning("[%s] Live states fetch failed; keeping last known values", self.server_id)
+                live_states = self.marker_states
+            if knx_live_states is None:
+                knx_live_states = self.knx_states
             # Cold start: the bulk plan snapshot isn't loaded yet (it lands after this first
             # cycle, via the backup cycle) — fall back to the last stored auto-backup so an
             # unnamed-but-wired marker still gets an entity on every restart, not just after
@@ -453,7 +524,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if referenced_markers is None:
                 referenced_markers = await self.function_plan_backup.async_referenced_marker_ids()
             self._last_referenced_marker_ids = referenced_markers
-            parsed_data = self.api.parse_config(raw_config, live_states, referenced_markers)
+            # Only fetched when KNX import is enabled — an extra HTTP round-trip nobody without
+            # KNX objects needs. get_knx_dpt_catalog() never raises (own contract, {} on
+            # failure), so an unreachable/failed fetch just leaves every KNX analog item on its
+            # generic fallback range rather than failing this whole poll.
+            knx_dpt_catalog = await self.api.get_knx_dpt_catalog() if import_knx else None
+            if import_knx and knx_dpt_catalog:
+                await self._maybe_persist_knx_dpt_catalog()
+            parsed_data = self.api.parse_config(
+                raw_config, live_states, referenced_markers, knx_live_states, knx_dpt_catalog
+            )
             # Unfiltered per-category counts — parsed_data carries every category regardless of
             # import_* opt-in, unlike final_data below. See available_source_counts docstring.
             # Held locally and only published to self.available_source_counts right before the
@@ -466,10 +546,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # async_update_from_raw_config never raises (own contract, enforced internally) —
             # no local guard needed here.
             await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
-
-            import_markers = conf.get("import_markers", True)
-            import_ios = conf.get("import_ios", True)
-            import_knx = conf.get("import_knx", False)
 
             final_data = {
                 "markers": parsed_data["markers"] if import_markers else [],
@@ -497,22 +573,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 else:
                     self.io_states[io["id"]] = io["value"]
 
-            # KNX diverges from the marker/IO pattern above: _process_knx() never receives a real
-            # live-value source (see its docstring — no known bulk live-value endpoint for KNX),
-            # so k["value"] here is always the placeholder 0, never an authoritative fresh read.
-            # The cached self.knx_states (populated exclusively by update_knx() from webhooks)
-            # must win unconditionally, or every poll silently wipes real webhook-pushed values
-            # back to 0 the instant they fall outside this poll's brief webhook-race window.
+            # KNX now follows the same R1 pattern as markers/IO above: get_live_states() gained
+            # a real per-object KNX query 2026-09-20 (live-tested against a real KNX-equipped
+            # Comexio instance, see project_knx_write_path_design memory) — a webhook that fired
+            # during the get_raw_config/get_live_states round-trip wins over this poll's (older)
+            # snapshot; otherwise the fresh, authoritative poll value wins and is cached.
+            #
+            # knx_live_states membership is checked explicitly (not just "value differs from
+            # cache") because api._build_source_item defaults a KNX id absent from the dashboard
+            # response to 0 — an HTTP 200 that simply omits one requested key (partial refresh,
+            # unsupported/stale K-element) would otherwise overwrite a real cached value with
+            # that 0 and make the entity report off/0 until the object reappears in a response
+            # (Sourcery finding, review 2026-09-21).
             for k in final_data["knx"]:
-                k["value"] = self.knx_states.get(k["id"], k["value"])
+                if k["id"] in self._webhook_updated_knx_ids:
+                    k["value"] = self.knx_states.get(k["id"], k["value"])
+                elif k["id"] in knx_live_states:
+                    self.knx_states[k["id"]] = k["value"]
+                else:
+                    k["value"] = self.knx_states.get(k["id"], k["value"])
 
-            # Prune knx_states down to the object ids the server still reports. marker_states /
-            # io_states are self-correcting — the loops above overwrite every cached entry with a
-            # fresh authoritative poll value each cycle — but knx_states is webhook-only, so a
-            # value cached for a since-deleted KNX object would otherwise linger forever and be
-            # inherited by a different object that later reuses the same numeric id. Keyed off
-            # parsed_data (not final_data) so the cache stays correct even while import_knx is
-            # off, and gated on a non-empty scrape (get_raw_config returns {} on a transient
+            # Prune knx_states down to the object ids the server still reports. The merge loop
+            # above only revisits ids currently present in final_data["knx"] — a value cached
+            # for a since-deleted KNX object would otherwise linger forever and be inherited by
+            # a different object that later reuses the same numeric id. Keyed off parsed_data
+            # (not final_data) so the cache stays correct even while import_knx is off, and
+            # gated on a non-empty scrape (get_raw_config returns {} on a transient
             # HTTP failure — pruning then would wipe every cached value over a blip).
             if raw_config.get("FubModules"):
                 known_knx_ids = {k["id"] for k in parsed_data.get("knx", [])}
@@ -568,13 +654,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # CONF_IGNORED_MARKERS/CONF_IGNORED_KNX) — leaving them in would make the audit
             # report them as permanently "missing" and let Full Sync / create_missing actually
             # create and wire Web-IO commands for sources the user explicitly opted out of.
+            # Auto-created write-path bridge Markers (kind == KNX_BRIDGE, title suffix
+            # "[K<id>]" — see MARKER_KNX_BRIDGE_SUFFIX_RE) are excluded the same way: they are
+            # pure internal wiring glue with no HA entity and no Web-IO command of their own
+            # (see project_knx_write_path_design memory) — without this they permanently show
+            # up as "Fehlend" since no webIO is ever expected to exist for them.
             ha_map = {}
             for cat in SOURCE_CATEGORIES.values():
                 if not cat.range_clustered:
                     continue
                 ignored_ids = self.ignored_ids_for(cat.key)
                 for item in final_data[cat.data_key]:
-                    if int(item["id"]) in ignored_ids:
+                    if int(item["id"]) in ignored_ids or item.get("kind") == MarkerKind.KNX_BRIDGE:
                         continue
                     ha_map[source_audit_key(cat, item["id"])] = {
                         "name": f"HA {item['name']}",
@@ -707,13 +798,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Check whether a function plan is actively selected (guards against false positives).
             # At startup the select entity is not yet in the state machine; fall back to the
             # fub_id persisted in options by async_select_option.
-            _lp_sel = self._active_plan_selector_state()
-            if _lp_sel and _lp_sel.state not in ("unavailable", "unknown"):
-                has_active_plan = True
-            else:
-                has_active_plan = self.config_entry.options.get(CONF_FUNCTION_PLAN_FUB_ID) is not None or bool(
-                    self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP)
-                )
+            has_active_plan = self._has_active_function_plan()
 
             # Wiring truth comes from the plan bulk snapshot (loadelements): the server-side
             # WebCommandIoId survives plan deletion and is not maintained by add_element
@@ -888,6 +973,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 for mid in ids:
                     mismatches.add(f"function_plan_trigger_orphan_{prefix}{mid}")
 
+            # KNX write path (Entwurf A "Merker-Brücke") audit, incl. Phase 7's API-Loopback
+            # fan-out check — see _audit_knx_bridge_items's own docstring for the full rationale.
+            knx_bridge_missing_items, knx_bridge_loopback_missing_items = self._audit_knx_bridge_items(
+                has_active_plan, final_data["knx"], ha_map, wired_knx_webio_pairs, mismatches
+            )
+
+            # DPT1.x classification for digital KNX objects with no [RO]/[TRIG]/[K<id>] suffix
+            # yet (real ETS imports never carry Comexio's own naming convention) — see
+            # _auto_suffix_unambiguous_knx / _audit_knx_dpt_ambiguous docstrings.
+            if import_knx:
+                await self._auto_suffix_unambiguous_knx(final_data["knx"])
+                self._audit_knx_dpt_ambiguous(final_data["knx"])
+
             self.last_audit_results = {
                 "type": type_mismatches,
                 "missing": missing_items,
@@ -902,6 +1000,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "function_plan_dangling": function_plan_dangling_items,
                 "function_plan_trigger_missing": function_plan_trigger_missing_by_ref,
                 "function_plan_trigger_orphan": function_plan_trigger_orphan_by_ref,
+                "knx_bridge_missing": knx_bridge_missing_items,
+                "knx_bridge_loopback_missing": knx_bridge_loopback_missing_items,
             }
 
             # Include pending entity cleanups (ignored markers/KNX with remaining HA entities) in mismatches
@@ -915,7 +1015,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     f"{len(type_mismatches)}-{len(missing_items)}-{len(renamed_items)}"
                     f"-{len(orphans)}-{ip_mismatch}-{len(function_plan_missing_items)}"
                     f"-{len(function_plan_dangling_items)}-{_count_by_ref(function_plan_trigger_missing_by_ref)}"
-                    f"-{_count_by_ref(function_plan_trigger_orphan_by_ref)}"
+                    f"-{_count_by_ref(function_plan_trigger_orphan_by_ref)}-{len(knx_bridge_missing_items)}"
+                    f"-{len(knx_bridge_loopback_missing_items)}"
                 )
 
                 # Only log details if the audit result differs from the previous run
@@ -925,7 +1026,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     # Consolidated warning for the Home Assistant log overview
                     _LOGGER.warning(
                         "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
-                        "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d, Trigger gaps:%d, Trigger orphans:%d)",
+                        "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d, Trigger gaps:%d, Trigger orphans:%d, "
+                        "KNX bridges:%d, KNX loopback:%d)",
                         self.server_id,
                         len(mismatches),
                         len(type_mismatches),
@@ -936,6 +1038,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                         len(function_plan_dangling_items),
                         _count_by_ref(function_plan_trigger_missing_by_ref),
                         _count_by_ref(function_plan_trigger_orphan_by_ref),
+                        len(knx_bridge_missing_items),
+                        len(knx_bridge_loopback_missing_items),
                     )
                     if ip_mismatch:
                         mismatched = {cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]}
@@ -969,6 +1073,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     if function_plan_dangling_items:
                         _LOGGER.info("%s Function Plan debris (%d):", ICON_DELETE, len(function_plan_dangling_items))
                         for item in function_plan_dangling_items:
+                            _LOGGER.info("   -> %s", item["name"])
+
+                    if knx_bridge_missing_items:
+                        _LOGGER.info(
+                            "%s KNX objects without bridge Marker (%d):", ICON_LINK, len(knx_bridge_missing_items)
+                        )
+                        for item in knx_bridge_missing_items:
+                            _LOGGER.info("   -> %s", item["name"])
+
+                    if knx_bridge_loopback_missing_items:
+                        _LOGGER.info(
+                            "%s KNX bridges without API-Loopback fan-out (%d):",
+                            ICON_LINK,
+                            len(knx_bridge_loopback_missing_items),
+                        )
+                        for item in knx_bridge_loopback_missing_items:
                             _LOGGER.info("   -> %s", item["name"])
 
                     if function_plan_trigger_missing_by_ref:
@@ -1019,6 +1139,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "function_plan_dangling": len(function_plan_dangling_items),
                     "function_plan_trigger_missing": _count_by_ref(function_plan_trigger_missing_by_ref),
                     "function_plan_trigger_orphan": _count_by_ref(function_plan_trigger_orphan_by_ref),
+                    "knx_bridge_missing": len(knx_bridge_missing_items),
+                    "knx_bridge_loopback_missing": len(knx_bridge_loopback_missing_items),
                     "all": len(mismatches),
                 }
 
@@ -1375,6 +1497,52 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 failed_classes[cls] = "delete_webio_base failed"
         return devices, classes, failed_classes, skipped
 
+    async def _delete_knx_loopback_webio(
+        self,
+        devices: dict[str, str],
+        classes: dict[str, str],
+        failed_classes: dict[str, str],
+        skipped: dict[str, str],
+    ) -> None:
+        """Delete the Phase 7 API-Loopback Web-IO device+class, if present.
+
+        This class/device lives OUTSIDE WEBIO_CLASSES (see ensure_knx_loopback_webio's
+        docstring — its commands are never keys of parse_config()'s webio_commands), so the
+        per-class loop above never sees it via last_audit_results["webio_devices"] and would
+        otherwise leave it behind forever on an uninstall. Needs its own live lookup instead of
+        the cached audit. Mutates the four result dicts in place under a "knx_loopback" key —
+        callers only ever report len(...) over these dicts, so no further reporting change is
+        needed for this extra entry to show up in the cleanup summary.
+        """
+        try:
+            device_id = await self.api.get_webio_device_info(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
+        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+            # get_webio_device_info raises RuntimeError on a non-200 response, but its own
+            # session.get() call is unwrapped — a connection failure/timeout propagates as
+            # aiohttp.ClientError/TimeoutError instead. Both are routine "couldn't delete it
+            # this time" outcomes here, not a crash.
+            skipped["knx_loopback"] = f"get_webio_device_info failed: {err}"
+            return
+        if not device_id:
+            return
+        base_info = await self.api.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
+        if not base_info:
+            # get_webio_base_info returns None both when the class genuinely doesn't exist
+            # AND on a failed HTTP fetch (same ambiguity get_webio_device_info's docstring
+            # warns about) — deleting the device first and treating this as "no class to
+            # delete" would orphan the class on a transient failure. Skip everything instead.
+            skipped["knx_loopback"] = "get_webio_base_info returned no class"
+            return
+        base_id = base_info[0]
+        if not await self.api.delete_webio_device(device_id):
+            skipped["knx_loopback"] = "delete_webio_device failed"
+            return
+        devices["knx_loopback"] = str(device_id)
+        if await self.api.delete_webio_base(base_id):
+            classes["knx_loopback"] = str(base_id)
+        else:
+            failed_classes["knx_loopback"] = "delete_webio_base failed"
+
     async def async_uninstall_cleanup(self) -> dict[str, Any]:
         """Tear down everything the integration created in Comexio: HA-managed Function
         Plans (CONF_FUNCTION_PLAN_PLAN_MAP), then the Web-IO device instances, then the
@@ -1388,6 +1556,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self._persist_plan_map({}, removals=set(deleted_plans))
 
         devices, classes, failed_classes, skipped = await self._delete_webio_devices_and_classes()
+        await self._delete_knx_loopback_webio(devices, classes, failed_classes, skipped)
 
         _LOGGER.info(
             "[%s] Uninstall cleanup: plans deleted=%s failed=%s, devices=%s, classes=%s, failed_classes=%s, skipped=%s",
@@ -1907,7 +2076,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def update_knx(self, knx_id: str | int, value: float | int | str) -> None:
         knx_id_str = str(knx_id)
+        previous = self.knx_states.get(knx_id_str)
         self.knx_states[knx_id_str] = value
+        self._webhook_updated_knx_ids.add(knx_id_str)  # R1: mark as received during possible fetch
         label = f"K{knx_id_str}"
         if self.data and "knx" in self.data:
             for k in self.data["knx"]:
@@ -1915,6 +2086,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     k["value"] = value
                     label = k.get("name") or label
                     break
+        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "knx", label, value, previous)
         self.async_set_updated_data(self.data)
         self._fire_plan_event("knx", knx_id_str, label, value)
         self.schedule_plan_preview_refresh()
@@ -1968,6 +2140,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not stored:
             return
         self.extension_registry = stored.get("extensions", {})
+
+    async def async_load_knx_dpt_catalog(self) -> None:
+        """Restore the last known-good KNX DPT catalog from disk (called once at setup).
+
+        Seeds api.ComexioAPI's in-memory cache before the first poll so its own fetch-failure
+        fallback (get_knx_dpt_catalog: "return self._knx_dpt_catalog or {}") has something
+        real to fall back to even on a fresh instance — see _knx_dpt_catalog_store's docstring
+        for why that matters on every reload, not just a full HA restart.
+        """
+        stored = await self._knx_dpt_catalog_store.async_load()
+        if not stored:
+            return
+        self.api.seed_knx_dpt_catalog(stored.get("catalog", {}), stored.get("version"))
+        self._last_persisted_knx_dpt_catalog_version = stored.get("version")
+
+    async def _maybe_persist_knx_dpt_catalog(self) -> None:
+        """Persist the KNX DPT catalog when a freshly fetched version differs from disk.
+
+        Only called after a non-empty knx_dpt_catalog was returned this poll (see
+        _async_update_data) — version-gated like the other *_store saves in this class so an
+        unchanged catalog (the common case, see get_knx_dpt_catalog's own version-cache check)
+        doesn't hit disk every poll.
+        """
+        snapshot = self.api.get_knx_dpt_catalog_snapshot()
+        if snapshot is None:
+            return
+        catalog, version = snapshot
+        if version == self._last_persisted_knx_dpt_catalog_version:
+            return
+        await self._knx_dpt_catalog_store.async_save({"catalog": catalog, "version": version})
+        self._last_persisted_knx_dpt_catalog_version = version
 
     async def async_load_watchdog_history(self) -> None:
         """Restore the persisted Bus-Load-Watchdog event history (called once at setup)."""
@@ -2909,7 +3112,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _cluster_plan_name(source_id: int, prefix: str, cluster_size: int, category_label: str) -> str:
-        """Name of the managed cluster plan a marker/KNX object belongs to (deterministic bucket math)."""
+        """Name of the managed cluster plan a marker/KNX object belongs to (deterministic bucket math).
+
+        KNX ignores the passed-in cluster_size and always buckets at FUNCTION_PLAN_KNX_CLUSTER_SIZE
+        (50), regardless of the shared CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN option (user decision,
+        2026-09-20) — a KNX bridge row needs its own K-object column plus a wider WebIO column and
+        reserves an extra row-slot per pair for the Phase 7 API-Loopback fan-out (see services/_grid.py
+        _KNX_COLUMN_WIDTH / _assign_grid_positions). With the KNX-only pair-to-pair row pitch
+        (FUNCTION_PLAN_KNX_LAYOUT_Y_STEP = 18.75, see is_knx_cluster_plan's row_step override in
+        services/plan_actions.py) an A3-formatted canvas fits 2 columns × 26 two-slot pairs = 52
+        pairs — just above 50, so bucketing at 50 leaves a little headroom rather than exactly
+        maxing out the canvas. (This docstring went through two corrections on 2026-09-20: first
+        it claimed "25 rows = 50 pairs" using the generic, untightened row pitch, which was never
+        actually reachable; then, once the pair-to-pair pitch was tightened to match the
+        within-pair hop pitch exactly [15.0], user testing found that made every row equidistant
+        with no visual gap between pairs at all ["press an press"] — FUNCTION_PLAN_KNX_LAYOUT_Y_STEP
+        [18.75] is the resulting compromise value, see its own docstring in const.py.) Bucketing
+        more than the canvas can hold under the generic (marker-sized) default would silently
+        overflow the canvas and drop pairs.
+        """
+        if category_label == SOURCE_CATEGORIES[WebioClass.KNX].label:
+            cluster_size = FUNCTION_PLAN_KNX_CLUSTER_SIZE
         start = ((source_id - 1) // cluster_size) * cluster_size + 1
         return f"{prefix} - {category_label} [{start}-{start + cluster_size - 1}]"
 
@@ -2940,10 +3163,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def resolve_marker_clusters(
         self, marker_ids: list[int], category_label: str
-    ) -> tuple[dict[int, list[int]], set[int]]:
+    ) -> tuple[dict[int, list[int]], set[int], list[str]]:
         """Group marker/KNX IDs by cluster plan and resolve/create each plan.
 
-        Returns ({fub_id: [source_ids_in_cluster]}, {fub_ids of freshly created plans}).
+        Returns ({fub_id: [source_ids_in_cluster]}, {fub_ids of freshly created plans},
+        [names of cluster plans that could not be resolved/created]). The third element lets
+        callers surface a partial failure to the user instead of it only appearing in the log —
+        a plan can fail (e.g. the _verify_new_plan_is_empty guard rejecting a contaminated
+        fub_id) while other clusters in the same batch succeed, so the emptiness of the first
+        dict alone is not a reliable "something went wrong" signal.
         Lookup order per cluster: CONF_FUNCTION_PLAN_PLAN_MAP cache → name scan → create.
         category_label picks the plan-name category ("Marker"/"KNX") — see resolve_knx_clusters.
         """
@@ -2955,6 +3183,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plan_map: dict[str, int] = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
         stale = self._stale_plan_map_entries(fub_data)
 
+        if category_label == SOURCE_CATEGORIES[WebioClass.KNX].label and cluster_size != FUNCTION_PLAN_KNX_CLUSTER_SIZE:
+            _LOGGER.debug(
+                "[%s] KNX cluster plans ignore the configured max-pairs-per-plan (%d) and always "
+                "bucket at %d — see _cluster_plan_name",
+                self.server_id,
+                cluster_size,
+                FUNCTION_PLAN_KNX_CLUSTER_SIZE,
+            )
+
         clusters: dict[str, list[int]] = {}
         for mid in marker_ids:
             clusters.setdefault(self._cluster_plan_name(mid, prefix, cluster_size, category_label), []).append(mid)
@@ -2962,11 +3199,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         result: dict[int, list[int]] = {}
         created_plans: set[int] = set()
         plan_map_updates: dict[str, int] = {}
+        failed_plans: list[str] = []
 
         for plan_name, cluster_ids in clusters.items():
             fub_id, created = await self._resolve_single_cluster_plan(plan_name, plan_map, fub_data)
             if fub_id is None:
                 _LOGGER.error("[%s] Failed to resolve/create cluster plan '%s'", self.server_id, plan_name)
+                failed_plans.append(plan_name)
                 continue
             result[fub_id] = cluster_ids
             if created:
@@ -2976,9 +3215,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if plan_map_updates or stale:
             await self._persist_plan_map(plan_map_updates, removals=set(stale))
 
-        return result, created_plans
+        return result, created_plans, failed_plans
 
-    async def resolve_knx_clusters(self, knx_ids: list[int]) -> tuple[dict[int, list[int]], set[int]]:
+    async def resolve_knx_clusters(self, knx_ids: list[int]) -> tuple[dict[int, list[int]], set[int], list[str]]:
         """Group KNX object IDs by cluster plan and resolve/create each plan (KNX counterpart of
         resolve_marker_clusters — same bucket math, plans named "HA - KNX [x-y]")."""
         return await self.resolve_marker_clusters(knx_ids, category_label=SOURCE_CATEGORIES[WebioClass.KNX].label)
@@ -2998,13 +3237,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
     ) -> tuple[int | None, bool]:
         """Find or create a single cluster plan by name. Returns (fub_id, freshly_created)."""
         cached = plan_map.get(plan_name)
-        if cached is not None and fub_data.get(str(cached), {}).get("Name") == plan_name:
+        if (
+            cached is not None
+            and cached not in self._distrusted_fub_ids
+            and fub_data.get(str(cached), {}).get("Name") == plan_name
+        ):
             return cached, False
 
         for fid_str, fub_info in fub_data.items():
-            if fub_info.get("Name") == plan_name:
+            fid = int(fid_str)
+            # Skip a plan _verify_new_plan_is_empty rejected but couldn't fully remove — see
+            # _distrusted_fub_ids' docstring. Without this, a plain by-name match would silently
+            # re-adopt the still-contaminated plan the moment fub_data gets refreshed again.
+            if fid not in self._distrusted_fub_ids and fub_info.get("Name") == plan_name:
                 _LOGGER.info("[%s] Found cluster plan '%s' (fub_id=%s)", self.server_id, plan_name, fid_str)
-                return int(fid_str), False
+                return fid, False
 
         fub_id = await self._create_managed_plan(plan_name)
         return fub_id, fub_id is not None
@@ -3019,6 +3266,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.error("[%s] Failed to create cluster plan '%s'", self.server_id, plan_name)
             return None
 
+        if not await self._verify_new_plan_is_empty(plan_name, fub_id):
+            return None
+
+        # Seed the bulk plan-snapshot cache immediately instead of waiting for the next full
+        # poll's function_plan_load_all_plans() to pick this fub_id up. Without this, a plan
+        # created earlier in THIS SAME sync run (e.g. Full Sync creating "HA - KNX [1-100]"
+        # before wiring bridge Markers into it) is invisible to _relevant_plans_loaded() for
+        # the rest of the run — async_fresh_trigger_audit()/async_fresh_knx_bridge_audit() then
+        # defer their whole check to "next poll" even though nothing is actually missing from
+        # the data, silently pushing the wiring itself out to a second, separate button press.
+        # {"elements": {}, "connections": {}} is the exact shape function_plan_load_elements()/
+        # function_plan_load_all_plans() use per plan — just-verified-empty is accurate as of
+        # this line; the "administrated by HA" comment element added a few lines below won't be
+        # reflected here until the next real poll, but no consumer filters on comment elements
+        # (all of them look for a specific reference type — Marker/IO/KNX), so that particular
+        # gap is harmless. _SEEDED_EMPTY_PLAN_MARKER flags this entry as a placeholder rather
+        # than real bulk data — see its own docstring for why _load_function_plan_check_data()
+        # needs to tell the difference.
+        self.function_plan_plans[fub_id] = {"elements": {}, "connections": {}, _SEEDED_EMPTY_PLAN_MARKER: True}
+
         # paper_name/orientation override is required: the freshly created plan is not in the
         # cached $Fubs data yet, so bounds lookup by fub_id would fall back to A4 landscape.
         x_max, _ = self.api.get_fub_canvas_bounds(fub_id, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
@@ -3029,6 +3296,133 @@ class ComexioCoordinator(DataUpdateCoordinator):
             y=FUNCTION_PLAN_LAYOUT_COMMENT_Y,
         )
         return fub_id
+
+    async def _verify_new_plan_is_empty(self, plan_name: str, fub_id: int) -> bool:
+        """Guard against building a managed plan on top of stale leftover elements.
+
+        Comexio's element/connection storage (loadelements/saveelements) is keyed purely by
+        fub_id and is NOT tied to a plan's actual registration lifetime — an id that was ever
+        written to before (a plan deleted directly in Comexio, a client that wrote elements
+        under an id before any plan existed there, ...) can still be handed back by
+        create_fup() as a "new" plan while its element storage silently carries the old data.
+        Building on top of that would corrupt the fresh plan with someone else's leftover
+        elements/wiring instead of the pristine canvas the rest of this method assumes.
+        Confirmed live 2026-09-15: a stale KNX-bridge test write under an unregistered fub_id
+        got inherited wholesale by a brand-new "HA - Marker [301-400]" plan that reused that
+        same id, mixing unrelated ghost elements (positioned far outside the visible canvas)
+        into the real plan.
+
+        Leftover elements are cleared in place first (function_plan_delete_elements also
+        removes their connections) so the freshly created plan/fub_id itself stays usable —
+        discarding it via delete_fup would only free the fub_id to be handed back by a later
+        create_fup() still carrying the same leftover data, since delete_fup does not touch
+        the fub_id-keyed element storage that caused the contamination in the first place.
+        The cleanup result is re-verified with a second load (the delete endpoint's boolean
+        result alone isn't proof the plan is actually empty afterwards — trusting it blindly
+        could let a partially-cleaned plan through undetected). Only if cleanup isn't possible
+        (load failure, no elements to delete despite orphaned connections, or the delete/
+        re-verify fails) is the plan discarded — see _discard_contaminated_plan. Either success
+        path lifts a prior quarantine entry for this fub_id (_distrusted_fub_ids): once
+        genuinely re-verified empty, a reused id is trustworthy again.
+        """
+        existing = await self.api.function_plan_load_elements(fub_id)
+        if self._plan_contents_clean(existing):
+            self._distrusted_fub_ids.discard(fub_id)
+            return True
+
+        if existing is None:
+            _LOGGER.error(
+                "[%s] Could not verify new cluster plan '%s' (fub_id=%s) is empty — removing it and aborting",
+                self.server_id,
+                plan_name,
+                fub_id,
+            )
+            await self._discard_contaminated_plan(plan_name, fub_id)
+            return False
+
+        elem_ids = [int(eid) for eid in existing.get("elements") or {}]
+        conn_count = len(existing.get("connections") or {})
+        if not elem_ids:
+            # function_plan_delete_elements operates on element ids — orphaned connections
+            # with no elements behind them aren't cleanable through this endpoint at all.
+            _LOGGER.error(
+                "[%s] New cluster plan '%s' (fub_id=%s) has %d orphaned connection(s) but no elements — "
+                "not cleanable via the API; removing the plan and aborting instead of building on top of "
+                "it. Inspect/clear fub_id=%s directly in Comexio Studio.",
+                self.server_id,
+                plan_name,
+                fub_id,
+                conn_count,
+                fub_id,
+            )
+            await self._discard_contaminated_plan(plan_name, fub_id)
+            return False
+
+        _LOGGER.warning(
+            "[%s] New cluster plan '%s' (fub_id=%s) unexpectedly already has %d element(s)/%d connection(s) — "
+            "Comexio likely reused a stale fub_id still carrying leftover data; clearing it before use.",
+            self.server_id,
+            plan_name,
+            fub_id,
+            len(elem_ids),
+            conn_count,
+        )
+        cleared = await self.api.function_plan_delete_elements(elem_ids)
+        if cleared and self._plan_contents_clean(await self.api.function_plan_load_elements(fub_id)):
+            _LOGGER.info(
+                "[%s] Cleared %d leftover element(s) from '%s' (fub_id=%s) — plan is usable now",
+                self.server_id,
+                len(elem_ids),
+                plan_name,
+                fub_id,
+            )
+            self._distrusted_fub_ids.discard(fub_id)
+            return True
+
+        _LOGGER.error(
+            "[%s] Could not clear leftover elements from new cluster plan '%s' (fub_id=%s) — removing it "
+            "and aborting instead of building on top of it",
+            self.server_id,
+            plan_name,
+            fub_id,
+        )
+        await self._discard_contaminated_plan(plan_name, fub_id)
+        return False
+
+    @staticmethod
+    def _plan_contents_clean(existing: dict | None) -> bool:
+        """True if a function_plan_load_elements() result has neither elements nor connections."""
+        return existing is not None and not existing.get("elements") and not existing.get("connections")
+
+    async def _discard_contaminated_plan(self, plan_name: str, fub_id: int) -> None:
+        """Best-effort remove a plan that failed the new-plan emptiness check and couldn't be
+        cleaned in place, and make sure it can't be silently re-adopted afterwards.
+
+        delete_fup() only un-registers the plan in Comexio — the fub_id-keyed element storage
+        that caused the contamination is untouched, so the id could still be handed back by a
+        later create_fup() and reproduce the exact same corruption; there is no fix for that
+        beyond a human clearing it in Comexio Studio. Dropping the cache entry alone is not
+        durable either: the very next parse_config() (every poll, and the reload every sync
+        ends with) repopulates fub_data wholesale from Comexio's still-live $Fubs listing if
+        delete_fup failed, which would let _resolve_single_cluster_plan's by-name scan silently
+        re-adopt the same poisoned plan with no re-check at all. The session-local quarantine
+        in _distrusted_fub_ids closes that gap for the lifetime of this coordinator.
+
+        Does not touch function_plan_plans: _create_managed_plan only seeds that cache AFTER
+        _verify_new_plan_is_empty returns True, and every path that reaches this method returns
+        False from there first — so a discarded fub_id can never have a cache entry to begin
+        with. This method must not become reachable from anywhere else without re-checking that.
+        """
+        self._distrusted_fub_ids.add(fub_id)
+        if not await self.api.delete_fup(fub_id):
+            _LOGGER.error(
+                "[%s] Could not remove contaminated/unverified plan '%s' (fub_id=%s) — quarantined for "
+                "this session, but manual cleanup in Comexio Studio is still required to free the name/id",
+                self.server_id,
+                plan_name,
+                fub_id,
+            )
+        self.api.fub_data.pop(str(fub_id), None)
 
     @staticmethod
     def _io_plan_members(plan_name: str, prefix: str) -> list[str] | None:
@@ -3047,14 +3441,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Live membership of every managed IO cluster plan: {fub_id: [ext names]}.
 
         Read from the live $Fubs plan names (authoritative — plan_map keys can go stale
-        after renames); membership order defines each extension's column index.
+        after renames); membership order defines each extension's column index. Excludes
+        _distrusted_fub_ids — the single choke point resolve_io_clusters/_join_or_create_io_plan/
+        managed_io_plan_members all go through, so a plan _verify_new_plan_is_empty rejected but
+        couldn't fully remove can't be found-by-name-and-written-into or joined-as-having-free-
+        capacity here either (see _resolve_single_cluster_plan's analogous check for Marker/KNX).
         """
         result: dict[int, list[str]] = {}
         for fid_str, fub_info in self.api.fub_data.items():
+            fid = int(fid_str) if fid_str.lstrip("-").isdigit() else None
+            if fid is None or fid in self._distrusted_fub_ids:
+                continue
             members = self._io_plan_members(str(fub_info.get("Name", "")), prefix)
             if members:
-                with contextlib.suppress(TypeError, ValueError):
-                    result[int(fid_str)] = members
+                result[fid] = members
         return result
 
     def managed_io_plan_members(self, fub_id: int) -> list[str] | None:
@@ -3074,16 +3474,44 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plan_map: dict[str, int] = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
         return plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME) == fub_id
 
+    def is_knx_cluster_plan(self, fub_id: int) -> bool:
+        """Whether fub_id's live plan name is one of this coordinator's managed KNX cluster plans.
+
+        The sort/grid code needs this UPFRONT — before plan elements are even loaded, at the
+        same point it already asks is_trigger_plan() — to pick the tighter KNX bridge row pitch
+        (FUNCTION_PLAN_KNX_LAYOUT_Y_STEP, see services/plan_actions.py's row_step selection)
+        instead of the generic marker/WebIO pitch. A KNX bridge pair reserves TWO row-slots
+        (K-object row + Phase 7 loopback hop — see services/_grid.py _assign_grid_positions), so
+        packing those slots at the generic pitch leaves a full blank row's worth of unused
+        vertical gap between one pair and the next (user report, 2026-09-20, screenshot comparing
+        old K5-K6-K7 spacing against the desired tighter K8-K9-K10 stacking). Deliberately NOT the
+        exact same value as the within-pair hop pitch (_KNX_LOOPBACK_Y_OFFSET) though — an earlier
+        attempt at that made every row in the plan perfectly equidistant with no visual gap
+        between separate pairs at all ("alles press an press", same-day follow-up report) — see
+        FUNCTION_PLAN_KNX_LAYOUT_Y_STEP's own docstring in const.py for the resulting numbers.
+
+        Matches by live plan name (like _is_managed_function_plan), not CONF_FUNCTION_PLAN_PLAN_MAP
+        membership — cluster plans aren't necessarily cached there under a name reverse-lookup,
+        and the name pattern alone ("{prefix} - {KNX label} [...]") is already the same
+        authoritative check _cluster_plan_name's callers rely on elsewhere.
+        """
+        prefix = f"{self._function_plan_prefix()} - {SOURCE_CATEGORIES[WebioClass.KNX].label} ["
+        return self.api.function_plan_name(fub_id).startswith(prefix)
+
     def _io_rows_needed(self, ext_name: str) -> int:
         """Column rows one extension package needs (IOs + header/blank separator rows)."""
         idents = [io["identifier"] for io in (self.data or {}).get("io", []) if io["ext_name"] == ext_name]
         rows = io_column_rows(idents)
         return (max(rows.values()) + 1) if rows else 0
 
-    async def resolve_io_clusters(self, ext_names: list[str]) -> tuple[dict[str, tuple[int, int]], set[int]]:
+    async def resolve_io_clusters(self, ext_names: list[str]) -> tuple[dict[str, tuple[int, int]], set[int], list[str]]:
         """Resolve/create the managed IO cluster plan of every extension (membership-true).
 
-        Returns ({ext_name: (fub_id, column_index)}, {fub_ids of freshly created plans}).
+        Returns ({ext_name: (fub_id, column_index)}, {fub_ids of freshly created plans},
+        [ext_names whose plan could not be resolved/created]). The third element lets callers
+        surface a partial failure to the user — see resolve_marker_clusters' docstring for why
+        an empty first dict is not a reliable "something went wrong" signal when several
+        extensions are being resolved at once.
         An extension already encoded in a managed IO plan name keeps that plan and column
         forever; a new extension joins the first plan with free capacity (the plan is
         renamed to extend its membership list) or gets a fresh plan. Capacity derives from
@@ -3097,6 +3525,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         result: dict[str, tuple[int, int]] = {}
         created_plans: set[int] = set()
         plan_map_updates: dict[str, int] = {}
+        failed_exts: list[str] = []
 
         for ext in ext_names:
             placed = next(
@@ -3107,6 +3536,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 placed = await self._join_or_create_io_plan(ext, membership, capacity, prefix)
             if placed is None:
                 _LOGGER.error("[%s] Failed to resolve/create IO cluster plan for '%s'", self.server_id, ext)
+                failed_exts.append(ext)
                 continue
             fub_id, _column = placed
             result[ext] = placed
@@ -3117,7 +3547,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         if plan_map_updates or stale:
             await self._persist_plan_map(plan_map_updates, removals=set(stale))
-        return result, created_plans
+        return result, created_plans, failed_exts
 
     async def _join_or_create_io_plan(
         self, ext: str, membership: dict[int, list[str]], capacity: int, prefix: str
@@ -3243,6 +3673,31 @@ class ComexioCoordinator(DataUpdateCoordinator):
         entity_id = er.async_get(self.hass).async_get_entity_id("select", DOMAIN, uid)
         return self.hass.states.get(entity_id) if entity_id else None
 
+    def _has_active_function_plan(self) -> bool:
+        """Whether a Managed Function Plan is configured and its selector isn't disabled/gone.
+
+        Shared has_active_plan guard for async_fresh_knx_bridge_audit and
+        async_fresh_knx_bridge_loopback_audit — both need it for the same reason (a fresh
+        re-audit against a plan nobody actually has active would be meaningless work), factored
+        out so the boolean expression isn't duplicated a third time and to keep each caller's
+        own cognitive complexity down (SonarQube S3776).
+        """
+        _lp_sel = self._active_plan_selector_state()
+        return (_lp_sel is not None and _lp_sel.state not in ("unavailable", "unknown")) or (
+            self.config_entry.options.get(CONF_FUNCTION_PLAN_FUB_ID) is not None
+            or bool(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP))
+        )
+
+    def _api_credentials_configured(self) -> bool:
+        """Whether both optional API Basic-Auth credentials (username + password) are set.
+
+        Several Phase 7 API-Loopback code paths need these (ensure_knx_loopback_webio aborts
+        deterministically without them) — a shared check so the audit gates that decide whether
+        to flag a loopback gap agree exactly with what the actual repair attempt requires,
+        instead of two independently-written boolean expressions drifting apart over time.
+        """
+        return bool(self.api.api_user and self.api.api_pass)
+
     def _function_plan_check_fub_ids(self) -> set[int]:
         """Collect the fub_ids of every managed plan relevant for the wiring audit.
 
@@ -3269,11 +3724,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Prefers the bulk snapshot from the backup cycle; plans missing there are fetched
         directly. Returns {fub_id: {"elements": ..., "connections": ...}}; failed plans
         are skipped.
+
+        A _SEEDED_EMPTY_PLAN_MARKER entry (a plan _create_managed_plan created and verified
+        empty earlier in this same run, not yet refreshed by a real bulk load) counts as a
+        cache miss here too — this method feeds marker-cleanup/unwire lookups that need to see
+        whatever was actually wired into the plan afterward, not the seed's now-possibly-stale
+        empty snapshot.
         """
         plans: dict[int, dict] = {}
         for fub_id in self._function_plan_check_fub_ids():
             plan_data = self.function_plan_plans.get(fub_id)
-            if plan_data is None:
+            if plan_data is None or plan_data.get(_SEEDED_EMPTY_PLAN_MARKER):
                 try:
                     plan_data = await self.api.function_plan_load_elements(fub_id)
                 except Exception:
@@ -3525,6 +3986,377 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return pairs
 
     @staticmethod
+    def _plan_knx_bridge_pairs(plan_data: dict) -> set[tuple[str, str]]:
+        """(bridge Marker ref_id, KNX ref_id) pairs actually wired Marker -> KNX in one plan.
+
+        Write-path counterpart of _plan_wired_pairs, but direction-sensitive unlike it:
+        a Marker and a KNX object can legitimately be connected in EITHER direction on a
+        plan (e.g. a K -> Marker wire built for unrelated custom logic, independent of
+        Entwurf A "Merker-Brücke"), and only Marker (input) -> KNX (output) counts as a
+        write bridge — the reverse must not be misread as one just because both element
+        types touch the same connection.
+        """
+        elem_refs: dict[str, tuple[str, str]] = {}
+        for elem_id, elem in (plan_data.get("elements") or {}).items():
+            ref = elem.get("reference") or {}
+            ref_type = str(ref.get("type"))
+            if ref_type in ("2", "11"):
+                elem_refs[str(elem_id)] = (ref_type, str(ref.get("ref_id")))
+        pairs: set[tuple[str, str]] = set()
+        for conn in (plan_data.get("connections") or {}).values():
+            input_id = str((conn.get("input") or {}).get("FubElementId"))
+            input_ref = elem_refs.get(input_id)
+            if input_ref is None or input_ref[0] != "2":
+                continue
+            outputs = conn.get("output") or []
+            if isinstance(outputs, dict):
+                outputs = list(outputs.values())
+            output_ids = {str(o.get("FubElementId")) for o in outputs}
+            knx_ids = {elem_refs[oid][1] for oid in output_ids if elem_refs.get(oid, ("", ""))[0] == "11"}
+            pairs.update((input_ref[1], k) for k in knx_ids)
+        return pairs
+
+    def _audit_knx_bridge_items(
+        self,
+        has_active_plan: bool,
+        knx_objects: list[dict[str, Any]],
+        ha_map: dict[str, Any],
+        wired_knx_webio_pairs: set[tuple[str, str]] | None,
+        mismatches: set[str],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """KNX write path (Entwurf A "Merker-Brücke") audit: bridge-Marker + API-Loopback fan-out.
+
+        A KNX object is blind/read-only in Comexio unless a dedicated bridge Marker is wired
+        Marker -> KNX object in its cluster plan (the K -> WebIO leg is the pre-existing,
+        separately-audited read path and is intentionally NOT duplicated here). Only imported/
+        non-ignored KNX objects (present in ha_map) are candidates — one without an HA entity
+        has nothing to bridge.
+
+        Phase 7 (API-Loopback fan-out): once a bridge's Marker/K-Element wiring exists
+        (knx_bridge_marker_by_k_id), the K-Element's own connection must ALSO reach the
+        Comexio-internal API-Loopback Web-IO (wire_knx_bridge_loopback) or the bridge Marker
+        gets stuck after a Bus-Rückänderung (see project_knx_write_path_design memory,
+        "Punkt 4"). Detected purely from the already-loaded wired_knx_webio_pairs —
+        _plan_wired_pairs collects EVERY (source, webio) pair a connection's sinks produce, so a
+        bridged K-Element with fewer than 2 such pairs is missing the loopback leg. No extra
+        HTTP round trip needed, and independent of the loopback device's/webIoId's concrete
+        identity (irrelevant to a plain sink count).
+
+        Mutates `mismatches` in place and may set self._lp_missing_recheck_pending — factored
+        out of _async_update_data purely to keep that method's own cognitive complexity (already
+        an accepted SonarQube S3776 outlier) from growing further with each Phase 7 addition.
+        """
+        knx_bridge_missing_items: list[dict[str, Any]] = []
+        knx_bridge_loopback_missing_items: list[dict[str, Any]] = []
+        if not has_active_plan:
+            return knx_bridge_missing_items, knx_bridge_loopback_missing_items
+        knx_bridge_marker_by_k_id = self._knx_bridge_marker_by_k_id()
+        if knx_bridge_marker_by_k_id is None:
+            self._lp_missing_recheck_pending = True
+            return knx_bridge_missing_items, knx_bridge_loopback_missing_items
+        knx_category = category_by_fub_module_type("11")
+        for k in knx_objects:
+            k_id = str(k["id"])
+            if source_audit_key(knx_category, k["id"]) not in ha_map:
+                continue
+            if k.get("kind") == MarkerKind.READ_ONLY:
+                # A read-only KNX object (explicit "[RO]" suffix, or auto-tagged by
+                # _auto_suffix_unambiguous_knx) has no write path to bridge — without this
+                # exclusion it would be flagged as "missing bridge Marker" on every poll
+                # forever, since knx_bridge_marker_by_k_id legitimately never contains it. A
+                # DPT-unambiguous item auto-tagged THIS same poll still briefly races past this
+                # check once (renamed remotely, but this poll's already-parsed item dict is not
+                # itself mutated — see _auto_suffix_unambiguous_knx's docstring); that one-poll
+                # lag self-resolves on the next poll's fresh scrape, same as the accepted lag
+                # documented there (Sourcery finding, review 2026-09-21).
+                continue
+            if k_id not in knx_bridge_marker_by_k_id:
+                knx_bridge_missing_items.append(
+                    {
+                        "name": k["name"],
+                        "ref_id": k_id,
+                        "title": k["title"],
+                        "type_raw": k["type_raw"],
+                        "webio_class": WEBIO_CLASS_KNX,
+                    }
+                )
+                mismatches.add(f"knx_bridge_missing_K{k_id}")
+
+        if wired_knx_webio_pairs is None:
+            self._lp_missing_recheck_pending = True
+            return knx_bridge_missing_items, knx_bridge_loopback_missing_items
+
+        knx_by_id = {str(k["id"]): k for k in knx_objects}
+        knx_bridge_loopback_missing_items = self._audit_knx_bridge_loopback_items(
+            knx_bridge_marker_by_k_id, knx_by_id, wired_knx_webio_pairs, mismatches
+        )
+        return knx_bridge_missing_items, knx_bridge_loopback_missing_items
+
+    def _audit_knx_bridge_loopback_items(
+        self,
+        knx_bridge_marker_by_k_id: dict[str, str],
+        knx_by_id: dict[str, dict[str, Any]],
+        wired_knx_webio_pairs: set[tuple[str, str]],
+        mismatches: set[str],
+    ) -> list[dict[str, Any]]:
+        """Phase 7 API-Loopback fan-out audit half of _audit_knx_bridge_items.
+
+        Split out to keep _audit_knx_bridge_items' own cognitive complexity within SonarQube
+        S3776's limit — see that method's docstring for the full semantics.
+
+        Known limitation: "complete" is decided by sink COUNT (>=2) alone, not by verifying
+        one sink is actually the API-Loopback device's own command — a K-element with two
+        ordinary/non-loopback Web-IO connections would suppress this repair indefinitely.
+        Fixing this needs a live identity lookup of which webIoId belongs to the loopback
+        class' commands (it's deliberately outside WEBIO_CLASSES, so there's no cached
+        per-poll mapping for it yet — see ensure_knx_loopback_webio's docstring). Tracked as
+        an open Phase 7 follow-up (Sourcery finding, review 2026-09-21), not fixed here.
+        """
+        sink_counts: dict[str, int] = {}
+        for k_ref_id, _webio_ref_id in wired_knx_webio_pairs:
+            sink_counts[k_ref_id] = sink_counts.get(k_ref_id, 0) + 1
+        # The repair for this gap (ensure_knx_loopback_webio) needs the OPTIONAL API username/
+        # password (CONF_API_USERNAME/CONF_API_PASSWORD) — without them it aborts
+        # deterministically every time. Flagging the gap anyway would raise a repair item that
+        # can never be fixed until credentials are set, re-appearing on every single poll —
+        # check once, not per candidate.
+        has_api_credentials = self._api_credentials_configured()
+        unfixable_without_credentials: list[str] = []
+        knx_bridge_loopback_missing_items: list[dict[str, Any]] = []
+        for k_id, marker_id in knx_bridge_marker_by_k_id.items():
+            # Not in sink_counts at all -> the read-path wire itself is missing, a different,
+            # already-audited gap (knx_bridge_missing/function_plan_missing) — nothing to fan
+            # the loopback onto yet.
+            if k_id not in sink_counts or sink_counts[k_id] >= 2:
+                continue
+            if not has_api_credentials:
+                unfixable_without_credentials.append(k_id)
+                continue
+            k = knx_by_id.get(k_id)
+            knx_bridge_loopback_missing_items.append(self._knx_bridge_loopback_missing_item(k, k_id, marker_id))
+            mismatches.add(f"knx_bridge_loopback_missing_K{k_id}")
+        if unfixable_without_credentials:
+            # One aggregated WARNING per poll rather than one INFO per candidate (a large KNX
+            # install would otherwise flood the log every ~15 min) — WARNING, not INFO, because
+            # this hides a real gap from the repair UI entirely (see _api_credentials_configured's
+            # docstring) and the only remaining visibility into it is this log line.
+            _LOGGER.warning(
+                "[%s] %d KNX bridge(s) are missing their API-Loopback fan-out (K%s), but no API "
+                "credentials are configured (set them via the integration's Reconfigure dialog) "
+                "— not flagging as a repair item until they are set, since the repair would fail "
+                "deterministically without them",
+                self.server_id,
+                len(unfixable_without_credentials),
+                ", K".join(sorted(unfixable_without_credentials)),
+            )
+        return knx_bridge_loopback_missing_items
+
+    @staticmethod
+    def _knx_bridge_loopback_missing_item(k: dict[str, Any] | None, k_id: str, marker_id: str) -> dict[str, Any]:
+        """Build one knx_bridge_loopback_missing audit item.
+
+        Shared by the live-poll computation in _async_update_data and the fresh mid-sync
+        re-audit (async_fresh_knx_bridge_loopback_audit) — byte-identical dict shape in both,
+        factored out to avoid the two drifting apart and to keep each caller's own cognitive
+        complexity down (SonarQube S3776; the two ternaries below cost +2 each inside a
+        for-loop). k is None when the K-Element vanished from the live config between the
+        wired-pairs check and this lookup — both callers fall back to a synthetic name/
+        binary-guess in that case rather than crash.
+        """
+        return {
+            "name": k["name"] if k else f"K{k_id}",
+            "ref_id": k_id,
+            "marker_id": marker_id,
+            "binary": k["type"] == "digital" if k else True,
+            "webio_class": WEBIO_CLASS_KNX,
+        }
+
+    def _knx_dpt_suffix_ignored_ids(self) -> set[int]:
+        """Ids the user chose "leave as writable switch" for in the knx_dpt_ambiguous repair
+        flow (CONF_KNX_DPT_SUFFIX_IGNORED) — shared by both the auto-tag and the audit below
+        so a manual opt-out (added by hand to the option, e.g. for an unambiguous DPT the
+        installer actually wired as a real switch) is honored by both.
+        """
+        knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
+        raw = self.config_entry.options.get(CONF_KNX_DPT_SUFFIX_IGNORED, "").strip()
+        return expand_ignored_marker_ids(raw, knx_prefix + knx_prefix.lower())
+
+    async def _auto_suffix_unambiguous_knx(self, knx_items: list[dict[str, Any]]) -> None:
+        """Auto-append "[RO]" to a digital KNX object whose DPT is semantically unambiguous
+        (KNX_DPT_DIGITAL_DEVICE_CLASS's 3 entries: Alarm/Anwesenheit/Tür-Fenster) but whose
+        title carries no classification suffix yet.
+
+        A real ETS-imported KNX object never carries Comexio's own [RO]/[TRIG] convention —
+        without this it would default to ComexioKnxSwitch (writable) even though these 3
+        DPTs are near-universally read-only sensor telegrams in practice (user decision
+        2026-09-20, see project_knx_write_path_design memory). Self-limiting on success: once
+        renamed, the next poll sees the "[RO]" suffix and MarkerKind.READ_ONLY, so this never
+        re-fires for the same item — unlike every other live-mutating action in this
+        integration, that makes it safe to run unconditionally on every poll instead of gating
+        it behind the Sync button or a Repair issue. Ignored KNX objects (ignored_knx_ids) and
+        objects the user manually added to CONF_KNX_DPT_SUFFIX_IGNORED are skipped. A rename
+        failure is retried on the next few polls (KNX_DPT_AUTOTAG_MAX_RETRIES) rather than
+        given up on immediately — a one-off transient error (e.g. a momentary HTTP hiccup)
+        would otherwise be treated the same as a genuinely persistent one (stale admin
+        session, name collision); only past that many consecutive failures is the id skipped
+        for the rest of this coordinator's lifetime.
+        """
+        ignored = self.ignored_knx_ids
+        ignored_suffix = self._knx_dpt_suffix_ignored_ids()
+        renamed_count = 0
+        newly_failed: list[str] = []
+        for item in knx_items:
+            k_id = int(item["id"])
+            if (
+                item["type"] != "digital"
+                or item.get("dpt_device_class") is None
+                or item.get("kind") != MarkerKind.NORMAL
+                or k_id in ignored
+                or k_id in ignored_suffix
+                or self._knx_dpt_autotag_fail_counts.get(k_id, 0) >= KNX_DPT_AUTOTAG_MAX_RETRIES
+            ):
+                continue
+            if await self.api.rename_knx_object(item["id"], f"{item['title']} {MARKER_READ_ONLY_SUFFIX}"):
+                renamed_count += 1
+                self._knx_dpt_autotag_fail_counts.pop(k_id, None)
+                continue
+            fail_count = self._knx_dpt_autotag_fail_counts.get(k_id, 0) + 1
+            self._knx_dpt_autotag_fail_counts[k_id] = fail_count
+            if fail_count >= KNX_DPT_AUTOTAG_MAX_RETRIES:
+                newly_failed.append(item["name"])
+        if newly_failed:
+            _LOGGER.warning(
+                "[%s] Giving up auto-tagging %d KNX object(s) as read-only after %d failed "
+                "attempts each (%s) — will not retry until the integration is reloaded; check "
+                "the preceding error log for the cause",
+                self.server_id,
+                len(newly_failed),
+                KNX_DPT_AUTOTAG_MAX_RETRIES,
+                ", ".join(newly_failed),
+            )
+        if renamed_count:
+            self._schedule_knx_dpt_reload(renamed_count)
+
+    def _schedule_knx_dpt_reload(self, renamed_count: int) -> None:
+        """Reload the integration shortly after _auto_suffix_unambiguous_knx renamed at least
+        one KNX object, so the entity platforms rebuild with its new MarkerKind (switch ->
+        sensor/binary_sensor) — entities are only created once, in each platform's
+        async_setup_entry, so a coordinator refresh alone would leave the stale writable
+        entity in place until the next full HA restart.
+
+        Deliberately scheduled with a short delay via async_call_later rather than reloading
+        synchronously from inside the poll that just wrote the rename: config_entries.
+        async_reload() tears the coordinator down (async_shutdown, api.close()), which would
+        race the still-running _async_update_data call this was triggered from if it fired
+        immediately. Debounced to one pending timer (_knx_dpt_reload_cancel) no matter how
+        many objects get renamed in this poll or across consecutive polls before it fires.
+        """
+        if self._knx_dpt_reload_cancel is not None:
+            return
+        _LOGGER.info(
+            "[%s] Auto-tagged %d KNX object(s) as read-only; scheduling integration reload...",
+            self.server_id,
+            renamed_count,
+        )
+        self._knx_dpt_reload_cancel = async_call_later(self.hass, 5, self._async_fire_knx_dpt_reload)
+
+    async def _async_fire_knx_dpt_reload(self, _now: Any) -> None:
+        """async_call_later callback for _schedule_knx_dpt_reload.
+
+        Fires from an unsupervised background timer, not a user-initiated action with its own
+        status sensor to fall back on — so a failed reload is logged with full context here
+        rather than left to bubble up into whatever generic handler async_call_later's executor
+        uses. The renamed KNX object(s) stay on their stale entity platform until the next
+        reload/restart in that case; nothing else in this coordinator retries it.
+        """
+        self._knx_dpt_reload_cancel = None
+        try:
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Reload after auto-tagging KNX object(s) as read-only failed — affected "
+                "entities stay on their previous platform until the next reload or restart",
+                self.server_id,
+            )
+
+    def _audit_knx_dpt_ambiguous(self, knx_items: list[dict[str, Any]]) -> None:
+        """Repair-issue audit for digital KNX objects whose DPT is a physically ambivalent
+        DPT1.x subtype (Schalter/Bool/Freigabe/Flanke/Binärwert — KNX_DPT_DIGITAL_AMBIGUOUS)
+        with no classification suffix yet.
+
+        Unlike the 3 unambiguous DPTs (_auto_suffix_unambiguous_knx), these need a human
+        decision — the DPT alone can't tell a real toggle switch from a Taster (-> "[TRIG]")
+        or a pure status readback (-> "[RO]"), see project_knx_write_path_design memory.
+        Raises one combined Repair issue per server listing every currently-open item; the
+        flow (repairs.py) lets the user classify each one individually, one at a time, or
+        leave it unchanged (added to CONF_KNX_DPT_SUFFIX_IGNORED so it stops reappearing).
+        """
+        ignored_suffix = self._knx_dpt_suffix_ignored_ids()
+        ignored_knx = self.ignored_knx_ids
+
+        items = [
+            {"id": item["id"], "title": item["title"], "name": item["name"]}
+            for item in knx_items
+            if item.get("dpt_ambiguous")
+            and item.get("kind") == MarkerKind.NORMAL
+            and int(item["id"]) not in ignored_knx
+            and int(item["id"]) not in ignored_suffix
+        ]
+
+        issue_id = f"knx_dpt_ambiguous_{self.server_id}"
+        if not items:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="knx_dpt_ambiguous",
+            translation_placeholders={"server_id": self.server_id, "count": str(len(items))},
+            data={"entry_id": self.config_entry.entry_id, "items": items},
+        )
+
+    def _knx_bridge_marker_by_k_id(self) -> dict[str, str] | None:
+        """{k_id: bridge marker_id} for every KNX object already wired to a bridge Marker.
+
+        Built from the same bulk plan snapshot / relevant-plans contract as
+        _wired_source_webio_pairs: returns None while any plan relevant to the audit (see
+        _function_plan_check_fub_ids) is not yet loaded, so the caller can defer the check to
+        the next poll instead of misreporting a still-loading plan as "no bridge wired".
+
+        Unlike _load_function_plan_check_data, a _SEEDED_EMPTY_PLAN_MARKER entry here is read
+        as-is rather than treated as a miss — reading it *as* a real snapshot is deliberate: at
+        seed time the plan genuinely had zero Marker->KNX pairs, and this method only ever looks
+        for that one connection shape (see _plan_knx_bridge_pairs), which the K->WebIO pairs a
+        Full Sync writes into the very same plan right beforehand never produce. That's still an
+        incidental non-collision between two specific connection shapes, not a structural
+        guarantee — a future caller reading this cache for anything else must not assume a
+        seeded entry reflects everything written into the plan since it was created.
+
+        An empty relevant_fub_ids (no active plan selected AND no CONF_FUNCTION_PLAN_PLAN_MAP
+        entries — e.g. the legacy CONF_FUNCTION_PLAN_FUB_ID == "auto" case) is deliberately
+        NOT delegated to _relevant_plans_loaded here: that method treats it as vacuously
+        "loaded" (see its own docstring) once function_plan_plans is merely non-empty from an
+        unrelated earlier snapshot, which would make this method return {} — read by
+        ComexioKnxEntity._async_source_write() as "definitely no bridge wired, run Full Sync",
+        a misleading instruction when the real problem is "no managed function plan configured
+        at all" (confirmed 2026-09-16 review). Returning None here instead keeps the caller on
+        its "data not loaded yet" branch, which — while not naming the actual cause — at least
+        never tells the user to run a sync step that cannot fix this.
+        """
+        relevant_fub_ids = self._function_plan_check_fub_ids()
+        if not relevant_fub_ids or not self._relevant_plans_loaded(relevant_fub_ids):
+            return None
+        by_k_id: dict[str, str] = {}
+        for fub_id, plan_data in self.function_plan_plans.items():
+            if fub_id in relevant_fub_ids:
+                for marker_id, k_id in self._plan_knx_bridge_pairs(plan_data):
+                    by_k_id[k_id] = marker_id
+        return by_k_id
+
+    @staticmethod
     def _connection_endpoint_ids(conn: dict) -> set[str]:
         """FubElementIds referenced by one connection — its single input plus every output."""
         endpoint_ids = {str((conn.get("input") or {}).get("FubElementId"))}
@@ -3599,6 +4431,96 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         existing_fub_ids = {int(fub_id) for fub_id in self.api.fub_data}
         return (relevant_fub_ids & existing_fub_ids) <= self.function_plan_plans.keys()
+
+    async def _ensure_relevant_plans_cached(self, relevant_fub_ids: set[int], *, force: bool = False) -> bool:
+        """Best-effort top up of self.function_plan_plans for a fresh (mid-sync) audit.
+
+        _relevant_plans_loaded() only ever reports whether every relevant, still-existing
+        fub_id is ALREADY cached — it never fetches anything itself, by design: the regular
+        per-poll audit path deliberately trusts the passive backup-cycle snapshot rather than
+        doing a live fetch on every tick (this cache exists specifically to avoid a per-poll
+        cost of ~0.5s per plan — see project_logikplan_services memory).
+
+        The "fresh" mid-sync audits (async_fresh_trigger_audit/async_fresh_knx_bridge_audit)
+        cannot make that trade-off: right after an HA restart self.function_plan_plans starts
+        completely empty, and the backup cycle that would normally fill it runs as a
+        *background* task (see _async_update_data) that can still be mid-flight when Initial
+        Setup is pressed moments after startup — this is what "the trigger plan re-audit
+        skipped" and "the KNX bridge re-audit skipped" warnings in the same sync run actually
+        trace back to, even for plans that already existed long before this run (most commonly
+        the trigger plan itself). _create_managed_plan's own cache seed only ever covers the
+        ONE plan it just created and cannot help here — every other plan relevant_fub_ids names
+        stays missing until something actually fetches it. So this live-fetches every relevant,
+        still-existing fub_id that is not in the cache yet (an entry already present — seeded
+        placeholder or genuine bulk data — is left untouched) and stores the result as genuine
+        data, so the audit that runs right after this call sees the real picture instead of
+        deferring to "next poll" for a plan that has simply never been loaded since restart.
+
+        Fetched results are collected in a local dict and merged into self.function_plan_plans
+        in one final, non-awaiting step rather than written in directly per iteration: the
+        backup cycle above replaces the whole attribute wholesale (self.function_plan_plans =
+        plans, not a merge) whenever it finishes, and with an `await` between each fetch in
+        this loop, that background reassignment can land in the middle of it — silently
+        discarding an entry this loop already wrote into the dict object that reassignment just
+        replaced. Merging once, after every fetch has completed, avoids that window entirely.
+
+        A fub_id this couldn't fetch (load failure, or the plan vanished between the caller's
+        own existence check and this one) is logged here by name/count — the caller's own
+        "not yet in the bulk snapshot, will retry next poll" warning fires unconditionally
+        whenever a plan is still missing afterwards, whether or not a live fetch was actually
+        attempted, and would otherwise read as pure timing when a fetch genuinely just failed.
+
+        force=True skips the "already cached" skip entirely and refetches every relevant,
+        still-existing fub_id regardless of cache presence. Needed by
+        async_fresh_knx_bridge_loopback_audit and (since 2026-09-21) async_fresh_trigger_audit:
+        both can run in the same sync pass as _wire_knx_full/_wire_knx_cluster, right after
+        those wrote new bridge Markers/sinks into the very plan this call is about to read
+        back — by then that plan is virtually guaranteed to already be a cache entry (just a
+        stale one, from before this run's writes), so the default "only fetch what's missing"
+        behavior would silently skip the live refetch that specific audit needs to see its own
+        run's writes (live-reproduced for the trigger case 2026-09-21: a K-object's trigger pair
+        failed with "no write-path bridge marker yet" moments after its bridge was wired
+        correctly in the same sync, once the KNX 3-leg consolidation removed the OLD design's
+        own end-of-run re-audit that used to refresh this cache as an incidental side effect).
+        async_fresh_knx_bridge_audit is the one caller that genuinely doesn't have this shape —
+        it always runs FIRST in a sync pass (before any KNX writes happen), so the default
+        (cache-preserving) behavior is correct and cheaper there.
+
+        Returns True unless a force=True refetch could not confirm freshness for at least one
+        candidate (its live fetch failed, leaving whatever was already cached — genuine data or,
+        just as likely, nothing at all — untouched and possibly stale). Without this signal, a
+        caller that specifically asked for force=True to guarantee a fresh view would silently
+        keep trusting pre-write data on a transient fetch failure instead of deferring like the
+        non-forced path already does when a fub_id is simply absent. Callers that don't pass
+        force=True don't need this: a fub_id that was never fetched and stays absent from the
+        cache is already correctly read as "not ready" by _knx_bridge_marker_by_k_id()/
+        _wired_source_webio_pairs returning None, so they're free to ignore the return value.
+        """
+        existing_fub_ids = {int(fub_id) for fub_id in self.api.fub_data}
+        fetched: dict[int, dict] = {}
+        candidates = relevant_fub_ids & existing_fub_ids
+        to_fetch = candidates if force else {fub_id for fub_id in candidates if fub_id not in self.function_plan_plans}
+        for fub_id in to_fetch:
+            try:
+                plan_data = await self.api.function_plan_load_elements(fub_id)
+            except Exception:
+                _LOGGER.exception(
+                    "[%s] Error loading function plan %s for fresh mid-sync audit", self.server_id, fub_id
+                )
+                continue
+            if plan_data:
+                fetched[fub_id] = plan_data
+        if fetched:
+            self.function_plan_plans.update(fetched)
+        failed = to_fetch - fetched.keys()
+        if failed:
+            _LOGGER.warning(
+                "[%s] Fresh mid-sync top-up: could not load plan(s) %s live — the next audit "
+                "warning for these is a genuine fetch failure, not just backup-cycle timing",
+                self.server_id,
+                sorted(failed),
+            )
+        return not (force and failed)
 
     def _connected_source_ids(self, source_type: str) -> set[str] | None:
         """ref_ids of `source_type` elements with ANY connection at all, across every plan
@@ -3935,6 +4857,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         space, so a single merged call could not tell them apart. Mirrors the per-category
         _dangling_source_ids pattern above.
 
+        KNX (ref_type=11) is a read-only label here: the *wired* plan element is always the
+        source's write-path bridge Marker (type=2), never the K element itself — Comexio
+        refuses to start a plan that wires a K element's Flanke self-reset loop back into
+        that K element's own input, since the input is already driven by the bridge Marker's
+        wiring ("mehrfach verwendete Ausgänge", confirmed live 2026-09-21; see
+        button.py's _resolve_knx_trigger_bridge_markers). trigger_marker_ids/missing_ids/
+        orphan_ids stay in K-id space for the caller (display, audit-key prefixing); only the
+        internal wired/existing lookups are translated to the bridge Marker's id.
+
         Returns None while the trigger plan's fub_id is a confirmed existing plan that simply
         has not landed in the bulk snapshot yet (same partial-snapshot startup/reload window
         _relevant_plans_loaded guards against for the generic Web-IO wiring check) — otherwise
@@ -3949,9 +4880,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if fub_id not in self.function_plan_plans:
             return None
 
+        marker_ref_type = int(category_by_fub_module_type("2").fub_module_type)
+        knx_ref_type = int(category_by_fub_module_type("11").fub_module_type)
+        bridge_marker_by_k_id = self._knx_bridge_marker_by_k_id()
+        if bridge_marker_by_k_id is None:
+            return None
+
         plan_data = self.function_plan_plans[fub_id]
         existing_by_ref, _ = self.api._function_plan_existing_refs(plan_data)
-        all_marker_ids = {ref_id for rt, ref_id in existing_by_ref if rt == ref_type}
+
+        if ref_type == knx_ref_type:
+            marker_by_k_id = {k_id: bridge_marker_by_k_id.get(str(k_id)) for k_id in trigger_marker_ids}
+            wired_marker_ids = self.api._function_plan_trigger_wired_marker_ids(plan_data, marker_ref_type)
+            missing_ids = [k_id for k_id, m in marker_by_k_id.items() if m is None or int(m) not in wired_marker_ids]
+
+            all_wired_marker_ids = {ref_id for rt, ref_id in existing_by_ref if rt == marker_ref_type}
+            reverse_bridge = {int(m): k_id for k_id, m in bridge_marker_by_k_id.items() if m is not None}
+            trigger_id_set = set(trigger_marker_ids)
+            orphan_ids = [
+                int(reverse_bridge[mid])
+                for mid in all_wired_marker_ids
+                if mid in reverse_bridge and int(reverse_bridge[mid]) not in trigger_id_set
+            ]
+            return missing_ids, orphan_ids
+
+        # Plain-marker category: a KNX trigger's bridge Marker also shows up here as a bare
+        # ref_type=2 plan element once wired above — its lifecycle belongs to the KNX branch
+        # exclusively (kept even if KNX import is currently opted out, matching
+        # _trigger_ids_by_ref's "leave inactive category's wiring untouched" rule), so it must
+        # never be swept up as a plain-marker orphan.
+        bridge_marker_ids = {int(m) for m in bridge_marker_by_k_id.values() if m is not None}
+        all_marker_ids = {ref_id for rt, ref_id in existing_by_ref if rt == ref_type} - bridge_marker_ids
         wired_marker_ids = self.api._function_plan_trigger_wired_marker_ids(plan_data, ref_type)
 
         missing_ids = [mid for mid in trigger_marker_ids if mid not in wired_marker_ids]
@@ -3979,9 +4938,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ({}, {} — a safe no-op); the next successful poll or sync retries it.
 
         _audit_all_trigger_pairs() can itself return None (trigger plan exists but its data
-        hasn't landed in the bulk snapshot yet) — treated the same safe-no-op way here, since
-        this caller (button.py, mid-sync) has no non-blocking way to force that snapshot to
-        refresh and must not misread "not loaded yet" as "plan is empty, everything's orphaned."
+        hasn't landed in the bulk snapshot yet) — no longer treated as an unavoidable dead end:
+        _ensure_relevant_plans_cached() below live-fetches the trigger plan (and every other
+        plan CONF_FUNCTION_PLAN_PLAN_MAP names) first, since the passive backup-cycle snapshot
+        this check would otherwise rely on can still be completely empty moments after an HA
+        restart (see that method's docstring). The None branch below is kept as a safety net for
+        whatever it still can't resolve (e.g. the live fetch itself failing) rather than treated
+        as unreachable.
+
+        force=True on that call since 2026-09-21: a Full Sync's trigger step
+        (button.py's _wire_trigger_pairs, called with refresh_audit=True) now runs right after
+        _wire_knx_full wrote brand-new bridge Markers into the very KNX cluster plan(s) this
+        audit's _knx_bridge_marker_by_k_id() lookup reads back (via _resolve_knx_trigger_bridge_markers,
+        for a K-object that just got its [TRIG]/[TP] suffix wired) — the same
+        write-then-read-back-in-the-same-pass shape _ensure_relevant_plans_cached's own
+        docstring already documents for async_fresh_knx_bridge_loopback_audit. Before the KNX
+        3-leg consolidation, this cache happened to already be fresh by the time this ran, as an
+        incidental side effect of that OLD design's own (now-removed) end-of-run
+        async_fresh_knx_bridge_loopback_audit() re-fetch. Without force=True here now, a
+        just-bridged K-object's trigger pair fails with "no write-path bridge marker yet,
+        cannot wire trigger pair" even though the bridge itself was wired correctly moments
+        earlier in the same sync (live-reproduced 2026-09-21, K2).
         """
         raw_config = await self.api.get_raw_config()
         if not raw_config:
@@ -3999,6 +4976,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # as "every existing trigger pair just got orphaned" rather than "category inactive,
         # don't touch its wiring").
         parsed = self.api.parse_config(raw_config)
+        await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids(), force=True)
         trigger_audit_result = self._audit_all_trigger_pairs(self._trigger_ids_by_ref(parsed))
         if trigger_audit_result is None:
             _LOGGER.warning(
@@ -4008,6 +4986,153 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             return {}, {}
         return trigger_audit_result
+
+    async def async_fresh_knx_bridge_audit(self) -> list[dict[str, Any]]:
+        """Fetch Comexio's config directly and re-run the knx_bridge_missing audit against it.
+
+        Same staleness problem as async_fresh_trigger_audit (see its docstring for why
+        async_request_refresh() cannot be used mid-sync): last_audit_results is the snapshot
+        from the *previous* poll, which can still show 0 missing bridges even though every
+        K-element genuinely lacks one now — e.g. import_knx was only just switched on, or the
+        KNX cluster plan itself only came into existence earlier in *this same* sync run (a
+        Full Sync's Initial-Setup pass creates the Web-IO class, wires K -> WebIO pairs, and
+        wires Marker -> K bridges all in one press; without this refresh the last leg would
+        silently see "no bridges missing" and the user would have to run a second, separate
+        "Brücken-Merker anlegen" action afterwards to close the gap Full Sync already knew
+        about).
+
+        get_raw_config() returns {} on an HTTP failure rather than raising — an empty result
+        here skips the audit entirely (safe no-op) instead of misreading a transient fetch
+        failure as "no KNX objects, nothing to bridge".
+
+        _knx_bridge_marker_by_k_id() still reads the cached bulk plan snapshot
+        (self.function_plan_plans) for already-wired bridges, exactly like the live audit — a
+        plan not yet in that snapshot defers the whole check (returns []) rather than risk
+        misreading "not loaded yet" as "nothing wired, everything missing", mirroring
+        async_fresh_trigger_audit's own None-handling. _ensure_relevant_plans_cached() below
+        live-fetches every relevant, still-existing plan that isn't cached yet BEFORE that read,
+        for the same reason async_fresh_trigger_audit now calls it: right after an HA restart
+        the passive backup-cycle snapshot this otherwise depends on can still be completely
+        empty when Initial Setup is pressed, deferring even for plans that already existed long
+        before this sync (most commonly the trigger plan) — not just the KNX cluster plan this
+        same sync may have just created.
+
+        Gated on the same has_active_plan check the live knx_bridge_missing_items block uses
+        (see _async_update_data) — _knx_bridge_marker_by_k_id() alone is not a substitute: with
+        no active plan, _function_plan_check_fub_ids() returns an empty relevant-fub_id set,
+        which _relevant_plans_loaded() then treats as vacuously satisfied (an empty set is a
+        subset of anything) as long as *some* unrelated plan is cached in function_plan_plans —
+        so it would return {} (not None) and every KNX object would be misreported as
+        bridge-missing, potentially auto-creating a KNX cluster plan the user never opted into
+        via Managed Function Plan.
+        """
+        if WebioClass.KNX not in self.active_webio_classes:
+            return []
+        if not self._has_active_function_plan():
+            return []
+        raw_config = await self.api.get_raw_config()
+        if not raw_config:
+            _LOGGER.warning(
+                "[%s] KNX bridge re-audit: direct config fetch failed — skipping rather than "
+                "risk misreading it as zero KNX objects",
+                self.server_id,
+            )
+            return []
+        parsed = self.api.parse_config(raw_config)
+        await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids())
+        knx_bridge_marker_by_k_id = self._knx_bridge_marker_by_k_id()
+        if knx_bridge_marker_by_k_id is None:
+            _LOGGER.warning(
+                "[%s] KNX bridge re-audit: relevant Function Plan(s) not yet in the bulk "
+                "snapshot — skipping this sync's bridge check, will retry on the next poll",
+                self.server_id,
+            )
+            return []
+        ignored_ids = self.ignored_ids_for(WebioClass.KNX)
+        missing_items: list[dict[str, Any]] = []
+        for k in parsed.get("knx", []):
+            k_id = str(k["id"])
+            if int(k_id) in ignored_ids or k_id in knx_bridge_marker_by_k_id:
+                continue
+            missing_items.append(
+                {
+                    "name": k["name"],
+                    "ref_id": k_id,
+                    "title": k["title"],
+                    "type_raw": k["type_raw"],
+                    "webio_class": WEBIO_CLASS_KNX,
+                }
+            )
+        return missing_items
+
+    async def async_fresh_knx_bridge_loopback_audit(self) -> list[dict[str, Any]]:
+        """Fetch Comexio's config directly and re-run the knx_bridge_loopback_missing audit.
+
+        Phase 7 counterpart of async_fresh_knx_bridge_audit — same staleness problem and same
+        fix: a bridge Marker/K-Element pair created earlier in *this same* sync run (e.g. by
+        _wire_knx_full/_wire_knx_cluster in button.py) is invisible to last_audit_results (a
+        snapshot from the *previous* poll), so without this refresh the loopback fan-out would
+        never get wired in the same Full Sync that just created the bridge — the user would
+        need a second, separate run to close a gap this sync already knows about.
+
+        Mirrors async_fresh_knx_bridge_audit's guards: bails out (returns []) rather than risk
+        misreading a transient failure/not-yet-cached plan as "nothing to fan out", including
+        the same has_active_plan gate for the same _function_plan_check_fub_ids() reason.
+        """
+        if WebioClass.KNX not in self.active_webio_classes:
+            return []
+        if not self._has_active_function_plan():
+            return []
+        if not self._api_credentials_configured():
+            # Same reasoning as the live-poll counterpart in _async_update_data: the repair for
+            # this gap needs the optional API username/password and aborts deterministically
+            # without them — returning [] here (instead of a permanently-unfixable item) avoids
+            # a repair flag that can never be resolved until credentials are configured.
+            return []
+        raw_config = await self.api.get_raw_config()
+        if not raw_config:
+            _LOGGER.warning(
+                "[%s] KNX loopback re-audit: direct config fetch failed — skipping rather than "
+                "risk misreading it as zero KNX objects",
+                self.server_id,
+            )
+            return []
+        parsed = self.api.parse_config(raw_config)
+        # force=True: this audit runs right after (or, for a just-created bridge, from within)
+        # _wire_knx_full/_wire_knx_cluster wrote new sinks into these same plans earlier in
+        # this sync pass — by now they are virtually guaranteed to already be cache entries
+        # (just stale ones), so the default
+        # "only fetch what's missing" behavior would silently skip the live refetch this specific
+        # audit needs. See _ensure_relevant_plans_cached's docstring.
+        if not await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids(), force=True):
+            _LOGGER.warning(
+                "[%s] KNX loopback re-audit: forced refetch of a relevant plan failed — skipping "
+                "this sync's loopback check rather than risk auditing stale (pre-write) plan data",
+                self.server_id,
+            )
+            return []
+        knx_bridge_marker_by_k_id = self._knx_bridge_marker_by_k_id()
+        wired_knx_webio_pairs = self._wired_source_webio_pairs("11")
+        if knx_bridge_marker_by_k_id is None or wired_knx_webio_pairs is None:
+            _LOGGER.warning(
+                "[%s] KNX loopback re-audit: relevant Function Plan(s) not yet in the bulk "
+                "snapshot — skipping this sync's loopback check, will retry on the next poll",
+                self.server_id,
+            )
+            return []
+        sink_counts: dict[str, int] = {}
+        for k_ref_id, _webio_ref_id in wired_knx_webio_pairs:
+            sink_counts[k_ref_id] = sink_counts.get(k_ref_id, 0) + 1
+        knx_by_id = {str(k["id"]): k for k in parsed.get("knx", [])}
+        missing_items: list[dict[str, Any]] = []
+        for k_id, marker_id in knx_bridge_marker_by_k_id.items():
+            # Not in sink_counts at all -> the read-path wire itself is missing, a different,
+            # already-audited gap — nothing to fan the loopback onto yet.
+            if k_id not in sink_counts or sink_counts[k_id] >= 2:
+                continue
+            k = knx_by_id.get(k_id)
+            missing_items.append(self._knx_bridge_loopback_missing_item(k, k_id, marker_id))
+        return missing_items
 
     def _function_plan_missing_eta_sec(self, missing_items: list[dict]) -> int:
         """Estimate the duration of the add-pairs repair action in seconds.

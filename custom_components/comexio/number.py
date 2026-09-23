@@ -42,12 +42,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         )
 
     # Analog KNX objects (blind implementation, see project_knx_objects memory) — opt-in, default OFF
+    # DPT3.x composite members (the step-code half of a Dimmer/Blinds pair) are skipped here —
+    # cover.py/light.py expose the pair as one composite entity instead (see
+    # project_knx_write_path_design memory, "Punkt 4, Hälfte (b)").
     if conf.get("import_knx", False):
         ignored_knx = coordinator.ignored_knx_ids
         entities.extend(
             ComexioKnxNumber(coordinator, coordinator.server_id, knx)
             for knx in coordinator.data.get("knx", [])
-            if knx["type"] == "analog" and int(knx["id"]) not in ignored_knx and knx.get("kind") == MarkerKind.NORMAL
+            if knx["type"] == "analog"
+            and int(knx["id"]) not in ignored_knx
+            and knx.get("kind") == MarkerKind.NORMAL
+            and knx.get("knx_composite") is None
         )
 
     if conf.get("import_ios", True):
@@ -120,6 +126,54 @@ class ComexioMarkerNumber(ComexioMarkerEntity, NumberEntity):
 
 class ComexioKnxNumber(ComexioKnxEntity, ComexioMarkerNumber):
     """An analog Comexio KNX object as a Number (blind implementation, see project_knx_objects memory)."""
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, knx: dict[str, Any]) -> None:
+        super().__init__(coordinator, server_id, knx)
+
+        # The KNX DPT's own value range (resolved by api._resolve_knx_dpt, see
+        # project_knx_write_path_design memory) takes precedence over
+        # ComexioMarkerNumber.__init__'s name-guessing heuristic above — Comexio's own
+        # $IOTypesBinary catalog carries no usable min/max for KNX object types (min=max=0
+        # placeholder), so the real range only comes from resolving the K-element's DPT.
+        # api._process_knx always sets dpt_min/dpt_max/dpt_unit together from one
+        # KNX_DPT_ANALOG_RANGES tuple (or none of them) — this guard is defensive only,
+        # against a future refactor that separates those three keys.
+        dpt_min, dpt_max = knx.get("dpt_min"), knx.get("dpt_max")
+        if dpt_min is not None and dpt_max is not None:
+            self._attr_native_min_value = float(dpt_min)
+            self._attr_native_max_value = float(dpt_max)
+            # dpt_step is always set together with dpt_min/dpt_max (see api._process_knx /
+            # KNX_DPT_ANALOG_RANGES) — without this, every KNX number silently kept
+            # ComexioMarkerNumber's hardcoded 0.1 step regardless of the DPT's actual
+            # resolution (found live 2026-09-20: a 2-octet counter DPT showed a 0.1 step that
+            # doesn't exist in its real 1-count resolution).
+            if (dpt_step := knx.get("dpt_step")) is not None:
+                self._attr_native_step = float(dpt_step)
+            # The DPT is authoritative for the unit too, precisely when it HAS none: a
+            # unitless DPT (e.g. DPT3.008's 0-7 step code on a "Rollo ..."-named object)
+            # must not be left wearing the name heuristic's "%"/device_class guess above,
+            # or the displayed unit contradicts the DPT-derived range (found in review
+            # 2026-09-20 against this repo's own K7="Rollo 1" DPT3.008 test object). Same
+            # reasoning for device_class: only set it from KNX_DPT_DEVICE_CLASS (e.g.
+            # DPT9.001 -> temperature), never from the heuristic's guess — a DPT without a
+            # mapped device class (like DPT3.008's step value) stays plain None, not "%".
+            self._attr_native_unit_of_measurement = knx.get("dpt_unit") or None
+            self._attr_device_class = None
+            if dpt_device_class := knx.get("dpt_device_class"):
+                try:
+                    self._attr_device_class = NumberDeviceClass(dpt_device_class)
+                except ValueError:
+                    # Defensive only: dpt_device_class always comes from KNX_DPT_DEVICE_CLASS,
+                    # whose values are all valid NumberDeviceClass members today — this guards
+                    # against a future typo there taking down the whole number platform (a bad
+                    # value here would otherwise raise out of __init__, before async_add_entities
+                    # ever runs for the markers/IOs built alongside this KNX entity).
+                    _LOGGER.debug(
+                        "KNX item %s: dpt_device_class '%s' is not a valid NumberDeviceClass, ignoring",
+                        self._marker_id,
+                        dpt_device_class,
+                    )
+            self._attr_icon = "mdi:knx"
 
 
 class ComexioIONumber(ComexioIOEntity, NumberEntity):

@@ -71,6 +71,13 @@
         "ignore": "🔇 Diese Nachricht ignorieren"
       }
     },
+    "knx_dpt_suffix_action": {
+      "options": {
+        "ro": "🔒 Reiner Sensor (Anhängen von [RO])",
+        "trig": "🔘 Taster (Anhängen von [TRIG])",
+        "ignore": "🔇 Als beschreibbaren Schalter belassen"
+      }
+    },
     "function_plan_max_pairs_per_plan": {
       "options": {
         "50": "50 Paare / 1 Erweiterung",
@@ -115,7 +122,7 @@
           "schema_io": "Verfügbare Variablen: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "cover_keywords": "Kommaseparierte Liste (z.B. rollo, jalousie, blind)",
           "logikplan_plan_prefix": "Präfix für automatisch angelegte Cluster-Pläne. Pläne heißen dann z. B.: HA - Marker [1-100].",
-          "logikplan_max_pairs_per_plan": "Wie viele Web-IO- und Merker-Paare in einen verwalteten Plan passen, bevor ein neuer Cluster-Plan angelegt wird. Für IO-Cluster-Pläne entspricht das 1 (50), 2 (100) bzw. 3 (150) Erweiterungen pro Plan.",
+          "logikplan_max_pairs_per_plan": "Wie viele Web-IO- und Merker-Paare in einen verwalteten Plan passen, bevor ein neuer Cluster-Plan angelegt wird. Für IO-Cluster-Pläne entspricht das 1 (50), 2 (100) bzw. 3 (150) Erweiterungen pro Plan. KNX-Cluster-Pläne ignorieren diese Einstellung und nutzen immer eine feste Größe von 50.",
           "logikplan_io_extensions": "Für jede ausgewählte Erweiterung werden deren IOs in einen verwalteten IO-Cluster-Plan verdrahtet (z. B. HA - IO [Ext]), eine Spalte je Erweiterung. Zum Testen mit einer einzelnen Erweiterung beginnen und die übrigen danach ergänzen.",
           "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden.",
           "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden.",
@@ -276,6 +283,17 @@
     "duplicate_plan_names": {
       "title": "Doppelte Comexio-Plan-Namen",
       "description": "Zwei oder mehr Funktionspläne tragen exakt denselben Namen: {plans}.\n\nComexio erzwingt keine eindeutigen Plan-Namen — nur die interne Plan-ID ist wirklich eindeutig — aber diese Integration löst Pläne an mehreren Stellen über den Namen auf (Connect, Sort, Restore, …). Bei doppelten Namen könnte eine namensbasierte Suche unbemerkt den falschen Plan treffen.\n\nDu kannst das technisch so lassen, aktuell bricht dadurch nichts — es ist aber ein latentes Risiko, besonders bei `function_plan_restore`, falls dieser Plan mal gelöscht wird und wiederhergestellt werden muss. **Empfehlung: einen der doppelten Namen in Comexio Studio umbenennen**, um die Mehrdeutigkeit dauerhaft zu beseitigen."
+    },
+    "knx_dpt_ambiguous": {
+      "title": "KNX-Objekte müssen klassifiziert werden ({count})",
+      "fix_flow": {
+        "step": {
+          "knx_dpt_suffix": {
+            "title": "KNX-Objekt klassifizieren",
+            "description": "**{name}** (noch {remaining} weitere danach) verwendet einen KNX-DPT1.x-Untertyp (Schalter/Bool/Freigabe/Flanke/Binärwert), den KNX sowohl als echten Umschalter, als Taster (Momentkontakt) als auch als reine Statusrückmeldung verdrahten lässt — der Datenpunkttyp allein verrät nicht, welcher Fall vorliegt, das weißt nur du anhand der tatsächlichen Verdrahtung.\n\nWie soll dieses Objekt behandelt werden?"
+          }
+        }
+      }
     }
   }
 }

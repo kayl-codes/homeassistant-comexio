@@ -100,6 +100,26 @@ def _mmss(seconds: float) -> str:
     return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
 
 
+def _post_result_notification(hass: HomeAssistant, notif_id: str, msg: str, title: str) -> None:
+    """Post a run's final/result notification so it reliably surfaces as a new alert.
+
+    `persistent_notification.async_create` silently degrades to an in-place update (HA core
+    fires `UpdateType.UPDATED` instead of `UpdateType.ADDED`) whenever `notification_id` already
+    exists — which the frontend does not reliably re-surface as something new to look at. Two
+    ids can already exist here: `notif_id` itself (the live-progress notification this very run
+    has been updating in place) and `{notif_id}_result` (an unread summary left over from a
+    *previous* run, if the user never dismissed it) — both are dismissed before creating, so the
+    result always lands as a genuinely new notification regardless of run history. Reported
+    18.09.2026: a first version of this fix only dismissed `notif_id`, so it reliably helped the
+    very first run after a manual dismissal but silently regressed to the original bug from the
+    second run onward.
+    """
+    result_id = f"{notif_id}_result"
+    persistent_notification.async_dismiss(hass, notif_id)
+    persistent_notification.async_dismiss(hass, result_id)
+    persistent_notification.async_create(hass, msg, title=title, notification_id=result_id)
+
+
 def _plan_summary_line(
     plan_name: str,
     is_fresh: bool,
@@ -225,6 +245,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                     "update_ip",
                     "function_plan_add_missing",
                     "cleanup_entities",
+                    "knx_bridge_add_missing",
                 ]
             )
         },
@@ -366,6 +387,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 plan_summary += await self._wire_trigger_pairs(ctx)
                 duration = datetime.datetime.now() - start_time
                 msg = self._build_function_plan_add_missing_message(plan_summary, duration)
+            elif action == "knx_bridge_add_missing":
+                # Standalone action: complete every open KNX write-path leg for every KNX
+                # object that still lacks one — write-path bridge Marker, API-Loopback fan-out,
+                # AND (decided 18.09.2026: a bridge with an incomplete K-Element left behind
+                # isn't "fixed") the K -> Web-IO read path — in one combined stop/write/finalize
+                # cycle per cluster (_wire_knx_full). refresh_audit=True re-audits bridge/
+                # loopback against Comexio's *current* config instead of trusting
+                # last_audit_results; the read-path leg reuses the already-fetched
+                # function_plan_missing gap_items, same as function_plan_add_missing above.
+                plan_summary = await self._wire_knx_full(ctx, [], gap_items, refresh_audit=True)
+                duration = datetime.datetime.now() - start_time
+                msg = self._build_function_plan_add_missing_message(plan_summary, duration)
             else:
                 (
                     added,
@@ -380,7 +413,27 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     debris_removed,
                 ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
 
-                plan_summary = await self._wire_created_pairs(ctx, created_names, gap_items)
+                # KNX's read-path candidates are carved out of both inputs here and handed to
+                # _wire_knx_full instead, which wires them together with the bridge/loopback
+                # legs in one combined cycle per cluster — leaving them in what's passed to
+                # _wire_created_pairs would wire the same K -> Web-IO pairs a second time
+                # (_wire_created_pairs' own _classify_created_names buckets KNX-named Web-IO
+                # commands from created_names exactly like _wire_knx_full does, and its gap-item
+                # merge does the same for gap_items — both need the KNX slice removed).
+                knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
+                knx_gap_key = f"{SOURCE_CATEGORIES[WebioClass.KNX].key.value}_id"
+                created_names_no_knx = [
+                    name for name in created_names if _parse_source_id_from_webio_name(name, knx_prefix) is None
+                ]
+                gap_items_no_knx = [item for item in gap_items if knx_gap_key not in item]
+                # _wire_knx_full must run BEFORE _wire_trigger_pairs: a KNX [TRIG]/[TP] source's
+                # self-reset pair is now wired via its write-path bridge Marker (see
+                # _resolve_knx_trigger_bridge_markers), which _wire_knx_full's leg 2 is what
+                # creates in the first place. Running trigger-pairs first left that bridge
+                # missing and the trigger pair unwired every time (live 2026-09-21: "K2: no
+                # write-path bridge marker yet, cannot wire trigger pair").
+                plan_summary = await self._wire_created_pairs(ctx, created_names_no_knx, gap_items_no_knx)
+                plan_summary += await self._wire_knx_full(ctx, created_names, gap_items, refresh_audit=True)
                 plan_summary += await self._wire_trigger_pairs(ctx, refresh_audit=True)
 
                 duration = datetime.datetime.now() - start_time
@@ -408,13 +461,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 msg = f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
 
             self.coordinator.last_audit_failed = False
-            update_status(msg, pct=100, step_info="Done")
+            update_status(msg, pct=100, step_info="Done", final=True)
 
         except Exception as e:
             self.coordinator.in_sync = False
             self.coordinator.sync_error = True
             _LOGGER.exception("[%s] Sync failed", self.server_id)
-            update_status(f"Error: {e}", is_error=True)
+            update_status(f"Error: {e}", is_error=True, final=True)
 
         finally:
             await self._finalize_sync()
@@ -427,8 +480,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         is_error: bool = False,
         pct: int | None = None,
         step_info: str | None = None,
+        final: bool = False,
     ) -> None:
-        """Update coordinator sync-progress state and optionally show a UI notification."""
+        """Update coordinator sync-progress state and optionally show a UI notification.
+
+        `final=True` marks the last call of a run (the completed summary or a fatal error).
+        Every other call in a run reuses the same `notif_id` to update one live-progress
+        notification in place rather than spamming a new one per step — but that also means a
+        plain reuse for the summary only rewrites a notification the user may already have
+        read/dismissed mid-run, and HA's frontend does not re-surface an in-place update as a
+        new alert. See `_post_result_notification` for how the final call avoids that (reported
+        by user 18.09.2026 — sync finished but no summary notification was seen).
+        """
         self.coordinator.sync_progress_text = msg
         if pct is not None:
             self.coordinator.sync_progress_pct = pct
@@ -437,7 +500,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self.coordinator.async_set_updated_data(self.coordinator.data)
         if notify_enabled:
             title = "Comexio Sync Failed" if is_error else f"Comexio Sync ({self.server_id})"
-            persistent_notification.async_create(self.hass, msg, title=title, notification_id=notif_id)
+            if final:
+                _post_result_notification(self.hass, notif_id, msg, title)
+            else:
+                persistent_notification.async_create(self.hass, msg, title=title, notification_id=notif_id)
 
     async def _sync_all_classes(
         self, ctx: _SyncContext, audit_data: dict[str, Any], dev_ids: dict[str, str | None]
@@ -552,10 +618,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Remove HA entities, Function Plan elements and WebIO commands for ignored markers/KNX objects."""
 
         def _notify(msg: str) -> None:
+            # Every call here is this action's terminal result (no separate progress phase of
+            # its own) — reusing notif_id in place has the same not-surfaced-as-new problem
+            # _update_sync_status's final=True path fixes, see _post_result_notification.
             if notify_enabled:
-                persistent_notification.async_create(
-                    self.hass, msg, title=f"Comexio Cleanup ({self.server_id})", notification_id=notif_id
-                )
+                _post_result_notification(self.hass, notif_id, msg, f"Comexio Cleanup ({self.server_id})")
 
         if not entity_ids:
             # Reachable via a direct press_action service call with no pending audit gap — the
@@ -1102,7 +1169,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             cls_audit["dangling"] if cls_effective_action in {"full_sync", "delete_orphans"} else []
         )
         result = await self._execute_delta_tasks(
-            ctx, cls, class_dev_id, base_id, tasks_to_do, cls_dangling_to_delete, on_progress
+            ctx, cls, class_dev_id, base_id, tasks_to_do, cls_dangling_to_delete, on_progress, label, pct_start
         )
         result["updated_ip"] = False
         result["skipped_creates"] = skipped_creates
@@ -1258,6 +1325,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         tasks_to_do: list[dict],
         cls_dangling: list[dict],
         on_progress: Callable[[int, str, str], None],
+        label: str,
+        pct_start: int,
     ) -> dict[str, int]:
         """Run the collected delta-sync tasks against the Comexio API, in order."""
         api = ctx.api
@@ -1280,7 +1349,21 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # plan) would silently rewrite its layout, so that filter must stay enforced at the
         # source rather than re-checked here. was_active=True because each cleanup's own
         # restart already brought the plan back up by this point.
-        for fub_id in resort_fub_ids:
+        #
+        # Each sort is a real multi-step Comexio round-trip (stop_fup/delete_elements/
+        # save_elements_pos/run_fup) that can take several seconds per plan — without a status
+        # update here the sync notification sits frozen on whatever text preceded this class'
+        # delta sync for the whole loop, looking hung even though it's actively working
+        # (reported by user 21.09.2026: "was macht der solange, das ist total unklar").
+        total_resorts = len(resort_fub_ids)
+        for idx, fub_id in enumerate(sorted(resort_fub_ids), start=1):
+            if total_resorts:
+                ctx.update_status(
+                    f"{ICON_TOOLS} **Class:** {label}\nRe-sorting Function Plan {idx} of {total_resorts} "
+                    f"after cleanup (fub {fub_id})...",
+                    pct=pct_start,
+                    step_info=f"{label}: re-sorting plan {idx}/{total_resorts} (fub {fub_id})",
+                )
             await async_sort_function_plan(self.hass, self.coordinator, api, fub_id, notify=False, was_active=True)
 
         for idx, task in enumerate(tasks_to_do):
@@ -1503,12 +1586,69 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 summary.append(await self._remove_trigger_pairs(ctx, ids, ref_type))
         return summary
 
+    def _resolve_knx_trigger_bridge_markers(self, k_ids: list[int]) -> tuple[list[int], list[str]]:
+        """Translate KNX trigger source ids to their write-path bridge marker ids.
+
+        Comexio refuses to start a plan that wires a K element's own Flanke self-reset
+        loop back into that K element's input: the K object's input is already driven by
+        its write-bridge Marker (create_knx_bridge_marker's plan), so the reciprocal
+        connection this self-reset trick needs collides with it ("Der Funktionsplan konnte
+        aufgrund von mehrfach verwendeten Ausgängen nicht gestartet werden" / "Element K<n>
+        wird bereits im Funktionsplan ... verwendet", confirmed live 2026-09-21). The bridge
+        Marker itself has no such conflict (nothing else drives its plan-input), so the
+        Trigger plan must always wire that Marker, never the K element directly — see
+        [[project_knx_write_path_design]].
+
+        Returns (bridge_marker_ids, errors) — a K id without a bridge marker yet (write
+        bridge not created, e.g. mid-sync ordering issue) is reported as an error and
+        skipped rather than silently wiring nothing. A K id whose bridge Marker exists but
+        is missing from the wiring-derived map (see _knx_bridge_marker_id_by_title) still
+        resolves via its title instead of being dropped.
+        """
+        bridge_marker_by_k_id = self.coordinator._knx_bridge_marker_by_k_id()
+        if bridge_marker_by_k_id is None:
+            return [], [f"KNX trigger pairs: bridge-marker map not loaded yet, skipped {len(k_ids)} id(s)"]
+        marker_ids: list[int] = []
+        errors: list[str] = []
+        for k_id in k_ids:
+            marker_id = bridge_marker_by_k_id.get(str(k_id))
+            if marker_id is None:
+                marker_id = self._knx_bridge_marker_id_by_title(k_id)
+            if marker_id is None:
+                errors.append(f"K{k_id}: no write-path bridge marker yet, cannot wire trigger pair")
+            else:
+                marker_ids.append(int(marker_id))
+        return marker_ids, errors
+
+    def _knx_bridge_marker_id_by_title(self, k_id: int) -> int | None:
+        """Fallback bridge-Marker lookup via its title suffix "[K<k_id>]", for when
+        _knx_bridge_marker_by_k_id()'s plan-wiring-derived map has no entry for k_id.
+
+        That map is built from the KNX cluster plan's *connection* wiring (see
+        _plan_knx_bridge_pairs) — if that connection is removed or broken in Comexio
+        (manually, or by an external tool) while the bridge Marker itself is left behind,
+        still carrying its machine-set "[K<k_id>]" title (create_knx_bridge_marker,
+        MARKER_KNX_BRIDGE_SUFFIX_RE), the map lookup alone would make it permanently
+        invisible: a future orphan audit derives its own candidates from that very same
+        map (see coordinator._audit_trigger_pairs), so a K id dropped here would never be
+        reconsidered either, leaving its stale Marker+Flanke trigger-plan wiring stuck
+        forever. Scanning the coordinator's cached marker list directly (kind==KNX_BRIDGE,
+        the same classification MARKER_KNX_BRIDGE_SUFFIX_RE drives) sidesteps the
+        connection-wiring dependency entirely.
+        """
+        suffix = f"[K{k_id}]"
+        for m in self.coordinator.data.get("markers", []):
+            if m.get("kind") == MarkerKind.KNX_BRIDGE and (m.get("title") or "").rstrip().endswith(suffix):
+                return int(m["id"])
+        return None
+
     async def _add_trigger_pairs(self, ctx: _SyncContext, missing_ids: list[int], ref_type: int = 2) -> str:
         """Resolve/create the trigger plan and add the missing source+Flanke pairs.
 
         ref_type is the plan-element type of the trigger source category (marker=2,
-        KNX=11 — blind guess); it selects the audit-key prefix and is threaded into the
-        API so the created element points at the right $FubModules bucket.
+        KNX=11 — blind guess); it selects the audit-key prefix. A KNX source is wired via
+        its bridge Marker instead of the K element itself (see
+        _resolve_knx_trigger_bridge_markers) — the actual element created is always type=2.
         """
         api = ctx.api
         fub_id, is_fresh = await self.coordinator.resolve_trigger_plan()
@@ -1518,6 +1658,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             )
 
         prefix = category_by_fub_module_type(ref_type).audit_key_prefix
+        knx_ref_type = int(SOURCE_CATEGORIES[WebioClass.KNX].fub_module_type)
+        bridge_errors: list[str] = []
+        wire_ref_type = ref_type
+        wire_ids = missing_ids
+        if ref_type == knx_ref_type:
+            wire_ids, bridge_errors = self._resolve_knx_trigger_bridge_markers(missing_ids)
+            wire_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
+
         plan_name = self._plan_name(fub_id)
         was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
         t0 = time.monotonic()
@@ -1526,8 +1674,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
         await api.function_plan_stop_fup(fub_id)
         added, errors = await api.function_plan_add_trigger_pairs(
-            fub_id, missing_ids, fresh_plan=is_fresh, ref_type=ref_type
+            fub_id, wire_ids, fresh_plan=is_fresh, ref_type=wire_ref_type
         )
+        errors = bridge_errors + errors
         if errors:
             _LOGGER.warning("[%s] function_plan_add_trigger_pairs errors: %s", self.server_id, errors)
         if added and not is_fresh:
@@ -1571,7 +1720,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"remove_trigger_pairs {[f'{prefix}{m}' for m in orphan_ids]}"
         )
-        deleted, plan_stopped = await ctx.api.function_plan_remove_trigger_pairs(fub_id, orphan_ids, ref_type=ref_type)
+        # KNX orphans are reported as K ids, but the actual plan element is the bridge Marker
+        # (see _resolve_knx_trigger_bridge_markers) — translate before deleting.
+        knx_ref_type = int(SOURCE_CATEGORIES[WebioClass.KNX].fub_module_type)
+        remove_ref_type = ref_type
+        remove_ids = orphan_ids
+        if ref_type == knx_ref_type:
+            remove_ids, bridge_errors = self._resolve_knx_trigger_bridge_markers(orphan_ids)
+            if bridge_errors:
+                _LOGGER.warning("[%s] remove_trigger_pairs bridge lookup errors: %s", self.server_id, bridge_errors)
+            remove_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
+        deleted, plan_stopped = await ctx.api.function_plan_remove_trigger_pairs(
+            fub_id, remove_ids, ref_type=remove_ref_type
+        )
         note = f", {ICON_WARNING} plan left stopped — please restart it in Comexio" if plan_stopped else ""
         return f"{ICON_DELETE} Removed {deleted} orphaned trigger element(s){note}"
 
@@ -1579,15 +1740,27 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self, ctx: _SyncContext, category: SourceCategory, source_ids: list[int], progress_state: dict
     ) -> tuple[list[str], int, int]:
         """Resolve the marker/KNX cluster plans and add the pairs. Returns (lines, added, errors)."""
-        plan_to_ids, created_plans = await self.coordinator.resolve_marker_clusters(source_ids, category.label)
+        plan_to_ids, created_plans, failed_plans = await self.coordinator.resolve_marker_clusters(
+            source_ids, category.label
+        )
+        # Surface a resolve failure to the user, not just the log — a cluster can fail to
+        # resolve/create (e.g. the stale-fub_id guard rejecting a contaminated plan) while
+        # other clusters in the same batch succeed, so plan_to_ids alone can't signal it.
+        summary: list[str] = [
+            f"{ICON_WARNING} Cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
+        ]
+        errors = len(failed_plans)
         if not plan_to_ids:
-            _LOGGER.warning("[%s] Cluster plan wiring: no %s cluster plan available", self.server_id, category.label)
-            return [f"{ICON_WARNING} No {category.label} cluster plan available — see log."], 0, 1
+            if not failed_plans:
+                _LOGGER.warning(
+                    "[%s] Cluster plan wiring: no %s cluster plan available", self.server_id, category.label
+                )
+                summary.append(f"{ICON_WARNING} No {category.label} cluster plan available — see log.")
+                errors = 1
+            return summary, 0, errors
 
         ref_type = int(category.fub_module_type)
-        summary: list[str] = []
         added = 0
-        errors = 0
         for fub_id, cluster_ids in plan_to_ids.items():
             if getattr(self.coordinator, "cancel_sync", False):
                 break
@@ -1599,6 +1772,358 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             errors += len(lp_errors)
         return summary, added, errors
 
+    async def _wire_knx_full(
+        self, ctx: _SyncContext, created_names: list[str], gap_items: list[dict], refresh_audit: bool = False
+    ) -> list[str]:
+        """Wire every open KNX leg (read-path, write-path bridge, API-Loopback fan-out) for
+        every KNX cluster in exactly ONE combined stop -> write -> finalize cycle per plan.
+
+        Reported by the user 18.09.2026: running _wire_created_pairs' KNX slice, then
+        _wire_knx_bridges, then _wire_knx_bridge_loopbacks in sequence on the SAME plan made
+        each of them independently capture-was_active -> stop_fup -> write -> sort/reactivate,
+        so a plan with all three legs open visibly sorted/reactivated three times in a row
+        instead of once, and the tripled Comexio round-trips compounded into a long silent
+        stretch. An intermediate design (legs 1+2 combined, leg 3 deferred to one final
+        follow-up pass per affected cluster) still left every affected plan visibly
+        sorting/reactivating twice — flagged by the user as still redundant (screenshots,
+        21.09.2026: "erst werden die einen Elemente hinzugefügt, dann wird sortiert, dann
+        werden die nächsten elemente hinzugefügt, dann wird wieder sortiert ... das ist doch
+        überflüssig"). This method now wires all three legs for a cluster inside a single
+        _wire_knx_cluster call — one capture-was_active -> stop_fup -> write (all legs) ->
+        sort/reactivate cycle per plan, full stop.
+
+        The three legs have a real dependency chain, not just a shared plan:
+          - Leg 1 (K -> webIO-HA read path, function_plan_add_marker_pairs ref_type=11) creates
+            the K-Element's own connection record. Computed the same way _wire_created_pairs
+            computes it (freshly created_names this run, unioned with the pre-existing
+            function_plan_missing gap_items for a full sync) — there is no fresh-audit
+            equivalent for this leg (see async_fresh_knx_bridge_audit's docstring for why KNX
+            bridge/loopback have one and this doesn't: only those two can come into existence
+            mid-run from a plan/import_knx toggle created earlier in the same run).
+          - Leg 2 (Merker -> K write-path bridge) creates an entirely independent connection
+            record (Marker as source, K as sink) and can run before/after/independent of leg 1
+            — it creates the K-Element itself if missing.
+          - Leg 3 (K -> webIO-Loopback fan-out) hard-requires leg 1's connection record to
+            already exist (it only ever EXTENDS it, see wire_knx_bridge_loopback's docstring)
+            and needs each K-Element's marker_id from leg 2. A bridge leg 2 creates THIS run has
+            no marker_id in the pre-fetched loopback audit yet (that audit only lists a K-Element
+            once its bridge marker is already visible server-side).
+
+            Until 2026-09-21 this dependency was resolved either via an extra
+            async_fresh_knx_bridge_loopback_audit() re-fetch per cluster (a full get_raw_config +
+            parse_config + force-reload of every relevant fub_id — live-observed by the user as
+            a ~7.5-minute silent stretch on a loaded Comexio server), or via a deferred
+            second cycle per affected cluster. Both are gone now: api.py's
+            function_plan_add_knx_bridge_pairs (leg 2) already creates the bridge Marker
+            synchronously and knows its marker_id — it now returns that mapping directly
+            instead of discarding it, so _wire_knx_cluster can wire leg 3 for a freshly-bridged
+            K-object in the SAME cycle, with no re-audit and no follow-up pass at all.
+
+        Runs for a Full Sync as well as the standalone knx_bridge_add_missing action (decided
+        18.09.2026: that action completes every open KNX write-path leg, including the read
+        path, rather than leaving a bridge with an incomplete K-Element behind) — but not for
+        a scoped delta action (update_types/create_missing/...), mirroring _wire_trigger_pairs'
+        gating. created_names is empty for knx_bridge_add_missing (it doesn't sync Web-IO
+        commands itself) — its read-path candidates come from gap_items alone, same as
+        function_plan_add_missing's own read-path-only wiring.
+        """
+        if ctx.action not in {"full_sync", "knx_bridge_add_missing"}:
+            return []
+
+        clustered_cats = [cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered]
+        source_ids_by_cat, _created_io_refs = self._classify_created_names(created_names, clustered_cats, {})
+        gap_keys = {f"{cat.key.value}_id": cat for cat in clustered_cats}
+        self._merge_gap_source_ids(source_ids_by_cat, gap_items, gap_keys)
+        read_path_ids = set(source_ids_by_cat.get(WebioClass.KNX, []))
+
+        if refresh_audit:
+            bridge_missing = await self.coordinator.async_fresh_knx_bridge_audit()
+            loopback_missing = await self.coordinator.async_fresh_knx_bridge_loopback_audit()
+        else:
+            audit_data = getattr(self.coordinator, "last_audit_results", {})
+            bridge_missing = audit_data.get("knx_bridge_missing", [])
+            loopback_missing = audit_data.get("knx_bridge_loopback_missing", [])
+        bridge_by_id = {int(item["ref_id"]): item for item in bridge_missing}
+        loopback_by_id = {int(item["ref_id"]): item for item in loopback_missing}
+
+        all_k_ids = read_path_ids | set(bridge_by_id) | set(loopback_by_id)
+        if not all_k_ids:
+            return []
+
+        plan_to_ids, created_plans, failed_plans = await self.coordinator.resolve_knx_clusters(sorted(all_k_ids))
+        # Surface a resolve failure to the user, not just the log — see _wire_source_clusters.
+        summary: list[str] = [
+            f"{ICON_WARNING} KNX cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
+        ]
+        if not plan_to_ids:
+            if not failed_plans:
+                _LOGGER.warning("[%s] KNX combined wiring: no KNX cluster plan available", self.server_id)
+                summary.append(f"{ICON_WARNING} No KNX cluster plan available — see log.")
+            return summary
+
+        # NOT len(all_k_ids): a K-id needing e.g. both the read-path and bridge legs
+        # contributes 2 to "done" below (once per leg it actually goes through) but would
+        # only contribute 1 to a union-based total, letting done run past total (>100%
+        # progress, negative ETA). Sum of the three per-leg counts instead, so it lines up
+        # 1:1 with the progress_state["done"] += len(...) calls in _wire_knx_cluster's three
+        # leg helpers below (including the one that grows "total" back when a bridge just
+        # created THIS run pulls in an extra loopback item mid-cluster).
+        progress_state = {
+            "done": 0,
+            "total": len(read_path_ids) + len(bridge_by_id) + len(loopback_by_id),
+            "t0": time.monotonic(),
+        }
+        for fub_id, cluster_ids in plan_to_ids.items():
+            # Checked only between clusters, same as _add_pairs_to_plan's existing pattern —
+            # but each cluster here now wires all three legs (including leg 3 for a bridge it
+            # just created — see _wire_knx_cluster's docstring) in one combined stop/write/
+            # finalize cycle instead of one leg's own.
+            if getattr(self.coordinator, "cancel_sync", False):
+                break
+            line = await self._wire_knx_cluster(
+                ctx,
+                fub_id,
+                sorted(cluster_ids),
+                fub_id in created_plans,
+                read_path_ids,
+                bridge_by_id,
+                loopback_by_id,
+                progress_state,
+            )
+            if line:
+                summary.append(line)
+        return summary
+
+    async def _wire_knx_leg_read_path(
+        self, ctx: _SyncContext, fub_id: int, plan_name: str, read_ids: list[int], progress_state: dict
+    ) -> tuple[list[int], list[str], str]:
+        """Leg 1: K -> webIO-HA read path. Returns (added K ref_ids, errors, summary part)."""
+        ctx.update_status(
+            f"Adding {len(read_ids)} pair(s) to Function Plan '{plan_name}'...",
+            pct=_PCT_PLAN_PAIRS,
+            step_info="Function Plan: adding pairs",
+        )
+        added, errors = await ctx.api.function_plan_add_marker_pairs(
+            fub_id,
+            read_ids,
+            # Always the off-canvas-parking + follow-up-sort branch (fresh_plan=False), even
+            # for a plan created THIS run (is_fresh=True) — see _wire_knx_leg_bridge's docstring
+            # for why: it and this leg would otherwise place their respective elements at
+            # identical coordinates on a brand-new plan.
+            fresh_plan=False,
+            progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+            ref_type=11,
+        )
+        progress_state["done"] += len(read_ids)
+        return added, errors, f"read-path +{len(added)}/{len(read_ids)}"
+
+    async def _wire_knx_leg_bridge(
+        self,
+        ctx: _SyncContext,
+        fub_id: int,
+        plan_name: str,
+        bridge_items: list[dict],
+        loopback_by_id: dict[int, dict],
+        progress_state: dict,
+    ) -> tuple[list[int], list[str], str, list[dict]]:
+        """Leg 2: Merker -> K write-path bridge. Returns (added, errors, summary part,
+        loopback items for every K just bridged THIS call that still needs leg 3 — see
+        _wire_knx_cluster, which wires these in the same stop/write/finalize cycle).
+        """
+        ctx.update_status(
+            f"Adding {len(bridge_items)} KNX bridge(s) to Function Plan '{plan_name}'...",
+            pct=_PCT_PLAN_PAIRS,
+            step_info="Function Plan: adding KNX bridges",
+        )
+        added, errors, bridged = await ctx.api.function_plan_add_knx_bridge_pairs(
+            fub_id,
+            bridge_items,
+            # fresh_plan=False unconditionally (see _wire_knx_full's CRITICAL note): both this
+            # leg's bridge-Marker and leg 1's K-Element use the IDENTICAL _pair_pos formula in
+            # api.py when fresh_plan=True, each with its own n_added starting at 0 — on a plan
+            # created THIS run (is_fresh=True) that places the i-th K-object's leg-1 element and
+            # leg-2 element on the exact same coordinates. The old three-independent-cycles
+            # design never hit this because leg 2's cycle always saw an already-existing,
+            # non-fresh plan by the time it ran. Forcing the parking+sort path here is safe
+            # regardless of is_fresh: shared parking coordinates are harmless (the sort pass
+            # below resolves them into unique final positions), and _wire_knx_cluster forces
+            # was_active=True for a genuinely fresh plan itself (create_fup's plans start
+            # inactive and are cached that way — no default kicks in — see its comment there).
+            fresh_plan=False,
+            progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+        )
+        progress_state["done"] += len(bridge_items)
+        part = f"bridges +{len(added)}/{len(bridge_items)}"
+
+        # api.py's function_plan_add_knx_bridge_pairs now hands back (marker_id, binary) for
+        # every K it just bridged — created_knx_bridge_marker already knows both synchronously,
+        # so no re-audit is needed to learn them (see its docstring). This lets _wire_knx_cluster
+        # wire leg 3 for a brand-new bridge in the SAME cycle as legs 1+2 (single sort/reactivate
+        # per plan, not the two-cycle "consolidate legs 1+2, defer leg 3" design this replaced —
+        # see _wire_knx_cluster's docstring for why that design's own re-audit is now unnecessary,
+        # per user feedback 21.09.2026 that even ONE extra sort/add cycle per affected cluster
+        # was still visibly redundant).
+        newly_bridged_loopback_items = [
+            {"ref_id": k, "marker_id": bridged[k][0], "binary": bridged[k][1]} for k in added if k not in loopback_by_id
+        ]
+        return added, errors, part, newly_bridged_loopback_items
+
+    async def _wire_knx_leg_loopback(
+        self, ctx: _SyncContext, fub_id: int, plan_name: str, loopback_items: list[dict], progress_state: dict
+    ) -> tuple[list[int], list[str], str]:
+        """Leg 3: K -> webIO-Loopback fan-out. Returns (added K ref_ids, errors, summary part)."""
+        ctx.update_status(
+            f"Wiring API-Loopback fan-out for {len(loopback_items)} KNX bridge(s) on '{plan_name}'...",
+            pct=_PCT_PLAN_PAIRS,
+            step_info="Function Plan: KNX loopback fan-out",
+        )
+        api = ctx.api
+        bridges = [(int(i["ref_id"]), int(i["marker_id"]), bool(i["binary"])) for i in loopback_items]
+        added, skipped, errors = await api.function_plan_add_knx_bridge_loopback_pairs(
+            fub_id,
+            bridges,
+            api.api_user,
+            api.api_pass,
+            fresh_plan=False,  # see _wire_knx_leg_bridge's docstring
+            progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+        )
+        progress_state["done"] += len(loopback_items)
+        skip_note = f" (+{len(skipped)} already wired)" if skipped else ""
+        return added, errors, f"loopback +{len(added)}/{len(loopback_items)}{skip_note}"
+
+    async def _wire_knx_cluster(
+        self,
+        ctx: _SyncContext,
+        fub_id: int,
+        cluster_ids: list[int],
+        is_fresh: bool,
+        read_path_ids: set[int],
+        bridge_by_id: dict[int, dict],
+        loopback_by_id: dict[int, dict],
+        progress_state: dict,
+    ) -> str:
+        """Wire every open KNX leg for one cluster plan in a single stop -> write -> finalize cycle.
+
+        Legs 1+2+3 all run in this ONE cycle now, including leg 3 (API-Loopback fan-out) for a
+        K just bridged by leg 2 THIS call — api.py's function_plan_add_knx_bridge_pairs hands
+        back each new bridge's marker_id directly (see _wire_knx_leg_bridge's docstring), so no
+        re-audit is needed to learn it before wiring leg 3. Replaces the previous design (legs
+        1+2 here, leg 3 deferred to a separate end-of-run re-audit + follow-up pass across every
+        affected cluster) per user feedback 21.09.2026: even that single extra sort/reactivate
+        cycle per affected cluster was still visibly redundant ("mehrere sortings... das ist
+        doch überflüssig") — a plan getting a brand-new bridge now sorts exactly once, like any
+        other plan, instead of twice.
+
+        is_fresh (plan created THIS run) only affects the cosmetic "(new)" summary tag and the
+        finalize call below — every leg's own API call always uses fresh_plan=False regardless,
+        see _wire_knx_leg_bridge's docstring for why.
+
+        The rename-mismatch check below now runs ONCE per cluster, up front, instead of once per
+        leg as in the old three-independent-cycles design — a narrower (not new) guard against a
+        rename/repurpose of this exact plan happening mid-cycle, between two of the three legs
+        this method now runs back-to-back without re-checking. Accepted as part of the same
+        consolidation tradeoff as cancel_sync's coarser granularity (see _wire_knx_full's loop).
+        """
+        api = ctx.api
+        plan_name = self._plan_name(fub_id)
+        knx_label = SOURCE_CATEGORIES[WebioClass.KNX].label
+        if (mismatch := self._check_plan_rename_mismatch(fub_id, cluster_ids, plan_name, knx_label)) is not None:
+            # mismatch[1]/[2] (empty added-ids / the _ERR_RENAMED_MID_SYNC string) are dropped here
+            # unlike _add_pairs_to_plan's/_add_io_pairs_to_plan's own use of this same helper, which
+            # return the full triple for their callers' aggregate error count. _wire_knx_full has no
+            # such aggregate (it only ever returns summary lines) and mismatch[0] already carries the
+            # same information into that summary — accepted as harmless today, but keep in mind if an
+            # aggregate error count is ever added for the KNX path too.
+            return mismatch[0]
+
+        cluster_set = set(cluster_ids)
+        read_ids = sorted(read_path_ids & cluster_set)
+        bridge_items = [bridge_by_id[k] for k in cluster_ids if k in bridge_by_id]
+        loopback_items = [loopback_by_id[k] for k in cluster_ids if k in loopback_by_id]
+        if not read_ids and not bridge_items and not loopback_items:
+            return ""  # defensive: resolve_knx_clusters only groups ids from one of the three sets above
+
+        # Capture the activation state BEFORE stop_fup — same reasoning as _add_pairs_to_plan.
+        # is_fresh forces this True regardless of the raw flag: create_fup always creates plans
+        # inactive (fub_active="0") AND immediately caches that same fub_info into fub_data (see
+        # create_fup's own docstring/body) — so .get(..., True)'s default never actually fires for
+        # a plan created THIS run, the real stored value (0/False) wins instead. Without this, a
+        # brand-new cluster plan would end up permanently stopped: is_fresh=False further down
+        # only controls whether the sort pass runs, was_active alone controls reactivation — same
+        # invariant _add_trigger_pairs already documents and relies on.
+        was_active = is_fresh or bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        t0 = time.monotonic()
+        await self.coordinator.async_function_plan_change_backup(
+            fub_id, f"wire_knx_full {[f'K{m}' for m in cluster_ids]}"
+        )
+        await api.function_plan_stop_fup(fub_id)
+
+        all_added: list[int] = []
+        all_errors: list[str] = []
+        parts: list[str] = []
+
+        try:
+            if read_ids:
+                added, errors, part = await self._wire_knx_leg_read_path(
+                    ctx, fub_id, plan_name, read_ids, progress_state
+                )
+                all_added.extend(added)
+                all_errors.extend(errors)
+                parts.append(part)
+
+            if bridge_items:
+                added, errors, part, new_loopback_items = await self._wire_knx_leg_bridge(
+                    ctx, fub_id, plan_name, bridge_items, loopback_by_id, progress_state
+                )
+                all_added.extend(added)
+                all_errors.extend(errors)
+                parts.append(part)
+                # A bridge just created THIS call has no slot in progress_state["total"] yet
+                # (_wire_knx_full's upfront count only knows about the pre-fetched
+                # knx_bridge_loopback_missing audit) — grow it here, same reasoning as
+                # _plan_pair_progress's "NOT len(all_k_ids)" note on that upfront sum.
+                progress_state["total"] += len(new_loopback_items)
+                loopback_items = loopback_items + new_loopback_items
+
+            if loopback_items:
+                added, errors, part = await self._wire_knx_leg_loopback(
+                    ctx, fub_id, plan_name, loopback_items, progress_state
+                )
+                all_added.extend(added)
+                all_errors.extend(errors)
+                parts.append(part)
+        except (Exception, asyncio.CancelledError):
+            # Anything unexpected escaping the three legs above (most legs already isolate their
+            # own known failure modes, see _wire_knx_leg_bridge's re-audit try/except) must not
+            # leave the plan stopped on the real Comexio server with no indication to the user —
+            # async_handle_press' own except Exception only reports "Error: ..." and never
+            # restarts a plan itself. Best-effort restart before letting the exception propagate,
+            # same failure class _remove_trigger_pairs already guards for its own single write.
+            # asyncio.CancelledError is listed explicitly — it subclasses BaseException, not
+            # Exception, since Python 3.8, so a cancelled sync (HA shutdown, config-entry
+            # reload, a cancelled service call) would otherwise skip this restart entirely and
+            # leave the managed plan permanently stopped (Sourcery finding, review 2026-09-23).
+            if was_active:
+                await api.function_plan_run_fup(fub_id)
+            raise
+
+        if all_errors:
+            _LOGGER.warning("[%s] _wire_knx_cluster errors on fub=%s: %s", self.server_id, fub_id, all_errors)
+
+        # is_fresh's only remaining effect is the "(new)" summary tag below and the was_active
+        # override above — the finalize call itself always sorts (is_fresh=False) for the same
+        # reason every leg above forces fresh_plan=False; reactivation is guaranteed regardless
+        # via the corrected was_active, not via is_fresh here.
+        note = await self._finalize_plan_after_pairs(
+            ctx, fub_id, plan_name, list(dict.fromkeys(all_added)), False, was_active
+        )
+        err_note = f", {ICON_WARNING} {len(all_errors)} errors" if all_errors else ""
+        line = (
+            f"• '{plan_name}'{' (new)' if is_fresh else ''}: {', '.join(parts)}"
+            f" in {_mmss(time.monotonic() - t0)} min{note}{err_note}"
+        )
+        return line
+
     async def _wire_io_clusters(
         self, ctx: _SyncContext, io_items: list[dict[str, str]], progress_state: dict
     ) -> tuple[list[str], int, int]:
@@ -1607,18 +2132,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         for item in io_items:
             by_ext.setdefault(item["ext_name"], []).append(item["identifier"])
 
-        ext_plans, created_plans = await self.coordinator.resolve_io_clusters(sorted(by_ext))
+        ext_plans, created_plans, failed_exts = await self.coordinator.resolve_io_clusters(sorted(by_ext))
+        # Surface a resolve failure to the user, not just the log — see _wire_source_clusters.
+        summary: list[str] = [
+            f"{ICON_WARNING} IO cluster plan for '{ext}' could not be resolved/created — see log" for ext in failed_exts
+        ]
+        errors = len(failed_exts)
         if not ext_plans:
-            _LOGGER.warning("[%s] Cluster plan wiring: no IO cluster plan available", self.server_id)
-            return [f"{ICON_WARNING} No IO cluster plan available — see log."], 0, 1
+            if not failed_exts:
+                _LOGGER.warning("[%s] Cluster plan wiring: no IO cluster plan available", self.server_id)
+                summary.append(f"{ICON_WARNING} No IO cluster plan available — see log.")
+                errors = 1
+            return summary, 0, errors
 
         plan_exts: dict[int, list[tuple[str, int]]] = {}
         for ext, (fub_id, column) in ext_plans.items():
             plan_exts.setdefault(fub_id, []).append((ext, column))
 
-        summary: list[str] = []
         added = 0
-        errors = 0
         for fub_id, ext_cols in plan_exts.items():
             if getattr(self.coordinator, "cancel_sync", False):
                 break
