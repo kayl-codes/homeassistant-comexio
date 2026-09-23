@@ -2092,13 +2092,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 all_added.extend(added)
                 all_errors.extend(errors)
                 parts.append(part)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             # Anything unexpected escaping the three legs above (most legs already isolate their
             # own known failure modes, see _wire_knx_leg_bridge's re-audit try/except) must not
             # leave the plan stopped on the real Comexio server with no indication to the user —
             # async_handle_press' own except Exception only reports "Error: ..." and never
             # restarts a plan itself. Best-effort restart before letting the exception propagate,
             # same failure class _remove_trigger_pairs already guards for its own single write.
+            # asyncio.CancelledError is listed explicitly — it subclasses BaseException, not
+            # Exception, since Python 3.8, so a cancelled sync (HA shutdown, config-entry
+            # reload, a cancelled service call) would otherwise skip this restart entirely and
+            # leave the managed plan permanently stopped (Sourcery finding, review 2026-09-23).
             if was_active:
                 await api.function_plan_run_fup(fub_id)
             raise
