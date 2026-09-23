@@ -19,7 +19,11 @@ from .entity import ComexioKnxDpt3Entity
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+# HA calls this with `await` — the async signature is a platform-setup contract requirement
+# regardless of body (python:S7503 false positive).
+async def async_setup_entry(  # NOSONAR
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up Comexio Blinds (KNX DPT3.008 direction+stepcode pairs) as Covers."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     conf = {**entry.data, **entry.options}

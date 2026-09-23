@@ -212,7 +212,8 @@ async def _tick_comexio_request_progress(method: str, path: str) -> None:
         _LOGGER.info("Warte weiterhin auf Antwort von Comexio: %s %s (%ds)", method, path, elapsed)
 
 
-async def _on_comexio_request_start(_session: aiohttp.ClientSession, trace_ctx: Any, params: Any) -> None:
+# aiohttp TraceConfig requires an async callback signature regardless of body (python:S7503 false positive).
+async def _on_comexio_request_start(_session: aiohttp.ClientSession, trace_ctx: Any, params: Any) -> None:  # NOSONAR
     trace_ctx.progress_task = asyncio.ensure_future(_tick_comexio_request_progress(params.method, params.url.path))
 
 
