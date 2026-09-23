@@ -578,11 +578,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Comexio instance, see project_knx_write_path_design memory) — a webhook that fired
             # during the get_raw_config/get_live_states round-trip wins over this poll's (older)
             # snapshot; otherwise the fresh, authoritative poll value wins and is cached.
+            #
+            # knx_live_states membership is checked explicitly (not just "value differs from
+            # cache") because api._build_source_item defaults a KNX id absent from the dashboard
+            # response to 0 — an HTTP 200 that simply omits one requested key (partial refresh,
+            # unsupported/stale K-element) would otherwise overwrite a real cached value with
+            # that 0 and make the entity report off/0 until the object reappears in a response
+            # (Sourcery finding, review 2026-09-21).
             for k in final_data["knx"]:
                 if k["id"] in self._webhook_updated_knx_ids:
                     k["value"] = self.knx_states.get(k["id"], k["value"])
-                else:
+                elif k["id"] in knx_live_states:
                     self.knx_states[k["id"]] = k["value"]
+                else:
+                    k["value"] = self.knx_states.get(k["id"], k["value"])
 
             # Prune knx_states down to the object ids the server still reports. The merge loop
             # above only revisits ids currently present in final_data["knx"] — a value cached
@@ -4049,6 +4058,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for k in knx_objects:
             k_id = str(k["id"])
             if source_audit_key(knx_category, k["id"]) not in ha_map:
+                continue
+            if k.get("kind") == MarkerKind.READ_ONLY:
+                # A read-only KNX object (explicit "[RO]" suffix, or auto-tagged by
+                # _auto_suffix_unambiguous_knx) has no write path to bridge — without this
+                # exclusion it would be flagged as "missing bridge Marker" on every poll
+                # forever, since knx_bridge_marker_by_k_id legitimately never contains it. A
+                # DPT-unambiguous item auto-tagged THIS same poll still briefly races past this
+                # check once (renamed remotely, but this poll's already-parsed item dict is not
+                # itself mutated — see _auto_suffix_unambiguous_knx's docstring); that one-poll
+                # lag self-resolves on the next poll's fresh scrape, same as the accepted lag
+                # documented there (Sourcery finding, review 2026-09-21).
                 continue
             if k_id not in knx_bridge_marker_by_k_id:
                 knx_bridge_missing_items.append(
