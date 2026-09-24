@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Comexio IO-Server</title>
+<script type="text/javascript" src="/11.0.2/js/cmb_admin.js"></script>
+</head>
+<body>
+<div id="content">Funktionsmodule</div>
+<script type="text/javascript">
+    var $Paper = {
+        "2": {"Id": 2, "Name": "A4", "MMX": 297, "MMY": 210},
+    };
+    var $Fubs = {"1": {"Id": 1, "Name": "Plan {mit} \"Klammern\"", "Paper": 2}};
+    var $Broken = {"1": {"Id": 1, 'Name': 'single quotes are not JSON'}};
+    var $NotAnObject = 42;
+</script>
+<script>
+    var $FubModules = {"2": {"1": {"Id": 1, "Name": "Licht, Wohnen", "Type": 1}}, "10": [], };
+</script>
+</body>
+</html>

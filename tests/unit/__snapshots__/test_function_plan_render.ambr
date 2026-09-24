@@ -1,0 +1,22 @@
+# serializer version: 1
+# name: test_analyze_function_plan
+  list([
+    dict({
+      'category': 'DEAD_OUTPUT',
+      'element_ids': list([
+        '7',
+      ]),
+      'message': "Nicht: Ausgang 'out' hat keinen Verbraucher.",
+      'severity': 'warning',
+    }),
+    dict({
+      'category': 'SELF_RESET',
+      'element_ids': list([
+        '8',
+        '9',
+      ]),
+      'message': 'Erkanntes Selbstreset-Muster (virtueller Taster), gutartig: M4 Klingel [TRIG] → T1 Taster Reset → (zurück).',
+      'severity': 'info',
+    }),
+  ])
+# ---

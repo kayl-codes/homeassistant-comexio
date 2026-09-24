@@ -3,14 +3,17 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
+      # Snapshots are byte-exact test expectations (the SVG ones end without a newline) — never "fix" them.
       - id: trailing-whitespace
+        exclude: ^tests/.*/__snapshots__/
       - id: end-of-file-fixer
+        exclude: ^tests/.*/__snapshots__/
       - id: check-yaml
       - id: check-json
 
   # Ruff Linter und Formatter
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.5.0
+    rev: v0.16.6  # keep in sync with ruff==<version> in .github/workflows/ci.yml
     hooks:
       - id: ruff
         args: [ --fix ]
@@ -24,4 +27,12 @@ repos:
         entry: python scripts/generate_requirements.py
         language: system
         files: ^(custom_components/comexio/manifest\.json|requirements\.txt)$
+        pass_filenames: false
+
+      # Unit tests (tests/unit, pure logic, ~2 s) — needs `pip install -r requirements_test.txt` once.
+      - id: pytest-unit
+        name: Unit tests (pytest tests/unit)
+        entry: python -m pytest tests/unit -q
+        language: system
+        files: ^(custom_components/comexio/.*\.py|tests/.*|pyproject\.toml|requirements_test\.txt)$
         pass_filenames: false

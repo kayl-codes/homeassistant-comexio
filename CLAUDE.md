@@ -25,9 +25,18 @@ ruff format --check .
 
 # Pre-commit (runs ruff + whitespace/YAML/JSON checks)
 pre-commit run --all-files
+
+# Unit tests (install once: pip install -r requirements_test.txt)
+pytest tests/unit
+
+# Unit tests with coverage report
+pytest tests/unit --cov --cov-report=term-missing
+
+# Regenerate snapshots after an intended output change (review the diff!)
+pytest tests/unit --snapshot-update
 ```
 
-There is no automated test suite. Manual testing requires a live HA + Comexio instance.
+`tests/unit/` holds pure-logic tests (parsers, Web-IO command builders, KNX DPT handling, function plan diff/render/analysis) — no HA instance, runs natively on Windows. Test data lives in `tests/fixtures/comexio/` (synthetic, never real installation data); the only place that constructs a `ComexioAPI` is the `comexio_api` fixture in `tests/unit/conftest.py`. Anything needing a running HA (config flow, setup, webhook, coordinator) is still manual testing against a live HA + Comexio instance.
 
 ## Code quality rules
 
@@ -35,6 +44,9 @@ There is no automated test suite. Manual testing requires a live HA + Comexio in
 - Ruff rule sets: B, C4, E, F, I, SIM, UP, W
 - Sourcery enabled for all files except `.github/` and `tests/`
 - Cognitive complexity ≤ 15; no duplicated string literals (extract constants)
+- **Tests alongside ruff:** every change runs `pytest tests/unit` in addition to `ruff check` / `ruff format` before it counts as done (the pre-commit hook `pytest-unit` and the CI job `tests` enforce the same). A red test is a finding, not an obstacle — never delete or loosen an assertion to make it pass.
+- **Snapshots:** a failing snapshot means the output changed. If the change is intended, regenerate with `--snapshot-update` and state the reviewed snapshot diff in the PR; otherwise fix the code.
+- **Regression tests:** every bug fix in pure logic (parsers, command builders, diff/render/analysis) gets a test that fails without the fix. Test data goes to `tests/fixtures/comexio/` and must be synthetic.
 
 ## Terminology: "function plan"
 
