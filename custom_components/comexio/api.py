@@ -1734,12 +1734,19 @@ class ComexioAPI:
 
     # --- WEB-IO MANAGEMENT ---
     async def get_webio_base_info(self, webio_name: str) -> tuple[str, bool] | None:
-        """Scans classes via add-page."""
+        """Scans classes via add-page.
+
+        Returns (base_id, deletable), or `None` if `webio_name` genuinely has no class in a
+        successfully-fetched page. A failed fetch raises RuntimeError instead of returning
+        `None`, mirroring get_webio_device_info — callers treat `None` as "class absent" and
+        upload a fresh class on that basis, so silently reporting "absent" on a transient HTTP
+        error would create a duplicate class next to the one that is actually still present.
+        """
         url_add = f"{self._base_url}/admin/web_io/add"
         async with self.session.get(url_add) as resp:
             if resp.status != 200:
                 _LOGGER.error("Failed to fetch Web-IO add page (HTTP %s)", resp.status)
-                return None
+                raise RuntimeError(f"Failed to fetch Web-IO add page (HTTP {resp.status})")
             html = await resp.text()
             pattern = rf'<option value="(\d+)"[^>]*>{re.escape(webio_name)}</option>'
             if match := re.search(pattern, html, re.IGNORECASE):
@@ -1748,7 +1755,7 @@ class ComexioAPI:
                 async with self.session.get(url_win) as win_resp:
                     if win_resp.status != 200:
                         _LOGGER.error("Failed to fetch Web-IO base window (HTTP %s)", win_resp.status)
-                        return None
+                        raise RuntimeError(f"Failed to fetch Web-IO base window (HTTP {win_resp.status})")
                     win_html = await win_resp.text()
 
                     return (b_id, f"delete_web_device_base/?id={b_id}" in win_html)
@@ -2426,22 +2433,17 @@ class ComexioAPI:
         visible via reload rather than re-creating them one by one) or the class already
         existed beforehand. Returns None if api_username/api_password aren't configured, the
         class upload or device creation call reports failure (server-side "no", not a network
-        error), or the device is confirmed present while its class cannot be found/verified
-        (get_webio_base_info's check failed transiently — see the inline comment where this is
-        decided; aborting here avoids a duplicate class upload that would orphan the existing
-        one's already-embedded commands). A connection-level failure (timeout, unreachable
-        host) during any of the base/device checks or the upload/create calls propagates as an
-        exception instead of returning None — matching how every other Web-IO class's own
+        error), the device or class check itself fails (HTTP error, timeout, unreachable host
+        — both get_webio_device_info and get_webio_base_info raise rather than report
+        "absent", so a flaky check can't trigger a duplicate class upload that would orphan
+        the existing one's already-embedded commands), or the device is present while its
+        class is not (see the inline comment where this is decided). A connection-level
+        failure during the upload/create calls propagates as an exception instead of
+        returning None — matching how every other Web-IO class's own
         bootstrap path (button.py's `_recreate_class`) behaves; the top-level sync handler is
         the catch-all for that case, same as for them.
 
         Known limitations:
-        - The device-confirmed-present guard above only catches one direction: it cannot tell
-          "class genuinely never existed" apart from "class check failed while the device
-          itself was independently deleted" (device and class are deletable independently —
-          see delete_webio_device vs. delete_webio_base). That combination is treated as
-          genuinely fresh and would re-embed only the current batch's bridges. Accepted as a
-          rare double-failure edge case rather than adding another unverifiable branch here.
         - Once the device exists, this never re-checks its username/password/ip against the
           current config — unlike WEBIO_CLASSES devices, this class isn't covered by the
           IP-mismatch/credential audit (it isn't a member of WEBIO_CLASSES), so a later
@@ -2467,21 +2469,24 @@ class ComexioAPI:
             _LOGGER.warning("ensure_knx_loopback_webio: device check failed: %s", err)
             return None
 
-        base_info = await self.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
-        # Unlike get_webio_device_info above, get_webio_base_info returns None on BOTH genuine
-        # absence AND a transient HTTP failure of its own check (see its own docstring — no
-        # raise path exists there). device_id, just resolved above via the raise-based check,
-        # is the reliable anchor: a device can only exist if create_webio_device below already
-        # succeeded for it once, which itself requires a base_id from a prior successful class
-        # creation — so device_id is not None makes a None base_info here the flaky case, not
-        # genuine absence. Abort rather than risk treating a still-existing class as brand new:
-        # that would bulk-upload only *this* call's bridges and orphan any others the class
-        # already carries from an earlier bootstrap run.
+        try:
+            base_info = await self.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
+        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+            # Same raise contract as get_webio_device_info above: a failed check must not be
+            # read as "class absent", which would bulk-upload only *this* call's bridges as a
+            # brand-new class and orphan any others the existing class already carries.
+            _LOGGER.warning("ensure_knx_loopback_webio: class check failed: %s", err)
+            return None
+        # base_info is None now means the class is genuinely absent (a failed check raised
+        # above). A device can only exist if create_webio_device below already succeeded for
+        # it once, which itself requires a base_id from a prior successful class creation — so
+        # a device without its class is an inconsistent server state, not a fresh install.
+        # Abort rather than upload a new class next to the orphaned device.
         if device_id is not None and base_info is None:
             _LOGGER.error(
-                "ensure_knx_loopback_webio: device '%s' exists but its Web-IO class '%s' could "
-                "not be found/verified — aborting rather than risking a duplicate class upload, "
-                "see log above",
+                "ensure_knx_loopback_webio: device '%s' exists but its Web-IO class '%s' was "
+                "not found — aborting rather than uploading a new class next to the orphaned "
+                "device",
                 WEBIO_DEVICE_NAME_KNX_LOOPBACK,
                 WEBIO_CLASS_NAME_KNX_LOOPBACK,
             )
@@ -4022,7 +4027,7 @@ class ComexioAPI:
 
         Phase 7 (see project_knx_write_path_design memory): besides the K-Element (source,
         type=11) -> HA-Web-IO (sink) wire _function_plan_wire_ref_pair already drew
-        (function_plan_add_marker_pairs, ref_type=11), the same K-Element output must ALSO
+        (function_plan_add_source_pairs, ref_type=11), the same K-Element output must ALSO
         reach a second Web-IO whose command writes the bridge Marker directly via Comexio's
         own /api/ endpoint — closing the "Punkt 4" stuck-marker loop entirely inside Comexio.
 
@@ -4167,7 +4172,7 @@ class ComexioAPI:
     ) -> tuple[list[int], list[str], dict[int, tuple[int, bool]]]:
         """Create a bridge Marker + wire it to its KNX object, for every item, on a stopped plan.
 
-        Write-path counterpart of function_plan_add_marker_pairs (Entwurf A "Merker-Brücke"):
+        Write-path counterpart of function_plan_add_source_pairs (Entwurf A "Merker-Brücke"):
         unlike that read-path pairing, the source element does not exist yet — a fresh
         bridge Marker is created per K-element (ensure_knx_bridge_block_start once per call
         keeps the whole batch on/after the round-50 boundary, then create_knx_bridge_marker
@@ -4356,7 +4361,7 @@ class ComexioAPI:
 
         bridges: (k_id, marker_id, binary) triples for K-Elements whose Marker<->K-Element wire
         (write path, wire_knx_bridge_pair) and K-Element->HA-Web-IO wire (read path,
-        function_plan_add_marker_pairs ref_type=11) already exist — this call only ADDS the
+        function_plan_add_source_pairs ref_type=11) already exist — this call only ADDS the
         loopback fan-out via wire_knx_bridge_loopback, it never creates the bridge itself. Also
         doubles as the retrofit path for bridges predating Phase 7 (e.g. M300-M306): pass
         their existing (k_id, marker_id, binary) triples the same way as for freshly created
@@ -4830,7 +4835,7 @@ class ComexioAPI:
         return str(ref.get("type")) == "5" and str(ref.get("ref_id")) == flanke_ref_id
 
     @staticmethod
-    def _function_plan_trigger_wired_marker_ids(plan_data: dict | None, ref_type: int = 2) -> set[int]:
+    def _function_plan_trigger_wired_source_ids(plan_data: dict | None, ref_type: int = 2) -> set[int]:
         """Source (marker=2/KNX=11) ref_ids in plan_data with a complete <->Flanke round trip.
 
         A source element that exists but is missing either the ->Flanke or the
@@ -5081,10 +5086,10 @@ class ComexioAPI:
         )
         return None
 
-    async def function_plan_add_marker_pairs(
+    async def function_plan_add_source_pairs(
         self,
         fub_id: int,
-        marker_ids: list[int],
+        source_ids: list[int],
         fresh_plan: bool = False,
         progress_cb: Callable[[int, int], None] | None = None,
         ref_type: int = 2,
@@ -5100,23 +5105,23 @@ class ComexioAPI:
         progress_cb(done, total) is invoked after every processed marker.
         ref_type selects the source category (marker=2 / KNX=11 — blind guess),
         driving the source data key and the plan-element type.
-        Returns (added_marker_ids, error_messages).
+        Returns (added_source_ids, error_messages).
         """
         category = category_by_fub_module_type(ref_type)
 
         def _expected_names(data: dict) -> set[str]:
-            markers = {int(m["id"]): m for m in data.get(category.data_key, [])}
-            return {f"HA {markers[mid]['name']}" for mid in marker_ids if mid in markers}
+            sources = {int(m["id"]): m for m in data.get(category.data_key, [])}
+            return {f"HA {sources[mid]['name']}" for mid in source_ids if mid in sources}
 
         fresh_data = await self._reload_config_until_commands_ready(_expected_names)
         webio_commands = fresh_data.get("webio_commands", {})
-        markers_by_id = {int(m["id"]): m for m in fresh_data.get(category.data_key, [])}
+        sources_by_id = {int(m["id"]): m for m in fresh_data.get(category.data_key, [])}
 
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
 
         if fresh_plan:
-            marker_ids = sorted(marker_ids)
+            source_ids = sorted(source_ids)
         _, y_max = self.get_fub_canvas_bounds(fub_id)
         # Always the generic pitch, even for a fresh KNX read-only cluster plan (ref_type=11) —
         # unlike async_sort_function_plan's is_knx_cluster_plan branch, that tighter pitch
@@ -5125,7 +5130,7 @@ class ComexioAPI:
         # so the generic pitch already places it with no gap — reviewed and confirmed harmless
         # 2026-09-20, not a bug to fix.
         max_rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
-        rows_per_col = _balanced_rows_per_col(len(marker_ids), max_rows_per_col)
+        rows_per_col = _balanced_rows_per_col(len(source_ids), max_rows_per_col)
 
         def _pair_pos(n_added: int, n_loop: int) -> tuple[float, float, float]:
             """(x_marker, x_webio, y): final grid slot for fresh plans, placeholder otherwise."""
@@ -5146,11 +5151,11 @@ class ComexioAPI:
 
         added: list[int] = []
         errors: list[str] = []
-        for i, marker_id in enumerate(marker_ids):
+        for i, source_id in enumerate(source_ids):
             err = await self._function_plan_add_single_pair(
                 fub_id,
-                marker_id,
-                markers_by_id,
+                source_id,
+                sources_by_id,
                 webio_commands,
                 existing_by_ref,
                 conn_endpoints,
@@ -5159,19 +5164,19 @@ class ComexioAPI:
                 plan_data,
             )
             if err is None:
-                added.append(marker_id)
+                added.append(source_id)
             elif err:
                 errors.append(err)
             if progress_cb:
-                progress_cb(i + 1, len(marker_ids))
+                progress_cb(i + 1, len(source_ids))
 
         return added, errors
 
     async def _function_plan_add_single_pair(
         self,
         fub_id: int,
-        marker_id: int,
-        markers_by_id: dict,
+        source_id: int,
+        sources_by_id: dict,
         webio_commands: dict,
         existing_by_ref: dict[tuple[int, int], int],
         conn_endpoints: list[set[int]],
@@ -5191,26 +5196,26 @@ class ComexioAPI:
         corrected for). ref_type=11 (KNX) additionally needs it for the Phase-7 API-Loopback
         fan-out this repair must not clobber.
         """
-        label = f"{category_by_fub_module_type(ref_type).audit_key_prefix}{marker_id}"
-        marker = markers_by_id.get(marker_id)
-        if not marker:
+        label = f"{category_by_fub_module_type(ref_type).audit_key_prefix}{source_id}"
+        source = sources_by_id.get(source_id)
+        if not source:
             return f"{label}: not found in fresh config"
 
-        expected_cmd_name = f"HA {marker['name']}"
+        expected_cmd_name = f"HA {source['name']}"
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
-            _LOGGER.warning("function_plan_add_marker_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
+            _LOGGER.warning("function_plan_add_source_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
             return f"{label}: Web-IO '{expected_cmd_name}' not found after config reload"
 
         web_ref_id = webio_cmd.get("webIoId")
         if web_ref_id is None:
             return f"{label}: no webIoId for '{expected_cmd_name}'"
 
-        conn_type = "binary" if marker["type"] == "digital" else "analog"
+        conn_type = "binary" if source["type"] == "digital" else "analog"
         return await self._function_plan_wire_ref_pair(
             fub_id,
             ref_type,
-            marker_id,
+            source_id,
             int(web_ref_id),
             conn_type,
             label,
@@ -5223,7 +5228,7 @@ class ComexioAPI:
     async def function_plan_add_trigger_pairs(
         self,
         fub_id: int,
-        marker_ids: list[int],
+        source_ids: list[int],
         fresh_plan: bool = False,
         progress_cb: Callable[[int, int], None] | None = None,
         ref_type: int = 2,
@@ -5234,17 +5239,17 @@ class ComexioAPI:
         plan, a separate fub_id. See MARKER_TRIGGER_SUFFIXES / FUNCTION_PLAN_TRIGGER_PLAN_NAME
         in const.py for why the two are kept apart.
         fresh_plan=True places the pairs directly at their final grid positions
-        (sorted by marker/KNX ID), matching function_plan_add_marker_pairs.
-        Returns (added_marker_ids, error_messages).
+        (sorted by marker/KNX ID), matching function_plan_add_source_pairs.
+        Returns (added_source_ids, error_messages).
         """
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, _ = self._function_plan_existing_refs(plan_data)
 
         if fresh_plan:
-            marker_ids = sorted(marker_ids)
+            source_ids = sorted(source_ids)
         _, y_max = self.get_fub_canvas_bounds(fub_id)
         max_rows_per_col = max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP))
-        rows_per_col = _balanced_rows_per_col(len(marker_ids), max_rows_per_col)
+        rows_per_col = _balanced_rows_per_col(len(source_ids), max_rows_per_col)
 
         def _pair_pos(n_added: int, n_loop: int) -> tuple[float, float, float]:
             """(x_marker, x_flanke, y): final grid slot for fresh plans, placeholder otherwise.
@@ -5269,23 +5274,23 @@ class ComexioAPI:
 
         added: list[int] = []
         errors: list[str] = []
-        for i, marker_id in enumerate(marker_ids):
+        for i, source_id in enumerate(source_ids):
             err = await self._function_plan_add_single_trigger(
-                fub_id, marker_id, plan_data, existing_by_ref, _pair_pos(len(added), i), ref_type
+                fub_id, source_id, plan_data, existing_by_ref, _pair_pos(len(added), i), ref_type
             )
             if err is None:
-                added.append(marker_id)
+                added.append(source_id)
             elif err:
                 errors.append(err)
             if progress_cb:
-                progress_cb(i + 1, len(marker_ids))
+                progress_cb(i + 1, len(source_ids))
 
         return added, errors
 
     async def _function_plan_add_single_trigger(
         self,
         fub_id: int,
-        marker_id: int,
+        source_id: int,
         plan_data: dict | None,
         existing_by_ref: dict[tuple[int, int], int],
         pos: tuple[float, float, float],
@@ -5310,11 +5315,11 @@ class ComexioAPI:
         (_function_plan_flanke_wires_back) — a one-directional leftover from a failed previous
         attempt must not be reported as already wired.
         """
-        label = f"{category_by_fub_module_type(ref_type).audit_key_prefix}{marker_id}"
+        label = f"{category_by_fub_module_type(ref_type).audit_key_prefix}{source_id}"
         x_marker, x_flanke, y = pos
         flanke_ref_id = int(FUB_BASE_REF_ID_FLANKE)
 
-        existing_marker_elem = existing_by_ref.get((ref_type, marker_id))
+        existing_marker_elem = existing_by_ref.get((ref_type, source_id))
         existing_flanke_elem: int | None = None
         already_complete = False
         if existing_marker_elem:
@@ -5336,7 +5341,7 @@ class ComexioAPI:
         flanke_is_new = existing_flanke_elem is None
 
         elem_marker = existing_marker_elem or await self.function_plan_add_element(
-            fub_id=fub_id, ref_id=marker_id, element_type=ref_type, x=x_marker, y=y
+            fub_id=fub_id, ref_id=source_id, element_type=ref_type, x=x_marker, y=y
         )
         if elem_marker is None:
             return await self._function_plan_trigger_add_failed(
@@ -5447,7 +5452,7 @@ class ComexioAPI:
         return ComexioAPI._function_plan_connection_exists(plan_data, flanke_elem_id, marker_elem_id)
 
     async def function_plan_remove_trigger_pairs(
-        self, fub_id: int, marker_ids: list[int], ref_type: int = 2
+        self, fub_id: int, source_ids: list[int], ref_type: int = 2
     ) -> tuple[int, bool]:
         """Remove orphaned Source+Flanke pairs (source no longer [TRIG]/[TP]) from the trigger plan.
 
@@ -5458,7 +5463,7 @@ class ComexioAPI:
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, _ = self._function_plan_existing_refs(plan_data)
         marker_elem_ids = [
-            elem_id for marker_id in marker_ids if (elem_id := existing_by_ref.get((ref_type, marker_id)))
+            elem_id for source_id in source_ids if (elem_id := existing_by_ref.get((ref_type, source_id)))
         ]
         flanke_elem_ids = self._function_plan_paired_flanke_ids(plan_data, marker_elem_ids, int(FUB_BASE_REF_ID_FLANKE))
         elem_ids = marker_elem_ids + flanke_elem_ids
@@ -5544,7 +5549,7 @@ class ComexioAPI:
         there union onto the IO source's CURRENT sinks instead of resaving conn_id="new" over an
         existing connection (silent-failure-hunter finding, 2026-09-18: this path used to omit
         plan_data entirely, reproducing Bug #2 for IO sources even though the structurally
-        identical Marker/KNX path — function_plan_add_marker_pairs/_function_plan_add_single_pair
+        identical Marker/KNX path — function_plan_add_source_pairs/_function_plan_add_single_pair
         — already threaded it through).
         """
         label = f"{ext_name} {ident}"
@@ -5694,12 +5699,12 @@ class ComexioAPI:
         )
 
     @staticmethod
-    def _find_marker_element_id(elements: dict[str, Any], marker_id: int, ref_type: int = 2) -> str | None:
+    def _find_source_element_id(elements: dict[str, Any], source_id: int, ref_type: int = 2) -> str | None:
         """Return the plan-local element id of the given source ref (marker=2/KNX=11), or None if not wired."""
         for elem_id, elem_data in elements.items():
             ref = elem_data.get("reference", {})
             # reference.type comes back as int or str depending on the response shape — normalize.
-            if str(ref.get("type")) == str(ref_type) and int(ref.get("ref_id", -1)) == marker_id:
+            if str(ref.get("type")) == str(ref_type) and int(ref.get("ref_id", -1)) == source_id:
                 return str(elem_id)
         return None
 

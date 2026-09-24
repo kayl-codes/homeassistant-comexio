@@ -73,7 +73,7 @@ async def _load_connect_poc_topology(
     Also returns the raw plan_data itself (code-reviewer finding, 2026-09-19, Bug #2 follow-up):
     needed by _get_or_create_webio_element to union onto a reused marker's CURRENT sinks instead
     of resaving conn_id="new" over an existing connection — same fix already applied to the
-    managed function_plan_add_marker_pairs/_add_io_pairs paths in api.py.
+    managed function_plan_add_source_pairs/_add_io_pairs paths in api.py.
     """
     plan_data = await api.function_plan_load_elements(fub_id)
     existing_by_ref: dict[tuple[int, int], int] = {}
@@ -159,7 +159,7 @@ async def _get_or_create_webio_element(
         # quirk function_plan_save_connection's docstring documents (Bug #2, 2026-09-18) — a
         # resave with conn_id="new" over a source that already has a connection merges into the
         # existing record but silently drops that record's "input" field. Uses the same
-        # _function_plan_union_sink helper the managed function_plan_add_marker_pairs/
+        # _function_plan_union_sink helper the managed function_plan_add_source_pairs/
         # _add_io_pairs paths in api.py already rely on.
         union = api._function_plan_union_sink(plan_data, elem_marker, existing_webio_elem, label, fub_id)
         if union is None:

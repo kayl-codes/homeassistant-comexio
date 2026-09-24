@@ -268,7 +268,7 @@ async def async_sort_function_plan(
 
     was_active overrides the fub_data lookup: callers that already stopped the plan
     themselves must pass the pre-stop state, because any config reload in between (e.g.
-    inside function_plan_add_marker_pairs) refreshes fub_data to the stopped state and
+    inside function_plan_add_source_pairs) refreshes fub_data to the stopped state and
     the plan would never be reactivated.
     """
     t_start = time.monotonic()
