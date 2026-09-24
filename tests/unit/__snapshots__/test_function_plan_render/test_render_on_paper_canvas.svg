@@ -61,7 +61,7 @@
 <g class="node-g" data-label="! Administrated by HomeAssistant, dont delete or rename !" data-eid="1">
 <text class="node-comment" x="600.0" y="51.3" font-size="9.8"><tspan x="600.0" dy="0">! Administrated by HomeAssistant, dont delete or rename !</tspan></text>
 </g>
-<g class="node-g" data-label="M1 Licht Wohnen" data-eid="2" data-target="M1" data-analog="0" data-writable="1" data-value="1.0">
+<g class="node-g" data-label="M1 Licht Wohnen" data-eid="2" data-sid="M1" data-target="M1" data-analog="0" data-writable="1" data-value="1.0">
 <rect class="node" x="24.5" y="64.5" width="161" height="14" rx="7.0" stroke-width="1"><title>M1 Licht Wohnen</title></rect>
 <path class="block-head" d="M60.0,64.5 H31.5 Q24.5,64.5 24.5,71.5 V71.5 Q24.5,78.5 31.5,78.5 H60.0 Z"/>
 <text class="block-head-label" x="42.2" y="75.0" text-anchor="middle" font-size="9.8">M1</text>
@@ -70,7 +70,7 @@
 <path class="port-glyph" d="M15.0,67.7 L24.5,71.5 L15.0,75.3 z"/>
 <path class="port-glyph" d="M185.5,67.7 L195.0,71.5 L185.5,75.3 z"/>
 </g>
-<g class="node-g" data-label="BASE I1 Taster Flur" data-eid="3" data-target="BASE#I1" data-analog="0" data-writable="1" data-value="1.0">
+<g class="node-g" data-label="BASE I1 Taster Flur" data-eid="3" data-sid="BASE#I1" data-target="BASE#I1" data-analog="0" data-writable="1" data-value="1.0">
 <rect class="node" x="24.5" y="79.5" width="161" height="14" rx="7.0" stroke-width="1"><title>BASE I1 Taster Flur</title></rect>
 <path class="block-head" d="M85.2,79.5 H31.5 Q24.5,79.5 24.5,86.5 V86.5 Q24.5,93.5 31.5,93.5 H85.2 Z"/>
 <text class="block-head-label" x="54.8" y="90.0" text-anchor="middle" font-size="9.8">BASE  #I1</text>
@@ -111,7 +111,7 @@
 <path class="port-glyph" d="M260.5,172.7 L270.0,176.5 L260.5,180.3 z"/>
 </g>
 <g class="node-g" data-label="M4 Klingel [TRIG]
-⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster" data-eid="8" data-target="M4" data-analog="0" data-writable="1" data-value="0.0">
+⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster" data-eid="8" data-sid="M4" data-target="M4" data-analog="0" data-writable="1" data-value="0.0">
 <rect class="node" x="24.5" y="244.5" width="161" height="14" rx="7.0" stroke-width="1"><title>M4 Klingel [TRIG]
 ⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster</title></rect>
 <path class="block-head" d="M60.0,244.5 H31.5 Q24.5,244.5 24.5,251.5 V251.5 Q24.5,258.5 31.5,258.5 H60.0 Z"/>
@@ -124,7 +124,7 @@
 <g class="node-g" data-label="T1 Taster Reset
 Typ: Einschaltwischend
 t1: 0,5 Sek.
-⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster" data-eid="9">
+⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster" data-eid="9" data-sid="T1">
 <rect class="node" x="219.5" y="244.5" width="161" height="14" rx="7.0" stroke-width="1"><title>T1 Taster Reset
 Typ: Einschaltwischend
 t1: 0,5 Sek.

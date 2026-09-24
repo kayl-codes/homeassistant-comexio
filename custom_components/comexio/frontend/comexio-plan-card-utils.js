@@ -70,6 +70,29 @@ export function matchesPattern(label, pattern) {
   }
 }
 
+// True when the query is wrapped in double quotes — the card's "search the label text"
+// mode (see matchesElement).
+export function isTextQuery(query) {
+  return query.length >= 2 && query.startsWith('"') && query.endsWith('"');
+}
+
+// Search-box predicate for one plan element. A quoted query matches the full label
+// (description text included); anything else matches only the element's own object id
+// (the SVG's data-sid: "M416", "K54", "IOX3#AI5", …), so "M416" no longer also hits every
+// Web-IO command or bridge label that merely mentions M416. Spaces around "#" are dropped
+// in id mode ("IOX3 #*" == "IOX3#*"). (Mirrored in services/misc.py _build_element_matcher.)
+export function matchesElement(label, searchId, query) {
+  if (isTextQuery(query)) {
+    const inner = query.slice(1, -1).trim();
+    return inner.length > 0 && matchesPattern(label, inner);
+  }
+  const idQuery = query
+    .split("#")
+    .map((part) => part.trim())
+    .join("#");
+  return Boolean(searchId) && matchesPattern(searchId, idQuery);
+}
+
 // dd.MM.yyyy HH:mm:ss.fff (user-specified log timestamp format)
 export function fmtTs(d) {
   const p = (n, l = 2) => String(n).padStart(l, "0");

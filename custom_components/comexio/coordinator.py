@@ -1418,6 +1418,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ios_by_id = {str(io["id"]): io for io in data.get("io_all", [])}
         return markers_by_id, webio_by_id, ios_by_id
 
+    def function_plan_knx_label_map(self) -> dict[str, Any]:
+        """KNX object id -> item ({"name", "type", "value", ...}) for plan-preview "K{id}" pills.
+
+        Kept separate from function_plan_label_maps' marker map: both share the same plain
+        numeric id space, so K5 and M5 would collide in one dict. Empty while import_knx is
+        off (coordinator data carries no KNX items then) — pills/labels fall back to "K{id} (unknown)".
+        """
+        return {str(k["id"]): k for k in (self.data or {}).get("knx", [])}
+
     async def async_repoint_function_plan_fub_id(self, plan_name: str, old_fub_id: int, new_fub_id: int) -> list[str]:
         """Point any config that references old_fub_id by name at the plan's new fub_id.
 
@@ -1634,6 +1643,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             sun_times,
             canvas=canvas,
             connection_values=connection_values,
+            knx_by_id=self.function_plan_knx_label_map(),
         )
 
         filename = f"comexio_{self.server_id}_plan_preview.svg"
@@ -2470,7 +2480,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         self._bus_load_fail_streak = 0
         workload = result.get("workload")
-        if isinstance(workload, bool) or not isinstance(workload, (int, float)):
+        if isinstance(workload, bool) or not isinstance(workload, int | float):
             self.bus_workload = None
         else:
             self.bus_workload = int(workload)

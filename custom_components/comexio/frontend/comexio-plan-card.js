@@ -1,4 +1,4 @@
-// Version: 0.9.15
+// Version: 0.9.16
 // Comexio function plan preview card — renders the plan-preview SVG INLINE (not via <img>).
 //
 // Why inline: an SVG inside an <img> is static — no :hover rules, no <title> tooltips,
@@ -25,11 +25,15 @@
 // sibling module — see comexio-plan-card-utils.js. Deployment note: this split means the
 // card now ships as TWO files that must be copied together into the same www/hacsfiles
 // folder (relative import path below), not just this one file as before.
-import { matchesPattern, fmtTs } from "./comexio-plan-card-utils.js";
+// The ?v= suffix tracks the card version below and must be bumped whenever the utils module
+// changes: the card file itself is deployed under a new versioned name each release, but this
+// sibling keeps its name, so a browser would otherwise pair the new card with a cached old
+// utils module (v0.9.32: "does not provide an export named 'isTextQuery'").
+import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-plan-card-utils.js?v=0.9.33";
 
 // Version banner: lets the user verify in the browser console WHICH build actually
 // executes — ?v= query bumps proved unreliable against the service-worker cache.
-console.info("comexio-plan-card v0.9.31 (Restore-as-Copy + Flussdiagramm-Merge) loaded");
+console.info("comexio-plan-card v0.9.33 (ID-Suche + \"Textsuche\", versionierter utils-Import) loaded");
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
 // function_plan_backup.py) so the card can parse kind+slot back out of the select's state
@@ -575,7 +579,7 @@ class ComexioPlanCard extends HTMLElement {
         </div>
         <div class="toolbar">
           <button class="help-toggle" title="Hilfe: Bedienung der Karte" aria-label="Hilfe anzeigen"><ha-icon icon="mdi:help-circle-outline"></ha-icon></button>
-          <input type="search" placeholder="Suche… (z. B. M14, M1?, IOX3 #*) — Enter: alle Pläne durchsuchen" aria-label="Suche im Plan">
+          <input type="search" placeholder="Suche… (z. B. M14, K5?, IOX3 #*, &quot;Küche&quot;) — Enter: alle Pläne durchsuchen" aria-label="Suche im Plan">
           <span class="hits"></span>
           <button class="zoom-out" title="Verkleinern" aria-label="Verkleinern"><ha-icon icon="mdi:magnify-minus-outline"></ha-icon></button>
           <span class="zoom-label" title="Klick: zurück auf 100 %">100 %</span>
@@ -610,8 +614,8 @@ class ComexioPlanCard extends HTMLElement {
         <table>
           <thead><tr><th>Aktion</th><th>Wirkung</th></tr></thead>
           <tbody>
-            <tr><td>Suche tippen</td><td>Hebt passende Elemente hervor (gelber Rahmen), der Rest wird abgedunkelt. Platzhalter: <code>?</code> = ein Zeichen, <code>*</code> = beliebig viele (z. B. <code>M1?</code>, <code>IOX3#*</code>).</td></tr>
-            <tr><td>Enter in der Suche</td><td>Durchsucht alle Pläne. Bei genau einem Treffer wird der Plan automatisch ausgewählt.</td></tr>
+            <tr><td>Suche tippen</td><td>Hebt passende Elemente hervor (gelber Rahmen), der Rest wird abgedunkelt. Ohne Anführungszeichen wird nur die Objekt-ID gesucht (<code>M416</code>, <code>K54</code>, <code>T12</code>, <code>IOX3#AI5</code>); in <code>"…"</code> gesetzt die komplette Beschriftung (z. B. <code>"Küche"</code> — nur so werden auch Web-IO-Befehle, Bausteine und Kommentare gefunden). Platzhalter: <code>?</code> = ein Zeichen, <code>*</code> = beliebig viele (z. B. <code>M1?</code>, <code>IOX3#*</code>).</td></tr>
+            <tr><td>Enter in der Suche</td><td>Durchsucht alle Pläne nach denselben Regeln (ohne <code>"…"</code> nur Objekt-IDs, mit <code>"…"</code> die Beschriftung). Liegen alle Treffer in genau einem Plan, wird dieser automatisch ausgewählt.</td></tr>
             <tr><td>Hover über Element</td><td>Zeigt den vollen Namen als Tooltip.</td></tr>
             <tr><td>Hover über Draht</td><td>Hebt das gesamte elektrische Netz (alle Äste) gelb hervor.</td></tr>
             <tr><td>Lupe − / +</td><td>Zoom verkleinern / vergrößern.</td></tr>
@@ -1833,10 +1837,6 @@ class ComexioPlanCard extends HTMLElement {
     this._sendCommand(this._cmdInput.value);
   }
 
-  _matches(label) {
-    return matchesPattern(label, this._pattern);
-  }
-
   _applySearch() {
     const svg = this._planEl.querySelector("svg");
     if (!svg) {
@@ -1846,13 +1846,15 @@ class ComexioPlanCard extends HTMLElement {
     svg.classList.toggle("searching", active);
     let hits = 0;
     for (const node of svg.querySelectorAll("g.node-g")) {
-      const hit = active && this._matches(node.dataset.label || "");
+      const hit = active && matchesElement(node.dataset.label || "", node.dataset.sid || "", this._pattern);
       node.classList.toggle("search-hit", hit);
       if (hit) {
         hits += 1;
       }
     }
-    this._hitsEl.textContent = active ? `${hits} Treffer` : "";
+    // An id-only miss usually means "I meant the description" — point at the quote syntax.
+    const hint = hits === 0 && !isTextQuery(this._pattern) ? ' — Textsuche: in "…" setzen' : "";
+    this._hitsEl.textContent = active ? `${hits} Treffer${hint}` : "";
   }
 
   getCardSize() {

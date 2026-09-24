@@ -16,14 +16,16 @@ def _element_analog(
     markers_by_id: dict,
     webio_by_id: dict,
     ios_by_id: dict,
+    knx_by_id: dict | None = None,
 ) -> bool | None:
     """Analog/digital classification of a pill element for its pins (None = unknown)."""
     ref = elem.get("reference") or {}
     etype = ref.get("type")
     ref_id = str(ref.get("ref_id", "?"))
-    if etype == 2:
-        marker = markers_by_id.get(ref_id)
-        return None if marker is None else marker.get("type") == "analog"
+    if etype in (2, 11):
+        # KNX objects (11) share the marker item shape (see api._process_source_items).
+        source = (markers_by_id if etype == 2 else knx_by_id or {}).get(ref_id)
+        return None if source is None else source.get("type") == "analog"
     if etype == 1:
         io = ios_by_id.get(ref_id)
         return None if io is None else not io.get("is_binary", False)
@@ -41,12 +43,34 @@ def _element_raw_value(
     markers_by_id: dict,
     webio_by_id: dict,
     ios_by_id: dict,
+    knx_by_id: dict | None = None,
 ) -> Any:
     """Live value of a pill element (None when the source carries no value)."""
     ref = elem.get("reference") or {}
     rid = str(ref.get("ref_id", "?"))
-    by_id = {2: markers_by_id, 1: ios_by_id, 10: webio_by_id}.get(ref.get("type"))
+    by_id = {2: markers_by_id, 1: ios_by_id, 10: webio_by_id, 11: knx_by_id or {}}.get(ref.get("type"))
     return (by_id.get(rid) or {}).get("value") if by_id is not None else None
+
+
+# reference.type -> id prefix of the element kinds addressed by a plain "<prefix><ref_id>" id.
+_SEARCH_ID_PREFIX = {2: "M", 11: "K", 4: "T", 3: "C"}
+
+
+def element_search_id(elem: dict[str, Any], ios_by_id: dict) -> str:
+    """Object id the plan search matches by default ("M416", "K54", "T12", "C3", "IOX3#AI5").
+
+    Empty for elements without an own object id (Web-IO commands, blocks, constants,
+    comments) — those are only found by a quoted text search over the full label (see
+    services/misc.py _build_element_matcher and comexio-plan-card-utils.js matchesElement).
+    """
+    ref = elem.get("reference") or {}
+    etype = ref.get("type")
+    rid = str(ref.get("ref_id", "?"))
+    if prefix := _SEARCH_ID_PREFIX.get(etype):
+        return f"{prefix}{rid}"
+    if etype == 1 and (io := ios_by_id.get(rid)):
+        return f"{io.get('ext_name', '')}#{io.get('identifier', '')}"
+    return ""
 
 
 def _is_high(value: Any) -> bool:
@@ -87,6 +111,14 @@ def _pill_parts_marker(rid: str, markers_by_id: dict) -> tuple[str, str, str]:
     return f"M{rid}", "(unknown)", ""
 
 
+def _pill_parts_knx(rid: str, knx_by_id: dict) -> tuple[str, str, str]:
+    """Studio-style |K51|title value| pill; the name follows the KNX naming schema
+    (default "K{KnxId} {KnxTitle}"), so its "K{id}" prefix is stripped like a marker's."""
+    if knx := knx_by_id.get(rid):
+        return f"K{rid}", _strip_prefix(knx["name"], f"K{rid}"), _fmt_value(knx.get("value"))
+    return f"K{rid}", "(unknown)", ""
+
+
 def _pill_parts_io(rid: str, ios_by_id: dict) -> tuple[str, str, str]:
     if io := ios_by_id.get(rid):
         ext, ident = io.get("ext_name", ""), io.get("identifier", "")
@@ -103,6 +135,7 @@ def _pill_parts(
     markers_by_id: dict,
     webio_by_id: dict,
     ios_by_id: dict,
+    knx_by_id: dict | None = None,
 ) -> tuple[str, str, str]:
     """(id_text, description, value) for Studio's split pill layout |ID|description value|.
 
@@ -117,6 +150,8 @@ def _pill_parts(
         return _pill_parts_marker(rid, markers_by_id)
     if etype == 1:
         return _pill_parts_io(rid, ios_by_id)
+    if etype == 11:
+        return _pill_parts_knx(rid, knx_by_id or {})
     if etype == 4:
         time_module = catalog.get("time_modules", {}).get(rid) or {}
         return f"T{rid}", time_module.get("name") or "Zeitglied", ""
