@@ -14,6 +14,7 @@ from typing import Any
 
 import aiohttp
 from homeassistant.components import persistent_notification
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
@@ -21,6 +22,7 @@ from homeassistant.helpers import entity_registry as er
 from ..const import DOMAIN, MarkerKind, webio_class_name
 from ..coordinator import ComexioCoordinator
 from ..function_plan_render import resolve_element_label
+from ..function_plan_render_values import element_search_id
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,7 +43,7 @@ _SET_VALUE_IO_RX = re.compile(r"^([^#\s]+)#([^#\s]+)$")
 def _build_label_matcher(query: str):
     """Compile the preview card's search syntax into a label predicate.
 
-    Same rules as comexio-plan-card.js _matchesPattern, so the dashboard search box and
+    Same rules as comexio-plan-card-utils.js matchesPattern, so the dashboard search box and
     this service accept identical input. Wildcards are TOKEN-ANCHORED: '?' = exactly one
     non-space character, '*' = any run of non-space characters (also empty), and the
     match must cover a whole token — 'M4?' hits M40–M49 but not M4/M400, 'M4*' hits
@@ -53,7 +55,7 @@ def _build_label_matcher(query: str):
     if any(ch in query for ch in "?*"):
         # Collapse "**"/"***" to a single "*" first — semantically identical, but adjacent
         # \S* \S* quantifiers on the same character class are super-linear on backtracking
-        # for a non-matching input. Mirrored in comexio-plan-card.js _matchesPattern.
+        # for a non-matching input. Mirrored in comexio-plan-card-utils.js matchesPattern.
         query = re.sub(r"\*+", "*", query)
         body = "".join(
             "\\S" if tok == "?" else r"\S*" if tok == "*" else re.escape(tok) for tok in re.split(r"([?*])", query)
@@ -71,24 +73,58 @@ def _build_label_matcher(query: str):
     return lambda label: bool(pattern.search(label))
 
 
-async def _async_set_plan_selector(hass: HomeAssistant, coordinator: ComexioCoordinator, plan_name: str) -> bool:
+def _is_text_query(query: str) -> bool:
+    """True for a quoted full-label text query (comexio-plan-card-utils.js isTextQuery)."""
+    return len(query) >= 2 and query.startswith('"') and query.endswith('"')
+
+
+def _build_element_matcher(query: str):
+    """Compile a function_plan_search query into an element predicate (label, search_id) -> bool.
+
+    Same rules as comexio-plan-card-utils.js matchesElement: a query wrapped in double
+    quotes searches the full element label (description text included); anything else
+    matches only the element's own object id (element_search_id: "M416", "K54",
+    "IOX3#AI5", …), so "M416" no longer also hits every Web-IO command or bridge label that
+    merely mentions M416. Spaces around "#" are dropped in id mode ("IOX3 #*" == "IOX3#*").
+    """
+    if _is_text_query(query):
+        inner = query[1:-1].strip()
+        if not inner:
+            return lambda _label, _search_id: False
+        matches_label = _build_label_matcher(inner)
+        return lambda label, _search_id: matches_label(label)
+    matches_id = _build_label_matcher("#".join(part.strip() for part in query.split("#")))
+    return lambda _label, search_id: bool(search_id) and matches_id(search_id)
+
+
+async def _async_set_plan_selector(hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int) -> bool:
     """Point the 'Function Plans' select entity at the given plan (True when it was set).
 
     Used by the search service on an unambiguous hit, so a follow-up action without
     fub_id (visualize/sort/…) targets the plan just found. Goes through the regular
-    select_option service so the entity's own persistence logic runs.
+    select_option service so the entity's own persistence logic runs. The option is looked
+    up by its "(ID <n>)" suffix among the entity's current options — options are
+    "<name> (ID <n>)" labels, optionally "⏸ "-prefixed (select.py _plan_option_label), so
+    the bare plan name is never a valid option.
     """
     entity_id = er.async_get(hass).async_get_entity_id(
         "select", DOMAIN, f"comexio_{coordinator.server_id}_logikplan_plan_selector"
     )
-    if not entity_id:
+    state = hass.states.get(entity_id) if entity_id else None
+    if state is None or state.state == STATE_UNAVAILABLE:
+        _LOGGER.warning("Function Plan Search: plan selector %s is missing or unavailable", entity_id)
+        return False
+    suffix = f"(ID {fub_id})"
+    option = next((opt for opt in state.attributes.get("options", []) if opt.endswith(suffix)), None)
+    if option is None:
+        _LOGGER.warning("Function Plan Search: plan selector has no option for fub_id %s", fub_id)
         return False
     try:
         await hass.services.async_call(
-            "select", "select_option", {"entity_id": entity_id, "option": plan_name}, blocking=True
+            "select", "select_option", {"entity_id": entity_id, "option": option}, blocking=True
         )
     except HomeAssistantError as err:
-        _LOGGER.warning("Function Plan Search: could not set plan selector to '%s': %s", plan_name, err)
+        _LOGGER.warning("Function Plan Search: could not set plan selector to '%s': %s", option, err)
         return False
     return True
 
@@ -321,7 +357,8 @@ async def _search_plan_labels(
     markers_by_id: dict,
     webio_by_id: dict,
     ios_by_id: dict,
-    matches_label: Any,
+    knx_by_id: dict,
+    matches_element: Any,
     login_state: dict[str, bool | None],
 ) -> tuple[list[str] | None, str | None]:
     """Search one plan's element labels for function_plan_search (extracted to stay under
@@ -340,12 +377,15 @@ async def _search_plan_labels(
         plan_data = await api.function_plan_load_elements(int(fid)) if login_state["ok"] else None
     if not plan_data:
         return None, f"{fub.get('Name', '?')} (fub {fid})"
-    labels = {
+    hits: set[str] = set()
+    for elem in plan_data.get("elements", {}).values():
         # Comments carry multi-line text — flatten like the text visualization does.
-        " ".join(resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id).split())
-        for elem in plan_data.get("elements", {}).values()
-    }
-    return sorted(label for label in labels if matches_label(label)), None
+        label = " ".join(
+            resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id=knx_by_id).split()
+        )
+        if matches_element(label, element_search_id(elem, ios_by_id)):
+            hits.add(label)
+    return sorted(hits), None
 
 
 def _build_search_notification_lines(
@@ -362,10 +402,19 @@ def _build_search_notification_lines(
             lines.append(f"- … and {len(res['matches']) - max_shown} more (full list in the service response)")
     if not results:
         lines.append(f"No element matching '{query}' found in any of the {plan_count} plans.")
+        if not _is_text_query(query):
+            lines.append(
+                'Plain queries match object IDs only (M…/K…/T…/C…/EXT#IO) — wrap the query in double quotes ("…") '
+                "to search the label text."
+            )
     if failed:
         lines.append(f"\n**{len(failed)} plan(s) could not be loaded:** {', '.join(failed)}")
     if selector_set:
         lines.append(f"\nSingle plan hit — the 'Function Plans' selector was set to **{results[0]['plan_name']}**.")
+    elif len(results) == 1:
+        lines.append(
+            "\nSingle plan hit, but the 'Function Plans' selector could not be updated — pass fub_id explicitly."
+        )
     lines.append(f"\nDuration: {duration:.1f}s")
     return lines
 
@@ -373,10 +422,11 @@ def _build_search_notification_lines(
 async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -> dict | None:
     """Find which function plans contain elements matching a text/wildcard query.
 
-    Searches the resolved human-readable labels of EVERY element (markers, IOs, WebIOs,
-    blocks, time modules, constants, comments) in EVERY live plan — the same labels the
-    SVG preview shows — using the preview card's search syntax (see _build_label_matcher).
-    Answers "which plan is Mxx in?" without opening plans one by one.
+    Searches EVERY element of EVERY live plan using the preview card's search syntax (see
+    _build_element_matcher): a plain query matches object ids only (M/K/T/C/IO), a quoted
+    one the resolved human-readable labels (markers, IOs, WebIOs, blocks, time modules,
+    constants, comments) — the same labels the SVG preview shows. Answers "which plan is
+    Mxx in?" without opening plans one by one.
     """
     query = str(call.data.get("query", "")).strip()
     if not query:
@@ -390,8 +440,9 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
         return None
     coordinator, api, _fub_id = ctx
 
-    matches_label = _build_label_matcher(query)
+    matches_element = _build_element_matcher(query)
     markers_by_id, webio_by_id, ios_by_id = coordinator.function_plan_label_maps()
+    knx_by_id = coordinator.function_plan_knx_label_map()
     catalog = await coordinator.function_plan_catalog.async_get_catalog()
 
     plans = sorted(api.fub_data.items(), key=lambda kv: int(kv[0]))
@@ -401,7 +452,17 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
     login_state: dict[str, bool | None] = {"ok": None}  # lazy, at most one login attempt
     for fid, fub in plans:
         hits, failure = await _search_plan_labels(
-            coordinator, api, fid, fub, catalog, markers_by_id, webio_by_id, ios_by_id, matches_label, login_state
+            coordinator,
+            api,
+            fid,
+            fub,
+            catalog,
+            markers_by_id,
+            webio_by_id,
+            ios_by_id,
+            knx_by_id,
+            matches_element,
+            login_state,
         )
         if failure:
             failed.append(failure)
@@ -413,7 +474,7 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
     duration = time.monotonic() - t_start
     # An unambiguous hit selects the plan right away (user wish): the next call
     # without fub_id (visualize/sort/…) then targets the plan just found.
-    selector_set = len(results) == 1 and await _async_set_plan_selector(hass, coordinator, results[0]["plan_name"])
+    selector_set = len(results) == 1 and await _async_set_plan_selector(hass, coordinator, results[0]["fub_id"])
     _LOGGER.info(
         "Function Plan Search: query='%s' → %d match(es) in %d of %d plans, selector_set=%s (%.1fs)",
         query,

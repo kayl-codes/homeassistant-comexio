@@ -109,6 +109,7 @@ def resolve_element_label(
     webio_by_id: dict,
     ios_by_id: dict,
     sun_times: dict[str, str] | None = None,
+    knx_by_id: dict | None = None,
 ) -> str:
     """Build a human-readable label for one plan element.
 
@@ -128,6 +129,7 @@ def resolve_element_label(
         2: (markers_by_id, f"M{ref_id} (unknown)"),
         10: (webio_by_id, f"WebIO ref={ref_id}"),
         1: (ios_by_id, f"IO ref={ref_id}"),
+        11: (knx_by_id or {}, f"K{ref_id} (unknown)"),
     }
     if named := named_by_type.get(etype):
         return _named_ref_label(named[0], ref_id, named[1])

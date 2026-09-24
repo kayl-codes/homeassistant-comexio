@@ -24,7 +24,13 @@ from .function_plan_render_constants import (
     _ROW_H,
     _VARIADIC_PORT_THRESHOLD,
 )
-from .function_plan_render_values import _element_analog, _element_raw_value, _is_high, _pill_parts
+from .function_plan_render_values import (
+    _element_analog,
+    _element_raw_value,
+    _is_high,
+    _pill_parts,
+    element_search_id,
+)
 
 
 def _sink_list(conn: dict[str, Any]) -> list[dict[str, Any]]:
@@ -143,6 +149,7 @@ def _build_geometries(
     markers_by_id: dict,
     webio_by_id: dict,
     ios_by_id: dict,
+    knx_by_id: dict | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Per-element geometry at Comexio's own position_x/position_y.
 
@@ -156,7 +163,7 @@ def _build_geometries(
     fub_base = catalog.get("fub_base", {})
     return {
         elem_id: _build_one_geometry(
-            elem_id, elem, catalog, markers_by_id, webio_by_id, ios_by_id, fub_base, used_in, used_out
+            elem_id, elem, catalog, markers_by_id, webio_by_id, ios_by_id, fub_base, used_in, used_out, knx_by_id
         )
         for elem_id, elem in elements.items()
     }
@@ -203,6 +210,7 @@ def _build_one_geometry(
     fub_base: dict[str, Any],
     used_in: dict[str, set[int]],
     used_out: dict[str, set[int]],
+    knx_by_id: dict | None = None,
 ) -> dict[str, Any]:
     """Geometry for a single plan element (see _build_geometries)."""
     ref = elem.get("reference") or {}
@@ -217,7 +225,7 @@ def _build_one_geometry(
         "etype": etype,
         "in": [],
         "out": [],
-        "analog": _element_analog(elem, markers_by_id, webio_by_id, ios_by_id),
+        "analog": _element_analog(elem, markers_by_id, webio_by_id, ios_by_id, knx_by_id),
         # Greyed elements — via CSS classes separate from node-orphan so all remain
         # independently stylable (see _STYLE).
         "inactive": _geometry_is_inactive(etype, ref_id, ios_by_id, markers_by_id),
@@ -230,13 +238,16 @@ def _build_one_geometry(
     # that WRITES M4 — only the wires leaving M4's output). Red additionally
     # requires a DIGITAL source (user rule): an analog output reading 1 is a
     # value, not a HIGH state.
-    geo["value_raw"] = _element_raw_value(elem, markers_by_id, webio_by_id, ios_by_id)
+    geo["value_raw"] = _element_raw_value(elem, markers_by_id, webio_by_id, ios_by_id, knx_by_id)
     geo["hot"] = _is_high(geo["value_raw"]) and geo["analog"] is False
     _shape_special(geo, elem, fub_base, used_in.get(elem_id, set()), used_out.get(elem_id, set()))
     _apply_geometry_target_fields(geo, etype, ref_id, markers_by_id, ios_by_id)
+    geo["search_id"] = element_search_id(elem, ios_by_id)
     geo["pins"] = geo["kind"] == "block" or (geo["kind"] in ("pill", "const") and geo["analog"] is not None)
     if geo["kind"] == "pill":
-        geo["id_text"], geo["desc"], geo["value"] = _pill_parts(elem, catalog, markers_by_id, webio_by_id, ios_by_id)
+        geo["id_text"], geo["desc"], geo["value"] = _pill_parts(
+            elem, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id
+        )
     return geo
 
 

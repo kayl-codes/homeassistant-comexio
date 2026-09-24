@@ -781,11 +781,12 @@ function_plan_preview_stop:
 function_plan_search:
   name: Function Plan Search
   description: >
-    Finds which function plans contain elements matching a text query. Searches the
-    human-readable labels of every element (markers, IOs, WebIOs, blocks, time modules,
-    constants, comments) in every live plan — same syntax as the preview card's search
-    box: plain text = case-insensitive substring, wildcards ? (one non-space character)
-    and * (anything). Results come as a notification and as a service response. When
+    Finds which function plans contain elements matching a query — same syntax as the
+    preview card's search box. A plain query matches object IDs only (markers M…, KNX
+    objects K…, time modules T…, calendar functions C…, IOs EXT#IO); wrap it in double
+    quotes to search the full human-readable labels of every element instead (WebIOs,
+    blocks, constants and comments are only found this way). Wildcards: ? (one non-space
+    character) and * (anything). Results come as a notification and as a service response. When
     exactly ONE plan matches, the 'Function Plans' selector is set to it automatically —
     a follow-up action without a plan then targets the plan just found.
   fields:
@@ -798,7 +799,7 @@ function_plan_search:
           integration: comexio
     query:
       name: Search text
-      description: "e.g. 'M33', 'Küche', 'M22?' or 'IOX3 #*'"
+      description: "e.g. 'M33', 'K54', 'M22?', 'IOX3 #*' or '\"Küche\"' (quoted = label text)"
       required: true
       selector:
         text:
@@ -942,9 +943,11 @@ cards:
 
 ## 5. Funktionen der Karte
 
-- **Suchleiste** — Groß-/Kleinschreibung wird ignoriert, Substring-Suche über jede
-  Element-Beschriftung (Merker, IOs, WebIOs, Bausteine, Konstanten, Kommentare).
-  Platzhalter: `?` steht für genau ein Nicht-Leerzeichen, `*` für beliebig viele
+- **Suchleiste** — Groß-/Kleinschreibung wird ignoriert. Ohne Anführungszeichen wird
+  nur die Objekt-ID gesucht (`M416`, `K54`, `T12`, `C3`, `IOX3#AI5` bzw. `IOX3 #AI5`),
+  sodass `M416` nicht zusätzlich jeden Web-IO-Befehl trifft, der M416 im Namen trägt.
+  In `"…"` gesetzt wird die komplette Element-Beschriftung durchsucht (Merker, IOs,
+  WebIOs, Bausteine, Konstanten, Kommentare), z. B. `"Küche"`. Platzhalter: `?` steht für genau ein Nicht-Leerzeichen, `*` für beliebig viele
   Zeichen. Treffer bekommen einen hervorgehobenen Rahmen, der Rest wird abgedunkelt,
   ein Trefferzähler wird angezeigt. Dieselbe Syntax nutzt die Aktion
   `function_plan_search`.

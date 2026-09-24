@@ -74,6 +74,7 @@ def render_plan_svg(
     sun_times: dict[str, str] | None = None,
     canvas: tuple[float, float] | None = None,
     connection_values: dict[str, Any] | None = None,
+    knx_by_id: dict | None = None,
 ) -> str:
     """Render elements at Comexio's own position_x/position_y with port-accurate wiring.
 
@@ -96,8 +97,11 @@ def render_plan_svg(
     for a LIVE render of the plan it was fetched for; a caller rendering a backup snapshot
     must leave this None since a snapshot's element ids belong to a different point in
     time (or a deleted/recreated plan) and would color wires from unrelated data.
+
+    knx_by_id: optional KNX object id -> item map (coordinator.function_plan_knx_label_map)
+    for "K{id}" pills; without it KNX elements still render as "K{id}" pills, just unnamed.
     """
-    geos = _build_geometries(elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id)
+    geos = _build_geometries(elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id)
     if canvas:
         # Paper mode: absolute coordinates, canvas grows only if content overflows the paper.
         _min_x, _min_y, max_x, max_y = _bounding_box(geos)
@@ -109,7 +113,7 @@ def render_plan_svg(
         width, height = _fit_to_bounding_box(geos)
 
     labels = {
-        elem_id: resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id, sun_times)
+        elem_id: resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id, sun_times, knx_by_id)
         for elem_id, elem in elements.items()
     }
     for elem_id in detect_self_reset_elements(elements, connections, catalog):
