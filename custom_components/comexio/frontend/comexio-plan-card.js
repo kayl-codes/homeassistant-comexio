@@ -25,11 +25,11 @@
 // sibling module — see comexio-plan-card-utils.js. Deployment note: this split means the
 // card now ships as TWO files that must be copied together into the same www/hacsfiles
 // folder (relative import path below), not just this one file as before.
-// The ?v= suffix must be bumped whenever the utils module changes: the card file itself is
-// deployed under a new versioned name each release, but this sibling keeps its name, so a
-// browser would otherwise pair the new card with a cached old utils module (v0.9.32:
-// "does not provide an export named 'isTextQuery'").
-import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-plan-card-utils.js?v=0.9.32";
+// The ?v= suffix tracks the card version below and must be bumped whenever the utils module
+// changes: the card file itself is deployed under a new versioned name each release, but this
+// sibling keeps its name, so a browser would otherwise pair the new card with a cached old
+// utils module (v0.9.32: "does not provide an export named 'isTextQuery'").
+import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-plan-card-utils.js?v=0.9.33";
 
 // Version banner: lets the user verify in the browser console WHICH build actually
 // executes — ?v= query bumps proved unreliable against the service-worker cache.
