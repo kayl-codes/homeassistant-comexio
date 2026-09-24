@@ -118,7 +118,10 @@ jobs:
           cache: 'pip'
           cache-dependency-path: tests/requirements.txt
       - name: Install test dependencies
-        run: 'pip install --only-binary :all: -r tests/requirements.txt'
+        # No --only-binary here (unlike the other jobs): this needs the full homeassistant runtime,
+        # and with binary-only pip's resolver backtracks through HA's cp314 tree until
+        # "resolution-too-deep" (verified on PR #90). Test-only toolchain, exact top-level pins.
+        run: pip install -r tests/requirements.txt
       - name: Run unit tests
         run: pytest tests/unit -q
 
