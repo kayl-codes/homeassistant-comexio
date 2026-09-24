@@ -12,6 +12,7 @@ import re
 import time
 from typing import Any
 
+import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
@@ -147,6 +148,32 @@ def _resolve_set_value_target(target: str, value: float, data: dict) -> tuple[di
     return None, f"Invalid target '{target}' — expected 'M<id>' or '<Extension>#<IO>' (e.g. M107 or IOX2#Q3)."
 
 
+async def _upload_webio_class(api: Any, server_id: str, class_name: str, web_io_json: str) -> str:
+    """Clean-reinstall one Web-IO class for handle_generate_web_io; returns its result line.
+
+    Split out of handle_generate_web_io to keep its cognitive complexity within SonarQube
+    S3776's limit.
+    """
+    try:
+        base_info = await api.get_webio_base_info(class_name)
+    except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+        # A failed lookup must not fall through to upload_web_io below — that would create a
+        # duplicate class next to one that may well still exist.
+        _LOGGER.warning("Web-IO class lookup for '%s' failed, skipping upload: %s", class_name, err)
+        return f"{class_name}: skipped — Web-IO class lookup failed: {err}"
+    if base_info:
+        base_id, deletable = base_info
+        if not deletable:
+            return f"{class_name}: skipped — in use by Comexio logic, use the Smart-Sync button instead"
+        _LOGGER.info("Base class '%s' is deletable, performing clean reinstall.", class_name)
+        if not await api.delete_webio_base(base_id):
+            # Same duplicate-class risk as a failed lookup above.
+            return f"{class_name}: skipped — deleting the old class failed"
+
+    success, result_val = await api.upload_web_io(server_id, class_name, web_io_json)
+    return f"{class_name}: Base-ID {result_val}" if success else f"{class_name}: Upload failed: {result_val}"
+
+
 async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None:
     """Service to preview or upload the Web-IO configuration."""
     entry_id = call.data.get("config_entry")
@@ -199,22 +226,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
                 ignored_knx_ids=coordinator.ignored_knx_ids,
             )
 
-            base_info = await api.get_webio_base_info(class_name)
-            if base_info:
-                base_id, deletable = base_info
-                if deletable:
-                    _LOGGER.info("Base class '%s' is deletable, performing clean reinstall.", class_name)
-                    await api.delete_webio_base(base_id)
-                else:
-                    results.append(
-                        f"{class_name}: skipped — in use by Comexio logic, use the Smart-Sync button instead"
-                    )
-                    continue
-
-            success, result_val = await api.upload_web_io(server_id, class_name, web_io_json)
-            results.append(
-                f"{class_name}: Base-ID {result_val}" if success else f"{class_name}: Upload failed: {result_val}"
-            )
+            results.append(await _upload_webio_class(api, server_id, class_name, web_io_json))
 
         persistent_notification.async_create(
             hass, "\n".join(results) or "Nothing to do.", title=f"Comexio Sync ({server_id})"

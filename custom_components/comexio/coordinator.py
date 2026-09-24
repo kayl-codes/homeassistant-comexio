@@ -146,7 +146,7 @@ _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 # entry the same as real data (accurate, since it genuinely was empty at seed time) — but
 # _load_function_plan_check_data() must NOT: its contract is "cache miss -> live fetch", and a
 # seeded entry can already be stale by the time it's consulted (real wiring written afterward,
-# e.g. by function_plan_add_marker_pairs, never gets mirrored back into this cache).
+# e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache).
 _SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
 
 # Debounce for live plan-preview refreshes: webhook bursts (e.g. a dimmer ramp) collapse
@@ -1525,19 +1525,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         if not device_id:
             return
-        base_info = await self.api.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
-        if not base_info:
-            # get_webio_base_info returns None both when the class genuinely doesn't exist
-            # AND on a failed HTTP fetch (same ambiguity get_webio_device_info's docstring
-            # warns about) — deleting the device first and treating this as "no class to
-            # delete" would orphan the class on a transient failure. Skip everything instead.
-            skipped["knx_loopback"] = "get_webio_base_info returned no class"
+        try:
+            base_info = await self.api.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
+        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+            # Same raise contract as get_webio_device_info above. Checked BEFORE deleting the
+            # device: deleting it first and then failing the class lookup would leave the
+            # class behind with no retry path. Skip everything instead.
+            skipped["knx_loopback"] = f"get_webio_base_info failed: {err}"
             return
-        base_id = base_info[0]
         if not await self.api.delete_webio_device(device_id):
             skipped["knx_loopback"] = "delete_webio_device failed"
             return
         devices["knx_loopback"] = str(device_id)
+        if base_info is None:
+            # A successful lookup that found no class: genuinely already gone, nothing to delete.
+            return
+        base_id = base_info[0]
         if await self.api.delete_webio_base(base_id):
             classes["knx_loopback"] = str(base_id)
         else:
@@ -2936,7 +2939,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Source exists and is intentionally ignored — only flag if legacy entities/links remain
             has_entities = source_id in ids_with_entities
-            function_plan_fub_id = self._check_marker_function_plan_link(source_id, lp_plans, ref_type)
+            function_plan_fub_id = self._check_source_function_plan_link(source_id, lp_plans, ref_type)
             _LOGGER.debug(
                 "[%s] ignored %s%s: has_entities=%s, function_plan_fub_id=%s",
                 self.server_id,
@@ -3746,8 +3749,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("[%s] No function plans available for link check", self.server_id)
         return plans
 
-    async def resolve_marker_cleanup_plans(
-        self, marker_ids: list[int], preferred_fub_id: int | None = None, ref_type: int = 2
+    async def resolve_source_cleanup_plans(
+        self, source_ids: list[int], preferred_fub_id: int | None = None, ref_type: int = 2
     ) -> dict[int, list[int]]:
         """Group markers/KNX objects by the managed plan they are wired in, for per-plan cleanup.
 
@@ -3758,13 +3761,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         selects the source category's plan-element type (marker=2, KNX=11 — blind guess).
         """
         if preferred_fub_id is not None:
-            return {preferred_fub_id: list(marker_ids)}
+            return {preferred_fub_id: list(source_ids)}
         plans = await self._load_function_plan_check_data()
         plan_to_ids: dict[int, list[int]] = {}
-        for marker_id in marker_ids:
-            fub_id = self._check_marker_function_plan_link(marker_id, plans, ref_type)
+        for source_id in source_ids:
+            fub_id = self._check_source_function_plan_link(source_id, plans, ref_type)
             if fub_id is not None and self._is_managed_function_plan(fub_id):
-                plan_to_ids.setdefault(fub_id, []).append(marker_id)
+                plan_to_ids.setdefault(fub_id, []).append(source_id)
         return plan_to_ids
 
     async def _resolve_unwire_plan_targets(
@@ -3906,32 +3909,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "touched_fub_ids": list(dict.fromkeys(touched_fub_ids)),
         }
 
-    def _check_marker_function_plan_link(self, marker_id: int, plans: dict[int, dict], ref_type: int = 2) -> int | None:
+    def _check_source_function_plan_link(self, source_id: int, plans: dict[int, dict], ref_type: int = 2) -> int | None:
         """Check if the source (marker=2/KNX=11) is wired in any of the pre-loaded managed plans.
 
         Returns the fub_id of the first plan in which the source element has a
         WebIO connection, else None.
         """
         for fub_id, plan_data in plans.items():
-            if self._marker_wired_in_plan(marker_id, plan_data, ref_type):
+            if self._source_wired_in_plan(source_id, plan_data, ref_type):
                 return fub_id
         return None
 
     @staticmethod
-    def _marker_wired_in_plan(marker_id: int, plan_data: dict, ref_type: int = 2) -> bool:
+    def _source_wired_in_plan(source_id: int, plan_data: dict, ref_type: int = 2) -> bool:
         """Check if the source element (marker=2/KNX=11) in this plan has an outgoing connection."""
         all_matches = [
             elem_id
             for elem_id, elem_data in plan_data.get("elements", {}).items()
             # reference.type comes back as int or str depending on the response shape — normalize.
             if str((ref := elem_data.get("reference", {})).get("type")) == str(ref_type)
-            and int(ref.get("ref_id", -1)) == marker_id
+            and int(ref.get("ref_id", -1)) == source_id
         ]
         if len(all_matches) > 1:
-            _LOGGER.debug("_marker_wired_in_plan: M%s has MULTIPLE elements in this plan: %s", marker_id, all_matches)
-        marker_elem_id = ComexioAPI._find_marker_element_id(plan_data.get("elements", {}), marker_id, ref_type)
+            _LOGGER.debug("_source_wired_in_plan: M%s has MULTIPLE elements in this plan: %s", source_id, all_matches)
+        marker_elem_id = ComexioAPI._find_source_element_id(plan_data.get("elements", {}), source_id, ref_type)
         if not marker_elem_id:
-            _LOGGER.debug("_marker_wired_in_plan: M%s not found as an element in this plan", marker_id)
+            _LOGGER.debug("_source_wired_in_plan: M%s not found as an element in this plan", source_id)
             return False
 
         # DEBUG: dump every connection touching ANY of the matched marker elements, in either role
@@ -3940,8 +3943,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             out_ids = ComexioAPI._connection_output_ids(conn_data)
             if in_id in all_matches or any(oid in all_matches for oid in out_ids):
                 _LOGGER.debug(
-                    "_marker_wired_in_plan: M%s conn=%s touches a marker element (input=%s, outputs=%s, raw=%s)",
-                    marker_id,
+                    "_source_wired_in_plan: M%s conn=%s touches a marker element (input=%s, outputs=%s, raw=%s)",
+                    source_id,
                     conn_id,
                     in_id,
                     out_ids,
@@ -3954,8 +3957,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ]
         wired = marker_elem_id in input_ids
         _LOGGER.debug(
-            "_marker_wired_in_plan: M%s -> elem_id=%s (all_matches=%s), wired=%s",
-            marker_id,
+            "_source_wired_in_plan: M%s -> elem_id=%s (all_matches=%s), wired=%s",
+            source_id,
             marker_elem_id,
             all_matches,
             wired,
@@ -4832,7 +4835,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 orphan_by_ref[ref_type] = orphan_ids
         return missing_by_ref, orphan_by_ref
 
-    def _audit_trigger_pairs(self, trigger_marker_ids: list[int], ref_type: int) -> tuple[list[int], list[int]] | None:
+    def _audit_trigger_pairs(self, trigger_source_ids: list[int], ref_type: int) -> tuple[list[int], list[int]] | None:
         """Compare trigger sources ([TRIG]/[TP]) of one category (ref_type) against the
         dedicated trigger plan's wiring.
 
@@ -4862,7 +4865,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         refuses to start a plan that wires a K element's Flanke self-reset loop back into
         that K element's own input, since the input is already driven by the bridge Marker's
         wiring ("mehrfach verwendete Ausgänge", confirmed live 2026-09-21; see
-        button.py's _resolve_knx_trigger_bridge_markers). trigger_marker_ids/missing_ids/
+        button.py's _resolve_knx_trigger_bridge_markers). trigger_source_ids/missing_ids/
         orphan_ids stay in K-id space for the caller (display, audit-key prefixing); only the
         internal wired/existing lookups are translated to the bridge Marker's id.
 
@@ -4876,7 +4879,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plan_map = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
         fub_id = plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
         if fub_id is None or self.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
-            return list(trigger_marker_ids), []
+            return list(trigger_source_ids), []
         if fub_id not in self.function_plan_plans:
             return None
 
@@ -4890,13 +4893,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         existing_by_ref, _ = self.api._function_plan_existing_refs(plan_data)
 
         if ref_type == knx_ref_type:
-            marker_by_k_id = {k_id: bridge_marker_by_k_id.get(str(k_id)) for k_id in trigger_marker_ids}
-            wired_marker_ids = self.api._function_plan_trigger_wired_marker_ids(plan_data, marker_ref_type)
+            marker_by_k_id = {k_id: bridge_marker_by_k_id.get(str(k_id)) for k_id in trigger_source_ids}
+            wired_marker_ids = self.api._function_plan_trigger_wired_source_ids(plan_data, marker_ref_type)
             missing_ids = [k_id for k_id, m in marker_by_k_id.items() if m is None or int(m) not in wired_marker_ids]
 
             all_wired_marker_ids = {ref_id for rt, ref_id in existing_by_ref if rt == marker_ref_type}
             reverse_bridge = {int(m): k_id for k_id, m in bridge_marker_by_k_id.items() if m is not None}
-            trigger_id_set = set(trigger_marker_ids)
+            trigger_id_set = set(trigger_source_ids)
             orphan_ids = [
                 int(reverse_bridge[mid])
                 for mid in all_wired_marker_ids
@@ -4911,10 +4914,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # never be swept up as a plain-marker orphan.
         bridge_marker_ids = {int(m) for m in bridge_marker_by_k_id.values() if m is not None}
         all_marker_ids = {ref_id for rt, ref_id in existing_by_ref if rt == ref_type} - bridge_marker_ids
-        wired_marker_ids = self.api._function_plan_trigger_wired_marker_ids(plan_data, ref_type)
+        wired_marker_ids = self.api._function_plan_trigger_wired_source_ids(plan_data, ref_type)
 
-        missing_ids = [mid for mid in trigger_marker_ids if mid not in wired_marker_ids]
-        trigger_id_set = set(trigger_marker_ids)
+        missing_ids = [mid for mid in trigger_source_ids if mid not in wired_marker_ids]
+        trigger_id_set = set(trigger_source_ids)
         orphan_ids = [mid for mid in all_marker_ids if mid not in trigger_id_set]
         return missing_ids, orphan_ids
 

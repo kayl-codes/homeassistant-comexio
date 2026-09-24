@@ -818,7 +818,7 @@ FUNCTION_PLAN_MANAGED_PLAN_COMMENT = "! Administrated by HomeAssistant, dont del
 
 
 # Function Plan canvas grid layout — shared by the function plan services (sorting) and the
-# direct grid placement in api.function_plan_add_marker_pairs / _add_io_pairs.
+# direct grid placement in api.function_plan_add_source_pairs / _add_io_pairs.
 FUNCTION_PLAN_LAYOUT_X_MARKER = 15.0  # left margin of the source (marker/IO) column
 FUNCTION_PLAN_LAYOUT_X_WEBIO = 210.0  # marker + 195 gap
 # KNX write bridge (Entwurf A "Merker-Brücke"): a K-object sits at X_WEBIO itself — matching

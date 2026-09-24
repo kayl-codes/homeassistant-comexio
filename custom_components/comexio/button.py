@@ -9,6 +9,7 @@ import logging
 import time
 from typing import Any
 
+import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
@@ -667,7 +668,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self, category: SourceCategory, ids: list[int], api: Any, dev_id: str | None, lp_fub_id: int | None
     ) -> list[str]:
         """Run the entity/Function-Plan/WebIO cleanup for one source category; return summary lines."""
-        deleted_entities = self._delete_marker_entities(ids, category)
+        deleted_entities = self._delete_source_entities(ids, category)
         lp_count, webio_cmd_ids, stopped_plans, stop_failures = await self._cleanup_function_plan_plans(
             api, ids, lp_fub_id, category
         )
@@ -686,7 +687,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         lines.extend(self._build_stop_failure_lines(stop_failures))
         return lines
 
-    def _delete_marker_entities(self, ids: list[int], category: SourceCategory) -> int:
+    def _delete_source_entities(self, ids: list[int], category: SourceCategory) -> int:
         """Remove HA entities for the given marker/KNX ids; return the deleted-entity count."""
         registry = er.async_get(self.hass)
         source_entities = self.coordinator.marker_entities_by_id(ids, category.unique_id_infix)
@@ -811,7 +812,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         webio_ids: list[int] = []
         unwired_marker_elem_ids: list[int] = []
         for marker_id in cleanup_ids:
-            marker_elem_id = api._find_marker_element_id(plan_data.get("elements", {}), marker_id, ref_type)
+            marker_elem_id = api._find_source_element_id(plan_data.get("elements", {}), marker_id, ref_type)
             if not marker_elem_id:
                 continue
             marker_webio_ids = api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data)
@@ -843,7 +844,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return result.get("deleted_elem_count", 0), stopped_plan, stop_failure
 
     async def _cleanup_function_plan_plans(
-        self, api: Any, marker_ids: list[int], lp_fub_id: int | None, category: SourceCategory
+        self, api: Any, source_ids: list[int], lp_fub_id: int | None, category: SourceCategory
     ) -> tuple[int, list[int], list[tuple[str, int]], list[tuple[str, int]]]:
         """Run the Function Plan cleanup for every managed plan the markers/KNX objects are wired in.
 
@@ -851,7 +852,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         failures — the latter two as (name, fub_id) tuples).
         """
         ref_type = int(category.fub_module_type)
-        plan_to_ids = await self.coordinator.resolve_marker_cleanup_plans(marker_ids, lp_fub_id, ref_type)
+        plan_to_ids = await self.coordinator.resolve_source_cleanup_plans(source_ids, lp_fub_id, ref_type)
         lp_count = 0
         webio_cmd_ids: list[int] = []
         stopped_plans: list[tuple[str, int]] = []
@@ -1074,7 +1075,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     pct=pct_start + 2,
                     step_info="Deleting old class",
                 )
-                await api.delete_webio_base(base_id)
+                # Uploading on top of a class that failed to delete would leave two classes
+                # of the same name behind — abort instead (reported by async_handle_press).
+                if not await api.delete_webio_base(base_id):
+                    raise RuntimeError(f"Deleting old Web-IO class failed ({label})")
                 await asyncio.sleep(0.5)
             else:
                 _LOGGER.warning(
@@ -1130,7 +1134,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         base_id = ctx.webio_devices_audit.get(cls, {}).get("base_id")
         if not base_id or str(base_id) in {"0", "None"}:
-            b_info = await api.get_webio_base_info(class_name)
+            try:
+                b_info = await api.get_webio_base_info(class_name)
+            except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+                # Only a fallback lookup: without a base_id, new-command creates are skipped
+                # (and reported) below while renames/type-fixes still run — no reason to abort
+                # the whole Delta Sync over it.
+                _LOGGER.warning("[%s] %s: fallback Base ID lookup failed: %s", self.server_id, label, err)
+                b_info = None
             if b_info:
                 base_id = b_info[0]
                 _LOGGER.debug("[%s] %s: resolved fallback Base ID: %s", self.server_id, label, base_id)
@@ -1793,7 +1804,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         sort/reactivate cycle per plan, full stop.
 
         The three legs have a real dependency chain, not just a shared plan:
-          - Leg 1 (K -> webIO-HA read path, function_plan_add_marker_pairs ref_type=11) creates
+          - Leg 1 (K -> webIO-HA read path, function_plan_add_source_pairs ref_type=11) creates
             the K-Element's own connection record. Computed the same way _wire_created_pairs
             computes it (freshly created_names this run, unioned with the pre-existing
             function_plan_missing gap_items for a full sync) — there is no fresh-audit
@@ -1903,7 +1914,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             pct=_PCT_PLAN_PAIRS,
             step_info="Function Plan: adding pairs",
         )
-        added, errors = await ctx.api.function_plan_add_marker_pairs(
+        added, errors = await ctx.api.function_plan_add_source_pairs(
             fub_id,
             read_ids,
             # Always the off-canvas-parking + follow-up-sort branch (fresh_plan=False), even
@@ -2187,7 +2198,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if (mismatch := self._check_plan_rename_mismatch(fub_id, cluster_ids, plan_name, category.label)) is not None:
             return mismatch
 
-        # Capture the activation state BEFORE stop_fup: function_plan_add_marker_pairs
+        # Capture the activation state BEFORE stop_fup: function_plan_add_source_pairs
         # reloads the config (refreshing fub_data) after the stop, so any later lookup
         # would see the plan as inactive and skip reactivation.
         was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
@@ -2201,7 +2212,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             fub_id, f"add_marker_pairs {[f'{category.audit_key_prefix}{m}' for m in cluster_ids]}"
         )
         await api.function_plan_stop_fup(fub_id)
-        lp_added, lp_errors = await api.function_plan_add_marker_pairs(
+        lp_added, lp_errors = await api.function_plan_add_source_pairs(
             fub_id,
             cluster_ids,
             fresh_plan=is_fresh,
@@ -2210,7 +2221,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
         progress_state["done"] += len(cluster_ids)
         if lp_errors:
-            _LOGGER.warning("[%s] function_plan_add_marker_pairs errors: %s", self.server_id, lp_errors)
+            _LOGGER.warning("[%s] function_plan_add_source_pairs errors: %s", self.server_id, lp_errors)
 
         note = await self._finalize_plan_after_pairs(ctx, fub_id, plan_name, lp_added, is_fresh, was_active)
         return (
