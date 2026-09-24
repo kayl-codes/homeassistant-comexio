@@ -5100,9 +5100,9 @@ class ComexioAPI:
         retrying with backoff (see _reload_config_until_commands_ready) since a
         just-uploaded command does not always show up on the very next reload.
         fresh_plan=True places the pairs directly at their final grid positions
-        (sorted by marker/KNX ID) — no sort pass is needed afterwards. Otherwise the
+        (sorted by source ID) — no sort pass is needed afterwards. Otherwise the
         elements get placeholder positions and a sort run must follow.
-        progress_cb(done, total) is invoked after every processed marker.
+        progress_cb(done, total) is invoked after every processed source.
         ref_type selects the source category (marker=2 / KNX=11 — blind guess),
         driving the source data key and the plan-element type.
         Returns (added_source_ids, error_messages).
@@ -5133,7 +5133,7 @@ class ComexioAPI:
         rows_per_col = _balanced_rows_per_col(len(source_ids), max_rows_per_col)
 
         def _pair_pos(n_added: int, n_loop: int) -> tuple[float, float, float]:
-            """(x_marker, x_webio, y): final grid slot for fresh plans, placeholder otherwise."""
+            """(x_source, x_webio, y): final grid slot for fresh plans, placeholder otherwise."""
             if fresh_plan:
                 col, row = divmod(n_added, rows_per_col)
                 x_off = col * FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH
@@ -5184,7 +5184,7 @@ class ComexioAPI:
         ref_type: int = 2,
         plan_data: dict | None = None,
     ) -> str | None:
-        """Add one Marker/KNX+Web-IO pair at pos=(x_marker, x_webio, y).
+        """Add one Source+Web-IO pair at pos=(x_source, x_webio, y).
 
         Return semantics as _function_plan_wire_ref_pair (None = added, "" = already wired).
         plan_data: see _function_plan_wire_ref_pair — needed for every ref_type, not just KNX:
@@ -5239,7 +5239,7 @@ class ComexioAPI:
         plan, a separate fub_id. See MARKER_TRIGGER_SUFFIXES / FUNCTION_PLAN_TRIGGER_PLAN_NAME
         in const.py for why the two are kept apart.
         fresh_plan=True places the pairs directly at their final grid positions
-        (sorted by marker/KNX ID), matching function_plan_add_source_pairs.
+        (sorted by source ID), matching function_plan_add_source_pairs.
         Returns (added_source_ids, error_messages).
         """
         plan_data = await self.function_plan_load_elements(fub_id)
@@ -5252,7 +5252,7 @@ class ComexioAPI:
         rows_per_col = _balanced_rows_per_col(len(source_ids), max_rows_per_col)
 
         def _pair_pos(n_added: int, n_loop: int) -> tuple[float, float, float]:
-            """(x_marker, x_flanke, y): final grid slot for fresh plans, placeholder otherwise.
+            """(x_source, x_flanke, y): final grid slot for fresh plans, placeholder otherwise.
 
             Uses FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP (not the generic, single-row-tall
             FUNCTION_PLAN_LAYOUT_Y_STEP) — the Flanke block renders 4 row-heights tall, so the
@@ -5296,7 +5296,7 @@ class ComexioAPI:
         pos: tuple[float, float, float],
         ref_type: int = 2,
     ) -> str | None:
-        """Add one Source+Flanke self-reset pair at pos=(x_marker, x_flanke, y).
+        """Add one Source+Flanke self-reset pair at pos=(x_source, x_flanke, y).
 
         Flanke element is created before the marker element (matches the user's Studio layout
         preference — creation order affects auto-placement even though explicit x/y is passed).
@@ -5316,7 +5316,7 @@ class ComexioAPI:
         attempt must not be reported as already wired.
         """
         label = f"{category_by_fub_module_type(ref_type).audit_key_prefix}{source_id}"
-        x_marker, x_flanke, y = pos
+        x_source, x_flanke, y = pos
         flanke_ref_id = int(FUB_BASE_REF_ID_FLANKE)
 
         existing_marker_elem = existing_by_ref.get((ref_type, source_id))
@@ -5341,7 +5341,7 @@ class ComexioAPI:
         flanke_is_new = existing_flanke_elem is None
 
         elem_marker = existing_marker_elem or await self.function_plan_add_element(
-            fub_id=fub_id, ref_id=source_id, element_type=ref_type, x=x_marker, y=y
+            fub_id=fub_id, ref_id=source_id, element_type=ref_type, x=x_source, y=y
         )
         if elem_marker is None:
             return await self._function_plan_trigger_add_failed(
