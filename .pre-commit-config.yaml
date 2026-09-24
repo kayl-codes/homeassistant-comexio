@@ -29,10 +29,10 @@ repos:
         files: ^(custom_components/comexio/manifest\.json|requirements\.txt)$
         pass_filenames: false
 
-      # Unit tests (tests/unit, pure logic, ~2 s) — needs `pip install -r requirements_test.txt` once.
+      # Unit tests (tests/unit, pure logic, ~2 s) — needs `pip install -r tests/requirements.txt` once.
       - id: pytest-unit
         name: Unit tests (pytest tests/unit)
         entry: python -m pytest tests/unit -q
         language: system
-        files: ^(custom_components/comexio/.*\.py|tests/.*|pyproject\.toml|requirements_test\.txt)$
+        files: ^(custom_components/comexio/.*\.py|tests/.*|pyproject\.toml)$
         pass_filenames: false

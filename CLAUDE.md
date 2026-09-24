@@ -26,7 +26,7 @@ ruff format --check .
 # Pre-commit (runs ruff + whitespace/YAML/JSON checks)
 pre-commit run --all-files
 
-# Unit tests (install once: pip install -r requirements_test.txt)
+# Unit tests (install once: pip install -r tests/requirements.txt)
 pytest tests/unit
 
 # Unit tests with coverage report

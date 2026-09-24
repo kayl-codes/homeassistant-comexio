@@ -9,7 +9,7 @@ on:
       - 'requirements.txt'
       - 'scripts/generate_requirements.py'
       - 'tests/**'
-      - 'requirements_test.txt'
+      - 'tests/requirements.txt'
       - '.gitattributes'
   pull_request:
     types: [opened, synchronize, reopened]
@@ -20,7 +20,7 @@ on:
       - 'requirements.txt'
       - 'scripts/generate_requirements.py'
       - 'tests/**'
-      - 'requirements_test.txt'
+      - 'tests/requirements.txt'
       - '.gitattributes'
   workflow_dispatch:
 
@@ -113,12 +113,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          # Same interpreter as HA 2026.8's own runtime; homeassistant is pinned in requirements_test.txt.
+          # Same interpreter as HA 2026.8's own runtime; homeassistant is pinned in tests/requirements.txt.
           python-version: '3.14'
           cache: 'pip'
-          cache-dependency-path: requirements_test.txt
+          cache-dependency-path: tests/requirements.txt
       - name: Install test dependencies
-        run: pip install -r requirements_test.txt
+        run: 'pip install --only-binary :all: -r tests/requirements.txt'
       - name: Run unit tests
         run: pytest tests/unit -q
 

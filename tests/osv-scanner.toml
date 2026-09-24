@@ -1,0 +1,11 @@
+# OSV-Scanner config for tests/ only (osv-scanner.toml applies to its own directory, not to the
+# repo root). tests/requirements.txt pins the unit-test toolchain (homeassistant, pytest, syrupy);
+# none of it ships with the integration — the runtime dependencies live in the root
+# requirements.txt (generated from manifest.json), which stays fully scanned. Advisories in HA's
+# transitive tree (e.g. its cryptography pin) are HA Core's to fix, not this repo's.
+[[PackageOverrides]]
+name = ".*"
+nameIsRegex = true
+ecosystem = "PyPI"
+vulnerability.ignore = true
+reason = "Test-only toolchain (tests/requirements.txt), never shipped; runtime deps are scanned via the root requirements.txt"
