@@ -1,0 +1,84 @@
+# OSV-Scanner config for tests/ only (osv-scanner.toml applies to its own directory, not to the
+# repo root). tests/requirements.txt pins the unit-test toolchain (homeassistant, pytest, syrupy);
+# none of it ships with the integration — the runtime dependencies live in the root
+# requirements.txt (generated from manifest.json), which stays fully scanned.
+#
+# Only the specific advisories below are ignored, each with its reason — any NEW advisory in the
+# test toolchain (pytest, syrupy, homeassistant itself, ...) still fails the scan. Every entry
+# expires so it gets re-checked; on expiry (or an HA bump) re-run the scan and drop what's fixed.
+
+# --- cryptography 48.0.1: Home Assistant Core's own exact pin (homeassistant==2026.8.3 requires
+# cryptography==48.0.1), so it cannot be raised here without breaking HA's resolver (cf. #61).
+[[IgnoredVulns]]
+id = "PYSEC-2026-3552"
+ignoreUntil = 2027-03-31
+reason = "cryptography==48.0.1 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-g6cj-pr64-35w5"
+ignoreUntil = 2027-03-31
+reason = "Alias of PYSEC-2026-3552 (cryptography==48.0.1 pinned by homeassistant, test-only)"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3553"
+ignoreUntil = 2027-03-31
+reason = "cryptography==48.0.1 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-jwv3-5hgf-82ww"
+ignoreUntil = 2027-03-31
+reason = "Alias of PYSEC-2026-3553 (cryptography==48.0.1 pinned by homeassistant, test-only)"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3554"
+ignoreUntil = 2027-03-31
+reason = "cryptography==48.0.1 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-m2h6-j472-rp4c"
+ignoreUntil = 2027-03-31
+reason = "Alias of PYSEC-2026-3554 (cryptography==48.0.1 pinned by homeassistant, test-only)"
+
+# --- anyio / idna / pygments: false positives. OSV-Scanner reports the dependency *lower bounds*
+# from HA's metadata (anyio 4.9.0, idna 3.9.0, pygments 2.9.0) as if they were installed versions;
+# pip actually resolves anyio 4.15.1, idna 3.20, pygments 2.21.0 (CI job log, PR #90), all past
+# the fixed versions.
+[[IgnoredVulns]]
+id = "GHSA-5p39-cfhj-2xmp"
+ignoreUntil = 2027-03-31
+reason = "anyio: scanner reads the >=4.9.0 floor as installed version; resolved anyio is 4.15.1 (fixed in 4.14.2)"
+
+[[IgnoredVulns]]
+id = "GHSA-82r6-8w77-94w6"
+ignoreUntil = 2027-03-31
+reason = "anyio: scanner reads the >=4.9.0 floor as installed version; resolved anyio is 4.15.1 (fixed in 4.14.2)"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-215"
+ignoreUntil = 2027-03-31
+reason = "idna: scanner reads the >=3.9.0 floor as installed version; resolved idna is 3.20 (fixed in 3.15)"
+
+[[IgnoredVulns]]
+id = "GHSA-65pc-fj4g-8rjx"
+ignoreUntil = 2027-03-31
+reason = "Alias of PYSEC-2026-215 (idna floor false positive, resolved 3.20)"
+
+[[IgnoredVulns]]
+id = "PYSEC-2023-117"
+ignoreUntil = 2027-03-31
+reason = "pygments: scanner reads the >=2.9.0 floor as installed version; resolved pygments is 2.21.0 (fixed in 2.15.0)"
+
+[[IgnoredVulns]]
+id = "GHSA-mrwq-x4v8-fh7p"
+ignoreUntil = 2027-03-31
+reason = "Alias of PYSEC-2023-117 (pygments floor false positive, resolved 2.21.0)"
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2987"
+ignoreUntil = 2027-03-31
+reason = "pygments: scanner reads the >=2.9.0 floor as installed version; resolved pygments is 2.21.0 (fixed in 2.20.0)"
+
+[[IgnoredVulns]]
+id = "GHSA-5239-wwwm-4pmq"
+ignoreUntil = 2027-03-31
+reason = "Alias of PYSEC-2026-2987 (pygments floor false positive, resolved 2.21.0)"

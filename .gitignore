@@ -35,3 +35,5 @@ venv/
 # SonarScanner local cache / JVM crash dumps
 .scannerwork/
 hs_err_pid*.log
+
+coverage.xml

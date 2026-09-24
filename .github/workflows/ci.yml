@@ -8,6 +8,9 @@ on:
       - 'pyproject.toml'
       - 'requirements.txt'
       - 'scripts/generate_requirements.py'
+      - 'tests/**'
+      - 'tests/requirements.txt'
+      - '.gitattributes'
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
@@ -16,6 +19,9 @@ on:
       - 'pyproject.toml'
       - 'requirements.txt'
       - 'scripts/generate_requirements.py'
+      - 'tests/**'
+      - 'tests/requirements.txt'
+      - '.gitattributes'
   workflow_dispatch:
 
 permissions:
@@ -94,6 +100,30 @@ jobs:
           else
             echo "### mypy: ${count} error(s) found (non-blocking during initial type-coverage rollout)" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  tests:
+    name: Unit tests - pytest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          # Same interpreter as HA 2026.8's own runtime; homeassistant is pinned in tests/requirements.txt.
+          python-version: '3.14'
+          cache: 'pip'
+          cache-dependency-path: tests/requirements.txt
+      - name: Install test dependencies
+        # No --only-binary here (unlike the other jobs): this needs the full homeassistant runtime,
+        # and with binary-only pip's resolver backtracks through HA's cp314 tree until
+        # "resolution-too-deep" (verified on PR #90). Test-only toolchain, exact top-level pins.
+        run: pip install -r tests/requirements.txt
+      - name: Run unit tests
+        run: pytest tests/unit -q
 
   check-requirements-sync:
     name: Verify requirements.txt matches manifest.json

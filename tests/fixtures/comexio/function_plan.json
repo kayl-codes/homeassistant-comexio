@@ -1,0 +1,40 @@
+{
+  "_comment": "Synthetic function plan in the elements/connections shape of api.function_plan_load_elements (= a stored backup snapshot), plus the catalog subset and label maps render_plan_svg/analyze_function_plan consume. Covers: marker + IO into an Oder gate driving a Web-IO, a constant into an unwired Nicht gate, a marker/on_pulse-timer self-reset cycle, and the managed-plan comment.",
+  "elements": {
+    "1": {"id": 1, "fub_id": 7, "name": "! Administrated by HomeAssistant, dont delete or rename !", "position_x": 600, "position_y": 7.5, "reference": {"type": 14, "ref_id": 5}},
+    "2": {"id": 2, "fub_id": 7, "name": "", "position_x": 15, "position_y": 30, "reference": {"type": 2, "ref_id": 1}},
+    "3": {"id": 3, "fub_id": 7, "name": "", "position_x": 15, "position_y": 45, "reference": {"type": 1, "ref_id": 11}},
+    "4": {"id": 4, "fub_id": 7, "name": "", "position_x": 210, "position_y": 30, "reference": {"type": 5, "ref_id": 5}},
+    "5": {"id": 5, "fub_id": 7, "name": "", "position_x": 420, "position_y": 30, "reference": {"type": 10, "ref_id": 101}},
+    "6": {"id": 6, "fub_id": 7, "name": "5", "position_x": 15, "position_y": 120, "reference": {"type": 16, "ref_id": 1}},
+    "7": {"id": 7, "fub_id": 7, "name": "", "position_x": 210, "position_y": 120, "reference": {"type": 5, "ref_id": 23}},
+    "8": {"id": 8, "fub_id": 7, "name": "", "position_x": 15, "position_y": 210, "reference": {"type": 2, "ref_id": 4}},
+    "9": {"id": 9, "fub_id": 7, "name": "", "position_x": 210, "position_y": 210, "reference": {"type": 4, "ref_id": 1}}
+  },
+  "connections": {
+    "10": {"input": {"FubElementId": 2, "IOPos": 0, "Inverted": false}, "output": [{"FubElementId": 4, "IOPos": 0, "Inverted": false}]},
+    "11": {"input": {"FubElementId": 3, "IOPos": 0, "Inverted": false}, "output": [{"FubElementId": 4, "IOPos": 1, "Inverted": true}]},
+    "12": {"input": {"FubElementId": 4, "IOPos": 0, "Inverted": false}, "output": [{"FubElementId": 5, "IOPos": 0, "Inverted": false}]},
+    "13": {"input": {"FubElementId": 6, "IOPos": 0, "Inverted": false}, "output": [{"FubElementId": 7, "IOPos": 0, "Inverted": false}]},
+    "14": {"input": {"FubElementId": 8, "IOPos": 0, "Inverted": false}, "output": [{"FubElementId": 9, "IOPos": 0, "Inverted": false}]},
+    "15": {"input": {"FubElementId": 9, "IOPos": 0, "Inverted": false}, "output": [{"FubElementId": 8, "IOPos": 0, "Inverted": false}]}
+  },
+  "catalog": {
+    "fub_types": {"1": "inOutput", "2": "marker", "4": "timeModule", "5": "fubBase", "10": "webIo", "14": "infoText", "16": "constant"},
+    "fub_base": {
+      "5": {"name": "or", "short_name": "Oder", "display_name": "Oder-Baustein", "in": {"0": "a", "1": "b"}, "out": {"0": "O"}, "categories": ["basic"], "width": 1, "height": 0, "autogrow": 16, "n_in": 2, "n_out": 1, "in_types": [0, 0], "out_types": [0], "in_hide": [], "out_hide": []},
+      "23": {"name": "not", "short_name": "Nicht", "display_name": "Nicht-Baustein", "in": {"0": "in"}, "out": {"0": "out"}, "categories": ["basic"], "width": 1, "height": 0, "autogrow": 0, "n_in": 1, "n_out": 1, "in_types": [0], "out_types": [0], "in_hide": [], "out_hide": []}
+    },
+    "time_modules": {"1": {"name": "Taster Reset", "kind": "on_pulse", "t1": 5, "t2": 0}}
+  },
+  "markers_by_id": {
+    "1": {"id": "1", "name": "M1 Licht Wohnen", "title": "Licht Wohnen", "type": "digital", "value": 1.0},
+    "4": {"id": "4", "name": "M4 Klingel [TRIG]", "title": "Klingel [TRIG]", "type": "digital", "value": 0.0}
+  },
+  "webio_by_id": {
+    "101": {"name": "30. HA M1 Licht Wohnen", "analog": false}
+  },
+  "ios_by_id": {
+    "11": {"id": "11", "ext_name": "BASE", "identifier": "I1", "name": "BASE I1 Taster Flur", "is_binary": true, "value": 1.0}
+  }
+}

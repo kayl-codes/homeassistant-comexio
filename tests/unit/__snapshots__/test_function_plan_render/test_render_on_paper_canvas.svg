@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 754" style="max-width:960px" font-family="sans-serif" font-size="9.8">
+<style>
+  .canvas-bg { fill: #ffffff; }
+  .plan-title { fill: #111111; }
+  .node { fill: #ebf4ff; stroke: #2b6cb0; fill-opacity: 0.86; }
+  .node-webio { fill: #2b6cb0; stroke: #1a4971; fill-opacity: 0.92; }
+  .node-orphan { fill: #f5f5f5; stroke: #999999; fill-opacity: 0.86; }
+  /* Same default as node-orphan, but a separate class: an inactive IO is an expected,
+     valid state (Comexio won't even let it be wired), not a broken/orphaned reference. */
+  .node-inactive { fill: #f5f5f5; stroke: #999999; fill-opacity: 0.86; }
+  /* Whole-group grey-out for inactive IOs and unnamed ("#nn") markers: the body rect
+     alone is too subtle (ID box, texts and pins keep their colors), so the wrapping
+     g.node-g-inactive mutes those too. Quick restyle hook: these rules + dark twins. */
+  .node-g-inactive .block-head { fill: #9e9e9e; }
+  .node-g-inactive .block-head-label { fill: #f5f5f5; }
+  .node-g-inactive .node-label { fill: #8a8a8a; }
+  .node-g-inactive .port-glyph { fill: #aaaaaa; }
+  .node-label { fill: #111111; }
+  .block-head { fill: #2b6cb0; }
+  .block-head-label { fill: #ffffff; }
+  .port-label { fill: #333333; }
+  .port-glyph { fill: #555555; }
+  .node-comment { fill: #666666; font-style: italic; }
+  .edge-line { stroke: #555555; fill: none; }
+  .edge-dot { fill: #ffffff; stroke: #555555; }
+  .edge-junction { fill: #555555; stroke: none; }
+  .edge-line.edge-hot { stroke: #d05c5c; }
+  .edge-junction.edge-hot { fill: #d05c5c; }
+  @media (prefers-color-scheme: dark) {
+    .canvas-bg { fill: #1e1e1e; }
+    .plan-title { fill: #e8e8e8; }
+    .node { fill: #16324a; stroke: #5b9bd5; fill-opacity: 0.86; }
+    .node-webio { fill: #2b6cb0; stroke: #5b9bd5; fill-opacity: 0.92; }
+    .node-orphan { fill: #2a2a2a; stroke: #777777; fill-opacity: 0.86; }
+    .node-inactive { fill: #2a2a2a; stroke: #777777; fill-opacity: 0.86; }
+    .node-g-inactive .block-head { fill: #4a4a4a; }
+    .node-g-inactive .block-head-label { fill: #a8a8a8; }
+    .node-g-inactive .node-label { fill: #8a8a8a; }
+    .node-g-inactive .port-glyph { fill: #666666; }
+    .node-label { fill: #e8e8e8; }
+    .block-head { fill: #2b6cb0; }
+    .block-head-label { fill: #ffffff; }
+    .port-label { fill: #cccccc; }
+    .port-glyph { fill: #bbbbbb; }
+    .node-comment { fill: #999999; }
+    .edge-line { stroke: #aaaaaa; fill: none; }
+    .edge-dot { fill: #1e1e1e; stroke: #aaaaaa; }
+    .edge-junction { fill: #aaaaaa; }
+    .edge-line.edge-hot { stroke: #e57373; }
+    .edge-junction.edge-hot { fill: #e57373; }
+  }
+</style>
+<rect class="canvas-bg" width="100%" height="100%"/>
+<text class="plan-title" x="25.0" y="24" font-size="20" font-weight="bold">Test &lt;Plan&gt;<tspan dx="12" font-size="10" font-weight="normal">aktiv · A4</tspan></text>
+<path class="edge-line edge-hot" data-net="0" d="M185.5,71.5 L195.0,71.5 L198.0,71.5 Q202.5,71.5 202.5,76.0 L202.5,82.0 Q202.5,86.5 207.0,86.5 L210.0,86.5 L219.5,86.5" stroke-width="1.2"/>
+<path class="edge-line edge-hot" data-net="1" d="M185.5,86.5 L195.0,86.5 L198.0,86.5 Q202.5,86.5 202.5,91.0 L202.5,97.0 Q202.5,101.5 207.0,101.5 L210.0,101.5 L219.5,101.5" stroke-width="1.2"/>
+<path class="edge-line" data-net="2" d="M260.5,94.0 L270.0,94.0 L333.8,94.0 Q345.0,94.0 345.0,82.8 L345.0,82.8 Q345.0,71.5 356.2,71.5 L420.0,71.5 L429.5,71.5" stroke-width="1.2"/>
+<path class="edge-line" data-net="3" d="M65.5,161.5 L75.0,161.5 L135.0,161.5 Q142.5,161.5 142.5,169.0 L142.5,169.0 Q142.5,176.5 150.0,176.5 L210.0,176.5 L219.5,176.5" stroke-width="1.2"/>
+<path class="edge-line" data-net="4" d="M185.5,251.5 L195.0,251.5 H210.0 L219.5,251.5" stroke-width="1.2"/>
+<path class="edge-line" data-net="5" d="M380.5,251.5 L390.0,251.5 H15.0 L24.5,251.5" stroke-width="1.2"/>
+<g class="node-g" data-label="! Administrated by HomeAssistant, dont delete or rename !" data-eid="1">
+<text class="node-comment" x="600.0" y="51.3" font-size="9.8"><tspan x="600.0" dy="0">! Administrated by HomeAssistant, dont delete or rename !</tspan></text>
+</g>
+<g class="node-g" data-label="M1 Licht Wohnen" data-eid="2" data-target="M1" data-analog="0" data-writable="1" data-value="1.0">
+<rect class="node" x="24.5" y="64.5" width="161" height="14" rx="7.0" stroke-width="1"><title>M1 Licht Wohnen</title></rect>
+<path class="block-head" d="M60.0,64.5 H31.5 Q24.5,64.5 24.5,71.5 V71.5 Q24.5,78.5 31.5,78.5 H60.0 Z"/>
+<text class="block-head-label" x="42.2" y="75.0" text-anchor="middle" font-size="9.8">M1</text>
+<text class="node-label" x="181.5" y="75.0" text-anchor="end" font-size="9.8">1</text>
+<text class="node-label" x="63.0" y="75.0" font-size="9.8">Licht Wohnen</text>
+<path class="port-glyph" d="M15.0,67.7 L24.5,71.5 L15.0,75.3 z"/>
+<path class="port-glyph" d="M185.5,67.7 L195.0,71.5 L185.5,75.3 z"/>
+</g>
+<g class="node-g" data-label="BASE I1 Taster Flur" data-eid="3" data-target="BASE#I1" data-analog="0" data-writable="1" data-value="1.0">
+<rect class="node" x="24.5" y="79.5" width="161" height="14" rx="7.0" stroke-width="1"><title>BASE I1 Taster Flur</title></rect>
+<path class="block-head" d="M85.2,79.5 H31.5 Q24.5,79.5 24.5,86.5 V86.5 Q24.5,93.5 31.5,93.5 H85.2 Z"/>
+<text class="block-head-label" x="54.8" y="90.0" text-anchor="middle" font-size="9.8">BASE  #I1</text>
+<text class="node-label" x="181.5" y="90.0" text-anchor="end" font-size="9.8">1</text>
+<text class="node-label" x="88.2" y="90.0" font-size="9.8">Taster Flur</text>
+<path class="port-glyph" d="M15.0,82.7 L24.5,86.5 L15.0,90.3 z"/>
+<path class="port-glyph" d="M185.5,82.7 L195.0,86.5 L185.5,90.3 z"/>
+</g>
+<g class="node-g" data-label="Oder" data-eid="4">
+<rect class="node" x="219.5" y="64.5" width="41" height="44" rx="7.0" stroke-width="1"><title>Oder</title></rect>
+<path class="block-head" d="M219.5,79.5 V71.5 Q219.5,64.5 226.5,64.5 H253.5 Q260.5,64.5 260.5,71.5 V79.5 Z"/>
+<text class="block-head-label" x="240.0" y="75.3" text-anchor="middle" font-size="10.5" font-weight="bold">Oder</text>
+<text class="port-label" x="222.5" y="89.7" font-size="9.0">a</text>
+<path class="port-glyph" d="M210.0,82.7 L219.5,86.5 L210.0,90.3 z"/>
+<text class="port-label" x="222.5" y="104.7" font-size="9.0">b</text>
+<path class="port-glyph" d="M210.0,97.7 L219.5,101.5 L210.0,105.3 z"/>
+<text class="port-label" x="257.5" y="97.2" text-anchor="end" font-size="9.0">O</text>
+<path class="port-glyph" d="M260.5,90.2 L270.0,94.0 L260.5,97.8 z"/>
+</g>
+<g class="node-g" data-label="30. HA M1 Licht Wohnen" data-eid="5">
+<rect class="node-webio" x="429.5" y="64.5" width="161" height="14" rx="7.0" stroke-width="1"><title>30. HA M1 Licht Wohnen</title></rect>
+<text class="block-head-label" x="434.5" y="75.0" font-size="9.8">30. HA M1 Licht Wohnen</text>
+<path class="port-glyph" d="M420.0,67.7 L429.5,71.5 L420.0,75.3 z"/>
+<path class="port-glyph" d="M590.5,67.7 L600.0,71.5 L590.5,75.3 z"/>
+</g>
+<g class="node-g" data-label="5" data-eid="6">
+<rect class="node" x="24.5" y="154.5" width="41" height="14" rx="7.0" stroke-width="1"><title>5</title></rect>
+<text class="node-label" x="45.0" y="165.0" text-anchor="middle" font-size="9.8">5</text>
+<circle class="port-glyph" cx="70.25" cy="161.5" r="4.0"/>
+</g>
+<g class="node-g" data-label="Nicht" data-eid="7">
+<rect class="node" x="219.5" y="154.5" width="41" height="29" rx="7.0" stroke-width="1"><title>Nicht</title></rect>
+<path class="block-head" d="M219.5,169.5 V161.5 Q219.5,154.5 226.5,154.5 H253.5 Q260.5,154.5 260.5,161.5 V169.5 Z"/>
+<text class="block-head-label" x="240.0" y="165.3" text-anchor="middle" font-size="10.5" font-weight="bold">Nicht</text>
+<text class="port-label" x="222.5" y="179.7" font-size="9.0">in</text>
+<path class="port-glyph" d="M210.0,172.7 L219.5,176.5 L210.0,180.3 z"/>
+<text class="port-label" x="257.5" y="179.7" text-anchor="end" font-size="9.0">out</text>
+<path class="port-glyph" d="M260.5,172.7 L270.0,176.5 L260.5,180.3 z"/>
+</g>
+<g class="node-g" data-label="M4 Klingel [TRIG]
+⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster" data-eid="8" data-target="M4" data-analog="0" data-writable="1" data-value="0.0">
+<rect class="node" x="24.5" y="244.5" width="161" height="14" rx="7.0" stroke-width="1"><title>M4 Klingel [TRIG]
+⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster</title></rect>
+<path class="block-head" d="M60.0,244.5 H31.5 Q24.5,244.5 24.5,251.5 V251.5 Q24.5,258.5 31.5,258.5 H60.0 Z"/>
+<text class="block-head-label" x="42.2" y="255.0" text-anchor="middle" font-size="9.8">M4</text>
+<text class="node-label" x="181.5" y="255.0" text-anchor="end" font-size="9.8">0</text>
+<text class="node-label" x="63.0" y="255.0" font-size="9.8">Klingel [TRIG]</text>
+<path class="port-glyph" d="M15.0,247.7 L24.5,251.5 L15.0,255.3 z"/>
+<path class="port-glyph" d="M185.5,247.7 L195.0,251.5 L185.5,255.3 z"/>
+</g>
+<g class="node-g" data-label="T1 Taster Reset
+Typ: Einschaltwischend
+t1: 0,5 Sek.
+⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster" data-eid="9">
+<rect class="node" x="219.5" y="244.5" width="161" height="14" rx="7.0" stroke-width="1"><title>T1 Taster Reset
+Typ: Einschaltwischend
+t1: 0,5 Sek.
+⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster</title></rect>
+<path class="block-head" d="M255.0,244.5 H226.5 Q219.5,244.5 219.5,251.5 V251.5 Q219.5,258.5 226.5,258.5 H255.0 Z"/>
+<text class="block-head-label" x="237.2" y="255.0" text-anchor="middle" font-size="9.8">T1</text>
+<text class="node-label" x="258.0" y="255.0" font-size="9.8">Taster Reset</text>
+<path class="port-glyph" d="M210.0,247.7 L219.5,251.5 L210.0,255.3 z"/>
+<path class="port-glyph" d="M380.5,247.7 L390.0,251.5 L380.5,255.3 z"/>
+</g>
+<circle class="edge-dot" cx="210.0" cy="101.5" r="3.2"/>
+<text class="port-label" x="76.0" y="158.5" font-size="7.6">5</text>
+</svg>

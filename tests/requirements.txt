@@ -1,0 +1,7 @@
+# Test dependencies for the unit test suite (tests/unit/).
+# homeassistant is pinned to the same version as homeassistant-stubs in .github/workflows/ci.yml:
+# the tested modules import it at module level even though the unit tests never start an HA instance.
+homeassistant==2026.8.3
+pytest==9.1.1
+pytest-cov==7.1.0
+syrupy==6.1.1

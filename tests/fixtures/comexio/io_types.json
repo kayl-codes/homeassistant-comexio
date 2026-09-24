@@ -1,0 +1,7 @@
+{
+  "1": {"binary": true, "min": 0, "max": 1, "unit": "0/1"},
+  "2": {"binary": true, "min": 0, "max": 1, "unit": "1/0"},
+  "5": {"binary": false, "min": -40, "max": 80, "unit": "°C"},
+  "6": {"binary": false, "min": 0, "max": 100, "unit": "%"},
+  "121": {"binary": false, "min": 0, "max": 0, "unit": ""}
+}
