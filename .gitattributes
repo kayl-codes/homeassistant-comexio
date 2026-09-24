@@ -1,0 +1,3 @@
+# Test snapshots are compared byte-for-byte (syrupy): keep LF on every platform,
+# otherwise core.autocrlf on Windows turns them into CRLF on checkout and every snapshot fails.
+tests/**/__snapshots__/** text eol=lf

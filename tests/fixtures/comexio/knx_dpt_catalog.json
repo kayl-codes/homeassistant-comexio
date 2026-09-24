@@ -1,0 +1,17 @@
+{
+  "KnxPoints": {
+    "1": {"KnxDeviceId": 10},
+    "2": {"KnxDeviceId": 11},
+    "3": {"KnxDeviceId": 11},
+    "4": {"KnxDeviceId": 12}
+  },
+  "KnxDevices": {
+    "10": {"KnxDptId": 20},
+    "11": {"KnxDptId": 21},
+    "12": {"KnxDptId": 20}
+  },
+  "KnxDpt": {
+    "20": {"KnxBaseTypeId": 9, "KnxSubId": 1},
+    "21": {"KnxBaseTypeId": 3, "KnxSubId": 8}
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "FubModules": {
+    "1": {
+      "1": {
+        "extension": {"Name": "BASE", "Identifier": "1000-2000-3000"},
+        "inoutput": {
+          "11": {"Id": 11, "Identifier": "I1", "Description": "Taster Flur", "InOutputTypeId": 1, "Value": "1", "Active": true},
+          "12": {"Id": 12, "Identifier": "Q1", "Description": "Licht Flur", "InOutputTypeId": 2, "Value": 0, "Active": true},
+          "13": {"Id": 13, "Identifier": "AI1", "Description": "", "InOutputTypeId": 5, "Value": "21,5", "Active": true},
+          "14": {"Id": 14, "Identifier": "Q2", "Description": "Reserve", "InOutputTypeId": 2, "Value": 0, "Active": false},
+          "15": null
+        }
+      },
+      "2": {
+        "extension": {"Name": "UD 1", "Identifier": "5010"},
+        "inoutput": {
+          "21": {"Id": 21, "Identifier": "QI1", "Description": "Dimmer Bad", "InOutputTypeId": 6, "Value": "55", "Active": true}
+        }
+      }
+    },
+    "2": {
+      "1": {"Id": 1, "Name": "Licht Wohnen", "Type": 1},
+      "2": {"Id": 2, "Name": "Solltemperatur", "Type": 2},
+      "3": {"Id": 3, "Name": "Status Anlage [RO]", "Type": 1},
+      "4": {"Id": 4, "Name": "Klingel [TRIG]", "Type": 1},
+      "5": {"Id": 5, "Name": "", "Type": 1},
+      "6": {"Id": 6, "Name": "", "Type": 1},
+      "7": {"Id": 7, "Name": "Rollo Wohnen [K3]", "Type": 2}
+    },
+    "10": {
+      "30": {
+        "101": {"Name": "HA M1 Licht Wohnen", "TypeId": 1, "WebCommandId": 5},
+        "102": {"Name": "HA M2 Solltemperatur", "TypeId": "2", "WebCommandId": 6}
+      },
+      "31": {
+        "103": {"Name": "HA IO BASE Q1", "TypeId": 1, "WebCommandId": 7}
+      },
+      "40": {
+        "104": {"Name": "Fremdbefehl", "TypeId": 2, "WebCommandId": 1},
+        "105": "kein-dict"
+      }
+    },
+    "11": {
+      "1": {"Id": 1, "Name": "Wohnen Temperatur", "Type": 5},
+      "2": {"Id": 2, "Name": "Rollo Richtung", "Type": 2},
+      "3": {"Id": 3, "Name": "Rollo Schritt", "Type": 121},
+      "4": {"Id": 4, "Name": "Unbekannter Typ", "Type": 999},
+      "5": {"Id": 5, "Name": "", "Type": 5}
+    }
+  },
+  "WebDevices": {
+    "30": {"Name": "HomeAssistant [M]", "Ip": " 192.168.1.20:8123", "BaseId": 7},
+    "31": {"Name": "HomeAssistant [IO]", "Ip": "192.168.1.20:8123", "BaseId": 8},
+    "40": {"Name": "Fremdgeraet", "Ip": "10.0.0.5", "BaseId": 9}
+  },
+  "Fubs": {
+    "1": {"Id": 1, "Name": "HA - Marker", "Paper": 2, "Resolution": 90, "Orientation": 0, "Active": 1},
+    "2": {"Id": 2, "Name": "Hochformat A3", "Paper": 3, "Resolution": 120, "Orientation": 1, "Active": 0}
+  },
+  "Paper": {
+    "2": {"Id": 2, "Name": "A4", "MMX": 297, "MMY": 210},
+    "3": {"Id": 3, "Name": "A3", "MMX": 420, "MMY": 297}
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "_comment": "Comexio (PHP json_encode) serializes a gap-free group with ids exactly 0..N-1 as a JSON array instead of an object (#85). Every group below is in that array shape.",
+  "FubModules": {
+    "2": [
+      {"Id": 0, "Name": "Merker Null", "Type": 1},
+      {"Id": 1, "Name": "Merker Eins", "Type": 2}
+    ],
+    "10": [
+      [
+        {"Name": "HA M0 Merker Null", "TypeId": 1, "WebCommandId": 1},
+        {"Name": "HA M1 Merker Eins", "TypeId": 2, "WebCommandId": 2}
+      ],
+      {
+        "7": {"Name": "HA IO BASE Q1", "TypeId": 1, "WebCommandId": 3}
+      }
+    ]
+  },
+  "WebDevices": {
+    "0": {"Name": "HomeAssistant [M]", "Ip": "192.168.1.20:8123", "BaseId": 7},
+    "1": {"Name": "HomeAssistant [IO]", "Ip": "192.168.1.20:8123", "BaseId": 8}
+  }
+}
