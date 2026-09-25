@@ -112,6 +112,8 @@ def trigger_plan_action(own_ref_type: int, source_ref_types: set[int]) -> str:
     source_ref_types: ref_types of the trigger sources currently placed in the plan.
     Other categories' pairs present -> only this scope's pairs go (or nothing, if it has
     none); otherwise the plan holds nothing worth keeping and is deleted as a whole.
+    Only trigger sources are weighed, not other elements: the plan is integration-owned
+    (fixed name), like the cluster plans a cleanup deletes whole regardless of user edits.
     """
     if not source_ref_types - {own_ref_type}:
         return TRIGGER_PLAN_DELETE
