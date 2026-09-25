@@ -307,6 +307,27 @@ def _plan_payload_has_elements(data: Any) -> bool:
     return isinstance(data, dict) and isinstance(data.get("elements"), (dict, list))
 
 
+def _reference_type(ref: Any) -> int | None:
+    """An element reference's integer type (int or numeric string), or None if unreadable.
+
+    A missing or malformed type must not pass as "not a marker" — the reference could still
+    point at a marker, which the force gate would then treat as unplaced.
+    """
+    if not isinstance(ref, dict):
+        return None
+    ref_type = ref.get("type")
+    if isinstance(ref_type, bool):
+        return None
+    if isinstance(ref_type, int):
+        return ref_type
+    if isinstance(ref_type, str):
+        # isascii+isdecimal, not isdigit: "²".isdigit() is True but int("²") raises.
+        text = ref_type.strip()
+        if text.isascii() and text.isdecimal() and len(text) <= 10:
+            return int(text)
+    return None
+
+
 def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
     """Marker ids referenced in one plan, or None if any element/reference is unreadable."""
     elements = plan_data.get("elements") if isinstance(plan_data, dict) else None
@@ -317,9 +338,10 @@ def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
         ref = elem.get("reference") if isinstance(elem, dict) else "malformed"
         if ref is None:
             continue
-        if not isinstance(ref, dict):
+        ref_type = _reference_type(ref)
+        if ref_type is None:
             return None
-        if str(ref.get("type")).strip() != "2":
+        if ref_type != 2:
             continue
         ref_id = ComexioAPI._parse_plausible_marker_id(ref.get("ref_id"))
         if ref_id is None:

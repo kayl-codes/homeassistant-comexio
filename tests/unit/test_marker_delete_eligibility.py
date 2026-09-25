@@ -135,6 +135,14 @@ def test_placed_marker_ids_strict_collects_marker_refs() -> None:
         _plan(_ref(2, None)),
         _plan("malformed element"),
         _plan({"reference": "malformed"}),
+        # Regression (Sourcery, PR #94): a reference without a readable type used to be skipped
+        # as "not a marker", so a placed marker behind it looked unplaced.
+        _plan({"reference": {"ref_id": 4}}),
+        _plan(_ref(None, 4)),
+        _plan(_ref(True, 4)),
+        _plan(_ref("x", 4)),
+        _plan(_ref(2.0, 4)),
+        _plan(_ref("²", 4)),  # isdigit() but not int()-parseable — must not raise
     ],
 )
 def test_placed_marker_ids_strict_fails_closed(plan: dict) -> None:
