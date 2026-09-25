@@ -362,6 +362,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # still "succeeds" with old or empty data. Destructive callers check this instead of
         # last_update_success alone.
         self._last_poll_scraped: bool = False
+        # Whether the last scraped config holds titled KNX bridge markers — taken from the
+        # unfiltered parse, since data["markers"] is empty when marker import is off.
+        self._knx_bridge_markers_present: bool = False
         self.sync_error: bool = False
         self.sync_progress_text: str = "Idle"
         self.sync_progress_pct: int | None = None
@@ -584,6 +587,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # chance to fail, and the attribute's contract is "last *successful* poll". Writing
             # it here directly would leak counts from a poll that ends up raising further down.
             source_counts = {cat.key: len(parsed_data.get(cat.data_key, [])) for cat in SOURCE_CATEGORIES.values()}
+            self._knx_bridge_markers_present = any(
+                m.get("kind") == MarkerKind.KNX_BRIDGE for m in parsed_data.get("markers", [])
+            )
 
             # async_update_from_raw_config never raises (own contract, enforced internally) —
             # no local guard needed here.
@@ -1715,9 +1721,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return has_knx_artifacts(
             dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})),
             self._parsed_webio_devices(),
-            has_bridge_markers=any(
-                m.get("kind") == MarkerKind.KNX_BRIDGE for m in (self.data or {}).get("markers", [])
-            ),
+            has_bridge_markers=self._knx_bridge_markers_present,
         )
 
     async def async_uninstall_cleanup(
@@ -1870,7 +1874,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         try:
             reset, failed, placed, error = await self.api.reset_knx_bridge_markers(progress_cb)
         except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.error("[%s] Resetting the KNX bridge markers failed: %s", self.server_id, err)
+            _LOGGER.exception("[%s] Resetting the KNX bridge markers failed", self.server_id)
             return [], [], f"connection error: {err}"
         except Exception:  # last phase: must not discard the earlier phases' result
             _LOGGER.exception("[%s] Resetting the KNX bridge markers failed unexpectedly", self.server_id)

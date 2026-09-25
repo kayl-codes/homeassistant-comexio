@@ -516,7 +516,8 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> No
     )
 
 
-async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+# HA awaits async_migrate_entry — the async signature is its contract, not an unused async.
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:  # NOSONAR
     """Migrate an older config entry to the current (1, CONFIG_ENTRY_MINOR_VERSION) layout.
 
     1.1 -> 1.2 (v0.10.0): no data change; flags the entry for the one-shot KNX pre-release
