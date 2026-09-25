@@ -106,6 +106,7 @@ _COMEXIO_VERSION_RE = re.compile(
     r'module/admin/function_function_module/js/cmb_function_function_module\.js)"'
 )
 _VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
+_EMPTY_JS_ARRAY_RE = re.compile(r"\[\s*\]")
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTENT_TYPE_JSON = "Content-Type: application/json"
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
@@ -295,6 +296,76 @@ def _placed_marker_ids(all_plans: dict[int, dict], ref_type: int) -> set[int]:
             with suppress(TypeError, ValueError):
                 placed_ids.add(int(ref.get("ref_id")))
     return placed_ids
+
+
+def _knx_bridge_title(k_id: int, k_title: str) -> str:
+    """Marker title of the KNX bridge marker for K-element k_id (matches MARKER_KNX_BRIDGE_SUFFIX_RE)."""
+    return f"{k_title} [K{k_id}]"
+
+
+def _is_knx_bridge_title(name: Any) -> bool:
+    """True if name is a machine-given KNX bridge marker title ("... [K<id>]")."""
+    return isinstance(name, str) and bool(MARKER_KNX_BRIDGE_SUFFIX_RE.search(name))
+
+
+def _knx_bridge_run_end(items: Any, start: int, min_len: int = MARKER_KNX_BRIDGE_BLOCK_SIZE) -> int:
+    """Exclusive end of the contiguous run of blank or bridge-titled markers beginning at start.
+
+    Everything in that run is either a blank filler or a bridge marker — i.e. owned by the
+    bridge block — so free-marker reuse may extend over the whole run instead of stopping
+    after the first min_len ids (live 2026-09-25: a block that had grown to M300-M421 only
+    ever reused M300-M349, every later rebuild appended fresh markers above M421). Never
+    returns less than start + min_len, keeping the original single-block window as a floor.
+    """
+    names: dict[int, Any] = {
+        m["Id"]: m.get("Name") for m in items if isinstance(m, dict) and isinstance(m.get("Id"), int)
+    }
+    end = start
+    while end in names and (not names[end] or _is_knx_bridge_title(names[end])):
+        end += 1
+    return max(end, start + min_len)
+
+
+def _knx_bridge_reset_candidates(items: Any, placed_ids: set[int]) -> tuple[list[tuple[int, bool]], int]:
+    """Bridge-titled markers to reset (blank title) during a KNX cleanup.
+
+    Returns ([(marker_id, binary), ...] ascending, number of bridge markers skipped because
+    they are still placed in some function plan). A still-placed bridge marker is left alone:
+    it is either wired into a plan the cleanup did not delete or the user reused it.
+    """
+    candidates: list[tuple[int, bool]] = []
+    skipped = 0
+    for m in items:
+        if not isinstance(m, dict) or not isinstance(m.get("Id"), int) or not _is_knx_bridge_title(m.get("Name")):
+            continue
+        if m["Id"] in placed_ids:
+            skipped += 1
+            continue
+        # Same default as _build_source_item: a marker without Type is digital.
+        candidates.append((m["Id"], str(m.get("Type", 1)) == "1"))
+    return sorted(candidates), skipped
+
+
+def _stale_knx_bridge_marker_ids(items: Any, min_id: int, keep_titles: set[str]) -> set[int]:
+    """Ids >= min_id of bridge-titled markers whose title is not in keep_titles.
+
+    A bridge marker keeps its title after its K-element got a new one (e.g. a [TRIG]/[RO]
+    suffix via the DPT repair flow) or after its plan was deleted — create_knx_bridge_marker
+    only reuses exact title matches and blank markers, so such a leftover was never
+    reclaimed (live 2026-09-25: M313-M363 still carried old "[K<id>]" titles next to their
+    active replacements M364-M421). keep_titles holds the titles of the current batch, whose
+    unwired remnants create_knx_bridge_marker reuses by exact title instead. Placement is
+    NOT checked here — _free_marker_ids removes placed ids afterwards.
+    """
+    return {
+        m["Id"]
+        for m in items
+        if isinstance(m, dict)
+        and isinstance(m.get("Id"), int)
+        and m["Id"] >= min_id
+        and _is_knx_bridge_title(m.get("Name"))
+        and m.get("Name") not in keep_titles
+    }
 
 
 class ComexioAPI:
@@ -648,6 +719,11 @@ class ComexioAPI:
             for m in _VAR_DECL_RE.finditer(script):
                 var_name = m.group(1)
                 search_start = m.end()
+                if _EMPTY_JS_ARRAY_RE.match(script, search_start):
+                    # PHP json_encode renders an empty array as `[]` (e.g. $Fubs without any
+                    # plan) — searching on for "{" would grab the NEXT variable's object.
+                    result[var_name] = {}
+                    continue
                 brace_index = script.find("{", search_start)
                 if brace_index == -1:
                     continue
@@ -1189,7 +1265,10 @@ class ComexioAPI:
             # address) — stripped here, at the single point the value enters HA.
             raw_ip = d_data.get("Ip")
             dev_info["device_ip"] = raw_ip.strip() if isinstance(raw_ip, str) else raw_ip
-            raw_base_id = d_data.get("BaseId")
+            # The class id is WebDeviceBaseId in $WebDevices — "BaseId" only exists in the
+            # upload/save payloads. Reading "BaseId" here left base_id None for every class, so
+            # the uninstall cleanup never deleted a single Web-IO class (live-verified 2026-09-25).
+            raw_base_id = d_data.get("WebDeviceBaseId")
             dev_info["base_id"] = str(raw_base_id) if raw_base_id is not None else None
             return target_dev_id
         return None
@@ -3710,9 +3789,19 @@ class ComexioAPI:
         min_id: int,
         ref_type: int = 2,
         max_id: int | None = None,
+        keep_bridge_titles: set[str] | None = None,
     ) -> list[int]:
         """Ascending ids in [min_id, max_id) of markers that are 'free': no title AND not
-        placed as an element in any function plan.
+        placed as an element in any function plan (plus, with keep_bridge_titles, stale
+        bridge markers >= min_id — see below).
+
+        keep_bridge_titles (optional): additionally treat every unplaced, bridge-titled
+        marker >= min_id whose title is NOT in this set as free — a stale bridge marker left
+        behind by a K-element rename or a deleted plan (see _stale_knx_bridge_marker_ids).
+        Bridge titles are machine-given, so this never touches a user's own marker.
+        Deliberately NOT capped at max_id: max_id guards blank markers (which could be a
+        user's), a stale bridge marker is ours wherever it sits — and since the result is
+        ascending, ids above the block are only used once the block itself is exhausted.
 
         Mirrors the same relevant-vs-free distinction Comexio's own Studio validation uses
         (see project_knx_write_path_design memory, 15.09.2026 discussion): a blank, unplaced
@@ -3733,10 +3822,74 @@ class ComexioAPI:
         group = fub_modules.get("2")
         items = group.values() if isinstance(group, dict) else (group or [])
         candidate_ids = _blank_marker_id_candidates(items, min_id, max_id)
+        if keep_bridge_titles is not None:
+            candidate_ids |= _stale_knx_bridge_marker_ids(items, min_id, keep_bridge_titles)
         if not candidate_ids:
             return []
         placed_ids = _placed_marker_ids(all_plans, ref_type)
         return sorted(candidate_ids - placed_ids)
+
+    async def _load_all_plans_verified(self, fubs: dict[str, Any]) -> dict[int, dict] | None:
+        """Elements/connections of EVERY plan in fubs (a fresh $Fubs), or None if any is missing.
+
+        Placement checks that decide whether a bridge marker may be renamed or blanked need
+        the complete picture: function_plan_load_all_plans silently skips malformed entries
+        and filters against the cached plan list. This refreshes that cache (self._fub_data)
+        from fubs, then loads each plan the bulk response lacked individually (e.g. a plan
+        without elements, should the bulk endpoint omit those). Returns {} if there are no
+        plans at all.
+        """
+        self._fub_data = fubs
+        fub_ids = {int(fid) for fid in fubs}
+        if not fub_ids:
+            return {}
+        plans = await self.function_plan_load_all_plans()
+        for fid in sorted(fub_ids - set(plans)):
+            data = await self.function_plan_load_elements(fid)
+            if data is None:
+                _LOGGER.error("_load_all_plans_verified: plan fub=%s could not be loaded — placement unknown", fid)
+                return None
+            plans[fid] = data
+        return plans
+
+    async def reset_knx_bridge_markers(
+        self, progress_cb: Callable[[int, int], None] | None = None
+    ) -> tuple[list[int], list[int], int, str | None]:
+        """Blank the title of every unplaced KNX bridge marker ("... [K<id>]").
+
+        Part of the KNX cleanup: markers are never deleted (Comexio would not hand their ids
+        out again), only un-titled, so _free_marker_ids treats them as free and the next sync
+        rebuilds the bridge block compactly from its start. Clearing a title via isunique +
+        saveOne with name="" was verified live 2026-09-25 (M300: type and category kept).
+        Must run AFTER the KNX cluster plans were deleted — markers still placed in any plan
+        are skipped.
+
+        Reads $Fubs from the same fresh config fetch (the cached plan list still contains the
+        plans deleted moments ago). Returns (reset ids, failed ids, skipped-as-placed count,
+        error) — error is set, and nothing is touched, when the config or any plan could not
+        be loaded: a missing plan would make the bridge markers wired into it look unplaced.
+        progress_cb(done, total) is called after every marker (one HTTP round trip each).
+        """
+        conf = await self.get_raw_config()
+        fub_modules = conf.get("FubModules")
+        fubs = conf.get("Fubs")
+        if not fub_modules or not isinstance(fubs, dict):
+            return [], [], 0, "could not fetch current Comexio config"
+        all_plans = await self._load_all_plans_verified(fubs)
+        if all_plans is None:
+            return [], [], 0, "could not load every function plan"
+
+        group = fub_modules.get("2")
+        items = group.values() if isinstance(group, dict) else (group or [])
+        candidates, skipped = _knx_bridge_reset_candidates(items, _placed_marker_ids(all_plans, 2))
+        reset: list[int] = []
+        failed: list[int] = []
+        for i, (marker_id, binary) in enumerate(candidates, start=1):
+            (reset if await self.rename_marker(marker_id, "", binary) else failed).append(marker_id)
+            if progress_cb:
+                progress_cb(i, len(candidates))
+        _LOGGER.info("reset_knx_bridge_markers: reset=%d failed=%s skipped_placed=%d", len(reset), failed, skipped)
+        return reset, failed, skipped, None
 
     async def _fill_marker_gap(self, current_highest_id: int, target_id: int) -> int:
         """Consume marker ids via blank create_marker() calls until the next created
@@ -3871,7 +4024,7 @@ class ComexioAPI:
         Returns (marker_id, title) on success, None on failure (create or rename failed).
         """
         binary = self.io_types.get(str(k_type_raw), {}).get("binary", False)
-        title = f"{k_title} [K{k_id}]"
+        title = _knx_bridge_title(k_id, k_title)
 
         existing_id = self._marker_id_by_title(fub_modules, title)
         if existing_id is not None:
@@ -4121,12 +4274,19 @@ class ComexioAPI:
         )
         return None
 
-    async def _prepare_knx_bridge_batch(self) -> tuple[dict[str, Any] | None, list[int], str | None]:
+    async def _prepare_knx_bridge_batch(
+        self, batch_titles: set[str]
+    ) -> tuple[dict[str, Any] | None, list[int], str | None]:
         """Fetch config, locate the KNX bridge marker block, and collect reusable free markers.
 
         Split out of function_plan_add_knx_bridge_pairs to keep its own cognitive complexity
         within SonarQube S3776's limit. Returns (fub_modules, free_marker_ids, error) — on
         failure fub_modules is None and error carries the message the caller returns verbatim.
+
+        batch_titles: bridge titles of the current batch — stale bridge markers carrying one
+        of them stay out of the free list, create_knx_bridge_marker reuses them by title.
+        Reuse spans the whole contiguous blank/bridge run from the block start
+        (_knx_bridge_run_end), not just its first MARKER_KNX_BRIDGE_BLOCK_SIZE ids.
         """
         conf = await self.get_raw_config()
         fub_modules = conf.get("FubModules")
@@ -4143,23 +4303,29 @@ class ComexioAPI:
         if target is None:
             return None, [], "failed to reach the KNX bridge marker block boundary — aborting, see log"
 
-        all_plans = await self.function_plan_load_all_plans()
+        fubs = conf.get("Fubs")
+        all_plans = await self._load_all_plans_verified(fubs) if isinstance(fubs, dict) else None
         if not all_plans:
-            # function_plan_load_all_plans() returns {} both when there are genuinely no
-            # plans yet AND on a failed/incomplete fetch (HTTP error, malformed response —
-            # see its own docstring) — the two are indistinguishable here, and treating a
-            # failed fetch as "nothing is placed anywhere" would let _free_marker_ids reuse
-            # a marker that IS actually wired into a plan this call just couldn't see.
-            # Fall back to always creating fresh markers instead (still correct, just
-            # skips the reuse optimization for this run).
+            # None = some plan could not be loaded; {} = no plan at all, which cannot happen
+            # here (the target cluster plan exists) and so also points at a bad fetch. Reuse
+            # now also reclaims stale BRIDGE markers, which are wired into some plan far more
+            # often than blank ones — treating an unseen plan as "nothing placed there" would
+            # rename a live bridge of another cluster. Fall back to always creating fresh
+            # markers instead (still correct, just skips the reuse optimization for this run).
             _LOGGER.warning(
-                "function_plan_add_knx_bridge_pairs: function_plan_load_all_plans returned no "
-                "plans — skipping free-marker reuse for this run (creating fresh markers instead)"
+                "function_plan_add_knx_bridge_pairs: could not load every function plan "
+                "— skipping free-marker reuse for this run (creating fresh markers instead)"
             )
             return fub_modules, [], None
 
+        group = fub_modules.get("2")
+        items = list(group.values() if isinstance(group, dict) else (group or []))
         free_marker_ids = self._free_marker_ids(
-            fub_modules, all_plans, target, max_id=target + MARKER_KNX_BRIDGE_BLOCK_SIZE
+            fub_modules,
+            all_plans,
+            target,
+            max_id=_knx_bridge_run_end(items, target),
+            keep_bridge_titles=batch_titles,
         )
         return fub_modules, free_marker_ids, None
 
@@ -4191,7 +4357,8 @@ class ComexioAPI:
         brand-new bridge immediately, in the same cycle, instead of re-auditing for the
         marker_id later (see _add_single_knx_bridge's docstring)).
         """
-        fub_modules, free_marker_ids, error = await self._prepare_knx_bridge_batch()
+        batch_titles = {_knx_bridge_title(int(it["ref_id"]), it["title"]) for it in missing_items}
+        fub_modules, free_marker_ids, error = await self._prepare_knx_bridge_batch(batch_titles)
         if error:
             return [], [error], {}
         if fub_modules is None:
@@ -4709,6 +4876,25 @@ class ComexioAPI:
                     endpoints.add(int(endpoint["FubElementId"]))
             conn_endpoints.append(endpoints)
         return existing_by_ref, conn_endpoints
+
+    async def fetch_marker_titles(self) -> dict[int, str] | None:
+        """Current marker titles {id: title} from a fresh config fetch; None if it failed."""
+        conf = await self.get_raw_config()
+        fub_modules = conf.get("FubModules")
+        if not fub_modules:
+            return None
+        titles: dict[int, str] = {}
+        for mid, marker in self._iter_group(fub_modules.get("2")):
+            with suppress(TypeError, ValueError):
+                titles[int(mid)] = str((marker or {}).get("Name") or "")
+        return titles
+
+    @staticmethod
+    def function_plan_element_refs(plan_data: dict | None) -> list[tuple[int, int]]:
+        """(ref_type, ref_id) of every element in plan_data — public view of the index
+        _function_plan_existing_refs builds, for callers outside the API."""
+        existing_by_ref, _ = ComexioAPI._function_plan_existing_refs(plan_data)
+        return list(existing_by_ref)
 
     @staticmethod
     def _function_plan_find_connection_by_source(plan_data: dict | None, src_elem_id: int) -> tuple[int, dict] | None:

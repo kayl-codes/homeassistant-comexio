@@ -16,9 +16,11 @@ from .const import (
     CONF_API_USERNAME,
     CONF_HOST,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    CONF_KNX_PRERELEASE_CLEANUP_PENDING,
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_USERNAME,
+    CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
     SOURCE_CATEGORIES,
     MarkerKind,
@@ -197,6 +199,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     with contextlib.suppress(ValueError):
         webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handle_webhook)
+
+    # One-shot check after an update from a KNX pre-release (flag set by async_migrate_entry).
+    # Deliberately BEFORE the update listener is registered: clearing the flag writes the
+    # options, which must not trigger a reload of the entry that is still being set up.
+    coordinator.check_knx_prerelease_cleanup()
 
     entry.async_on_unload(entry.add_update_listener(update_listener))
     hass.data[DOMAIN][f"{entry.entry_id}_webhook"] = webhook_id
@@ -513,6 +520,28 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> No
         len(mismatches),
         deleted,
     )
+
+
+# HA awaits async_migrate_entry — the async signature is its contract, not an unused async.
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:  # NOSONAR
+    """Migrate an older config entry to the current (1, CONFIG_ENTRY_MINOR_VERSION) layout.
+
+    1.1 -> 1.2 (v0.10.0): no data change; flags the entry for the one-shot KNX pre-release
+    cleanup check (see coordinator.check_knx_prerelease_cleanup). Every pre-1.2 entry gets
+    the flag — the check itself only raises the repair issue if KNX artifacts exist, so
+    plain v0.9.x installs just clear it again.
+    """
+    if entry.version > 1:
+        # Downgrade from a future major version: refuse rather than guess the layout.
+        return False
+    if entry.minor_version < CONFIG_ENTRY_MINOR_VERSION:
+        hass.config_entries.async_update_entry(
+            entry,
+            options={**entry.options, CONF_KNX_PRERELEASE_CLEANUP_PENDING: True},
+            minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        )
+        _LOGGER.info("Comexio: migrated config entry %s to version 1.%d", entry.entry_id, CONFIG_ENTRY_MINOR_VERSION)
+    return True
 
 
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry):

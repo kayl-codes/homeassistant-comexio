@@ -160,7 +160,7 @@
         "name": "Aperçu"
       },
       "uninstall_cleanup": {
-        "name": "Nettoyage de désinstallation (test)"
+        "name": "Nettoyage de désinstallation"
       }
     },
     "image": {
@@ -275,7 +275,18 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Nettoyage de désinstallation",
-            "description": "Ceci supprime tout ce que l'intégration a créé dans Comexio : {plan_count} plan(s) de fonctions, {device_count} appareil(s) Web-IO, et {class_count} classe(s) Web-IO.\n\nCette action est irréversible. Les plans de fonctions créés par cette intégration, y compris leur câblage, seront définitivement supprimés.\n\nVoulez-vous continuer ?"
+            "description": "Choisissez ce qui doit être supprimé de Comexio. Au total, l'intégration a créé {plan_count} plan(s) de fonctions, {device_count} appareil(s) Web-IO et {class_count} classe(s) Web-IO.\n\n* **Everything** supprime tout.\n* **Markers only / IOs only / KNX only** suppriment uniquement les plans de fonctions, l'appareil et la classe Web-IO de cette partie. Le plan de déclenchement commun n'est supprimé entièrement que s'il ne contient aucune paire de déclenchement de l'autre catégorie — sinon Markers/KNX n'en retirent que leurs propres paires.\n* **KNX only** et **Everything** effacent aussi les titres des marqueurs passerelles KNX, qui redeviennent des marqueurs libres. Les marqueurs eux-mêmes ne sont pas supprimés.\n\nCette action est irréversible. Les plans de fonctions supprimés perdent définitivement leur câblage."
+          }
+        }
+      }
+    },
+    "knx_prerelease_cleanup": {
+      "title": "Comexio : nettoyer les restes des préversions KNX ({server_id})",
+      "fix_flow": {
+        "step": {
+          "uninstall_cleanup": {
+            "title": "Nettoyage de la préversion KNX",
+            "description": "Cette installation contient encore des plans de fonctions KNX ou des appareils Web-IO d'une préversion KNX (v0.10.0-rc1 à rc3). Leur structure ne correspond plus à cette version.\n\n**KNX only** (présélectionné) supprime les plans de fonctions KNX, l'appareil et la classe Web-IO KNX ainsi que le Web-IO de bouclage KNX, et efface les titres des marqueurs passerelles KNX afin qu'ils puissent être réutilisés. La prochaine synchronisation recrée ensuite tout proprement. Les plans de fonctions des marqueurs et des IO ne sont pas modifiés ; seules les paires de déclenchement KNX sont retirées du plan de déclenchement commun (le plan entier uniquement s'il ne contient rien d'autre).\n\nCette action est irréversible. Choisissez Cancel pour tout conserver en l'état."
           }
         }
       }

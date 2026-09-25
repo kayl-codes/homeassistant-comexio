@@ -56,6 +56,30 @@ FUNCTION_PLAN_FUB_ID_AUTO = "auto"
 CONF_FUNCTION_PLAN_PLAN_MAP = "logikplan_plan_map"  # dict: plan_name → fub_id (HA-managed cluster plans)
 CONF_FUNCTION_PLAN_PLAN_PREFIX = "logikplan_plan_prefix"
 DEFAULT_FUNCTION_PLAN_PLAN_PREFIX = "HA"
+
+# Config entry minor version 2 (v0.10.0): entries migrated from an older minor version get
+# this one-shot option set, so the first setup checks for leftovers of the KNX pre-releases
+# (v0.10.0-rc1..rc3 built KNX plans / Web-IO / bridge markers with an older layout) and
+# offers the KNX cleanup as a repair issue. Removed again right after that check.
+CONFIG_ENTRY_MINOR_VERSION = 2
+CONF_KNX_PRERELEASE_CLEANUP_PENDING = "knx_prerelease_cleanup_pending"
+# Repair issue translation keys; the issue id is "{key}_{server_id}".
+ISSUE_UNINSTALL_CLEANUP = "uninstall_cleanup"
+ISSUE_KNX_PRERELEASE_CLEANUP = "knx_prerelease_cleanup"
+# Uninstall cleanup: update the running notification every N reset bridge markers.
+UNINSTALL_CLEANUP_PROGRESS_EVERY = 10
+
+
+def uninstall_cleanup_notification_id(server_id: str) -> str:
+    """Notification id of the running/finished uninstall cleanup (result uses "<id>_result")."""
+    return f"comexio_uninstall_cleanup_{server_id}"
+
+
+def uninstall_cleanup_pending_notification_id(server_id: str) -> str:
+    """Notification id of the button's "repair issue waiting for confirmation" hint."""
+    return f"{uninstall_cleanup_notification_id(server_id)}_pending"
+
+
 CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN = "logikplan_max_pairs_per_plan"
 DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN = 100
 # KNX cluster plans hard-cap at this size, ignoring CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN

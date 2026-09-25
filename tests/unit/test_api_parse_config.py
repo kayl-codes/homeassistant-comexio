@@ -140,7 +140,7 @@ def test_config_entry_overrides_names_and_schema(parsing_api: ComexioAPI) -> Non
     )
     conf = {
         "FubModules": {"2": {"1": {"Id": 1, "Name": "Licht", "Type": 1}}},
-        "WebDevices": {"9": {"Name": "Haus [M]", "Ip": "192.168.1.20", "BaseId": 1}},
+        "WebDevices": {"9": {"Name": "Haus [M]", "Ip": "192.168.1.20", "WebDeviceBaseId": 1}},
     }
 
     result = parsing_api.parse_config(conf)

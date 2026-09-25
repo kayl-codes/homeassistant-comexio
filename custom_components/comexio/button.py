@@ -46,6 +46,7 @@ from .const import (
     ICON_TOOLS,
     ICON_UPLOAD,
     ICON_WARNING,
+    ISSUE_UNINSTALL_CLEANUP,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -67,6 +68,7 @@ from .const import (
     category_by_fub_module_type,
     source_category,
     trigger_pair_categories,
+    uninstall_cleanup_pending_notification_id,
     webio_class_label,
     webio_class_name,
     webio_range_check_entity_id,
@@ -2803,8 +2805,8 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
 
 
 class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
-    """Test button: raises a Repair issue to tear down everything the integration
-    created in Comexio (managed Function Plans, Web-IO devices, Web-IO classes).
+    """Raises the uninstall-cleanup Repair issue, whose dialog tears down what the
+    integration created in Comexio — everything, or one scope (markers / IOs / KNX).
     """
 
     _attr_has_entity_name = True
@@ -2830,35 +2832,21 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Raise a Repair issue summarizing what would be torn down. The actual
-        deletion only runs when the user confirms it in the Repair dialog."""
-        plan_map = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        deletion only runs when the user confirms it (and picks a scope) in the Repair dialog."""
         # Force a fresh audit rather than trusting a poll-interval-old snapshot — devices
         # created/removed since the last poll would otherwise be missed or acted on stale.
         await self.coordinator.async_request_refresh()
-        webio_devices = self.coordinator.last_audit_results.get("webio_devices", {})
-        device_count = sum(1 for dev in webio_devices.values() if dev.get("device_id"))
-        class_count = sum(1 for dev in webio_devices.values() if dev.get("base_id"))
-
-        ir.async_create_issue(
-            self.hass,
-            DOMAIN,
-            f"uninstall_cleanup_{self.server_id}",
-            is_fixable=True,
-            severity=ir.IssueSeverity.WARNING,
-            translation_key="uninstall_cleanup",
-            translation_placeholders={
-                "server_id": self.server_id,
-                "plan_count": str(len(plan_map)),
-                "device_count": str(device_count),
-                "class_count": str(class_count),
-            },
-            data={
-                "entry_id": self.coordinator.config_entry.entry_id,
-                "plan_count": len(plan_map),
-                "device_count": device_count,
-                "class_count": class_count,
-            },
-        )
+        self.coordinator.create_uninstall_cleanup_issue(ISSUE_UNINSTALL_CLEANUP)
+        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
+        if conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS):
+            persistent_notification.async_create(
+                self.hass,
+                "A repair issue **Uninstall Cleanup** was created. Open "
+                "[Settings → System → Repairs](/config/repairs), choose what to remove "
+                "(everything, markers, IOs or KNX) and confirm. Nothing is deleted until you do.",
+                title=f"Comexio Uninstall Cleanup ({self.coordinator.server_id})",
+                notification_id=uninstall_cleanup_pending_notification_id(self.coordinator.server_id),
+            )
 
 
 class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):

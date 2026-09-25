@@ -55,6 +55,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
 | `button` (diagnostic) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
+| `button` (diagnostic, disabled by default) | Integration | `Uninstall Cleanup` — raises a Repair issue that removes what the integration created in Comexio: everything, or only the Markers / IOs / KNX part (managed Function Plans, Web-IO devices and classes). KNX also resets the titles of the KNX bridge markers so they become free markers again; the shared `HA - TRIGGER` plan is only removed as a whole if it holds no other category's trigger pairs. Nothing is deleted until the Repair dialog is confirmed; progress and a result summary are shown as notifications. |
 
 ## 🚀 Installation
 
@@ -200,6 +201,7 @@ Comexio's KNX/EIB gateway objects ("K-Elements") can be imported as HA entities 
 - **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu.
 - **Extension entities don't reappear after coming back online:** Reload the integration via *Settings → Devices & Services → Comexio → ⋮ → Reload*. The coordinator will re-detect the extension as online and restore all its entities.
 - **KNX analog values above ~1,000,000 get rounded/corrupted:** See the [KNX Objects guide](KNX.md#9-known-limitations) — this is a Comexio firmware bug, not an integration issue.
+- **Updating from a KNX pre-release (v0.10.0-rc1 … rc3):** Those versions built the KNX Function Plans, Web-IO device/class and bridge markers in a layout the final release no longer uses. After the update, a one-time **Clean up KNX pre-release leftovers** Repair issue appears (with "KNX only" preselected) if such leftovers exist — confirm it, then run a sync to rebuild the KNX part cleanly. Marker and IO plans are not touched.
 
 ## 🤝 Contributing
 Pull Requests are highly welcome! If you find bugs or have feature requests, please create an issue in the GitHub repository.
@@ -268,6 +270,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
 | `button` (Diagnose) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
+| `button` (Diagnose, standardmäßig deaktiviert) | Integration | `Deinstallations-Bereinigung` — legt ein Reparatur-Issue an, das entfernt, was die Integration in Comexio angelegt hat: alles oder nur den Merker-/IO-/KNX-Teil (verwaltete Logikpläne, Web-IO-Geräte und -Klassen). KNX setzt zusätzlich die Titel der KNX-Brücken-Merker zurück, sodass sie wieder frei sind; der gemeinsame `HA - TRIGGER`-Plan wird nur komplett entfernt, wenn er keine Trigger-Paare einer anderen Kategorie enthält. Gelöscht wird erst nach Bestätigung im Reparatur-Dialog; Fortschritt und Zusammenfassung erscheinen als Benachrichtigungen. |
 
 ## 🚀 Installation
 
@@ -413,6 +416,7 @@ Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs a
 - **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten.
 - **Extension-Entitäten erscheinen nach Wiederherstellung nicht:** Lade die Integration über *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu laden* neu. Der Coordinator erkennt das Modul als online und legt alle Entitäten neu an.
 - **KNX-Analogwerte oberhalb von ca. 1.000.000 werden gerundet/verfälscht:** Siehe die [Anleitung KNX-Objekte](KNX.md#9-bekannte-einschränkungen) — das ist ein Comexio-Firmware-Bug, kein Integrations-Problem.
+- **Update von einer KNX-Vorabversion (v0.10.0-rc1 … rc3):** Diese Versionen haben KNX-Logikpläne, Web-IO-Gerät/-Klasse und Brücken-Merker in einem Layout angelegt, das die finale Version nicht mehr verwendet. Nach dem Update erscheint einmalig ein Reparatur-Issue **Überreste der KNX-Vorabversionen bereinigen** (mit vorausgewähltem „Nur KNX“), falls solche Reste existieren — bestätigen und danach synchronisieren, um den KNX-Teil sauber neu aufzubauen. Merker- und IO-Pläne bleiben unberührt.
 
 ## 🤝 Mitwirken
 Pull Requests sind herzlich willkommen! Wenn du Fehler findest oder Feature-Wünsche hast, erstelle bitte ein Issue im GitHub Repository.

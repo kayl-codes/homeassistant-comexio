@@ -160,7 +160,7 @@
         "name": "Vista previa"
       },
       "uninstall_cleanup": {
-        "name": "Limpieza de desinstalación (prueba)"
+        "name": "Limpieza de desinstalación"
       }
     },
     "image": {
@@ -275,7 +275,18 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Limpieza de desinstalación",
-            "description": "Esto elimina todo lo que la integración creó en Comexio: {plan_count} plan(es) de funciones, {device_count} dispositivo(s) Web-IO, y {class_count} clase(s) Web-IO.\n\nEsta acción no se puede deshacer. Los planes de funciones creados por esta integración, incluido su cableado, se eliminarán permanentemente.\n\n¿Deseas continuar?"
+            "description": "Elige qué eliminar de Comexio. En total, la integración creó {plan_count} plan(es) de funciones, {device_count} dispositivo(s) Web-IO y {class_count} clase(s) Web-IO.\n\n* **Everything** lo elimina todo.\n* **Markers only / IOs only / KNX only** eliminan solo los planes de funciones, el dispositivo y la clase Web-IO de esa parte. El plan de disparo compartido solo se elimina por completo si no contiene pares de disparo de la otra categoría; de lo contrario, Markers/KNX solo eliminan sus propios pares.\n* **KNX only** y **Everything** también borran los títulos de los marcadores puente KNX, que vuelven a quedar libres. Los marcadores en sí no se eliminan.\n\nEsta acción no se puede deshacer. Los planes de funciones eliminados pierden su cableado permanentemente."
+          }
+        }
+      }
+    },
+    "knx_prerelease_cleanup": {
+      "title": "Comexio: limpiar restos de las versiones preliminares KNX ({server_id})",
+      "fix_flow": {
+        "step": {
+          "uninstall_cleanup": {
+            "title": "Limpieza de la versión preliminar KNX",
+            "description": "Esta instalación aún contiene planes de funciones KNX o dispositivos Web-IO de una versión preliminar KNX (v0.10.0-rc1 a rc3). Su estructura ya no coincide con esta versión.\n\n**KNX only** (preseleccionado) elimina los planes de funciones KNX, el dispositivo y la clase Web-IO KNX y el Web-IO de bucle KNX, y borra los títulos de los marcadores puente KNX para que puedan reutilizarse. La próxima sincronización lo vuelve a crear todo correctamente. Los planes de funciones de marcadores e IO no se modifican; del plan de disparadores compartido solo se eliminan los pares de disparo KNX (el plan completo solo si no contiene nada más).\n\nEsta acción no se puede deshacer. Elige Cancel para dejarlo todo como está."
           }
         }
       }

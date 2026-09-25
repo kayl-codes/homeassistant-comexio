@@ -160,7 +160,7 @@
         "name": "Preview"
       },
       "uninstall_cleanup": {
-        "name": "Uninstall Cleanup (Test)"
+        "name": "Uninstall Cleanup"
       }
     },
     "image": {
@@ -275,7 +275,18 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Uninstall Cleanup",
-            "description": "This removes everything the integration created in Comexio: {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\nThis cannot be undone. Function Plans created by this integration, including their wiring, will be permanently deleted.\n\nDo you want to continue?"
+            "description": "Choose what to remove from Comexio. In total, the integration created {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\n* **Everything** removes all of it.\n* **Markers only / IOs only / KNX only** remove just that part's Function Plans, Web-IO device and class. The shared trigger plan is only removed as a whole if it holds no trigger pairs of the other category — otherwise Markers/KNX remove just their own pairs from it.\n* **KNX only** and **Everything** also clear the titles of the KNX bridge markers, so they become free markers again. The markers themselves are not deleted.\n\nThis cannot be undone. Deleted Function Plans lose their wiring permanently."
+          }
+        }
+      }
+    },
+    "knx_prerelease_cleanup": {
+      "title": "Comexio: clean up KNX pre-release leftovers ({server_id})",
+      "fix_flow": {
+        "step": {
+          "uninstall_cleanup": {
+            "title": "KNX pre-release cleanup",
+            "description": "This installation still contains KNX Function Plans or Web-IO devices from a KNX pre-release (v0.10.0-rc1 to rc3). Their layout no longer matches this version.\n\n**KNX only** (preselected) removes the KNX Function Plans, the KNX Web-IO device and class and the KNX loopback Web-IO, and clears the titles of the KNX bridge markers so they can be reused. The next sync then rebuilds everything cleanly. Marker and IO plans are not touched; from the shared trigger plan only the KNX trigger pairs are removed (the whole plan only if it holds nothing else).\n\nThis cannot be undone. Choose Cancel to keep everything as it is."
           }
         }
       }

@@ -160,7 +160,7 @@
         "name": "Vorschau"
       },
       "uninstall_cleanup": {
-        "name": "Deinstallations-Bereinigung (Test)"
+        "name": "Deinstallations-Bereinigung"
       }
     },
     "image": {
@@ -275,7 +275,18 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Deinstallations-Bereinigung",
-            "description": "Dies entfernt alles, was die Integration in Comexio angelegt hat: {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e), und {class_count} Web-IO-Klasse(n).\n\nDies kann nicht rückgängig gemacht werden. Von dieser Integration angelegte Logikpläne werden inklusive ihrer Verdrahtung endgültig gelöscht.\n\nMöchtest du fortfahren?"
+            "description": "Wähle, was aus Comexio entfernt werden soll. Insgesamt hat die Integration {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e) und {class_count} Web-IO-Klasse(n) angelegt.\n\n* **Everything** entfernt alles.\n* **Markers only / IOs only / KNX only** entfernen nur die Logikpläne, das Web-IO-Gerät und die Klasse dieses Bereichs. Der gemeinsame Trigger-Plan wird nur dann komplett entfernt, wenn er keine Trigger-Paare der anderen Kategorie enthält — sonst entfernen Merker/KNX nur ihre eigenen Paare daraus.\n* **KNX only** und **Everything** leeren außerdem die Titel der KNX-Brücken-Merker, damit sie wieder als freie Merker verfügbar sind. Die Merker selbst werden nicht gelöscht.\n\nDies kann nicht rückgängig gemacht werden. Gelöschte Logikpläne verlieren ihre Verdrahtung endgültig."
+          }
+        }
+      }
+    },
+    "knx_prerelease_cleanup": {
+      "title": "Comexio: Überreste der KNX-Vorabversionen bereinigen ({server_id})",
+      "fix_flow": {
+        "step": {
+          "uninstall_cleanup": {
+            "title": "Bereinigung KNX-Vorabversion",
+            "description": "Diese Installation enthält noch KNX-Logikpläne oder Web-IO-Geräte aus einer KNX-Vorabversion (v0.10.0-rc1 bis rc3). Deren Aufbau passt nicht mehr zu dieser Version.\n\n**KNX only** (vorausgewählt) entfernt die KNX-Logikpläne, das KNX-Web-IO-Gerät samt Klasse und das KNX-Loopback-Web-IO und leert die Titel der KNX-Brücken-Merker, damit sie wiederverwendet werden können. Die nächste Synchronisation legt danach alles sauber neu an. Merker- und IO-Logikpläne bleiben unberührt; aus dem gemeinsamen Trigger-Plan werden nur die KNX-Trigger-Paare entfernt (der ganze Plan nur, wenn er sonst nichts enthält).\n\nDies kann nicht rückgängig gemacht werden. Wähle Cancel, um alles unverändert zu lassen."
           }
         }
       }

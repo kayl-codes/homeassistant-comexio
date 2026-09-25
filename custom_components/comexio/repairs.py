@@ -1,6 +1,7 @@
 # Version: 0.7.5
 import asyncio
 import logging
+import time
 
 from homeassistant.components import persistent_notification
 from homeassistant.components.repairs import RepairsFlow
@@ -11,6 +12,15 @@ from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig,
 from homeassistant.util import slugify
 import voluptuous as vol
 
+from .cleanup_scope import (
+    CLEANUP_SCOPE_FULL,
+    CLEANUP_SCOPE_IO,
+    CLEANUP_SCOPE_KNX,
+    CLEANUP_SCOPE_MARKER,
+    CLEANUP_SCOPES,
+    SKIPPED_KNX_BRIDGE_MARKERS,
+    scope_includes_knx,
+)
 from .const import (
     CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
@@ -31,6 +41,7 @@ from .const import (
     ICON_RENAME,
     ICON_ROCKET,
     ICON_SYNC,
+    ISSUE_KNX_PRERELEASE_CLEANUP,
     MARKER_READ_ONLY_SUFFIX,
     MARKER_TRIGGER_SUFFIXES,
     SOURCE_CATEGORIES,
@@ -43,6 +54,8 @@ from .const import (
     WEBIO_CLASS_KNX,
     WebioClass,
     expand_ignored_marker_ids,
+    uninstall_cleanup_notification_id,
+    uninstall_cleanup_pending_notification_id,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -136,6 +149,94 @@ def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> st
     return f"{ICON_PUZZLE} Add {noun} to Function Plan {detail_str}"
 
 
+_CLEANUP_SCOPE_LABELS = {
+    CLEANUP_SCOPE_FULL: f"{ICON_DELETE} Everything",
+    CLEANUP_SCOPE_MARKER: f"{ICON_DELETE} Markers only",
+    CLEANUP_SCOPE_IO: f"{ICON_DELETE} IOs only",
+    CLEANUP_SCOPE_KNX: f"{ICON_DELETE} KNX only",
+}
+
+
+def _uninstall_cleanup_options(issue_data: dict) -> dict[str, str]:
+    """Scope choices of the uninstall-cleanup dialog, each with what it would delete.
+
+    Counts come from issue_data["counts"] (coordinator.uninstall_cleanup_counts at issue
+    creation). Issues created before the scope choice existed only carry the totals, which
+    then label the "Everything" option; the partial scopes are shown without counts.
+    """
+    counts = issue_data.get("counts") or {}
+    if CLEANUP_SCOPE_FULL not in counts:
+        counts = {
+            CLEANUP_SCOPE_FULL: {
+                "plans": issue_data.get("plan_count", 0),
+                "devices": issue_data.get("device_count", 0),
+                "classes": issue_data.get("class_count", 0),
+            }
+        }
+    options: dict[str, str] = {}
+    for scope in CLEANUP_SCOPES:
+        label = _CLEANUP_SCOPE_LABELS[scope]
+        if (c := counts.get(scope)) is not None:
+            label += f" ({c.get('plans', 0)} plans, {c.get('devices', 0)} devices, {c.get('classes', 0)} classes)"
+        if scope_includes_knx(scope):
+            label += " + reset KNX bridge markers"
+        options[scope] = label
+    options[ACTION_IGNORE] = "Cancel"
+    return options
+
+
+def _post_result_notification(hass: HomeAssistant, notif_id: str, msg: str, title: str) -> None:
+    """Replace the running-progress notification with the final result as a NEW notification.
+
+    Updating notif_id in place would only fire an UPDATED event, which the frontend does not
+    reliably surface as something new (same reasoning as button._post_result_notification).
+    """
+    result_id = f"{notif_id}_result"
+    persistent_notification.async_dismiss(hass, notif_id)
+    persistent_notification.async_dismiss(hass, result_id)
+    persistent_notification.async_create(hass, msg, title=title, notification_id=result_id)
+
+
+def _cleanup_incomplete(result: dict | None) -> bool:
+    """Whether a cleanup run left something behind that a re-run could still remove."""
+    if not result:
+        return False
+    retryable_skips = {k for k in result.get("skipped") or {} if k != SKIPPED_KNX_BRIDGE_MARKERS}
+    return bool(
+        result.get("failed_plans")
+        or result.get("failed_classes")
+        or result.get("failed_markers")
+        or result.get("marker_reset_error")
+        or retryable_skips
+    )
+
+
+def _cleanup_result_message(result: dict, scope: str) -> str:
+    """Persistent-notification text summarizing an uninstall cleanup run."""
+    lines = [
+        f"Cleanup finished (scope: {scope})",
+        "",
+        f"Plans removed: {len(result['deleted_plans'])} (failed: {len(result['failed_plans'])})",
+        f"Devices removed: {len(result['deleted_devices'])}",
+        f"Classes removed: {len(result['deleted_classes'])} (failed: {len(result['failed_classes'])})",
+    ]
+    if scope_includes_knx(scope):
+        lines.append(
+            f"KNX bridge markers reset: {len(result.get('reset_markers', []))} "
+            f"(failed: {len(result.get('failed_markers', []))})"
+        )
+        if error := result.get("marker_reset_error"):
+            lines.append(f"KNX bridge marker reset FAILED: {error} — run the KNX cleanup again")
+    if result.get("trigger_pairs_removed"):
+        lines.append(f"Trigger plan elements removed (plan kept): {result['trigger_pairs_removed']}")
+    lines.append(f"Skipped: {len(result['skipped'])}")
+    lines.extend(f"* {key}: {reason}" for key, reason in result["skipped"].items())
+    if _cleanup_incomplete(result):
+        lines.extend(["", "Not everything could be removed — the repair issue was raised again to retry."])
+    lines.extend(["", "Reloading the integration now..."])
+    return "\n".join(lines)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry):
     """Set up the repairs platform."""
     return True
@@ -162,7 +263,7 @@ class ComexioRepairFlow(RepairsFlow):
         if "statistics_orphaned" in self.issue_id:
             _LOGGER.debug("Routing to async_step_statistics_cleanup")
             return await self.async_step_statistics_cleanup()
-        if self.issue_id.startswith("uninstall_cleanup_"):
+        if self.issue_id.startswith(("uninstall_cleanup_", "knx_prerelease_cleanup_")):
             _LOGGER.debug("Routing to async_step_uninstall_cleanup")
             return await self.async_step_uninstall_cleanup()
         if self.issue_id.startswith("knx_dpt_ambiguous_"):
@@ -677,59 +778,69 @@ class ComexioRepairFlow(RepairsFlow):
         )
 
     async def async_step_uninstall_cleanup(self, user_input=None):
-        """Handle the uninstall/cleanup repair flow (test button).
+        """Handle the uninstall/cleanup repair flow (cleanup button + KNX pre-release cleanup issue).
 
-        Tears down everything the integration created in Comexio: HA-managed Function
-        Plans, then the Web-IO device instances, then the Web-IO device classes. This
-        is destructive and not reversible, so — unlike the other fix flows — the
-        default choice is 'ignore', not 'fix'.
+        Tears down what the integration created in Comexio for the chosen scope
+        (full / marker / io / knx, see cleanup_scope): HA-managed Function Plans, then the
+        Web-IO device instances, then the Web-IO device classes; knx/full also reset the
+        KNX bridge markers. This is destructive and not reversible, so — unlike the other
+        fix flows — the default choice is 'ignore' unless the issue names a default scope
+        (the KNX pre-release cleanup issue preselects 'knx').
         """
         entry_id = self.issue_data.get("entry_id")
 
         if user_input is not None:
             action = user_input["action"]
 
-            if action == "ignore":
+            self._dismiss_pending_notification(entry_id)
+            if action == ACTION_IGNORE:
                 ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
                 return self.async_create_entry(title="Cancelled", data={})
+            # vol.In below only lets through ACTION_IGNORE or one of CLEANUP_SCOPES.
+            scope = action
 
             if not entry_id:
                 return self.async_abort(reason="missing_entry_id")
 
-            # action == "fix": several sequential Comexio round-trips (one per plan,
-            # device and class) can add up past the repair dialog's UI timeout — same
-            # reasoning as the sync button's press_action, which also runs non-blocking
-            # instead of being awaited inline here.
+            # Several sequential Comexio round-trips (one per plan, device, class and
+            # marker) can add up past the repair dialog's UI timeout — same reasoning as
+            # the sync button's press_action, which also runs non-blocking instead of
+            # being awaited inline here.
             entry = self.hass.config_entries.async_get_entry(entry_id)
             coordinator = self.hass.data[DOMAIN].get(entry_id)
             if not coordinator or not entry:
                 return self.async_abort(reason="entry_not_found")
 
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-            self.hass.async_create_task(self._async_run_cleanup(coordinator, entry))
+            self.hass.async_create_task(self._async_run_cleanup(coordinator, entry, scope))
 
             return self.async_create_entry(title="Cleanup started in background", data={})
 
-        plan_count = self.issue_data.get("plan_count", 0)
-        device_count = self.issue_data.get("device_count", 0)
-        class_count = self.issue_data.get("class_count", 0)
-
-        options = {
-            "fix": f"Delete now ({plan_count} plans, {device_count} devices, {class_count} classes)",
-            "ignore": "Cancel",
-        }
+        options = _uninstall_cleanup_options(self.issue_data)
+        default = self.issue_data.get("default_scope", ACTION_IGNORE)
+        if default not in options:
+            default = ACTION_IGNORE
 
         return self.async_show_form(
             step_id="uninstall_cleanup",
             description_placeholders={
-                "plan_count": str(plan_count),
-                "device_count": str(device_count),
-                "class_count": str(class_count),
+                "plan_count": str(self.issue_data.get("plan_count", 0)),
+                "device_count": str(self.issue_data.get("device_count", 0)),
+                "class_count": str(self.issue_data.get("class_count", 0)),
             },
-            data_schema=vol.Schema({vol.Required("action", default="ignore"): vol.In(options)}),
+            data_schema=vol.Schema({vol.Required("action", default=default): vol.In(options)}),
         )
 
-    async def _async_run_cleanup(self, coordinator, entry: ConfigEntry) -> None:
+    def _dismiss_pending_notification(self, entry_id: str | None) -> None:
+        """The button's "repair issue waiting for confirmation" hint is answered once the
+        dialog is submitted — whether the cleanup starts, is cancelled or aborts."""
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
+        if coordinator is not None:
+            persistent_notification.async_dismiss(
+                self.hass, uninstall_cleanup_pending_notification_id(coordinator.server_id)
+            )
+
+    async def _async_run_cleanup(self, coordinator, entry: ConfigEntry, scope: str = CLEANUP_SCOPE_FULL) -> None:
         """Background task: run the actual teardown, reload the integration so it
         picks up a clean state, and report the result.
 
@@ -743,43 +854,54 @@ class ComexioRepairFlow(RepairsFlow):
         """
         conf = {**entry.data, **entry.options}
         notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
-        notif_id = f"comexio_uninstall_cleanup_{coordinator.server_id}"
+        notif_id = uninstall_cleanup_notification_id(coordinator.server_id)
         result = None
         succeeded = False
+        t0 = time.monotonic()
+
+        def _progress(text: str) -> None:
+            if not notify_enabled:
+                return
+            elapsed = int(time.monotonic() - t0)
+            persistent_notification.async_create(
+                self.hass,
+                f"Cleanup running (scope: {scope}) — elapsed {elapsed} s\n\n{text}",
+                title=f"Comexio Uninstall Cleanup ({coordinator.server_id})",
+                notification_id=notif_id,
+            )
 
         try:
-            result = await coordinator.async_uninstall_cleanup()
+            result = await coordinator.async_uninstall_cleanup(scope, progress_cb=_progress)
             succeeded = True
         except asyncio.CancelledError:
             raise
         except Exception:
             _LOGGER.exception("[%s] Uninstall cleanup failed", coordinator.server_id)
             if notify_enabled:
-                persistent_notification.async_create(
+                _post_result_notification(
                     self.hass,
+                    notif_id,
                     "The cleanup task failed unexpectedly. Check the log for details.",
-                    title=f"Comexio Uninstall Cleanup Failed ({coordinator.server_id})",
-                    notification_id=notif_id,
+                    f"Comexio Uninstall Cleanup Failed ({coordinator.server_id})",
                 )
+
+        if not succeeded or _cleanup_incomplete(result):
+            # The issue was deleted when the dialog was confirmed (and for the pre-release
+            # issue its trigger flag is long gone) — re-raise it so the retry the result
+            # message asks for (or a retry after a crash) is one click away.
+            translation_key = self.issue_id.removesuffix(f"_{coordinator.server_id}")
+            coordinator.create_uninstall_cleanup_issue(
+                translation_key,
+                default_scope=scope,
+                persistent=translation_key == ISSUE_KNX_PRERELEASE_CLEANUP,
+            )
 
         if succeeded and notify_enabled:
             if result:
-                msg = (
-                    f"Cleanup finished\n\n"
-                    f"Plans removed: {len(result['deleted_plans'])} (failed: {len(result['failed_plans'])})\n"
-                    f"Devices removed: {len(result['deleted_devices'])}\n"
-                    f"Classes removed: {len(result['deleted_classes'])} (failed: {len(result['failed_classes'])})\n"
-                    f"Skipped (still in use): {len(result['skipped'])}\n\n"
-                    f"Reloading the integration now..."
-                )
+                msg = _cleanup_result_message(result, scope)
             else:
                 msg = "Cleanup finished, but returned no result data. Check the log for details."
-            persistent_notification.async_create(
-                self.hass,
-                msg,
-                title=f"Comexio Uninstall Cleanup ({coordinator.server_id})",
-                notification_id=notif_id,
-            )
+            _post_result_notification(self.hass, notif_id, msg, f"Comexio Uninstall Cleanup ({coordinator.server_id})")
 
         if not succeeded:
             _LOGGER.warning(

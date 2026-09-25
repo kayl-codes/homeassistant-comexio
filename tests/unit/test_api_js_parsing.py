@@ -76,6 +76,14 @@ def test_scrape_js_vars_skips_invalid_json_with_warning(caplog: pytest.LogCaptur
     assert "Failed to decode JSON for variable $Broken on test page" in caplog.text
 
 
+def test_scrape_js_vars_empty_array_does_not_steal_next_object() -> None:
+    """Regression: `var $Fubs = [];` (PHP json_encode of an empty array, e.g. no plan left)
+    was assigned the NEXT variable's object literal."""
+    html = '<script>var $Fubs = [];\nvar $FubModules = {"2": {}};</script>'
+
+    assert ComexioAPI._scrape_js_vars(html, page_label="test") == {"Fubs": {}, "FubModules": {"2": {}}}
+
+
 def test_scrape_js_vars_ignores_declarations_outside_script_blocks() -> None:
     html = '<p>var $Outside = {"a": 1};</p><script>var $Inside = {"b": 2};</script>'
 
