@@ -324,7 +324,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     # Before removing offline IO entities from the registry, snapshot their entity_ids.
     # async_detect_orphaned_statistics uses this set to exclude "temporarily orphaned"
-    # statistics (extension offline but still known) from the repair issue.
+    # statistics (extension offline but still known) from the repair issue. Deleted registry
+    # entries count too: after the first restart with the extension offline, its entities are
+    # already gone from the live registry, but their statistics must stay protected.
     offline_unique_ids = {
         f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
         for io in coordinator.data.get("io", [])
@@ -334,6 +336,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         e.entity_id
         for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
         if e.unique_id in offline_unique_ids
+    } | {
+        deleted.entity_id
+        for deleted in ent_reg.deleted_entities.values()
+        if deleted.platform == DOMAIN and deleted.unique_id in offline_unique_ids
     }
 
     # Delete entities that are no longer active, or that migrated to a different HA domain.
