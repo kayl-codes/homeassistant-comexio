@@ -348,15 +348,29 @@ _MARKER_CONFIG_UNREADABLE = "Comexio marker config could not be fetched or parse
 _FORCE_IGNORED = "force ignored: not every function plan could be loaded and verified (see log)."
 
 
-def _is_api_created_marker(record: dict[str, Any]) -> bool:
-    """True if the marker record carries CategoryId==1 (created via the admin API, not Studio).
+def _marker_category_is(record: dict[str, Any], expected: int) -> bool:
+    """True if the marker record's CategoryId is exactly the int `expected`.
 
-    Python's loose equality makes True == 1 and 1.0 == 1, so a plain "== 1" check would let a
-    malformed CategoryId (e.g. a scraped JSON boolean true) alias onto "1" — only a genuine
-    int, not a bool, is accepted; anything else (including 1.0 or the string "1") is not.
+    Python's loose equality makes True == 1 and 1.0 == 1, so a plain "==" check would let a
+    malformed CategoryId (e.g. a scraped JSON boolean) alias onto a real category — only a
+    genuine int, not a bool, is accepted; a missing CategoryId, 1.0 or "1" never matches.
     """
-    value = record.get("CategoryId", 0)
-    return isinstance(value, int) and not isinstance(value, bool) and value == 1
+    value = record.get("CategoryId")
+    return isinstance(value, int) and not isinstance(value, bool) and value == expected
+
+
+def _is_api_created_marker(record: dict[str, Any]) -> bool:
+    """True if the marker record carries CategoryId==1 (created via the admin API, not Studio)."""
+    return _marker_category_is(record, 1)
+
+
+def _is_studio_marker(record: dict[str, Any]) -> bool:
+    """True if the marker record carries CategoryId==0 (factory or Studio-created).
+
+    marker_delete's force path only applies to this known category — an unknown or malformed
+    CategoryId stays protected even when the marker is untitled and unplaced.
+    """
+    return _marker_category_is(record, 0)
 
 
 def _marker_has_title(record: dict[str, Any]) -> bool:
@@ -379,9 +393,11 @@ def _classify_marker_delete_ids(
     - Absent from records (already deleted / never existed): deletable — delete_marker then
       reports it as the harmless "already absent" case.
     - CategoryId==1 (created by this integration via the API): deletable.
-    - Anything else (CategoryId==0 = factory or Studio-created): protected, unless force
-      is active (placed_ids is not None) AND the marker has no title AND it is not placed in
-      any function plan. placed_ids=None means force is off — or the plans couldn't all be
+    - CategoryId==0 (factory or Studio-created): protected, unless force is active
+      (placed_ids is not None) AND the marker has no title AND it is not placed in any
+      function plan.
+    - Anything else (unknown/malformed CategoryId): always protected, force or not.
+    placed_ids=None means force is off — or the plans couldn't all be
       loaded, in which case placement is unknown and nothing may pass on that basis.
     """
     deletable: list[int] = []
@@ -391,7 +407,12 @@ def _classify_marker_delete_ids(
         if (
             record is None
             or _is_api_created_marker(record)
-            or (placed_ids is not None and not _marker_has_title(record) and mid not in placed_ids)
+            or (
+                placed_ids is not None
+                and _is_studio_marker(record)
+                and not _marker_has_title(record)
+                and mid not in placed_ids
+            )
         ):
             deletable.append(mid)
         else:
@@ -3227,6 +3248,14 @@ class ComexioAPI:
             _LOGGER.exception("function_plan_load_elements fub_id=%s failed", fub_id)
             return None
 
+    @classmethod
+    def _normalize_plan_payload(cls, data: dict) -> dict:
+        """Normalize a plan's elements/connections in place to position-keyed dicts ({} if missing)."""
+        for key in ("elements", "connections"):
+            value = data.get(key)
+            data[key] = cls._keyed_by_list_position(value) if isinstance(value, list) else (value or {})
+        return data
+
     async def function_plan_load_all_plans(self, strict: bool = False) -> dict[int, dict]:
         """Load elements and connections for ALL known function plans in one bulk request.
 
@@ -3271,15 +3300,7 @@ class ComexioAPI:
                 if strict and not _plan_payload_has_elements(data):
                     _LOGGER.warning("function_plan_load_all_plans: entry fid=%s without elements — dropped", fid)
                     continue
-                elements = data.get("elements")
-                data["elements"] = (
-                    self._keyed_by_list_position(elements) if isinstance(elements, list) else (elements or {})
-                )
-                connections = data.get("connections")
-                data["connections"] = (
-                    self._keyed_by_list_position(connections) if isinstance(connections, list) else (connections or {})
-                )
-                plans[fid] = data
+                plans[fid] = self._normalize_plan_payload(data)
             except (ValueError, TypeError, AttributeError):
                 _LOGGER.exception("function_plan_load_all_plans: skipping malformed entry fid=%r", fid_str)
                 continue

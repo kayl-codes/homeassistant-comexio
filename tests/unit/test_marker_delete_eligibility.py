@@ -63,6 +63,18 @@ def test_malformed_category_is_not_api_created(category: Any) -> None:
     assert _classify_marker_delete_ids([9], {9: _marker(9, "t", category)}, None) == ([], [9])
 
 
+@pytest.mark.parametrize("category", [2, -1, True, False, 0.0, "0", None])
+def test_force_requires_studio_category(category: Any) -> None:
+    # Regression (Sourcery, PR #94): force only opens CategoryId==0 — an unknown or malformed
+    # CategoryId stays protected even when the marker is untitled and unplaced.
+    assert _classify_marker_delete_ids([9], {9: _marker(9, "", category)}, set()) == ([], [9])
+
+
+def test_force_with_missing_category_stays_protected() -> None:
+    record = {"Id": 9, "ShortName": "M9", "Name": "", "Type": 1}
+    assert _classify_marker_delete_ids([9], {9: record}, set()) == ([], [9])
+
+
 def test_placed_marker_ids_only_counts_marker_references() -> None:
     plans = {
         1: {"elements": {"a": {"reference": {"type": 2, "ref_id": "4"}}, "b": {"reference": {"type": 1, "ref_id": 3}}}},
