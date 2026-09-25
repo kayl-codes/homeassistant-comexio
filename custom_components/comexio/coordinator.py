@@ -1,11 +1,13 @@
 # Version: 0.8.1
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timedelta
 import logging
 import pathlib
 import re
 import socket
+import time
 from typing import Any
 
 import aiohttp
@@ -20,6 +22,22 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util, slugify
 
 from .api import ComexioAPI
+from .cleanup_scope import (
+    CLEANUP_SCOPE_FULL,
+    CLEANUP_SCOPE_KNX,
+    SKIPPED_KNX_BRIDGE_MARKERS,
+    TRIGGER_PLAN_DELETE,
+    TRIGGER_PLAN_KEEP,
+    TRIGGER_PLAN_REMOVE_PAIRS,
+    has_knx_artifacts,
+    plans_in_scope,
+    scope_counts,
+    scope_includes_knx,
+    scope_trigger_ref_type,
+    trigger_plan_action,
+    trigger_sources_by_category,
+    webio_classes_in_scope,
+)
 from .const import (
     BUS_LOAD_FAIL_STREAK_THRESHOLD,
     BUS_LOAD_POLL_INTERVAL_SEC,
@@ -46,6 +64,7 @@ from .const import (
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
     CONF_HOST,
     CONF_KNX_DPT_SUFFIX_IGNORED,
+    CONF_KNX_PRERELEASE_CLEANUP_PENDING,
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
@@ -79,6 +98,7 @@ from .const import (
     ICON_NETWORK,
     ICON_RENAME,
     ICON_WARNING,
+    ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     MARKER_READ_ONLY_SUFFIX,
     RANGE_CHECK_CHECKED,
@@ -90,6 +110,7 @@ from .const import (
     SOURCE_CATEGORIES,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    UNINSTALL_CLEANUP_PROGRESS_EVERY,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
@@ -274,6 +295,20 @@ async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str 
         return True
 
 
+def _marker_reset_progress(report: Callable[[str], None], step: str) -> Callable[[int, int], None]:
+    """Progress callback for the bridge-marker reset: a status line every
+    UNINSTALL_CLEANUP_PROGRESS_EVERY markers (and on the last), with an ETA from the rate so far."""
+    t0 = time.monotonic()
+
+    def _cb(done: int, total: int) -> None:
+        if done != total and done % UNINSTALL_CLEANUP_PROGRESS_EVERY:
+            return
+        remaining = (time.monotonic() - t0) / done * (total - done)
+        report(f"{step}: resetting KNX bridge markers {done}/{total} (about {int(remaining)} s left)")
+
+    return _cb
+
+
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
@@ -322,6 +357,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.last_audit_failed: bool = False
         self.last_summary_hash: str | None = None
         self.in_sync: bool = False
+        # Whether the most recent _async_update_data run actually scraped the server: a poll
+        # skipped for in_sync, or one whose get_raw_config came back empty ({} on a non-200),
+        # still "succeeds" with old or empty data. Destructive callers check this instead of
+        # last_update_success alone.
+        self._last_poll_scraped: bool = False
         self.sync_error: bool = False
         self.sync_progress_text: str = "Idle"
         self.sync_progress_pct: int | None = None
@@ -466,6 +506,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
+        self._last_poll_scraped = False
         if self.in_sync:
             _LOGGER.debug("[%s] Periodic audit skipped: Manual sync or repair is currently in progress", self.server_id)
             return self.data
@@ -491,6 +532,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # Fetch current raw configuration from the Comexio API
             raw_config = await self.api.get_raw_config()
+            self._last_poll_scraped = bool(raw_config.get("FubModules"))
             marker_data = raw_config.get("FubModules", {}).get("2", {})
             max_id = max(int(m.get("Id", 0)) for m in marker_data.values()) if marker_data else 0
 
@@ -1451,6 +1493,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.request_options_update_without_reload(new_options)
         return updated
 
+    def _parsed_webio_devices(self) -> dict[str, Any]:
+        """Web-IO device/class ids per class from the last successful poll ({cls: {device_id, base_id, ...}}).
+
+        Read from coordinator.data rather than last_audit_results: the audit is wiped to {}
+        whenever an active class has no device (missing_webio_class path), which after a
+        partial cleanup (e.g. scope knx) would hide the remaining classes from the next one.
+        """
+        return (self.data or {}).get("webio_devices", {})
+
     async def _delete_managed_plans(self, plan_map: dict[str, Any]) -> tuple[list[str], list[str]]:
         """Delete all HA-managed Function Plans. Returns (deleted, failed) plan names."""
         deleted_plans: list[str] = []
@@ -1474,9 +1525,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return deleted_plans, failed_plans
 
     async def _delete_webio_devices_and_classes(
-        self,
+        self, webio_classes: tuple[WebioClass, ...] = WEBIO_CLASSES
     ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
-        """Delete all Web-IO device instances, then their classes. Returns
+        """Delete the Web-IO device instances of webio_classes, then their classes. Returns
         (devices, classes, failed_classes, skipped)."""
         devices: dict[str, str] = {}
         classes: dict[str, str] = {}
@@ -1484,27 +1535,49 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # "class deletion failed" apart from "no base was configured for this class".
         failed_classes: dict[str, str] = {}
         skipped: dict[str, str] = {}
-        # Force a fresh audit rather than trusting a poll-interval-old snapshot — devices
+        # Force a fresh poll rather than trusting a poll-interval-old snapshot — devices
         # created/removed since the last poll would otherwise be missed or acted on stale.
-        await self.async_request_refresh()
-        webio_devices = self.last_audit_results.get("webio_devices", {})
-        for cls in WEBIO_CLASSES:
-            dev = webio_devices.get(cls, {})
-            device_id = dev.get("device_id")
-            base_id = dev.get("base_id")
-            if not device_id:
-                continue
+        # async_refresh, not async_request_refresh: the latter is debounced and silently
+        # does nothing when the cleanup button refreshed moments ago. Neither raises — a
+        # failed, skipped (in_sync) or empty poll keeps old or empty data, so the outcome
+        # is checked explicitly instead of deleting by stale ids or reporting "0 removed".
+        await self.async_refresh()
+        if not (self.last_update_success and self._last_poll_scraped):
+            reason = f"refresh from Comexio failed ({self.last_exception or 'no data'}) — Web-IO not deleted"
+            _LOGGER.warning("[%s] Uninstall cleanup: %s", self.server_id, reason)
+            for cls in webio_classes:
+                skipped[cls] = reason
+            return devices, classes, failed_classes, skipped
+        webio_devices = self._parsed_webio_devices()
+        for cls in webio_classes:
+            dev = webio_devices.get(cls) or {}
+            await self._delete_webio_class_entry(
+                cls, dev.get("device_id"), dev.get("base_id"), (devices, classes, failed_classes, skipped)
+            )
+        return devices, classes, failed_classes, skipped
+
+    async def _delete_webio_class_entry(
+        self,
+        cls: str,
+        device_id: Any,
+        base_id: Any,
+        results: tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]],
+    ) -> None:
+        """Delete one class's Web-IO device, then its class; record the outcome in results
+        (devices, classes, failed_classes, skipped). A class whose device is already gone is
+        still deleted — nothing can use it anymore, and skipping it silently left an orphan."""
+        devices, classes, failed_classes, skipped = results
+        if device_id:
             if not await self.api.delete_webio_device(device_id):
                 skipped[cls] = "delete_webio_device failed"
-                continue
+                return
             devices[cls] = str(device_id)
-            if not base_id:
-                continue
-            if await self.api.delete_webio_base(base_id):
-                classes[cls] = str(base_id)
-            else:
-                failed_classes[cls] = "delete_webio_base failed"
-        return devices, classes, failed_classes, skipped
+        if not base_id:
+            return
+        if await self.api.delete_webio_base(base_id):
+            classes[cls] = str(base_id)
+        else:
+            failed_classes[cls] = "delete_webio_base failed"
 
     async def _delete_knx_loopback_webio(
         self,
@@ -1517,9 +1590,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         This class/device lives OUTSIDE WEBIO_CLASSES (see ensure_knx_loopback_webio's
         docstring — its commands are never keys of parse_config()'s webio_commands), so the
-        per-class loop above never sees it via last_audit_results["webio_devices"] and would
-        otherwise leave it behind forever on an uninstall. Needs its own live lookup instead of
-        the cached audit. Mutates the four result dicts in place under a "knx_loopback" key —
+        per-class loop above never sees it via the parsed "webio_devices" and would otherwise
+        leave it behind forever on an uninstall. Needs its own live lookup instead of the
+        cached poll data. Mutates the four result dicts in place under a "knx_loopback" key —
         callers only ever report len(...) over these dicts, so no further reporting change is
         needed for this extra entry to show up in the cleanup summary.
         """
@@ -1532,8 +1605,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # this time" outcomes here, not a crash.
             skipped["knx_loopback"] = f"get_webio_device_info failed: {err}"
             return
-        if not device_id:
-            return
         try:
             base_info = await self.api.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
         except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
@@ -1542,10 +1613,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # class behind with no retry path. Skip everything instead.
             skipped["knx_loopback"] = f"get_webio_base_info failed: {err}"
             return
-        if not await self.api.delete_webio_device(device_id):
-            skipped["knx_loopback"] = "delete_webio_device failed"
-            return
-        devices["knx_loopback"] = str(device_id)
+        if device_id:
+            if not await self.api.delete_webio_device(device_id):
+                skipped["knx_loopback"] = "delete_webio_device failed"
+                return
+            devices["knx_loopback"] = str(device_id)
+        # No device but a class: a retry after a failed class delete — delete the orphan too.
         if base_info is None:
             # A successful lookup that found no class: genuinely already gone, nothing to delete.
             return
@@ -1555,39 +1628,258 @@ class ComexioCoordinator(DataUpdateCoordinator):
         else:
             failed_classes["knx_loopback"] = "delete_webio_base failed"
 
-    async def async_uninstall_cleanup(self) -> dict[str, Any]:
-        """Tear down everything the integration created in Comexio: HA-managed Function
-        Plans (CONF_FUNCTION_PLAN_PLAN_MAP), then the Web-IO device instances, then the
-        Web-IO device classes — in that order, since Comexio refuses to delete a device
-        or class still in use. Best-effort per phase; a failure in one plan/class does
-        not block the others, and failed plan deletions stay in plan_map for a retry.
+    def uninstall_cleanup_counts(self) -> dict[str, dict[str, int]]:
+        """Per cleanup scope: managed plans / Web-IO devices / classes it would delete (from
+        the plan map and the last audit) — the counters of the uninstall-cleanup repair dialog."""
+        return scope_counts(
+            dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})),
+            self._parsed_webio_devices(),
+        )
+
+    def create_uninstall_cleanup_issue(
+        self, translation_key: str, default_scope: str | None = None, persistent: bool = False
+    ) -> None:
+        """Raise the (fixable) uninstall-cleanup repair issue with per-scope counters.
+
+        translation_key: ISSUE_UNINSTALL_CLEANUP (test button) or ISSUE_KNX_PRERELEASE_CLEANUP
+        (after an update from a KNX pre-release); both run the same repair flow.
+        default_scope preselects a scope in the dialog — None keeps "Cancel" preselected.
+        persistent keeps the issue (and its data) across an HA restart — needed for the
+        one-shot pre-release issue, whose trigger flag is cleared right after raising it.
+        The counters come from the last poll; callers refresh first if they need them live.
         """
-        plan_map = dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}))
+        counts = self.uninstall_cleanup_counts()
+        full = counts[CLEANUP_SCOPE_FULL]
+        data: dict[str, Any] = {
+            "entry_id": self.config_entry.entry_id,
+            "plan_count": full["plans"],
+            "device_count": full["devices"],
+            "class_count": full["classes"],
+            "counts": counts,
+        }
+        if default_scope is not None:
+            data["default_scope"] = default_scope
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            f"{translation_key}_{self.server_id}",
+            is_fixable=True,
+            is_persistent=persistent,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=translation_key,
+            translation_placeholders={
+                "server_id": self.server_id,
+                "plan_count": str(full["plans"]),
+                "device_count": str(full["devices"]),
+                "class_count": str(full["classes"]),
+            },
+            data=data,
+        )
+
+    def check_knx_prerelease_cleanup(self) -> None:
+        """One-shot after an update from a KNX pre-release (CONF_KNX_PRERELEASE_CLEANUP_PENDING,
+        set by async_migrate_entry): raise the KNX cleanup repair issue if KNX artifacts exist,
+        then clear the flag.
+
+        v0.10.0-rc1..rc3 built KNX plans, Web-IO and bridge markers with a layout the release
+        no longer matches; the issue preselects the "knx" scope, which removes them and resets
+        the bridge markers so the next sync rebuilds everything cleanly. Must run after the
+        first refresh (needs the audit's Web-IO devices) and BEFORE the update listener is
+        registered — the flag is cleared with a plain options write, which would otherwise
+        reload the entry mid-setup.
+        """
+        options = self.config_entry.options
+        if not options.get(CONF_KNX_PRERELEASE_CLEANUP_PENDING):
+            return
+        if not self._last_poll_scraped:
+            # An empty/failed config scrape looks exactly like "no leftovers" — keep the flag
+            # and decide on a later setup instead of dropping the one-shot check for good.
+            _LOGGER.warning(
+                "[%s] KNX pre-release check postponed: the Comexio config could not be read", self.server_id
+            )
+            return
+        if self.has_knx_artifacts():
+            _LOGGER.warning(
+                "[%s] KNX pre-release leftovers found — raising the KNX cleanup repair issue", self.server_id
+            )
+            self.create_uninstall_cleanup_issue(
+                ISSUE_KNX_PRERELEASE_CLEANUP, default_scope=CLEANUP_SCOPE_KNX, persistent=True
+            )
+        else:
+            _LOGGER.info("[%s] Update from a KNX pre-release: no KNX leftovers found, nothing to clean", self.server_id)
+        new_options = {k: v for k, v in options.items() if k != CONF_KNX_PRERELEASE_CLEANUP_PENDING}
+        self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
+
+    def has_knx_artifacts(self) -> bool:
+        """Whether a KNX cluster plan, the KNX Web-IO device or a bridge marker exists (see cleanup_scope)."""
+        return has_knx_artifacts(
+            dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})),
+            self._parsed_webio_devices(),
+            has_bridge_markers=any(
+                m.get("kind") == MarkerKind.KNX_BRIDGE for m in (self.data or {}).get("markers", [])
+            ),
+        )
+
+    async def async_uninstall_cleanup(
+        self, scope: str = CLEANUP_SCOPE_FULL, progress_cb: Callable[[str], None] | None = None
+    ) -> dict[str, Any]:
+        """Tear down what the integration created in Comexio for a cleanup scope (see
+        cleanup_scope): the scope's HA-managed Function Plans (CONF_FUNCTION_PLAN_PLAN_MAP),
+        then its Web-IO device instances, then their Web-IO device classes — in that order,
+        since Comexio refuses to delete a device or class still in use. Scopes full/knx also
+        remove the KNX API-Loopback Web-IO and blank the titles of the KNX bridge markers,
+        so the next sync rebuilds the bridge block from scratch. Scopes marker/knx touch the
+        shared trigger plan only via _cleanup_trigger_plan (own pairs removed, the plan itself
+        only when no other category's pairs remain in it). Best-effort per phase; a
+        failure in one plan/class does not block the others, and failed plan deletions stay
+        in plan_map for a retry. progress_cb(text) receives a status line per phase (and per
+        batch of reset markers) for the running notification.
+        """
+        report = progress_cb or (lambda _text: None)
+        steps = 4 if scope_includes_knx(scope) else 2
+        full_map = dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}))
+        plan_map = plans_in_scope(full_map, scope)
+        report(
+            f"Step 1/{steps}: removing Function Plans ({len(plan_map)} in scope, plus the shared trigger plan check)"
+        )
+        trigger_pairs_removed = 0
+        if (own_ref_type := scope_trigger_ref_type(scope)) is not None and (
+            trigger_fub_id := full_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
+        ) is not None:
+            action, trigger_pairs_removed = await self._cleanup_trigger_plan(trigger_fub_id, own_ref_type)
+            if action == TRIGGER_PLAN_DELETE:
+                plan_map[FUNCTION_PLAN_TRIGGER_PLAN_NAME] = trigger_fub_id
         deleted_plans, failed_plans = await self._delete_managed_plans(plan_map)
+        if trigger_pairs_removed < 0:
+            failed_plans.append(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
+            trigger_pairs_removed = 0
         if deleted_plans:
             await self._persist_plan_map({}, removals=set(deleted_plans))
 
-        devices, classes, failed_classes, skipped = await self._delete_webio_devices_and_classes()
-        await self._delete_knx_loopback_webio(devices, classes, failed_classes, skipped)
+        report(f"Step 2/{steps}: deleting Web-IO devices and classes")
+        devices, classes, failed_classes, skipped = await self._delete_webio_devices_and_classes(
+            webio_classes_in_scope(scope)
+        )
+        reset_markers: list[int] = []
+        failed_markers: list[int] = []
+        marker_reset_error: str | None = None
+        if scope_includes_knx(scope):
+            report(f"Step 3/{steps}: removing the KNX loopback Web-IO")
+            await self._delete_knx_loopback_webio(devices, classes, failed_classes, skipped)
+            report(f"Step 4/{steps}: resetting KNX bridge markers (checking which are free)")
+            reset_markers, failed_markers, marker_reset_error = await self._reset_knx_bridge_markers(
+                skipped, _marker_reset_progress(report, f"Step 4/{steps}")
+            )
 
         _LOGGER.info(
-            "[%s] Uninstall cleanup: plans deleted=%s failed=%s, devices=%s, classes=%s, failed_classes=%s, skipped=%s",
+            "[%s] Uninstall cleanup (scope=%s): plans deleted=%s failed=%s, devices=%s, classes=%s, "
+            "failed_classes=%s, markers reset=%d failed=%s, skipped=%s",
             self.server_id,
+            scope,
             deleted_plans,
             failed_plans,
             devices,
             classes,
             failed_classes,
+            len(reset_markers),
+            failed_markers,
             skipped,
         )
         return {
+            "scope": scope,
             "deleted_plans": deleted_plans,
             "failed_plans": failed_plans,
             "deleted_devices": devices,
             "deleted_classes": classes,
             "failed_classes": failed_classes,
+            "reset_markers": reset_markers,
+            "failed_markers": failed_markers,
+            "marker_reset_error": marker_reset_error,
+            "trigger_pairs_removed": trigger_pairs_removed,
             "skipped": skipped,
         }
+
+    async def _cleanup_trigger_plan(self, fub_id: Any, own_ref_type: int) -> tuple[str, int]:
+        """Partial cleanup of the shared trigger plan for one category (ref_type 2/11).
+
+        Returns (action, removed element count); count -1 = failed. Deletes the plan only
+        when it holds no other category's trigger pairs — otherwise just this category's
+        source+Flanke pairs are removed, so the other category's self-reset keeps working.
+        """
+        try:
+            fub_id_int = int(fub_id)
+        except (TypeError, ValueError):
+            return TRIGGER_PLAN_KEEP, -1
+        plan_data = await self.api.function_plan_load_elements(fub_id_int)
+        if plan_data is None:
+            _LOGGER.error("[%s] Uninstall cleanup: could not load the trigger plan — left as is", self.server_id)
+            return TRIGGER_PLAN_KEEP, -1
+        marker_titles = await self.api.fetch_marker_titles()
+        if marker_titles is None:
+            _LOGGER.error(
+                "[%s] Uninstall cleanup: could not fetch the marker titles — trigger plan left as is", self.server_id
+            )
+            return TRIGGER_PLAN_KEEP, -1
+        sources = trigger_sources_by_category(
+            self.api.function_plan_element_refs(plan_data),
+            marker_titles,
+            {int(cat.fub_module_type) for cat in trigger_pair_categories()},
+        )
+        action = trigger_plan_action(own_ref_type, set(sources))
+        _LOGGER.info(
+            "[%s] Uninstall cleanup: trigger plan holds sources %s — action for ref_type %s: %s",
+            self.server_id,
+            {t: len(ids) for t, ids in sources.items()},
+            own_ref_type,
+            action,
+        )
+        if action != TRIGGER_PLAN_REMOVE_PAIRS:
+            return action, 0
+        # Group by the elements' own ref_type: a KNX pair may sit in the plan as a K element
+        # (11) or via its bridge marker (2) — each is removed with its own ref_type.
+        by_elem_type: dict[int, list[int]] = {}
+        for ref_type, ref_id in sources[own_ref_type]:
+            by_elem_type.setdefault(ref_type, []).append(ref_id)
+        removed = 0
+        for ref_type, ref_ids in by_elem_type.items():
+            count, plan_stopped = await self.api.function_plan_remove_trigger_pairs(fub_id_int, ref_ids, ref_type)
+            if not count or plan_stopped:
+                # 0 although pairs were found = stop/delete failed; plan_stopped = restart
+                # failed, which silently breaks the other category's trigger self-reset.
+                _LOGGER.error(
+                    "[%s] Uninstall cleanup: removing trigger pairs (ref_type %s) from fub %s failed"
+                    " (removed=%s, plan left stopped=%s)",
+                    self.server_id,
+                    ref_type,
+                    fub_id_int,
+                    count,
+                    plan_stopped,
+                )
+                return action, -1
+            removed += count
+        return action, removed
+
+    async def _reset_knx_bridge_markers(
+        self, skipped: dict[str, str], progress_cb: Callable[[int, int], None] | None = None
+    ) -> tuple[list[int], list[int], str | None]:
+        """Blank the KNX bridge marker titles as the last cleanup phase. Returns
+        (reset, failed, error). Plans/Web-IO are already gone at this point, so a connection
+        error must not escape and discard the result of those phases — it is returned as
+        error instead, and the user re-runs the KNX cleanup. Still-placed markers are
+        reported via skipped."""
+        try:
+            reset, failed, placed, error = await self.api.reset_knx_bridge_markers(progress_cb)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.error("[%s] Resetting the KNX bridge markers failed: %s", self.server_id, err)
+            return [], [], f"connection error: {err}"
+        except Exception:  # last phase: must not discard the earlier phases' result
+            _LOGGER.exception("[%s] Resetting the KNX bridge markers failed unexpectedly", self.server_id)
+            return [], [], "unexpected error, see log"
+        if error:
+            _LOGGER.error("[%s] Resetting the KNX bridge markers skipped: %s", self.server_id, error)
+        if placed:
+            skipped[SKIPPED_KNX_BRIDGE_MARKERS] = f"{placed} bridge marker(s) still placed in a plan"
+        return reset, failed, error
 
     async def async_generate_plan_preview(
         self,

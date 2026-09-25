@@ -19,6 +19,7 @@ from .const import (
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_USERNAME,
+    CONFIG_ENTRY_MINOR_VERSION,
     DEFAULT_COVER_KEYWORDS,
     DEFAULT_HOST,
     DOMAIN,
@@ -52,6 +53,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Comexio with detailed validation."""
 
     VERSION = 1
+    MINOR_VERSION = CONFIG_ENTRY_MINOR_VERSION
 
     async def async_step_user(self, user_input=None):
         """Handle the initial setup step when a user adds the integration."""

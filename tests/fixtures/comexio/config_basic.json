@@ -49,9 +49,9 @@
     }
   },
   "WebDevices": {
-    "30": {"Name": "HomeAssistant [M]", "Ip": " 192.168.1.20:8123", "BaseId": 7},
-    "31": {"Name": "HomeAssistant [IO]", "Ip": "192.168.1.20:8123", "BaseId": 8},
-    "40": {"Name": "Fremdgeraet", "Ip": "10.0.0.5", "BaseId": 9}
+    "30": {"Name": "HomeAssistant [M]", "Ip": " 192.168.1.20:8123", "WebDeviceBaseId": 7},
+    "31": {"Name": "HomeAssistant [IO]", "Ip": "192.168.1.20:8123", "WebDeviceBaseId": 8},
+    "40": {"Name": "Fremdgeraet", "Ip": "10.0.0.5", "WebDeviceBaseId": 9}
   },
   "Fubs": {
     "1": {"Id": 1, "Name": "HA - Marker", "Paper": 2, "Resolution": 90, "Orientation": 0, "Active": 1},

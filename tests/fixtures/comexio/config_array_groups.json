@@ -16,7 +16,7 @@
     ]
   },
   "WebDevices": {
-    "0": {"Name": "HomeAssistant [M]", "Ip": "192.168.1.20:8123", "BaseId": 7},
-    "1": {"Name": "HomeAssistant [IO]", "Ip": "192.168.1.20:8123", "BaseId": 8}
+    "0": {"Name": "HomeAssistant [M]", "Ip": "192.168.1.20:8123", "WebDeviceBaseId": 7},
+    "1": {"Name": "HomeAssistant [IO]", "Ip": "192.168.1.20:8123", "WebDeviceBaseId": 8}
   }
 }
