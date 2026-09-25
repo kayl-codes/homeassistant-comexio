@@ -3962,9 +3962,16 @@ class ComexioAPI:
         from fubs, then loads each plan the bulk response lacked individually (e.g. a plan
         without elements, should the bulk endpoint omit those). Returns {} if there are no
         plans at all. strict is passed on to both loaders (see function_plan_load_elements).
+        A non-numeric plan id also returns None — checked before the cache is replaced, so a
+        malformed $Fubs neither crashes the caller nor ends up in self._fub_data.
         """
+        try:
+            fub_ids = {int(fid) for fid in fubs}
+        except (TypeError, ValueError):
+            bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
+            _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in $Fubs — placement unknown", bad)
+            return None
         self._fub_data = fubs
-        fub_ids = {int(fid) for fid in fubs}
         if not fub_ids:
             return {}
         plans = await self.function_plan_load_all_plans(strict=strict)

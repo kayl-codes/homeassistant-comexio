@@ -1,5 +1,6 @@
 """marker_delete eligibility: CategoryId gate, force (untitled + unplaced), record parsing."""
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -73,6 +74,15 @@ def test_force_requires_studio_category(category: Any) -> None:
 def test_force_with_missing_category_stays_protected() -> None:
     record = {"Id": 9, "ShortName": "M9", "Name": "", "Type": 1}
     assert _classify_marker_delete_ids([9], {9: record}, set()) == ([], [9])
+
+
+def test_load_all_plans_verified_fails_closed_on_malformed_plan_id(comexio_api: ComexioAPI) -> None:
+    # Regression (Sourcery, PR #94): a non-numeric $Fubs key raised ValueError out of the force
+    # gate instead of ignoring force — and replaced the cached plan list before failing.
+    cached = {"1": {"Id": 1}}
+    comexio_api._fub_data = cached
+    assert asyncio.run(comexio_api._load_all_plans_verified({"1": {}, "x": {}}, strict=True)) is None
+    assert comexio_api._fub_data is cached
 
 
 def test_placed_marker_ids_only_counts_marker_references() -> None:
