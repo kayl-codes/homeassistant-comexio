@@ -778,7 +778,7 @@ class ComexioRepairFlow(RepairsFlow):
         )
 
     async def async_step_uninstall_cleanup(self, user_input=None):
-        """Handle the uninstall/cleanup repair flow (test button + KNX pre-release cleanup).
+        """Handle the uninstall/cleanup repair flow (cleanup button + KNX pre-release cleanup issue).
 
         Tears down what the integration created in Comexio for the chosen scope
         (full / marker / io / knx, see cleanup_scope): HA-managed Function Plans, then the
