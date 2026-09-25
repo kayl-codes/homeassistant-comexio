@@ -28,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 _MULTI_INSTANCE_MSG = "Multiple Comexio instances — please specify `config_entry`."
 _LOGIN_FAILED_MSG = "Comexio admin login failed."
 _INSTANCE_NOT_FOUND_LOG = "Comexio instance %s not found in hass.data"
+_INSTANCE_NOT_FOUND_MSG = "Comexio instance `{}` not found (not loaded, or wrong `config_entry`)."
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
@@ -95,6 +96,7 @@ async def _async_get_service_context(
     coordinator = domain_data.get(entry_id)
     if not isinstance(coordinator, ComexioCoordinator):
         _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
+        persistent_notification.async_create(hass, _INSTANCE_NOT_FOUND_MSG.format(entry_id), title=error_title)
         return None
     api = coordinator.api
 
@@ -198,6 +200,7 @@ def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: 
     coordinator = domain_data.get(entry_id)
     if not isinstance(coordinator, ComexioCoordinator):
         _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
+        persistent_notification.async_create(hass, _INSTANCE_NOT_FOUND_MSG.format(entry_id), title=error_title)
         return None
 
     api = coordinator.api
