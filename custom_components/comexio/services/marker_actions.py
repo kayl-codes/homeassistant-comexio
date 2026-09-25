@@ -71,14 +71,16 @@ def _error_result(error: str, requested: list[int] | None = None) -> dict:
     The service is registered with SupportsResponse.OPTIONAL and Developer Tools (and MCP
     callers) always request a response — returning None there makes HA reject the call with
     "expected a dictionary, but got NoneType", masking the actual reason. So every exit path
-    returns a dict. "error" is None only when the gate ran as requested; per-id outcomes are
-    always in deleted/skipped/protected/failed.
+    returns a dict. "error" is reserved for failures of the call itself or of the gate (it is
+    None when the gate ran as requested); per-id outcomes are always in
+    deleted/skipped/protected/failed, and why ids were protected is in "protected_reason".
     """
     return {
         "requested": requested or [],
         "deleted": [],
         "skipped": [],
         "protected": [],
+        "protected_reason": None,
         "failed": [],
         "duration": 0.0,
         "error": error,
@@ -114,18 +116,21 @@ def _fail(hass: HomeAssistant, error: str, requested: list[int] | None = None) -
     return _error_result(error, requested)
 
 
-def _protected_message(protected: list[int], force: bool, gate_error: str | None) -> str:
-    """Explain why ids were not deleted (CategoryId gate, force's title/placement check, or a load failure)."""
-    ids = ", ".join(f"M{mid}" for mid in protected)
+def _protected_reason(force: bool, gate_error: str | None) -> str:
+    """Why ids were protected (CategoryId gate, force's title/placement check, or a load failure)."""
     if gate_error:
-        reason = gate_error
-    elif force:
-        reason = (
+        return gate_error
+    if force:
+        return (
             "not created by this integration and either titled or placed in a function plan "
             "(force only deletes untitled, unplaced markers)"
         )
-    else:
-        reason = "not created by this integration (Studio-created/factory markers; enable 'force' for untitled ones)"
+    return "not created by this integration (Studio-created/factory markers; enable 'force' for untitled ones)"
+
+
+def _protected_message(protected: list[int], reason: str) -> str:
+    """Notification line listing the protected ids and why they were not deleted."""
+    ids = ", ".join(f"M{mid}" for mid in protected)
     return f"Protected, not deleted: {ids} — {reason}"
 
 
@@ -177,7 +182,8 @@ async def handle_marker_delete(hass: HomeAssistant, call: ServiceCall) -> dict:
 
     Always returns a dict (never None): the service supports responses and Developer Tools /
     MCP callers always request one — see _error_result. "error" carries gate_error when the
-    config couldn't be read or force was ignored, so a caller can tell that from real protection.
+    config couldn't be read or force was ignored, so a caller can tell that from real protection;
+    "protected_reason" carries the reason for the ids in "protected" in both cases.
     """
     raw_input = str(call.data.get("marker_id", "")).strip()
     marker_ids, error = _validate_marker_delete_request(call, raw_input)
@@ -196,10 +202,15 @@ async def handle_marker_delete(hass: HomeAssistant, call: ServiceCall) -> dict:
     force = call.data.get("force") is True
     requested = marker_ids
     marker_ids, protected, known_ids, gate_error = await api.get_marker_delete_eligibility(marker_ids, force=force)
-    protected_msg = _protected_message(protected, force, gate_error) if protected else None
+    protected_reason = _protected_reason(force, gate_error) if protected else None
+    protected_msg = _protected_message(protected, protected_reason) if protected_reason else None
     if not marker_ids:
         result = _fail(hass, f"{protected_msg}. Nothing deleted.", requested=requested)
+        # Protection alone is not a failure — keep "error" to gate_error here too, so "5" and
+        # "5,6" (M5 protected, M6 deletable) report M5 the same way.
         result["protected"] = protected
+        result["protected_reason"] = protected_reason
+        result["error"] = gate_error
         return result
 
     _LOGGER.info(
@@ -235,6 +246,7 @@ async def handle_marker_delete(hass: HomeAssistant, call: ServiceCall) -> dict:
         "deleted": deleted,
         "skipped": skipped,
         "protected": protected,
+        "protected_reason": protected_reason,
         "failed": failed,
         "duration": round(duration, 1),
         "error": gate_error,

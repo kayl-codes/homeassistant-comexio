@@ -595,7 +595,10 @@ marker_delete:
     have no name and are not placed in any function plan. A marker id that does not (or no
     longer) exist is silently skipped, not reported as an error — a genuine request failure
     (e.g. session drop) is still reported, never mistaken for that. Limited to 200 markers
-    per call. Requires "confirm" — without it, nothing is deleted.
+    per call. Requires "confirm" — without it, nothing is deleted. The response lists the ids
+    per outcome (deleted/skipped/protected/failed); "protected_reason" says why ids were
+    protected, and "error" is only set when the call failed or the check ran stricter than
+    requested (e.g. force ignored because not every function plan could be verified).
   fields:
     config_entry:
       name: Comexio instance
