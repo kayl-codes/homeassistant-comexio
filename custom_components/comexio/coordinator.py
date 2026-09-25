@@ -125,6 +125,7 @@ from .function_plan_backup import (
 )
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .function_plan_render import render_plan_svg
+from .orphaned_statistics import find_orphaned_statistic_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -342,7 +343,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.cancel_sync: bool = False
         self.entity_id_mismatches: list[dict[str, str]] = []
         self.orphaned_statistics: list[str] = []
-        self.offline_entity_statistic_ids: set[str] = set()
+        # None until async_setup_entry has computed it (after the first refresh) — orphan detection
+        # is skipped until then, so offline-extension statistics are never flagged unprotected.
+        self.offline_entity_statistic_ids: set[str] | None = None
         self.offline_extensions: set[str] | None = None
         self._extension_offline_issue_active: bool = False
         # Per-category item counts from the last successful poll, unfiltered by import_*
@@ -3013,7 +3016,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         from homeassistant.helpers import entity_registry as er
 
-        if "recorder" not in self.hass.config.components:
+        if "recorder" not in self.hass.config.components or self.offline_entity_statistic_ids is None:
             self.orphaned_statistics = []
             return []
 
@@ -3035,28 +3038,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         ent_reg = er.async_get(self.hass)
         server_slug = slugify(self.server_id)
-        # Match all historical naming patterns for this server_id:
+        # Fallback naming patterns for statistics whose registry entry HA has already purged:
         # - current:  sensor.comexio_{server_id}_...
         # - legacy:   sensor.comexio_server_{server_id}_...  (pre-sub-device-grouping naming)
         prefixes = (
             f"sensor.comexio_{server_slug}_",
             f"sensor.comexio_server_{server_slug}_",
         )
+        # Primary ownership signal: entities of this entry the registry still remembers as deleted.
+        # Device-name-based entity_ids (sensor.iosrv1_iox2_…) never match the prefixes above.
+        entry_id = self.config_entry.entry_id
+        known_entity_ids = {
+            deleted.entity_id
+            for deleted in ent_reg.deleted_entities.values()
+            if deleted.platform == DOMAIN and deleted.config_entry_id == entry_id
+        }
 
-        # Accept any source — the entity-registry check is the authoritative safety gate.
-        orphans = [
-            stat["statistic_id"]
-            for stat in all_stats
-            if any(stat["statistic_id"].startswith(p) for p in prefixes)
-            and ent_reg.async_get(stat["statistic_id"]) is None
-            and stat["statistic_id"] not in self.offline_entity_statistic_ids
-        ]
+        # The entity-registry check (live_entity_ids) is the authoritative safety gate.
+        orphans = find_orphaned_statistic_ids(
+            (stat["statistic_id"] for stat in all_stats),
+            live_entity_ids=set(ent_reg.entities),
+            known_entity_ids=known_entity_ids,
+            legacy_prefixes=prefixes,
+            protected_entity_ids=self.offline_entity_statistic_ids,
+        )
 
         _LOGGER.debug(
-            "[%s] Orphaned statistics detected: %d (total recorder stats scanned: %d)",
+            "[%s] Orphaned statistics detected: %d (total recorder stats scanned: %d): %s",
             self.server_id,
             len(orphans),
             len(all_stats),
+            orphans,
         )
 
         self.orphaned_statistics = orphans
