@@ -3792,12 +3792,16 @@ class ComexioAPI:
         keep_bridge_titles: set[str] | None = None,
     ) -> list[int]:
         """Ascending ids in [min_id, max_id) of markers that are 'free': no title AND not
-        placed as an element in any function plan.
+        placed as an element in any function plan (plus, with keep_bridge_titles, stale
+        bridge markers >= min_id — see below).
 
         keep_bridge_titles (optional): additionally treat every unplaced, bridge-titled
         marker >= min_id whose title is NOT in this set as free — a stale bridge marker left
         behind by a K-element rename or a deleted plan (see _stale_knx_bridge_marker_ids).
         Bridge titles are machine-given, so this never touches a user's own marker.
+        Deliberately NOT capped at max_id: max_id guards blank markers (which could be a
+        user's), a stale bridge marker is ours wherever it sits — and since the result is
+        ascending, ids above the block are only used once the block itself is exhausted.
 
         Mirrors the same relevant-vs-free distinction Comexio's own Studio validation uses
         (see project_knx_write_path_design memory, 15.09.2026 discussion): a blank, unplaced
