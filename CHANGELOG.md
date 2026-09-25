@@ -9,6 +9,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ---
 
+## [0.10.0] — 2026-09-25
+
+### ✨ New Features
+- **Comexio KNX objects as an opt-in entity category:** KNX objects (`$FubModules["11"]`) show up as sensor/switch/number/binary_sensor entities, with their own `[KNX]` Web-IO device/class, `HA - KNX [1-100]` function plan cluster pages and full audit/repair/sync/trigger-pair parity with Markers. Disabled by default via the new `import_knx` option; the option (and its naming schema / ignore list fields) only appears once the server actually reports KNX objects (#83, #84).
+- **KNX write path via a Marker bridge:** a KNX object can be written through a dedicated bridge Marker wired into its cluster plan, including the API-loopback fan-out that keeps the bridge in sync after a bus-side value change (#88).
+- **KNX unit/device_class detection:** analog KNX objects get unit, range, step and device_class derived from their datapoint type (e.g. DPT 9.001 → `temperature` / `°C`). Unambiguous digital datapoints (alarm, presence, window/door) become read-only binary sensors; the ambiguous digital types are classified individually via a new Repair flow (switch / read-only / trigger) (#88).
+- **KNX dimmer and blind entities:** DPT 3.007 / 3.008 group-address pairs are exposed as a single `light` (dimmer, best-effort brightness, restored across restarts) or `cover` (open/close/stop) instead of two separate switches. New `KNX.md` documents naming, detection and the full DPT-to-entity table (#88).
+- **New `comexio.marker_delete` service:** permanently deletes integration-created Markers by single ID, list or range (max. 200 per call, `confirm: true` required). Protected Markers (factory M1–M3, anything created in Comexio Studio) are skipped and listed under `protected` instead of aborting the whole call; the optional `force` flag additionally deletes unnamed Markers that are not placed in any function plan, and fails closed if any plan cannot be read (#87, #94).
+- **Selective uninstall cleanup:** the cleanup repair dialog offers **Everything / Markers only / IOs only / KNX only**, each listing the plans, Web-IO devices and classes it will delete. The shared `HA - TRIGGER` plan is kept whenever it still holds trigger pairs of another scope. Progress and a final summary are posted as notifications; an incomplete run re-raises the issue for a retry (#93).
+- **One-time KNX pre-release cleanup:** installations updated from v0.10.0-rc1 … rc3 get a persistent "Clean up KNX pre-release leftovers" repair issue (KNX scope preselected) if KNX plans, the KNX Web-IO device or bridge markers from the old layout exist (#93).
+- **Function plan preview: KNX pills and ID-based search:** KNX elements render in the Studio layout (`K51 | 13.011 … | value`) with live values. Search (card and `function_plan_search`) now matches object IDs (`M…`, `K…`, `T…`, `C…`, `EXT#IO`) by default, and full label text when the query is in double quotes (#91).
+- **Webhook debug logging:** each webhook push logs the Marker/IO name and value at debug level, e.g. `Webhook marker push: Rollo Küche = 1 (prev 0)` (#81).
+
+### 🛠️ Core & Stability Improvements
+- **Unit test suite:** 135+ pure-logic pytest tests (parsers, Web-IO command builders, KNX DPT handling, plan diff/render/analysis) with syrupy characterization snapshots, run by a new pre-commit hook and CI job (#90).
+- **No more duplicate Web-IO classes after a transient HTTP error:** `get_webio_base_info` and the Web-IO device existence check now raise on a failed fetch instead of reporting "absent", so sync and `generate_web_io` no longer upload a second class next to one that still exists (#84, #89).
+- **CI hardening:** Ruff/Bandit CI installs pinned to wheel-only exact versions (#82); a YAML parse error that had silently disabled the Ruff/Bandit/mypy/hassfest jobs is fixed (#88).
+- **Source-neutral internals:** function plan helpers shared by Markers and KNX objects were renamed to source-neutral names, and hardcoded Marker/KNX branches were replaced with registry lookups. No behaviour change (#84, #89).
+
+### 🐛 Bug Fixes & Refactoring
+- **Setup crash on gap-free Web-IO command groups:** Comexio serializes a sequentially-numbered Web-IO command group as a JSON array instead of an object, which crashed setup with `'list' object has no attribute 'items'` (#85).
+- **Orphaned statistics with device-name-based entity_ids:** statistics of deleted entities whose entity_id was derived from the device name were never flagged. Ownership is now determined via the entity registry's deleted entities, offline extensions stay protected across restarts, and a startup race is closed (#92).
+- **Uninstall never deleted Web-IO classes:** the class ID was read from `BaseId` (only present in upload payloads) instead of `WebDeviceBaseId`, so classes were never found for deletion (#93).
+- **Empty JS arrays in scraped admin pages:** `var $X = [];` (e.g. `$Fubs` with no plan left) no longer picks up the next variable's object literal (#93).
+- **`function_plan_search` plan selector:** a single hit now actually selects the plan — the option lookup used the bare plan name, which never matches the `<name> (ID n)` options (#91).
+- **`marker_delete` response crash:** every early exit returned `None`, which Home Assistant rejects when a response is requested (e.g. from Developer Tools); all paths now return a dict with the reason in `error` (#94).
+- **Webhook push for an untracked IO** now logs a warning instead of being dropped silently (#81).
+
+### ⚠️ Requirements & Notes
+- **KNX support is not yet verified against real KNX hardware.** Leave `import_knx` off unless you want to help verify it; nothing else is affected.
+- **Updating from v0.10.0-rc1 … rc3 with KNX enabled:** confirm the "Clean up KNX pre-release leftovers" repair issue, then run a sync to rebuild the KNX part in the final layout.
+- **Behaviour change in `function_plan_search`:** an unquoted query now matches object IDs only; to search label text use double quotes (`"Küche"`).
+- **Restart required** after updating.
+
+---
+
 ## [0.9.5] — 2026-09-09
 
 ### 🐛 Bug Fixes & Refactoring
@@ -272,15 +308,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.5...HEAD
-[0.9.5]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.4...0.9.5
-[0.9.4]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.3...0.9.4
-[0.9.3]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.2...0.9.3
-[0.9.2]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.1...0.9.2
-[0.9.1]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.9.0...0.9.1
-[0.9.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.8.1...0.9.0
-[0.8.1]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.8.0...0.8.1
-[0.8.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.7.5...0.8.0
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.5...v0.10.0
+[0.9.5]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.7.5...v0.8.0
 [0.7.5]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.7.1...0.7.5
 [0.7.1]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.7.0...0.7.1
 [0.7.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/0.6.4...0.7.0
