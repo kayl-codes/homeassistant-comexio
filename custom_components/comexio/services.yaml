@@ -589,12 +589,13 @@ marker_delete:
   description: >
     Permanently deletes one or more Markers directly on the Comexio server (not just from
     a function plan's canvas — the Marker itself, including any wiring to it). Only markers
-    this integration created itself (e.g. KNX bridge markers) can be deleted — factory and
-    Studio-created markers are protected and the whole call is refused if any are included.
-    A marker id that does not (or no longer) exist is silently skipped, not reported as an
-    error — a genuine request failure (e.g. session drop) is still reported, never mistaken
-    for that. Limited to 200 markers per call. Requires "confirm" — without it, nothing is
-    deleted.
+    this integration created itself (e.g. KNX bridge markers) are deleted — factory and
+    Studio-created markers are protected: they are skipped and listed as "protected", the
+    remaining ids are still deleted. With "force", protected markers are deleted too if they
+    have no name and are not placed in any function plan. A marker id that does not (or no
+    longer) exist is silently skipped, not reported as an error — a genuine request failure
+    (e.g. session drop) is still reported, never mistaken for that. Limited to 200 markers
+    per call. Requires "confirm" — without it, nothing is deleted.
   fields:
     config_entry:
       name: Comexio instance
@@ -613,6 +614,13 @@ marker_delete:
       name: Confirm deletion
       description: "Must be enabled — otherwise nothing is deleted."
       required: true
+      default: false
+      selector:
+        boolean:
+    force:
+      name: Force (untitled, unplaced markers)
+      description: "Also delete factory/Studio-created markers — but only those without a name that are not placed in any function plan."
+      required: false
       default: false
       selector:
         boolean:

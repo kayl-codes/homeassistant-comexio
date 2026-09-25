@@ -298,6 +298,107 @@ def _placed_marker_ids(all_plans: dict[int, dict], ref_type: int) -> set[int]:
     return placed_ids
 
 
+def _plan_payload_has_elements(data: Any) -> bool:
+    """True if a loadelements/loadallelements plan payload carries a real elements collection.
+
+    An error object or truncated payload (no "elements", or "elements": null) must not pass as
+    a loaded, empty plan wherever placement gates an irreversible action (marker_delete force).
+    """
+    return isinstance(data, dict) and isinstance(data.get("elements"), (dict, list))
+
+
+def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
+    """Marker ids referenced in one plan, or None if any element/reference is unreadable."""
+    elements = plan_data.get("elements") if isinstance(plan_data, dict) else None
+    if not isinstance(elements, dict):
+        return None
+    refs: set[int] = set()
+    for elem in elements.values():
+        ref = elem.get("reference") if isinstance(elem, dict) else "malformed"
+        if ref is None:
+            continue
+        if not isinstance(ref, dict):
+            return None
+        if str(ref.get("type")).strip() != "2":
+            continue
+        ref_id = ComexioAPI._parse_plausible_marker_id(ref.get("ref_id"))
+        if ref_id is None:
+            return None
+        refs.add(ref_id)
+    return refs
+
+
+def _placed_marker_ids_strict(all_plans: dict[int, dict]) -> set[int] | None:
+    """Fail-closed variant of _placed_marker_ids for marker_delete's force gate.
+
+    _placed_marker_ids silently skips unreadable references — fine for picking free ids, but
+    here a skipped reference would make a placed marker look unplaced and deletable. Any
+    unreadable plan, element or marker reference returns None (placement unknown) instead.
+    """
+    placed: set[int] = set()
+    for plan_data in all_plans.values():
+        refs = _plan_marker_refs_strict(plan_data)
+        if refs is None:
+            return None
+        placed |= refs
+    return placed
+
+
+_MARKER_CONFIG_UNREADABLE = "Comexio marker config could not be fetched or parsed — every id refused (see log)."
+_FORCE_IGNORED = "force ignored: not every function plan could be loaded and verified (see log)."
+
+
+def _is_api_created_marker(record: dict[str, Any]) -> bool:
+    """True if the marker record carries CategoryId==1 (created via the admin API, not Studio).
+
+    Python's loose equality makes True == 1 and 1.0 == 1, so a plain "== 1" check would let a
+    malformed CategoryId (e.g. a scraped JSON boolean true) alias onto "1" — only a genuine
+    int, not a bool, is accepted; anything else (including 1.0 or the string "1") is not.
+    """
+    value = record.get("CategoryId", 0)
+    return isinstance(value, int) and not isinstance(value, bool) and value == 1
+
+
+def _marker_has_title(record: dict[str, Any]) -> bool:
+    """True unless the marker's Name is missing/None or a blank string.
+
+    A non-string Name (malformed record) counts as titled — the force path of marker_delete
+    only removes markers it can positively identify as untitled.
+    """
+    name = record.get("Name")
+    if name is None:
+        return False
+    return not isinstance(name, str) or bool(name.strip())
+
+
+def _classify_marker_delete_ids(
+    marker_ids: list[int], records: dict[int, dict[str, Any]], placed_ids: set[int] | None
+) -> tuple[list[int], list[int]]:
+    """Split marker_ids into (deletable, protected) for the marker_delete service.
+
+    - Absent from records (already deleted / never existed): deletable — delete_marker then
+      reports it as the harmless "already absent" case.
+    - CategoryId==1 (created by this integration via the API): deletable.
+    - Anything else (CategoryId==0 = factory or Studio-created): protected, unless force
+      is active (placed_ids is not None) AND the marker has no title AND it is not placed in
+      any function plan. placed_ids=None means force is off — or the plans couldn't all be
+      loaded, in which case placement is unknown and nothing may pass on that basis.
+    """
+    deletable: list[int] = []
+    protected: list[int] = []
+    for mid in marker_ids:
+        record = records.get(mid)
+        if (
+            record is None
+            or _is_api_created_marker(record)
+            or (placed_ids is not None and not _marker_has_title(record) and mid not in placed_ids)
+        ):
+            deletable.append(mid)
+        else:
+            protected.append(mid)
+    return deletable, protected
+
+
 def _knx_bridge_title(k_id: int, k_title: str) -> str:
     """Marker title of the KNX bridge marker for K-element k_id (matches MARKER_KNX_BRIDGE_SUFFIX_RE)."""
     return f"{k_title} [K{k_id}]"
@@ -2897,68 +2998,65 @@ class ComexioAPI:
             _LOGGER.exception("delete_marker: HTTP request error deleting marker_id=%s", marker_id)
             return None
 
-    async def get_marker_delete_eligibility(self, marker_ids: list[int]) -> tuple[list[int], list[int], set[int]]:
-        """Split marker_ids into (deletable, protected, known_ids) using a fresh CategoryId lookup.
+    async def get_marker_delete_eligibility(
+        self, marker_ids: list[int], force: bool = False
+    ) -> tuple[list[int], list[int], set[int], str | None]:
+        """Split marker_ids into (deletable, protected, known_ids, gate_error) via a fresh config lookup.
 
-        Safety gate for marker_delete (user requirement 2026-09-17): only markers this
-        integration created itself via the API carry CategoryId==1 and may be deleted.
-        CategoryId==0 covers both factory-provisioned markers (M1 "System rebooted", M2
-        "TRUE", M3 "FALSE" on a fresh install) and anything a human created via Comexio
-        Studio, and must never be reachable through this service.
+        Safety gate for marker_delete: by default only markers this integration created itself
+        via the API carry CategoryId==1 and may be deleted. CategoryId==0 covers both
+        factory-provisioned markers (M1 "System rebooted", M2 "TRUE", M3 "FALSE") and anything
+        a human created via Comexio Studio — protected. With force=True a CategoryId==0 marker
+        becomes deletable too, but only if it has no title AND is not placed in any function
+        plan (checked against freshly loaded plans — see _classify_marker_delete_ids). If not
+        every plan can be loaded, force grants nothing: placement would be unknown.
 
-        A marker_id absent from the current config entirely (already deleted, or never
-        existed) is treated as deletable, not protected — it defaults to CategoryId 1 rather
-        than 0 here — so the existing "deleting an already-gone id is a routine no-op, not an
-        error" behavior (delete_marker returning False) is unaffected by this gate.
+        Protected ids no longer abort the batch — the caller deletes the deletable ones and
+        reports the protected ones. A marker_id absent from the current config entirely is
+        deletable (delete_marker then reports it as "already absent").
 
-        Deny-by-default on top of allow-by-CategoryId: an unrecognized CategoryId value (not
-        just 0 — nothing here guarantees the field stays a clean 0/1 flag, e.g. a scraped
-        string "1" fails the strict equality check below just like a real 0 would, and a
-        boolean `true` is rejected explicitly despite Python's `True == 1` — see the comment
-        below) is treated as protected too. A config fetch that failed outright (get_raw_config() returns {} on
-        a failed HTTP fetch, a dict without FubModules or a FubModules value that isn't itself
-        a dict if the JS block couldn't be parsed or came back malformed, or a transport
-        error/timeout — same convention as coordinator.py's "if not raw_config" guard) refuses
-        every requested id rather than defaulting them all to deletable — a blind config fetch
-        failure must never silently open this gate for an irreversible action, and a malformed
-        response must never crash the service call outright either (e.g. calling .get("2") on
-        a non-dict FubModules value, or converting a FubModules["2"] that came back as a
-        non-iterable scalar — e.g. a bare int — straight into a list). The same applies if
-        marker records exist but none has a usable integer Id (e.g. a parsing regression
-        upstream) — an empty `categories` map must not silently make every requested id default
-        to "deletable". The same reasoning applies even to a single unparseable record among
-        otherwise-fine ones: since we can't recover what id it was meant to be, we can't rule out
-        that it's a requested/protected marker, so one bad Id refuses the whole batch rather than
-        just being dropped and silently falling through to the absent-id default. The same is
-        true if two records resolve to the same Id (duplicate/malformed config): whichever one's
-        CategoryId ends up "winning" would be a silent, arbitrary choice, so a duplicate Id also
-        refuses the whole batch rather than letting one record overwrite the other.
+        A config fetch or parse failure (see _parse_marker_records) refuses every requested id
+        rather than defaulting them all to deletable — a blind failure must never silently open
+        this gate for an irreversible action.
 
-        The third return value, `known_ids`, is the set of ids actually found (with a usable
-        Id) in this lookup — the caller uses it to tell a delete_marker "False" result that
-        followed a confirmed-absent id (harmless) apart from one that followed an id we just
-        saw present as CategoryId==1 (suspicious: the server accepted it as deletable a moment
-        ago but the delete call itself reported nothing changed).
+        The third return value, `known_ids`, is the set of ids actually found in this lookup —
+        the caller uses it to tell a delete_marker "False" result for a confirmed-absent id
+        (harmless) apart from one for an id we just saw present (suspicious). The fourth,
+        `gate_error`, names a load failure that made the gate stricter than requested (config
+        unreadable, or force ignored because the plans couldn't be verified) — None otherwise,
+        so the caller can tell that apart from genuine protection.
         """
         try:
             conf = await self.get_raw_config()
         except (aiohttp.ClientError, TimeoutError):
             _LOGGER.exception("get_marker_delete_eligibility: config fetch failed — refusing all ids")
-            return [], list(marker_ids), set()
-        categories = self._parse_marker_categories(conf)
-        if categories is None:
-            return [], list(marker_ids), set()
-        # Python's loose equality makes True == 1 and 1.0 == 1, so a plain "!= 1" check would
-        # let a malformed CategoryId (e.g. a scraped JSON boolean true) alias onto "1" the same
-        # way the Id parsing above had to guard against — only a genuine int, not a bool, is
-        # accepted as CategoryId==1; anything else (including 1.0) stays protected.
-        protected = []
-        for mid in marker_ids:
-            value = categories.get(mid, 1)
-            if not (isinstance(value, int) and not isinstance(value, bool) and value == 1):
-                protected.append(mid)
-        deletable = [mid for mid in marker_ids if mid not in protected]
-        return deletable, protected, set(categories)
+            return [], list(marker_ids), set(), _MARKER_CONFIG_UNREADABLE
+        records = self._parse_marker_records(conf)
+        if records is None:
+            return [], list(marker_ids), set(), _MARKER_CONFIG_UNREADABLE
+        placed_ids = await self._placed_marker_ids_for_force(conf) if force else None
+        gate_error = _FORCE_IGNORED if force and placed_ids is None else None
+        deletable, protected = _classify_marker_delete_ids(marker_ids, records, placed_ids)
+        return deletable, protected, set(records), gate_error
+
+    async def _placed_marker_ids_for_force(self, conf: dict) -> set[int] | None:
+        """Marker ids placed in any function plan, from a fresh load of EVERY plan, or None.
+
+        None (force grants nothing) whenever the plan list or any single plan can't be loaded —
+        a missing plan would make the markers placed in it look unplaced.
+        """
+        fubs = conf.get("Fubs")
+        if not isinstance(fubs, dict):
+            _LOGGER.error("get_marker_delete_eligibility: no plan list in config — force ignored")
+            return None
+        all_plans = await self._load_all_plans_verified(fubs, strict=True)
+        if all_plans is None:
+            _LOGGER.error("get_marker_delete_eligibility: not every plan could be loaded — force ignored")
+            return None
+        placed = _placed_marker_ids_strict(all_plans)
+        if placed is None:
+            _LOGGER.error("get_marker_delete_eligibility: unreadable marker reference in a plan — force ignored")
+        return placed
 
     @staticmethod
     def _marker_group_items(group: Any) -> list[Any] | None:
@@ -2983,8 +3081,8 @@ class ComexioAPI:
         return None
 
     @staticmethod
-    def _parse_marker_categories(conf: dict) -> dict[int, Any] | None:
-        """Extract {marker_id: CategoryId} from a raw config dict, or None if unusable.
+    def _parse_marker_records(conf: dict) -> dict[int, dict[str, Any]] | None:
+        """Extract {marker_id: marker record} from a raw config dict, or None if unusable.
 
         Split out of get_marker_delete_eligibility to keep that function's cognitive
         complexity in check (SonarQube S3776) — this is a self-contained parse step with
@@ -3003,7 +3101,7 @@ class ComexioAPI:
         if not items:
             _LOGGER.error("get_marker_delete_eligibility: no marker config available — refusing all ids")
             return None
-        categories: dict[int, Any] = {}
+        records: dict[int, dict[str, Any]] = {}
         for m in items:
             if not isinstance(m, dict):
                 # A non-dict entry (e.g. a bare int/string/null from a scraping regression)
@@ -3014,9 +3112,9 @@ class ComexioAPI:
                 return None
             item_id = ComexioAPI._parse_plausible_marker_id(m.get("Id"))
             if item_id is None:
-                # A record with an Id we can't parse can't be entered into `categories` at all —
+                # A record with an Id we can't parse can't be entered into `records` at all —
                 # dropping it with just a warning and moving on would let a requested id that
-                # actually belongs to THIS record fall through categories.get(mid, 1)'s default
+                # actually belongs to THIS record fall through the absent-id default
                 # and be treated as "already deleted, so deletable" purely because we couldn't
                 # read its real (possibly CategoryId==0, protected) identity. There's no way to
                 # know in advance whether the unparseable record was for one of the requested
@@ -3027,7 +3125,7 @@ class ComexioAPI:
                     m.get("Id"),
                 )
                 return None
-            if item_id in categories:
+            if item_id in records:
                 # Two marker records resolving to the same Id (malformed config / upstream
                 # parsing regression) would otherwise let whichever one is iterated last win —
                 # if a protected CategoryId==0 record is silently overwritten by a duplicate
@@ -3037,11 +3135,11 @@ class ComexioAPI:
                 # duplicate Id refuses the whole batch rather than picking one silently.
                 _LOGGER.error("get_marker_delete_eligibility: duplicate marker Id %r — refusing all ids", item_id)
                 return None
-            categories[item_id] = m.get("CategoryId", 0)
-        if not categories:
+            records[item_id] = m
+        if not records:
             _LOGGER.error("get_marker_delete_eligibility: no marker had a usable Id — refusing all ids")
             return None
-        return categories
+        return records
 
     @staticmethod
     def _parse_plausible_marker_id(raw_id: Any) -> int | None:
@@ -3083,10 +3181,12 @@ class ComexioAPI:
         """
         return {str(item.get("id", i)): item for i, item in enumerate(items)}
 
-    async def function_plan_load_elements(self, fub_id: int) -> dict | None:
+    async def function_plan_load_elements(self, fub_id: int, strict: bool = False) -> dict | None:
         """Load elements and connections for a function plan (GET loadelements).
 
-        Returns dict with 'elements' and 'connections' keys, or None on failure.
+        Returns dict with 'elements' and 'connections' keys, or None on failure. strict=True
+        also treats a payload without a real elements collection as a failure instead of an
+        empty plan (see _plan_payload_has_elements).
         """
         url = f"{self._base_url}/admin/function_function_module/loadelements/"
         headers = {
@@ -3099,6 +3199,9 @@ class ComexioAPI:
                     _LOGGER.error("function_plan_load_elements failed (HTTP %s, fub=%s)", resp.status, fub_id)
                     return None
                 data = await resp.json(content_type=None)
+                if strict and not _plan_payload_has_elements(data):
+                    _LOGGER.error("function_plan_load_elements fub=%s: payload without elements", fub_id)
+                    return None
                 # Comexio's PHP backend serializes an associative array as a JSON array
                 # (not object) whenever its keys happen to be sequential integers from 0 —
                 # a shape coincidence, not a signal that the collection is empty. A small,
@@ -3124,13 +3227,14 @@ class ComexioAPI:
             _LOGGER.exception("function_plan_load_elements fub_id=%s failed", fub_id)
             return None
 
-    async def function_plan_load_all_plans(self) -> dict[int, dict]:
+    async def function_plan_load_all_plans(self, strict: bool = False) -> dict[int, dict]:
         """Load elements and connections for ALL known function plans in one bulk request.
 
         Uses the loadallelements endpoint (bulk variant of loadelements) instead of one
         request per plan — Comexio serializes requests server-side anyway, so N sequential
         per-plan calls gain nothing over a single bulk call. Result is filtered down to the
-        fub list cached by parse_config (self._fub_data).
+        fub list cached by parse_config (self._fub_data). strict=True drops entries without a
+        real elements collection instead of treating them as empty plans.
         Returns {fub_id: {"elements": {...}, "connections": {...}}}.
         """
         fub_ids = {int(fid) for fid in self._fub_data}
@@ -3163,6 +3267,9 @@ class ComexioAPI:
             try:
                 fid = int(fid_str)
                 if fid not in fub_ids:
+                    continue
+                if strict and not _plan_payload_has_elements(data):
+                    _LOGGER.warning("function_plan_load_all_plans: entry fid=%s without elements — dropped", fid)
                     continue
                 elements = data.get("elements")
                 data["elements"] = (
@@ -3825,7 +3932,7 @@ class ComexioAPI:
         placed_ids = _placed_marker_ids(all_plans, ref_type)
         return sorted(candidate_ids - placed_ids)
 
-    async def _load_all_plans_verified(self, fubs: dict[str, Any]) -> dict[int, dict] | None:
+    async def _load_all_plans_verified(self, fubs: dict[str, Any], strict: bool = False) -> dict[int, dict] | None:
         """Elements/connections of EVERY plan in fubs (a fresh $Fubs), or None if any is missing.
 
         Placement checks that decide whether a bridge marker may be renamed or blanked need
@@ -3833,15 +3940,15 @@ class ComexioAPI:
         and filters against the cached plan list. This refreshes that cache (self._fub_data)
         from fubs, then loads each plan the bulk response lacked individually (e.g. a plan
         without elements, should the bulk endpoint omit those). Returns {} if there are no
-        plans at all.
+        plans at all. strict is passed on to both loaders (see function_plan_load_elements).
         """
         self._fub_data = fubs
         fub_ids = {int(fid) for fid in fubs}
         if not fub_ids:
             return {}
-        plans = await self.function_plan_load_all_plans()
+        plans = await self.function_plan_load_all_plans(strict=strict)
         for fid in sorted(fub_ids - set(plans)):
-            data = await self.function_plan_load_elements(fid)
+            data = await self.function_plan_load_elements(fid, strict=strict)
             if data is None:
                 _LOGGER.error("_load_all_plans_verified: plan fub=%s could not be loaded — placement unknown", fid)
                 return None
