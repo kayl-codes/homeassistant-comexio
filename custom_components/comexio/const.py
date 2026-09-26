@@ -754,14 +754,41 @@ def stable_object_id(unique_id: str) -> str:
     return slugify(unique_id.removeprefix("comexio_"))
 
 
+def entity_id_migration_target(
+    entity_id: str, unique_id: str, suggested_object_id: str | None, server_id: str
+) -> str | None:
+    """entity_id a registered Comexio entity should be migrated to, or None if it is fine as is.
+
+    Entities that request a stable entity_id (see entity.ComexioStableEntityIdMixin) have it
+    stored as the registry's suggested_object_id — that is the target, so an entity_id built
+    by HA from the old display name converges on the technical address. Everything else
+    (diagnostic buttons/sensors) is only corrected for the legacy doubled server prefix
+    "comexio_<server>_<server>_" from before v0.7.5.
+    """
+    domain, slug = entity_id.split(".", 1)
+    if suggested_object_id and suggested_object_id == stable_object_id(unique_id):
+        target = f"{domain}.{suggested_object_id}"
+    else:
+        server_slug = slugify(server_id)
+        double_prefix = f"comexio_{server_slug}_{server_slug}_"
+        if not slug.startswith(double_prefix):
+            return None
+        target = f"{domain}.comexio_{server_slug}_{slug[len(double_prefix) :]}"
+    return None if target == entity_id else target
+
+
 def migrate_entry_options(minor_version: int, data: Mapping[str, Any], options: Mapping[str, Any]) -> dict[str, Any]:
     """Options of a config entry migrated from ``minor_version`` to CONFIG_ENTRY_MINOR_VERSION."""
     new_options = dict(options)
     if minor_version < 2:
         new_options[CONF_KNX_PRERELEASE_CLEANUP_PENDING] = True
-    if minor_version < 3 and CONF_SCHEMA_IO not in data and CONF_SCHEMA_IO not in options:
-        # Never saved a schema, i.e. ran on the old default: keep its entity names as they are.
-        new_options[CONF_SCHEMA_IO] = LEGACY_DEFAULT_SCHEMA_IO
+    if minor_version < 3:
+        if CONF_SCHEMA_IO not in data and CONF_SCHEMA_IO not in options:
+            # Never saved a schema, i.e. ran on the old default: keep its entity names as they are.
+            new_options[CONF_SCHEMA_IO] = LEGACY_DEFAULT_SCHEMA_IO
+        # "Ignore" was given for the old, much narrower doubled-prefix repair; the stable
+        # entity_id migration is a different question and must be offered once.
+        new_options.pop(CONF_ENTITY_ID_MIGRATION_IGNORED, None)
     return new_options
 
 

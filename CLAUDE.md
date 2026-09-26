@@ -135,7 +135,7 @@ The coordinator's `last_audit_results` dict (populated every poll) drives both s
 | Cancel button | `comexio_{server_id}_webio_sync_cancel_btn` | HA-derived |
 | Status sensor | `comexio_{server_id}_webio_sync_status_sensor` | HA-derived |
 
-The entity_id is `const.stable_object_id(unique_id)`, requested by `entity.ComexioStableEntityIdMixin`. HA applies it only when an entity is first registered; existing entities keep their entity_id (renaming them breaks automations/dashboards and orphans statistics), but HA stores it as `suggested_object_id`, so HA's "recreate entity ID" yields the stable id too.
+The entity_id is `const.stable_object_id(unique_id)`, requested by `entity.ComexioStableEntityIdMixin`. HA applies it only when an entity is first registered; existing entities keep their entity_id (renaming them breaks automations/dashboards and orphans statistics), but HA stores it as `suggested_object_id`, so HA's "recreate entity ID" yields the stable id too. Existing installs converge via the opt-in `entity_id_mismatch` repair / "Fix Entity IDs" button (`const.entity_id_migration_target`, `coordinator.async_migrate_entity_ids`): the recorder moves history and statistics along, automations/scripts/dashboards are not rewritten — the repair shows how many automations/scripts reference the old ids.
 
 ### Entity naming (configurable)
 

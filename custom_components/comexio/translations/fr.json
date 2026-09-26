@@ -244,12 +244,12 @@
       }
     },
     "entity_id_mismatch": {
-      "title": "ID de serveur en double dans les ID d'entité ({server_id})",
+      "title": "Identifiants d'entité non conformes au schéma Comexio ({server_id})",
       "fix_flow": {
         "step": {
           "entity_id_fix": {
             "title": "Corriger les ID d'entité",
-            "description": "**{count} entities** were found with a duplicate server-ID prefix in their entity_id.\n\nThe entity IDs can be corrected automatically. **History and automations are preserved**, but please review automations that reference these entity IDs directly.\n\nWould you like to fix the IDs now?"
+            "description": "**{count} entités** ont un entity_id qui ne suit pas le schéma stable Comexio (serveur, extension, numéro IO / marqueur / KNX — indépendant du nom affiché). Exemple : {example}\n\nLa correction les renomme. **L'historique et les statistiques suivent automatiquement.** Les automatisations, scripts et tableaux de bord ne sont **pas** mis à jour — **au moins {references} automatisations/scripts** (? = non vérifiable) utilisent actuellement ces entity_id et devront être adaptés ; vérifiez aussi les tableaux de bord. Les entity_id renommés manuellement sont également renommés.\n\nVoulez-vous corriger les identifiants maintenant ?"
           }
         }
       }
