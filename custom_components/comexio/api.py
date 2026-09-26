@@ -1459,7 +1459,9 @@ class ComexioAPI:
     # plan (see _process_markers) — kept out of the entity/name comparison logic nowhere
     # special-cased on purpose: once imported, it behaves exactly like any other marker name,
     # so a later real rename in Comexio is picked up by the normal sync/rename detection.
-    _NO_NAME_MARKER_TITLE = "#nn"
+    # Also the {IoTitle} of an IO without a description (see _io_schema_title), so unnamed
+    # markers and IOs read the same way in HA.
+    _NO_NAME_TITLE = "#nn"
 
     def _process_markers(
         self,
@@ -1743,7 +1745,7 @@ class ComexioAPI:
         """
         type_raw = raw.get("Type", 1)
         type_str, type_unresolved = self._source_item_type(module_key, type_raw)
-        title = raw.get("Name") or self._NO_NAME_MARKER_TITLE
+        title = raw.get("Name") or self._NO_NAME_TITLE
 
         ha_name = schema.format_map(
             SafeDict(ServerAlias=server_alias, **{id_placeholder: item_id, title_placeholder: title})
@@ -1877,6 +1879,21 @@ class ComexioAPI:
             return "°C"
         return "" if unit in ("0/1", "1/0", "?") else unit
 
+    @classmethod
+    def _io_schema_title(cls, desc: str, ident: str) -> str:
+        """{IoTitle} for the entity name schema: the Comexio description, or "#nn" if there is none.
+
+        An IO without a description arrives here with desc == ident (see _process_ios), and a
+        description that merely repeats the identifier carries no information either — using it
+        as the title would render "IOX1 I6 I6" under the default schema, so both get the same
+        placeholder unnamed markers use. Never empty, so no schema can render an empty name or a
+        dangling separator.
+        """
+        title = (desc or "").strip()
+        if not title or title.casefold() == ident.strip().casefold():
+            return cls._NO_NAME_TITLE
+        return title
+
     def _add_io_entry(
         self,
         data: dict[str, Any],
@@ -1929,7 +1946,7 @@ class ComexioAPI:
             io_name = f"{ext_name} {ident}"
 
         ha_name = schema_io.format_map(
-            SafeDict(ServerAlias=server_alias, ExtName=ext_name, IoId=ident, IoTitle=desc or "")
+            SafeDict(ServerAlias=server_alias, ExtName=ext_name, IoId=ident, IoTitle=self._io_schema_title(desc, ident))
         )
 
         entry = {

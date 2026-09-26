@@ -46,7 +46,7 @@
       }),
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE AI1 AI1',
+        'ha_name': 'BASE AI1 #nn',
         'id': '13',
         'identifier': 'AI1',
         'inactive': False,
@@ -112,7 +112,7 @@
       }),
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE AI1 AI1',
+        'ha_name': 'BASE AI1 #nn',
         'id': '13',
         'identifier': 'AI1',
         'inactive': False,

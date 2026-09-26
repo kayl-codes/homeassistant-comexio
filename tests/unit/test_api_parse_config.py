@@ -162,3 +162,26 @@ def test_fub_metadata_is_cached_for_canvas_helpers(parsing_api: ComexioAPI) -> N
     assert parsing_api.get_fub_canvas_bounds(2) == pytest.approx(
         (870.0 * 297 / 297 * 120 / 90, 720.0 * 420 / 210 * 120 / 90)
     )
+
+
+def test_io_without_description_gets_placeholder_title(basic_result: dict[str, Any]) -> None:
+    """Regression: an IO with an empty description rendered as "BASE AI1 AI1" under the default schema."""
+    io = _by_id(basic_result["io"])["13"]
+
+    assert (io["ha_name"], io["name"]) == ("BASE AI1 #nn", "BASE AI1")
+
+
+@pytest.mark.parametrize(
+    ("desc", "ident", "expected"),
+    [
+        ("Licht Flur", "Q1", "Licht Flur"),
+        ("  Licht Flur ", "Q1", "Licht Flur"),
+        ("", "I6", "#nn"),
+        ("   ", "I6", "#nn"),
+        ("I6", "I6", "#nn"),
+        ("i6", "I6", "#nn"),
+        ("I6 Diele", "I6", "I6 Diele"),
+    ],
+)
+def test_io_schema_title(desc: str, ident: str, expected: str) -> None:
+    assert ComexioAPI._io_schema_title(desc, ident) == expected
