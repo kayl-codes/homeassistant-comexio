@@ -59,7 +59,7 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 | Field | Description |
 |-------|-------------|
 | **Naming schema — Markers** | Template for entity names. Variables: `{MarkerId}`, `{MarkerTitle}` |
-| **Naming schema — IOs** | Template for entity names. Variables: `{ExtName}`, `{IoId}`, `{IoTitle}` |
+| **Naming schema — IOs** | Template for entity names. Variables: `{ExtName}`, `{IoId}`, `{IoTitle}`. Default `{IoId} {IoTitle}` — the extension already appears via the device name. An IO without a description gets the title `#nn`. Entity IDs never depend on the schema. |
 | **Create marker entities** | Enable/disable Marker import. |
 | **Create IO entities** | Enable/disable IO import. |
 | **Polling interval** | Dropdown (1 – 1440 min). Prefer longer intervals — live values arrive via webhook. |
@@ -187,7 +187,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 | Feld | Beschreibung |
 |------|--------------|
 | **Namensschema — Merker** | Vorlage für Entity-Namen. Variablen: `{MarkerId}`, `{MarkerTitle}` |
-| **Namensschema — IOs** | Vorlage für Entity-Namen. Variablen: `{ExtName}`, `{IoId}`, `{IoTitle}` |
+| **Namensschema — IOs** | Vorlage für Entity-Namen. Variablen: `{ExtName}`, `{IoId}`, `{IoTitle}`. Standard `{IoId} {IoTitle}` — die Extension steht bereits im Gerätenamen. Ein IO ohne Beschreibung erhält den Titel `#nn`. Entity-IDs hängen nie vom Schema ab. |
 | **Merker als Entitäten anlegen** | Merker-Import aktivieren/deaktivieren. |
 | **Ein- und Ausgänge anlegen** | IO-Import aktivieren/deaktivieren. |
 | **Abfrageintervall** | Dropdown (1 – 1440 min). Längere Intervalle bevorzugen — Live-Werte kommen per Webhook. |

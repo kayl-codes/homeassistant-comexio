@@ -168,7 +168,7 @@ def test_io_without_description_gets_placeholder_title(basic_result: dict[str, A
     """Regression: an IO with an empty description rendered as "BASE AI1 AI1" under the default schema."""
     io = _by_id(basic_result["io"])["13"]
 
-    assert (io["ha_name"], io["name"]) == ("BASE AI1 #nn", "BASE AI1")
+    assert (io["ha_name"], io["name"]) == ("AI1 #nn", "BASE AI1")
 
 
 @pytest.mark.parametrize(

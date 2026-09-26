@@ -14,7 +14,7 @@
     'io': list([
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE I1 Taster Flur',
+        'ha_name': 'I1 Taster Flur',
         'id': '11',
         'identifier': 'I1',
         'inactive': False,
@@ -30,7 +30,7 @@
       }),
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE Q1 Licht Flur',
+        'ha_name': 'Q1 Licht Flur',
         'id': '12',
         'identifier': 'Q1',
         'inactive': False,
@@ -46,7 +46,7 @@
       }),
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE AI1 #nn',
+        'ha_name': 'AI1 #nn',
         'id': '13',
         'identifier': 'AI1',
         'inactive': False,
@@ -62,7 +62,7 @@
       }),
       dict({
         'ext_name': 'UD 1',
-        'ha_name': 'UD 1 QI1 Dimmer Bad',
+        'ha_name': 'QI1 Dimmer Bad',
         'id': '21',
         'identifier': 'QI1',
         'inactive': False,
@@ -80,7 +80,7 @@
     'io_all': list([
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE I1 Taster Flur',
+        'ha_name': 'I1 Taster Flur',
         'id': '11',
         'identifier': 'I1',
         'inactive': False,
@@ -96,7 +96,7 @@
       }),
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE Q1 Licht Flur',
+        'ha_name': 'Q1 Licht Flur',
         'id': '12',
         'identifier': 'Q1',
         'inactive': False,
@@ -112,7 +112,7 @@
       }),
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE AI1 #nn',
+        'ha_name': 'AI1 #nn',
         'id': '13',
         'identifier': 'AI1',
         'inactive': False,
@@ -128,7 +128,7 @@
       }),
       dict({
         'ext_name': 'BASE',
-        'ha_name': 'BASE Q2 Reserve',
+        'ha_name': 'Q2 Reserve',
         'id': '14',
         'identifier': 'Q2',
         'inactive': True,
@@ -144,7 +144,7 @@
       }),
       dict({
         'ext_name': 'UD 1',
-        'ha_name': 'UD 1 QI1 Dimmer Bad',
+        'ha_name': 'QI1 Dimmer Bad',
         'id': '21',
         'identifier': 'QI1',
         'inactive': False,
