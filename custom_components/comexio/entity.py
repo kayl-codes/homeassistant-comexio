@@ -1,13 +1,16 @@
 # Version: 0.7.8
+import asyncio
 import logging
 from typing import Any
 
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, SOURCE_CATEGORIES, WebioClass
+from .const import DOMAIN, SOURCE_CATEGORIES, WebioClass, stable_object_id
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,7 +52,31 @@ def build_device_info(
     return info
 
 
-class ComexioIOEntity(CoordinatorEntity):
+class ComexioStableEntityIdMixin:
+    """Requests entity_id "<domain>.<stable_object_id(unique_id)>" instead of a name-derived one.
+
+    Hooked into add_to_platform_start because that is the first point the platform (and so
+    the domain) is known, and it runs before HA derives the entity_id. HA only uses the
+    requested id for a new registry entry — an existing entity keeps its entity_id, and one
+    restored from deleted_entities gets its old entity_id back — but stores it as
+    suggested_object_id either way, so HA's "recreate entity ID" and
+    async_regenerate_entity_id then yield the same stable id for existing entities too
+    (unless the user gave the entity a custom name, which takes precedence in HA).
+    If the id is already taken by another entity, HA silently appends "_2".
+    """
+
+    unique_id: str | None
+    entity_id: str
+
+    def add_to_platform_start(
+        self, hass: HomeAssistant, platform: EntityPlatform, parallel_updates: asyncio.Semaphore | None
+    ) -> None:
+        super().add_to_platform_start(hass, platform, parallel_updates)  # type: ignore[misc]
+        if self.unique_id:
+            self.entity_id = f"{platform.domain}.{stable_object_id(self.unique_id)}"
+
+
+class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
     """Shared base for all IO entities attached to an extension module.
 
     Centralises device_info and offline-availability logic that would otherwise
@@ -79,7 +106,7 @@ class ComexioIOEntity(CoordinatorEntity):
         return super().available and self._ext_name not in self.coordinator.offline_extensions
 
 
-class ComexioMarkerEntity(CoordinatorEntity):
+class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
     """Shared base for all marker entities (writable and read-only).
 
     Centralises unique_id/name/device_info that would otherwise be duplicated
@@ -184,7 +211,7 @@ class ComexioKnxEntity(ComexioMarkerEntity):
         )
 
 
-class ComexioKnxDpt3Entity(CoordinatorEntity):
+class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity):
     """Shared base for DPT3.x (Dimmer 3.007 / Blinds 3.008) composite KNX entities.
 
     Comexio splits a DPT3.x KNX object into two K-elements sharing one KnxDeviceId — a

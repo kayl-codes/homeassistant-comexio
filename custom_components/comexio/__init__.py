@@ -16,7 +16,6 @@ from .const import (
     CONF_API_USERNAME,
     CONF_HOST,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
-    CONF_KNX_PRERELEASE_CLEANUP_PENDING,
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_USERNAME,
@@ -25,6 +24,7 @@ from .const import (
     SOURCE_CATEGORIES,
     MarkerKind,
     WebioClass,
+    migrate_entry_options,
     webio_range_check_entity_id,
 )
 from .coordinator import ComexioCoordinator
@@ -530,6 +530,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool: 
     cleanup check (see coordinator.check_knx_prerelease_cleanup). Every pre-1.2 entry gets
     the flag — the check itself only raises the repair issue if KNX artifacts exist, so
     plain v0.9.x installs just clear it again.
+    1.2 -> 1.3: pins the old IO naming schema into entries that never saved one, so the new
+    DEFAULT_SCHEMA_IO only applies to new installs (see const.migrate_entry_options).
     """
     if entry.version > 1:
         # Downgrade from a future major version: refuse rather than guess the layout.
@@ -537,7 +539,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool: 
     if entry.minor_version < CONFIG_ENTRY_MINOR_VERSION:
         hass.config_entries.async_update_entry(
             entry,
-            options={**entry.options, CONF_KNX_PRERELEASE_CLEANUP_PENDING: True},
+            options=migrate_entry_options(entry.minor_version, entry.data, entry.options),
             minor_version=CONFIG_ENTRY_MINOR_VERSION,
         )
         _LOGGER.info("Comexio: migrated config entry %s to version 1.%d", entry.entry_id, CONFIG_ENTRY_MINOR_VERSION)

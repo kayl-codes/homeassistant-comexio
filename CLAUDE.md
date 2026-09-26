@@ -122,23 +122,29 @@ The sync button (`ComexioSyncButton.async_handle_press`) chooses between two str
 
 The coordinator's `last_audit_results` dict (populated every poll) drives both strategies. The sync lock (`_sync_lock`) prevents concurrent runs.
 
-### Unique ID scheme
+### Unique ID and entity_id scheme
 
-| Entity type | Pattern |
-|-------------|---------|
-| Marker entity | `comexio_{server_id}_m{id}` |
-| IO entity | `comexio_{server_id}_{ext_name}_{identifier}` |
-| Sync button | `comexio_{server_id}_webio_sync_start_btn` |
-| Cancel button | `comexio_{server_id}_webio_sync_cancel_btn` |
-| Status sensor | `comexio_{server_id}_webio_sync_status_sensor` |
+**Rule: ids carry only the technical address; only the display name carries the Comexio description.** A renamed description or a changed naming schema must never change a unique_id or entity_id. Every case below is pinned by a test (`tests/unit/test_entity_naming.py`, `test_api_parse_config.py`) — extend those tables instead of special-casing.
+
+| Entity type | unique_id | entity_id (new entities) |
+|-------------|-----------|--------------------------|
+| Marker entity | `comexio_{server_id}_m{id}` | `{domain}.{server_id}_m{id}` |
+| KNX entity | `comexio_{server_id}_k{id}` | `{domain}.{server_id}_k{id}` |
+| IO entity | `comexio_{server_id}_{ext_name}_{identifier}` | `{domain}.{server_id}_{ext_name}_{identifier}` |
+| Sync button | `comexio_{server_id}_webio_sync_start_btn` | HA-derived |
+| Cancel button | `comexio_{server_id}_webio_sync_cancel_btn` | HA-derived |
+| Status sensor | `comexio_{server_id}_webio_sync_status_sensor` | HA-derived |
+
+The entity_id is `const.stable_object_id(unique_id)`, requested by `entity.ComexioStableEntityIdMixin`. HA applies it only when an entity is first registered; existing entities keep their entity_id (renaming them breaks automations/dashboards and orphans statistics), but HA stores it as `suggested_object_id`, so HA's "recreate entity ID" yields the stable id too.
 
 ### Entity naming (configurable)
 
 Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templates. `SafeDict` (in `api.py`) leaves unknown `{keys}` unchanged. Default schemas:
 
 - Marker: `"M{MarkerId} {MarkerTitle}"`
-- IO: `"{ExtName} {IoId} {IoTitle}"`
+- IO: `"{IoId} {IoTitle}"` — no `{ExtName}`: IO entities sit on one device per extension and use `has_entity_name`, so the friendly name is already "`<server> <ext>` + entity name". The old default `"{ExtName} {IoId} {IoTitle}"` (`LEGACY_DEFAULT_SCHEMA_IO`) is pinned into config entries that never saved a schema (entry migration 1.2 → 1.3), so existing installs keep their names.
 - Available placeholders: `ServerAlias`, `MarkerId`, `MarkerTitle`, `ExtName`, `IoId`, `IoTitle`
+- An unnamed marker, and an IO whose description is empty or merely repeats its identifier, gets the title `#nn` — the title is never empty, so no schema renders an empty name or a dangling separator. Accepted limit: a schema of only `{IoTitle}` names all unnamed IOs of an extension `#nn`.
 
 ### Race-condition guards (see inline comments)
 

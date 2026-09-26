@@ -21,7 +21,11 @@ CONF_SCHEMA_MARKER = "schema_marker"
 CONF_SCHEMA_IO = "schema_io"
 CONF_SCHEMA_KNX = "schema_knx"
 DEFAULT_SCHEMA_MARKER = "M{MarkerId} {MarkerTitle}"
-DEFAULT_SCHEMA_IO = "{ExtName} {IoId} {IoTitle}"
+# {ExtName} is left out on purpose: IO entities sit on one device per extension and use
+# has_entity_name, so HA already prefixes the friendly name with "<server> <ext>".
+DEFAULT_SCHEMA_IO = "{IoId} {IoTitle}"
+# Default before minor version 3 — pinned into older entries that never saved a schema.
+LEGACY_DEFAULT_SCHEMA_IO = "{ExtName} {IoId} {IoTitle}"
 DEFAULT_SCHEMA_KNX = "K{KnxId} {KnxTitle}"
 
 # keys for API access
@@ -61,7 +65,9 @@ DEFAULT_FUNCTION_PLAN_PLAN_PREFIX = "HA"
 # this one-shot option set, so the first setup checks for leftovers of the KNX pre-releases
 # (v0.10.0-rc1..rc3 built KNX plans / Web-IO / bridge markers with an older layout) and
 # offers the KNX cleanup as a repair issue. Removed again right after that check.
-CONFIG_ENTRY_MINOR_VERSION = 2
+# Minor version 3: entries created before DEFAULT_SCHEMA_IO dropped {ExtName} get the old
+# default pinned into their options (see migrate_entry_options).
+CONFIG_ENTRY_MINOR_VERSION = 3
 CONF_KNX_PRERELEASE_CLEANUP_PENDING = "knx_prerelease_cleanup_pending"
 # Repair issue translation keys; the issue id is "{key}_{server_id}".
 ISSUE_UNINSTALL_CLEANUP = "uninstall_cleanup"
@@ -735,6 +741,28 @@ def webio_range_check_entity_id(server_id: str) -> str:
     any pre-existing registration built from the old, unslugified formula (__init__.py).
     """
     return f"button.comexio_{slugify(server_id)}_webio_range_check"
+
+
+def stable_object_id(unique_id: str) -> str:
+    """Object id (entity_id without domain) a Comexio IO/Marker/KNX entity requests for itself.
+
+    Derived from the unique_id alone — the technical address, e.g. "iosrv1_iox1_ai7" or
+    "iosrv1_m12" — never from the (schema-built, renamable) display name, so a renamed
+    description in Comexio or a changed naming schema never drifts the entity_id. HA only
+    applies it when the entity is first registered (see entity.ComexioStableEntityIdMixin).
+    """
+    return slugify(unique_id.removeprefix("comexio_"))
+
+
+def migrate_entry_options(minor_version: int, data: Mapping[str, Any], options: Mapping[str, Any]) -> dict[str, Any]:
+    """Options of a config entry migrated from ``minor_version`` to CONFIG_ENTRY_MINOR_VERSION."""
+    new_options = dict(options)
+    if minor_version < 2:
+        new_options[CONF_KNX_PRERELEASE_CLEANUP_PENDING] = True
+    if minor_version < 3 and CONF_SCHEMA_IO not in data and CONF_SCHEMA_IO not in options:
+        # Never saved a schema, i.e. ran on the old default: keep its entity names as they are.
+        new_options[CONF_SCHEMA_IO] = LEGACY_DEFAULT_SCHEMA_IO
+    return new_options
 
 
 # Result dict keys shared between coordinator._async_webio_range_check_tick and the
