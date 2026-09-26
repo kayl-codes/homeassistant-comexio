@@ -3104,7 +3104,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             if not corrected_id:
                 continue
-            if ent_reg.async_get(corrected_id) or not self.hass.states.async_available(corrected_id):
+            # async_available() is True for a free id (no state, no reservation) — the same test
+            # the registry applies before a rename, so a taken target would raise ValueError there.
+            target_free = ent_reg.async_get(corrected_id) is None and self.hass.states.async_available(corrected_id)
+            if not target_free:
                 if entity_entry.entity_id not in self._entity_id_target_taken_logged:
                     self._entity_id_target_taken_logged.add(entity_entry.entity_id)
                     _LOGGER.warning(
