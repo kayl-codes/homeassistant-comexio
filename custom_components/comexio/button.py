@@ -76,6 +76,7 @@ from .const import (
 from .coordinator import ComexioCoordinator
 from .entity import ComexioKnxEntity, ComexioMarkerEntity
 from .function_plan_backup import format_backup_label
+from .repairs import count_referencing_automations_and_scripts
 from .services import async_resync_io_group_headers, async_sort_function_plan
 
 _LOGGER = logging.getLogger(__name__)
@@ -2626,7 +2627,7 @@ class ComexioWebioRangeCheckButton(CoordinatorEntity, ButtonEntity):
 
 
 class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
-    """Button to fix duplicate server_id in entity IDs."""
+    """Button to migrate entity_ids to the Comexio scheme (see coordinator.detect_entity_id_mismatches)."""
 
     _attr_has_entity_name = True
 
@@ -2654,10 +2655,27 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
         return len(self.coordinator.entity_id_mismatches) > 0
 
     async def async_press(self) -> None:
-        """Migrate entity_ids by removing the duplicate server_id prefix."""
-        self.coordinator.async_migrate_entity_ids()
-        ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
+        """Migrate entity_ids to the Comexio scheme and report the outcome.
+
+        Unlike the repair dialog the button has no confirmation step, so the result —
+        including how many automations/scripts still reference the old ids — is posted as
+        a notification (English, like all persistent notifications of this integration).
+        """
+        old_ids = [m["current_id"] for m in self.coordinator.entity_id_mismatches]
+        references = count_referencing_automations_and_scripts(self.hass, old_ids)
+        migrated = self.coordinator.async_migrate_entity_ids()
+        failed = len(self.coordinator.entity_id_mismatches)
+        if not failed:
+            ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
         self.coordinator.async_set_updated_data(self.coordinator.data)
+        persistent_notification.async_create(
+            self.hass,
+            f"{migrated} entity IDs renamed, {failed} failed (see log). History and statistics moved along. "
+            f"{references} automations/scripts referenced the old entity IDs and must be updated; "
+            "please check dashboards as well.",
+            title=f"Comexio {self.server_id}: entity ID migration",
+            notification_id=f"comexio_entity_id_migration_{self.server_id}",
+        )
 
 
 class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):

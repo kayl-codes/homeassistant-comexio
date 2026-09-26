@@ -247,6 +247,27 @@ async def async_create_fix_flow(hass: HomeAssistant, issue_id: str, data: dict |
     return ComexioRepairFlow(issue_id, data)
 
 
+def count_referencing_automations_and_scripts(hass: HomeAssistant, entity_ids: list[str]) -> str:
+    """Number of automations and scripts that reference any of entity_ids, or "?" if unknown.
+
+    HA renames history and statistics along with an entity_id, but not these references —
+    the entity_id repair shows the count so the user knows what to update afterwards. It is
+    a lower bound: references built inside templates are not detected. "?" when there is
+    nothing to check against or a component isn't loaded (its lookup then returns [], which
+    would read as a false "0"). Dashboards cannot be checked and are only mentioned in the text.
+    """
+    if not entity_ids or not {"automation", "script"} <= hass.config.components:
+        return "?"
+    from homeassistant.components.automation import automations_with_entity
+    from homeassistant.components.script import scripts_with_entity
+
+    referencing: set[str] = set()
+    for entity_id in entity_ids:
+        referencing.update(automations_with_entity(hass, entity_id))
+        referencing.update(scripts_with_entity(hass, entity_id))
+    return str(len(referencing))
+
+
 class ComexioRepairFlow(RepairsFlow):
     """Handler for Comexio repair flows."""
 
@@ -342,6 +363,29 @@ class ComexioRepairFlow(RepairsFlow):
             ),
         )
 
+    def _run_entity_id_fix(self, entry_id: str):
+        """Run the entity_id migration; the issue stays open while renames failed."""
+        coordinator = self.hass.data[DOMAIN].get(entry_id)
+        if not coordinator:
+            return self.async_abort(reason="entry_not_found")
+
+        migrated = coordinator.async_migrate_entity_ids()
+        failed = len(coordinator.entity_id_mismatches)
+        if not failed:
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        coordinator.async_set_updated_data(coordinator.data)
+
+        is_de = self.hass.config.language == "de"
+        if failed:
+            title = (
+                f"{migrated} Entitäts-IDs korrigiert, {failed} fehlgeschlagen (siehe Log)"
+                if is_de
+                else f"{migrated} entity IDs fixed, {failed} failed (see log)"
+            )
+        else:
+            title = f"Entitäts-IDs für {migrated} Einträge korrigiert" if is_de else f"{migrated} entity IDs fixed"
+        return self.async_create_entry(title=title, data={})
+
     async def async_step_entity_id_fix(self, user_input=None):
         """Handle the entity_id migration repair flow."""
         entry_id = self.issue_data.get("entry_id")
@@ -359,28 +403,22 @@ class ComexioRepairFlow(RepairsFlow):
                 ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
                 return self.async_create_entry(title="Ignored", data={})
 
-            # action == "fix": run migration via coordinator
-            coordinator = self.hass.data[DOMAIN].get(entry_id)
-            if not coordinator:
-                return self.async_abort(reason="entry_not_found")
-
-            migrated = coordinator.async_migrate_entity_ids()
-            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-            coordinator.async_set_updated_data(coordinator.data)
-
-            is_de = self.hass.config.language == "de"
-            title = f"Entitäts-IDs für {migrated} Einträge korrigiert" if is_de else f"{migrated} entity IDs fixed"
-            return self.async_create_entry(
-                title=title,
-                data={},
-            )
+            return self._run_entity_id_fix(entry_id)
 
         coordinator = self.hass.data[DOMAIN].get(entry_id)
-        count = len(coordinator.entity_id_mismatches) if coordinator else self.issue_data.get("count", 0)
+        mismatches = coordinator.entity_id_mismatches if coordinator else []
+        count = len(mismatches) if coordinator else self.issue_data.get("count", 0)
+        example = f"{mismatches[0]['current_id']} → {mismatches[0]['corrected_id']}" if mismatches else "–"
 
         return self.async_show_form(
             step_id="entity_id_fix",
-            description_placeholders={"count": count},
+            description_placeholders={
+                "count": count,
+                "example": example,
+                "references": count_referencing_automations_and_scripts(
+                    self.hass, [m["current_id"] for m in mismatches]
+                ),
+            },
             data_schema=vol.Schema(
                 {
                     vol.Required("action", default=ACTION_FIX): SelectSelector(

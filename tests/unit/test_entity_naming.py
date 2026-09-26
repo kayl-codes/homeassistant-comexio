@@ -10,11 +10,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from custom_components.comexio.const import (
+    CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_KNX_PRERELEASE_CLEANUP_PENDING,
     CONF_SCHEMA_IO,
     CONFIG_ENTRY_MINOR_VERSION,
     DEFAULT_SCHEMA_IO,
     LEGACY_DEFAULT_SCHEMA_IO,
+    entity_id_migration_target,
     migrate_entry_options,
     stable_object_id,
 )
@@ -93,3 +95,42 @@ def test_migration_from_1_1_sets_knx_flag_and_pins_schema() -> None:
 
 def test_migration_is_a_no_op_at_current_version() -> None:
     assert migrate_entry_options(CONFIG_ENTRY_MINOR_VERSION, {}, {"a": 1}) == {"a": 1}
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "unique_id", "suggested", "expected"),
+    [
+        # Name-derived entity_id of a stable-id entity converges on the technical address.
+        (
+            "binary_sensor.iosrv1_iox1_iox1_ai7_p5_1_flur_pm_bewegung_ws",
+            "comexio_iosrv1_iox1_ai7",
+            "iosrv1_iox1_ai7",
+            "binary_sensor.iosrv1_iox1_ai7",
+        ),
+        ("switch.iosrv1_markers_m12_licht", "comexio_iosrv1_m12", "iosrv1_m12", "switch.iosrv1_m12"),
+        # Already stable: nothing to do.
+        ("binary_sensor.iosrv1_iox1_ai7", "comexio_iosrv1_iox1_ai7", "iosrv1_iox1_ai7", None),
+        # Not yet re-added since the stable-id change (no suggested_object_id): left alone.
+        ("binary_sensor.iosrv1_iox1_iox1_ai7_x", "comexio_iosrv1_iox1_ai7", None, None),
+        # A suggested_object_id that is not ours (e.g. set by something else) is not trusted.
+        ("sensor.iosrv1_x", "comexio_iosrv1_iox1_ai7", "something_else", None),
+        # Legacy doubled server prefix on diagnostic entities is still corrected.
+        (
+            "button.comexio_iosrv1_iosrv1_sync",
+            "comexio_iosrv1_webio_sync_start_btn",
+            None,
+            "button.comexio_iosrv1_sync",
+        ),
+        ("sensor.iosrv1_sync_status", "comexio_iosrv1_webio_sync_status_sensor", None, None),
+    ],
+)
+def test_entity_id_migration_target(
+    entity_id: str, unique_id: str, suggested: str | None, expected: str | None
+) -> None:
+    assert entity_id_migration_target(entity_id, unique_id, suggested, "iosrv1") == expected
+
+
+def test_migration_resets_the_old_entity_id_ignore_flag() -> None:
+    options = migrate_entry_options(2, {}, {CONF_SCHEMA_IO: "{IoTitle}", CONF_ENTITY_ID_MIGRATION_IGNORED: True})
+
+    assert options == {CONF_SCHEMA_IO: "{IoTitle}"}

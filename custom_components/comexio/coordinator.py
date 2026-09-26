@@ -128,6 +128,7 @@ from .const import (
     bus_load_signal,
     category_by_fub_module_type,
     classify_audit_key,
+    entity_id_migration_target,
     expand_ignored_marker_ids,
     fw_update_signal,
     io_audit_key,
@@ -385,6 +386,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._distrusted_fub_ids: set[int] = set()
         self.cancel_sync: bool = False
         self.entity_id_mismatches: list[dict[str, str]] = []
+        # entity_ids whose migration target is taken: logged once, not on every poll.
+        self._entity_id_target_taken_logged: set[str] = set()
         self.orphaned_statistics: list[str] = []
         # None until async_setup_entry has computed it (after the first refresh) — orphan detection
         # is skipped until then, so offline-extension statistics are never flagged unprotected.
@@ -3086,30 +3089,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.offline_extensions = new_offline
 
     def detect_entity_id_mismatches(self) -> list[dict[str, str]]:
-        """Scan the entity registry for entries whose entity_id contains a duplicate server_id.
+        """Scan the entity registry for entity_ids that don't follow the Comexio id scheme.
 
+        See const.entity_id_migration_target: IO/Marker/KNX entities whose entity_id differs
+        from their stable technical-address id, plus the legacy doubled server prefix. A
+        target already taken by another entity is skipped (HA would refuse the rename).
         Returns a list of dicts with 'current_id' and 'corrected_id'.
         """
-        from homeassistant.helpers import entity_registry as er
-
         ent_reg = er.async_get(self.hass)
-        server_slug = slugify(self.server_id)
-        double_prefix = f"comexio_{server_slug}_{server_slug}_"
-        single_prefix = f"comexio_{server_slug}_"
-
         mismatches: list[dict[str, str]] = []
         for entity_entry in er.async_entries_for_config_entry(ent_reg, self.config_entry.entry_id):
-            platform, slug = entity_entry.entity_id.split(".", 1)
-            if slug.startswith(double_prefix):
-                corrected_slug = single_prefix + slug[len(double_prefix) :]
-                corrected_id = f"{platform}.{corrected_slug}"
-                if not ent_reg.async_get(corrected_id):
-                    mismatches.append(
-                        {
-                            "current_id": entity_entry.entity_id,
-                            "corrected_id": corrected_id,
-                        }
+            corrected_id = entity_id_migration_target(
+                entity_entry.entity_id, entity_entry.unique_id, entity_entry.suggested_object_id, self.server_id
+            )
+            if not corrected_id:
+                continue
+            if ent_reg.async_get(corrected_id) or not self.hass.states.async_available(corrected_id):
+                if entity_entry.entity_id not in self._entity_id_target_taken_logged:
+                    self._entity_id_target_taken_logged.add(entity_entry.entity_id)
+                    _LOGGER.warning(
+                        "[%s] Cannot migrate %s to %s: that entity_id is already in use by another entity",
+                        self.server_id,
+                        entity_entry.entity_id,
+                        corrected_id,
                     )
+                continue
+            mismatches.append({"current_id": entity_entry.entity_id, "corrected_id": corrected_id})
 
         self.entity_id_mismatches = mismatches
         return mismatches
@@ -3371,19 +3376,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return orphans
 
     def async_migrate_entity_ids(self) -> int:
-        """Migrate entity_ids by removing the duplicate server_id prefix. Returns count of migrated IDs."""
-        from homeassistant.helpers import entity_registry as er
+        """Rename every entity in entity_id_mismatches to its corrected id. Returns count of migrated IDs.
 
+        The recorder moves history and long-term statistics along with the rename; automations,
+        scripts and dashboards referencing the old ids are not touched (see repairs flow).
+        """
         ent_reg = er.async_get(self.hass)
         migrated = 0
+        failed: list[dict[str, str]] = []
         for mismatch in self.entity_id_mismatches:
             try:
                 ent_reg.async_update_entity(mismatch["current_id"], new_entity_id=mismatch["corrected_id"])
                 migrated += 1
-            except Exception:
-                _LOGGER.exception("[%s] Failed to migrate entity_id %s", self.server_id, mismatch["current_id"])
-        self.entity_id_mismatches = []
-        _LOGGER.info("[%s] Entity ID migration complete: %d IDs updated", self.server_id, migrated)
+            except ValueError:
+                # HA refuses a target taken since detection (registered, or a live/reserved state).
+                _LOGGER.exception(
+                    "[%s] Failed to migrate entity_id %s to %s",
+                    self.server_id,
+                    mismatch["current_id"],
+                    mismatch["corrected_id"],
+                )
+                failed.append(mismatch)
+        # Failed renames stay pending, so the button/repair keep offering them.
+        self.entity_id_mismatches = failed
+        _LOGGER.info(
+            "[%s] Entity ID migration complete: %d IDs updated, %d failed", self.server_id, migrated, len(failed)
+        )
         return migrated
 
     def marker_entities_by_id(self, marker_ids: list[int], unique_id_infix: str = "m") -> dict[int, er.RegistryEntry]:
