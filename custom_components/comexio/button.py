@@ -2671,7 +2671,8 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
         persistent_notification.async_create(
             self.hass,
             f"{migrated} entity IDs renamed, {failed} failed (see log). History and statistics moved along. "
-            f"{references} automations/scripts referenced the old entity IDs and must be updated; "
+            f"At least {references} automations/scripts (? = could not be checked) referenced the old entity IDs "
+            "and must be updated; "
             "please check dashboards as well.",
             title=f"Comexio {self.server_id}: entity ID migration",
             notification_id=f"comexio_entity_id_migration_{self.server_id}",
