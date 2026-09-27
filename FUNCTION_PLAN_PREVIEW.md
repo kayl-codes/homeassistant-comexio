@@ -129,7 +129,9 @@ cards:
 - **Hover & tooltips** — hovering an element shows its full label as a native browser
   tooltip; hovering any wire highlights every branch of that electrical net together.
 - **Zoom controls** — magnifier −/+ buttons next to the search bar; the current zoom
-  level is remembered per browser. Click the percentage label to reset to 100%.
+  level is remembered per browser. Click the percentage label to reset to 100%. Live
+  refreshes keep your view: a zoomed-in, scrolled plan stays where it is while its values
+  update; only switching to another plan starts at the left edge again.
 - **Debug box** — toggle it via the console icon in the toolbar. It shows a live log of
   value changes on the plan currently displayed (fed by the same webhook pushes the
   integration already receives), and offers:
@@ -960,6 +962,9 @@ cards:
   Äste desselben elektrischen Netzes gemeinsam hervorgehoben.
 - **Zoom-Steuerung** — Lupe-Minus/Plus-Buttons neben der Suchleiste; die Zoomstufe
   wird pro Browser gemerkt. Klick auf die Prozent-Anzeige setzt auf 100 % zurück.
+  Live-Aktualisierungen behalten die Ansicht bei: Ein gezoomter, verschobener Plan bleibt
+  stehen, während sich seine Werte aktualisieren; erst ein Wechsel auf einen anderen Plan
+  beginnt wieder am linken Rand.
 - **Debug-Box** — über das Konsolen-Icon in der Werkzeugleiste umschaltbar. Zeigt ein
   Live-Protokoll der Wertänderungen des aktuell angezeigten Plans (gespeist aus
   denselben Webhook-Pushes, die die Integration ohnehin empfängt), dazu:
