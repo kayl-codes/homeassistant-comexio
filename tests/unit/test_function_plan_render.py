@@ -1,5 +1,9 @@
 """Function plan SVG preview rendering and the read-only plan health check."""
 
+import os
+from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -8,8 +12,30 @@ from syrupy.extensions.single_file import SingleFileSnapshotExtension, WriteMode
 
 from custom_components.comexio.function_plan_analysis import analyze_function_plan
 from custom_components.comexio.function_plan_render import render_plan_svg
+from custom_components.comexio.function_plan_render_flow import render_flow_svg
 from custom_components.comexio.function_plan_render_selfreset import detect_self_reset_cycles
 from tests.common import load_json_fixture
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Renders the fixture plan's flow diagram in a fresh interpreter and writes the SVG to stdout.
+_FLOW_RENDER_SCRIPT = """
+import sys
+from custom_components.comexio.function_plan_render_flow import render_flow_svg
+from tests.common import load_json_fixture
+
+plan = load_json_fixture("function_plan.json")
+svg, _ = render_flow_svg(
+    plan["elements"],
+    plan["connections"],
+    plan["catalog"],
+    plan["markers_by_id"],
+    plan["webio_by_id"],
+    plan["ios_by_id"],
+    title="T",
+)
+sys.stdout.buffer.write(svg.encode("utf-8"))
+"""
 
 
 class SvgSnapshotExtension(SingleFileSnapshotExtension):
@@ -79,3 +105,46 @@ def test_analyze_function_plan(plan: dict[str, Any], snapshot: SnapshotAssertion
     )
 
     assert findings == snapshot
+
+
+def _render_flow(plan: dict[str, Any]) -> tuple[str, int]:
+    return render_flow_svg(
+        plan["elements"],
+        plan["connections"],
+        plan["catalog"],
+        plan["markers_by_id"],
+        plan["webio_by_id"],
+        plan["ios_by_id"],
+        title="T",
+    )
+
+
+def test_render_flow_diagram(plan: dict[str, Any], svg_snapshot: SnapshotAssertion) -> None:
+    svg, skipped = _render_flow(plan)
+
+    assert skipped == 1
+    assert "1 unverdrahtete Element(e) ausgeblendet" in svg
+    assert svg.count('class="flow-edge"') == 6
+    assert "⟲ M4 Klingel [TRIG]</text>" in svg
+    assert "⟲ T1 Taster Reset</text>" in svg
+    assert svg == svg_snapshot
+
+
+def test_render_flow_is_independent_of_hash_seed() -> None:
+    """Set iteration order depends on PYTHONHASHSEED, i.e. changes with every HA restart — the
+    flow diagram (layering of a self-reset cycle, edge order, data-net ids) must not."""
+    outputs = []
+    for seed in ("1", "2", "3"):
+        result = subprocess.run(
+            [sys.executable, "-c", _FLOW_RENDER_SCRIPT],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+        outputs.append(result.stdout)
+
+    assert outputs[0]
+    assert outputs[1] == outputs[0]
+    assert outputs[2] == outputs[0]
