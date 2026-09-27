@@ -19,6 +19,7 @@ from .function_plan_analysis import build_wiring
 from .function_plan_render_geometry import _fit_to_bounding_box
 from .function_plan_render_labels import resolve_element_label
 from .function_plan_render_selfreset import detect_self_reset_cycles
+from .function_plan_render_values import element_id_sort_key
 
 __all__ = ["render_flow_svg"]
 
@@ -180,7 +181,7 @@ def _find_back_edges(node_ids: set[str], outgoing: dict[str, dict[int, list[str]
     # Sorted, not plain set order: where the DFS enters a cycle decides which of its edges
     # becomes the back edge and with it the layering — set order depends on PYTHONHASHSEED,
     # so an unsorted walk would reshuffle a self-reset cycle on every HA restart.
-    for start in sorted(node_ids, key=_column_sort_key):
+    for start in sorted(node_ids, key=element_id_sort_key):
         if start not in visited:
             _dfs_mark_back_edges(start, node_ids, outgoing, visited, back_edges)
     return back_edges
@@ -242,12 +243,8 @@ def _assign_layers(node_ids: set[str], preds: dict[str, set[str]]) -> dict[str, 
     return layer
 
 
-def _column_sort_key(eid: str) -> tuple[int, Any]:
-    return (0, int(eid)) if eid.isdigit() else (1, eid)
-
-
 def _edge_sort_key(edge: tuple[str, str]) -> tuple[tuple[int, Any], tuple[int, Any]]:
-    return _column_sort_key(edge[0]), _column_sort_key(edge[1])
+    return element_id_sort_key(edge[0]), element_id_sort_key(edge[1])
 
 
 def _push_sinks_to_bottom(layer_of: dict[str, int], succs_of: dict[str, set[str]]) -> None:
@@ -357,7 +354,7 @@ def _position_boxes(
     for eid, lvl in layer_of.items():
         by_row.setdefault(lvl, []).append(eid)
     for row_ids in by_row.values():
-        row_ids.sort(key=_column_sort_key)
+        row_ids.sort(key=element_id_sort_key)
     _minimize_crossings(by_row, preds_of, succs_of)
 
     y = 0.0
@@ -396,7 +393,7 @@ def _position_one_row(
             # Never moves left of the previous sibling in this row — collisions just push right,
             # bending that one edge instead of overlapping boxes. Sorted, because float addition
             # isn't associative — set order (PYTHONHASHSEED) could otherwise flip a rounded coordinate.
-            preds = sorted(preds_of.get(eid, ()), key=_column_sort_key)
+            preds = sorted(preds_of.get(eid, ()), key=element_id_sort_key)
             if centers := [boxes[p]["x"] + boxes[p]["w"] / 2 for p in preds if "x" in boxes[p]]:
                 x = max(x, sum(centers) / len(centers) - boxes[eid]["w"] / 2)
             boxes[eid]["x"] = x
@@ -561,7 +558,7 @@ def _diamond_points(box: dict[str, Any]) -> str:
 
 def _render_boxes_svg(boxes: dict[str, dict[str, Any]]) -> list[str]:
     parts = []
-    for eid in sorted(boxes, key=_column_sort_key):
+    for eid in sorted(boxes, key=element_id_sort_key):
         box = boxes[eid]
         box_class = "flow-box-cycle" if box["cycle"] else _SHAPE_CSS[box["shape"]]
         cx, cy = box["x"] + box["w"] / 2, box["y"] + box["h"] / 2
@@ -619,7 +616,7 @@ def _compute_source_remap(wired_ids: set[str], elements: dict[str, Any], incomin
     for dupes in groups.values():
         if len(dupes) < 2:
             continue
-        canonical = min(dupes, key=_column_sort_key)
+        canonical = min(dupes, key=element_id_sort_key)
         remap |= {eid: canonical for eid in dupes if eid != canonical}
     return remap
 

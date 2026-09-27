@@ -1,4 +1,4 @@
-# Version: 0.8.4
+# Version: 0.8.5
 """Element value/type classification and pill text formatting for the Function Plan renderer.
 
 Split out of function_plan_render.py (2026-08). Pure functions only, no HA/Comexio API
@@ -54,6 +54,16 @@ def _element_raw_value(
 
 # reference.type -> id prefix of the element kinds addressed by a plain "<prefix><ref_id>" id.
 _SEARCH_ID_PREFIX = {2: "M", 11: "K", 4: "T", 3: "C"}
+
+
+def element_id_sort_key(eid: str) -> tuple[int, Any]:
+    """Numeric order for plan element ids ("2" before "10"), non-numeric ids after them.
+
+    Anything that iterates a set of element ids into rendered or reported output sorts with
+    this key — set order depends on PYTHONHASHSEED and would change with every HA restart.
+    isascii+isdecimal, not isdigit: "²".isdigit() is True but int("²") raises.
+    """
+    return (0, int(eid)) if eid.isascii() and eid.isdecimal() else (1, eid)
 
 
 def element_search_id(elem: dict[str, Any], ios_by_id: dict) -> str:

@@ -14,6 +14,7 @@ from custom_components.comexio.function_plan_analysis import analyze_function_pl
 from custom_components.comexio.function_plan_render import render_plan_svg
 from custom_components.comexio.function_plan_render_flow import render_flow_svg
 from custom_components.comexio.function_plan_render_selfreset import detect_self_reset_cycles
+from custom_components.comexio.function_plan_render_values import element_id_sort_key
 from tests.common import load_json_fixture
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +37,38 @@ svg, _ = render_flow_svg(
 )
 sys.stdout.buffer.write(svg.encode("utf-8"))
 """
+
+# Marker "1" feeds two on_pulse timers ("2", "10") that both reset it — two self-reset
+# cycles whose order came from set iteration (PYTHONHASHSEED) before the fix.
+_SELF_RESET_SCRIPT = """
+from custom_components.comexio.function_plan_render_selfreset import detect_self_reset_cycles
+
+elements = {
+    "1": {"reference": {"type": 2, "ref_id": 1}},
+    "2": {"reference": {"type": 4, "ref_id": 1}},
+    "10": {"reference": {"type": 4, "ref_id": 1}},
+}
+connections = {
+    str(i): {"input": {"FubElementId": src}, "output": [{"FubElementId": dst}]}
+    for i, (src, dst) in enumerate([(1, 2), (1, 10), (2, 1), (10, 1)])
+}
+catalog = {"time_modules": {"1": {"kind": "on_pulse"}}}
+print(detect_self_reset_cycles(elements, connections, catalog))
+"""
+
+_HASH_SEEDS = ("1", "2", "3", "4", "5", "6")
+
+
+def _run_with_hash_seed(script: str, seed: str) -> bytes:
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONHASHSEED": seed},
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    return result.stdout
 
 
 class SvgSnapshotExtension(SingleFileSnapshotExtension):
@@ -133,18 +166,21 @@ def test_render_flow_diagram(plan: dict[str, Any], svg_snapshot: SnapshotAsserti
 def test_render_flow_is_independent_of_hash_seed() -> None:
     """Set iteration order depends on PYTHONHASHSEED, i.e. changes with every HA restart — the
     flow diagram (layering of a self-reset cycle, edge order, data-net ids) must not."""
-    outputs = []
-    for seed in ("1", "2", "3"):
-        result = subprocess.run(
-            [sys.executable, "-c", _FLOW_RENDER_SCRIPT],
-            env={**os.environ, "PYTHONHASHSEED": seed},
-            cwd=REPO_ROOT,
-            capture_output=True,
-            check=False,
-        )
-        assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
-        outputs.append(result.stdout)
+    outputs = [_run_with_hash_seed(_FLOW_RENDER_SCRIPT, seed) for seed in ("1", "2", "3")]
 
     assert outputs[0]
     assert outputs[1] == outputs[0]
     assert outputs[2] == outputs[0]
+
+
+@pytest.mark.parametrize("seed", _HASH_SEEDS)
+def test_self_reset_cycle_order_is_independent_of_hash_seed(seed: str) -> None:
+    output = _run_with_hash_seed(_SELF_RESET_SCRIPT, seed)
+
+    assert output.decode("utf-8").strip() == "[('1', '2'), ('1', '10')]"
+
+
+def test_element_id_sort_key_orders_numerically_and_never_raises() -> None:
+    ids = ["10", "b", "2", "²", "1"]
+
+    assert sorted(ids, key=element_id_sort_key) == ["1", "2", "10", "b", "²"]
