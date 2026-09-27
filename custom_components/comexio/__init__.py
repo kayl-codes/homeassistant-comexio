@@ -25,9 +25,11 @@ from .const import (
     MarkerKind,
     WebioClass,
     migrate_entry_options,
+    stable_object_id,
     webio_range_check_entity_id,
 )
 from .coordinator import ComexioCoordinator
+from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -157,7 +159,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await async_setup_services(hass)
 
     # Auto-fix statistics unit mismatches (one-time migration: empty → correct unit)
-    hass.async_create_task(_async_fix_statistics_units(hass, server_id))
+    hass.async_create_task(_async_fix_statistics_units(hass, server_id, entry.entry_id))
 
     # ---------------------------
     # Webhook Setup
@@ -339,15 +341,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         for io in coordinator.data.get("io", [])
         if io.get("offline") and not include_offline
     }
-    coordinator.offline_entity_statistic_ids = {
-        e.entity_id
-        for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
-        if e.unique_id in offline_unique_ids
-    } | {
-        deleted.entity_id
-        for deleted in ent_reg.deleted_entities.values()
-        if deleted.platform == DOMAIN and deleted.unique_id in offline_unique_ids
-    }
+    coordinator.offline_entity_statistic_ids = (
+        {
+            e.entity_id
+            for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+            if e.unique_id in offline_unique_ids
+        }
+        | {
+            deleted.entity_id
+            for deleted in ent_reg.deleted_entities.values()
+            if deleted.platform == DOMAIN and deleted.unique_id in offline_unique_ids
+        }
+        | {
+            # Registry-independent: the stable entity_id follows from the unique_id alone, so the
+            # protection survives HA purging the deleted registry entries.
+            f"sensor.{stable_object_id(uid)}"
+            for uid in offline_unique_ids
+        }
+    )
 
     # Delete entities that are no longer active, or that migrated to a different HA domain.
     _LOGGER.debug("Comexio Cleanup: protecting %d active unique IDs", len(active_unique_ids))
@@ -431,7 +442,7 @@ def _delete_stale_statistics_issues(hass: HomeAssistant, issue_reg, server_slug:
     return deleted
 
 
-async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> None:
+async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry_id: str) -> None:
     """Fix statistics unit mismatches from firmware upgrade (empty label → correct unit).
 
     Values stored in the recorder are already in the correct unit — only the
@@ -466,26 +477,25 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str) -> No
         return
 
     server_slug = slugify(server_id)
-    prefixes = (
-        f"sensor.comexio_{server_slug}_",
-        f"sensor.comexio_server_{server_slug}_",
-    )
 
-    mismatches: list[tuple[str, str]] = []
-    for stat in all_stats:
-        stat_id = stat["statistic_id"]
-        if not any(stat_id.startswith(p) for p in prefixes):
-            continue
+    def _current_unit(stat_id: str) -> str | None:
         state = hass.states.get(stat_id)
         if state is None:
             _LOGGER.debug("[%s] Skipping %s: entity state not available yet", server_id, stat_id)
-            continue
-        current_unit = state.attributes.get("unit_of_measurement") or ""
-        # HA 2024+ returns "statistics_unit_of_measurement"; older versions use "unit_of_measurement"
-        stored_unit = stat.get("statistics_unit_of_measurement") or stat.get("unit_of_measurement") or ""
-        if current_unit and not stored_unit:
-            _LOGGER.debug("[%s] Unit mismatch: %s  stored=%r  entity=%r", server_id, stat_id, stored_unit, current_unit)
-            mismatches.append((stat_id, current_unit))
+            return None
+        return state.attributes.get("unit_of_measurement") or ""
+
+    # Ownership via the entity registry: the stable entity_ids (sensor.iosrv1_base_ai2) carry
+    # no comexio_ prefix, so a prefix test alone would never select them.
+    ent_reg = er.async_get(hass)
+    mismatches = find_unit_mismatches(
+        all_stats,
+        owned_entity_ids={e.entity_id for e in er.async_entries_for_config_entry(ent_reg, entry_id)},
+        legacy_prefixes=legacy_statistic_prefixes(server_slug),
+        current_unit=_current_unit,
+    )
+    for stat_id, unit in mismatches:
+        _LOGGER.debug("[%s] Unit mismatch: %s  stored=<empty>  entity=%r", server_id, stat_id, unit)
 
     if not mismatches:
         _LOGGER.debug("[%s] Statistics unit check: no mismatches found", server_id)
