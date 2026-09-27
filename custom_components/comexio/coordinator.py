@@ -147,7 +147,11 @@ from .function_plan_backup import (
 )
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .function_plan_render import render_plan_svg
-from .orphaned_statistics import find_orphaned_statistic_ids
+from .orphaned_statistics import (
+    find_orphaned_statistic_ids,
+    legacy_statistic_prefixes,
+    stable_statistic_id_pattern,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -3342,15 +3346,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         ent_reg = er.async_get(self.hass)
         server_slug = slugify(self.server_id)
-        # Fallback naming patterns for statistics whose registry entry HA has already purged:
-        # - current:  sensor.comexio_{server_id}_...
-        # - legacy:   sensor.comexio_server_{server_id}_...  (pre-sub-device-grouping naming)
-        prefixes = (
-            f"sensor.comexio_{server_slug}_",
-            f"sensor.comexio_server_{server_slug}_",
-        )
+        # Fallbacks for statistics whose registry entry HA has already purged: the old comexio_
+        # prefixes and the stable scheme (sensor.iosrv1_m12 / _iox1_ai7). Extension names come
+        # from the persisted serial registry too, so extensions no longer reported still count.
+        extension_slugs = {slugify(meta.get("name", "")) for meta in self.extension_registry.values()}
+        extension_slugs.update(slugify(io["ext_name"]) for io in (self.data or {}).get("io", []))
+        extension_slugs.add("base")
         # Primary ownership signal: entities of this entry the registry still remembers as deleted.
-        # Device-name-based entity_ids (sensor.iosrv1_iox2_…) never match the prefixes above.
+        # Device-name-based entity_ids (sensor.iosrv1_iox2_…) match neither fallback.
         entry_id = self.config_entry.entry_id
         known_entity_ids = {
             deleted.entity_id
@@ -3358,13 +3361,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if deleted.platform == DOMAIN and deleted.config_entry_id == entry_id
         }
 
-        # The entity-registry check (live_entity_ids) is the authoritative safety gate.
+        # The live check is the authoritative safety gate: registered entities plus every sensor
+        # with a current state — YAML sensors without unique_id (e.g. sensor.iosrv1_base_ai2_daily)
+        # have statistics but no registry entry and could otherwise match a fallback.
         orphans = find_orphaned_statistic_ids(
             (stat["statistic_id"] for stat in all_stats),
-            live_entity_ids=set(ent_reg.entities),
+            live_entity_ids=set(ent_reg.entities) | set(self.hass.states.async_entity_ids("sensor")),
             known_entity_ids=known_entity_ids,
-            legacy_prefixes=prefixes,
+            legacy_prefixes=legacy_statistic_prefixes(server_slug),
             protected_entity_ids=self.offline_entity_statistic_ids,
+            stable_id_pattern=stable_statistic_id_pattern(server_slug, extension_slugs),
         )
 
         _LOGGER.debug(
