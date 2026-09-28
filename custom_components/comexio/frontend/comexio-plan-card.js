@@ -1108,8 +1108,8 @@ class ComexioPlanCard extends HTMLElement {
       const oldSvg = this._planEl.querySelector("svg");
       const samePlan =
         !!oldSvg &&
-        newSvg.hasAttribute("data-plan-id") &&
-        oldSvg.getAttribute("data-plan-id") === newSvg.getAttribute("data-plan-id") &&
+        newSvg.dataset.planId !== undefined &&
+        oldSvg.dataset.planId === newSvg.dataset.planId &&
         oldSvg.getAttribute("viewBox") === newSvg.getAttribute("viewBox");
       const scrollLeft = this._planEl.scrollLeft;
       this._applyZoom(newSvg);
