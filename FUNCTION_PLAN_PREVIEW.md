@@ -132,6 +132,8 @@ cards:
   level is remembered per browser. Click the percentage label to reset to 100%. Live
   refreshes keep your view: a zoomed-in, scrolled plan stays where it is while its values
   update; only switching to another plan starts at the left edge again.
+  If loading a refreshed image fails, the previous image stays on screen and the card
+  retries with increasing pauses (2 s, doubling up to 60 s) until it succeeds.
 - **Debug box** — toggle it via the console icon in the toolbar. It shows a live log of
   value changes on the plan currently displayed (fed by the same webhook pushes the
   integration already receives), and offers:
@@ -965,6 +967,8 @@ cards:
   Live-Aktualisierungen behalten die Ansicht bei: Ein gezoomter, verschobener Plan bleibt
   stehen, während sich seine Werte aktualisieren; erst ein Wechsel auf einen anderen Plan
   beginnt wieder am linken Rand.
+  Schlägt das Laden eines neuen Bilds fehl, bleibt das bisherige stehen und die Karte
+  versucht es mit wachsenden Pausen erneut (2 s, verdoppelt bis 60 s), bis es klappt.
 - **Debug-Box** — über das Konsolen-Icon in der Werkzeugleiste umschaltbar. Zeigt ein
   Live-Protokoll der Wertänderungen des aktuell angezeigten Plans (gespeist aus
   denselben Webhook-Pushes, die die Integration ohnehin empfängt), dazu:
