@@ -963,8 +963,6 @@ class ComexioRepairFlow(RepairsFlow):
         conf = {**entry.data, **entry.options}
         notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
         notif_id = uninstall_cleanup_notification_id(coordinator.server_id)
-        result = None
-        succeeded = False
         t0 = time.monotonic()
 
         def _progress(text: str) -> None:
@@ -981,12 +979,26 @@ class ComexioRepairFlow(RepairsFlow):
         if self._cleanup_blocked_by_sync(coordinator, scope, notif_id, notify_enabled):
             return
 
+        # Held for the whole teardown AND the reload after it: a sync pressed meanwhile is
+        # rejected as concurrent instead of writing into plans/devices this is deleting, and
+        # none can start in the gap before the reload and have its API session closed by it
+        # (same reasoning as button._finalize_sync). The reload built a new coordinator with
+        # its own lock, so releasing this (old) one afterwards is safe.
+        async with coordinator._sync_lock:
+            await self._async_cleanup_then_reload(coordinator, entry, scope, notif_id, notify_enabled, _progress)
+
+    async def _async_cleanup_then_reload(
+        self, coordinator, entry: ConfigEntry, scope: str, notif_id: str, notify_enabled: bool, progress_cb
+    ) -> None:
+        """Run the teardown, report it, and reload on success — the caller holds _sync_lock.
+
+        Reloads via config_entries.async_reload directly: coordinator.async_reload_entry takes
+        _sync_lock itself and would deadlock against the caller's hold.
+        """
+        result = None
+        succeeded = False
         try:
-            # Held for the whole teardown so a sync pressed meanwhile is rejected as concurrent
-            # instead of writing into plans/devices this is deleting. Released before the
-            # reload below, which takes the lock itself (async_reload_entry).
-            async with coordinator._sync_lock:
-                result = await coordinator.async_uninstall_cleanup(scope, progress_cb=_progress)
+            result = await coordinator.async_uninstall_cleanup(scope, progress_cb=progress_cb)
             succeeded = True
         except asyncio.CancelledError:
             raise
@@ -1021,7 +1033,13 @@ class ComexioRepairFlow(RepairsFlow):
         # moment to see the skip flag and return before we force our own explicit reload.
         await asyncio.sleep(0.5)
         _LOGGER.info("[%s] Reloading integration after uninstall cleanup...", coordinator.server_id)
-        await coordinator.async_reload_entry("uninstall cleanup")
+        try:
+            await self.hass.config_entries.async_reload(entry.entry_id)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Reload after uninstall cleanup failed — reload the integration manually",
+                coordinator.server_id,
+            )
 
     async def async_step_knx_dpt_suffix(self, user_input=None):
         """Handle the KNX DPT1.x ambiguous-classification repair flow.
