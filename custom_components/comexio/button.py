@@ -93,6 +93,12 @@ _NOTE_ACTIVATED = ", plan activated"
 _NOTE_NOT_ACTIVATED = f", {ICON_WARNING} plan NOT activated"
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
+_STEP_CHECKING_PLAN = "Checking function plan wiring"
+
+
+def _format_counts(added: int, updated: int, renamed: int, removed: int) -> str:
+    """Sync result counts in words — "+0 … -0" read like signed numbers."""
+    return f"{added} added, {updated} updated, {renamed} renamed, {removed} removed"
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -239,6 +245,9 @@ class _SyncContext:
     # Marker list fetched fresh mid-sync (async_fresh_trigger_audit) — coordinator.data stays
     # frozen while in_sync, so it lacks the bridge Markers this same sync created.
     fresh_markers: list[dict[str, Any]] | None = None
+    # Parsed config of the KNX step's fresh audit, kept only when that step wrote nothing to
+    # Comexio — the trigger step then reuses it instead of fetching config + plans again.
+    unchanged_config_snapshot: dict[str, Any] | None = None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -413,14 +422,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 )
                 dev_ids[cls] = await api.get_webio_device_info(class_names[cls])
 
-            # Get the current network address of this Home Assistant instance — can take a while
-            # if DNS lookups for KNOWN_DOMAINS time out before falling back to the local IP.
+            # Get the current network address of this Home Assistant instance — normally cached by
+            # the coordinator's audit; only a cold resolver searches the KNOWN_DOMAINS names (in parallel).
             update_status(
                 "Analyzing Comexio configuration — resolving Home Assistant network address...",
                 pct=5,
                 step_info=_STEP_ANALYZING_CONFIG,
             )
-            ha_address = await api.get_ha_address()
+            ha_address = await self.coordinator.async_ha_address()
 
             # Retrieve audit results stored in the coordinator
             audit_data = getattr(self.coordinator, "last_audit_results", {})
@@ -499,8 +508,27 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 # creates in the first place. Running trigger-pairs first left that bridge
                 # missing and the trigger pair unwired every time (live 2026-09-21: "K2: no
                 # write-path bridge marker yet, cannot wire trigger pair").
+                # Each step re-reads Comexio (the KNX step a fresh config + plan snapshot, several
+                # seconds; the trigger step reuses it when the KNX step wrote nothing, otherwise
+                # fetches its own) and reports nothing when there is nothing to wire — without
+                # these lines the status sat on the last analysis step for the whole wiring pass.
+                update_status(
+                    "Checking function plan wiring of the Web-IO commands...",
+                    pct=_PCT_PLAN_PAIRS,
+                    step_info=_STEP_CHECKING_PLAN,
+                )
                 plan_summary = await self._wire_created_pairs(ctx, created_names_no_knx, gap_items_no_knx)
+                update_status(
+                    "Checking KNX write path and wiring...",
+                    pct=_PCT_PLAN_PAIRS,
+                    step_info=_STEP_CHECKING_PLAN,
+                )
                 plan_summary += await self._wire_knx_full(ctx, created_names, gap_items, refresh_audit=True)
+                update_status(
+                    "Checking trigger pairs...",
+                    pct=_PCT_PLAN_PAIRS,
+                    step_info=_STEP_CHECKING_PLAN,
+                )
                 plan_summary += await self._wire_trigger_pairs(ctx, refresh_audit=True)
 
                 duration = datetime.datetime.now() - start_time
@@ -1003,7 +1031,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             )
         return (
             f"{ICON_SUCCESS} **Comexio Sync Finished**\n\n{recreate_note}{skip_note}{debris_note}"
-            f"Results: +{added}, {updated} updated, {renamed} renamed, -{removed} removed"
+            f"Results: {_format_counts(added, updated, renamed, removed) if changed else 'no changes needed'}"
             + (", IP-Address updated" if updated_ip else "")
             + f".\n{self._build_per_class_note(per_class)}{ICON_DURATION} Duration: {duration_str}"
         )
@@ -1017,8 +1045,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if len(changed_classes) < 2:
             return ""
         lines = [
-            f"  • {webio_class_label(cls)}: +{c['added']}, {c['updated']} updated, "
-            f"{c['renamed']} renamed, -{c['removed']} removed"
+            f"  • {webio_class_label(cls)}: {_format_counts(c['added'], c['updated'], c['renamed'], c['removed'])}"
             for cls, c in changed_classes.items()
         ]
         return "\n".join(lines) + "\n"
@@ -1666,7 +1693,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if ctx.action not in {"full_sync", "function_plan_add_missing"}:
             return []
         if refresh_audit:
-            missing_by_ref, orphan_by_ref, ctx.fresh_markers = await self.coordinator.async_fresh_trigger_audit()
+            # One-shot: the snapshot is only valid right after the KNX step that left it.
+            snapshot, ctx.unchanged_config_snapshot = ctx.unchanged_config_snapshot, None
+            missing_by_ref, orphan_by_ref, ctx.fresh_markers = await self.coordinator.async_fresh_trigger_audit(
+                snapshot
+            )
         else:
             audit_data = getattr(self.coordinator, "last_audit_results", {})
             missing_by_ref = audit_data.get("function_plan_trigger_missing", {})
@@ -1896,7 +1927,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             the K-Element's own connection record. Computed the same way _wire_created_pairs
             computes it (freshly created_names this run, unioned with the pre-existing
             function_plan_missing gap_items for a full sync) — there is no fresh-audit
-            equivalent for this leg (see async_fresh_knx_bridge_audit's docstring for why KNX
+            equivalent for this leg (see async_fresh_knx_audits' docstring for why KNX
             bridge/loopback have one and this doesn't: only those two can come into existence
             mid-run from a plan/import_knx toggle created earlier in the same run).
           - Leg 2 (Merker -> K write-path bridge) creates an entirely independent connection
@@ -1940,9 +1971,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self._merge_gap_source_ids(source_ids_by_cat, gap_items, gap_keys)
         read_path_ids = set(source_ids_by_cat.get(WebioClass.KNX, []))
 
+        snapshot = None
         if refresh_audit:
-            bridge_missing = await self.coordinator.async_fresh_knx_bridge_audit()
-            loopback_missing = await self.coordinator.async_fresh_knx_bridge_loopback_audit()
+            bridge_missing, loopback_missing, snapshot = await self.coordinator.async_fresh_knx_audits()
         else:
             audit_data = getattr(self.coordinator, "last_audit_results", {})
             bridge_missing = audit_data.get("knx_bridge_missing", [])
@@ -1952,6 +1983,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         all_k_ids = read_path_ids | set(bridge_by_id) | set(loopback_by_id)
         if not all_k_ids:
+            # Nothing is written below, so Comexio still matches the snapshot.
+            ctx.unchanged_config_snapshot = snapshot
             return []
 
         plan_to_ids, created_plans, failed_plans = await self.coordinator.resolve_knx_clusters(sorted(all_k_ids))

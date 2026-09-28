@@ -11,10 +11,8 @@ import json
 import logging
 import re
 import secrets
-import socket
 import time
 from typing import Any
-from urllib.parse import urlparse
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -48,7 +46,6 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
-    KNOWN_DOMAINS,
     KNX_DPT3_COMPOSITE_DOMAIN,
     KNX_DPT_ANALOG_RANGES,
     KNX_DPT_DEVICE_CLASS,
@@ -659,66 +656,6 @@ class ComexioAPI:
         except (ValueError, TypeError):
             _LOGGER.warning("Failed to clean value: %s", val)
             return 0
-
-    async def get_ha_address(self) -> str:
-        """
-        Dynamically determines the Home Assistant address (DNS:Port or IP:Port)
-        to be used for Comexio webhooks.
-        """
-        try:
-            internal_url = self.hass.config.internal_url
-            port = 8123
-            fallback_ip = None
-
-            if internal_url:
-                parsed = urlparse(internal_url)
-                port = parsed.port or 8123
-                fallback_ip = parsed.hostname
-
-            def resolve_dns():
-                for domain in KNOWN_DOMAINS:
-                    test_host = f"homeassistant.{domain}"
-                    try:
-                        socket.gethostbyname(test_host)
-                        return test_host
-                    except OSError:
-                        continue
-                return None
-
-            hostname = await self.hass.async_add_executor_job(resolve_dns)
-
-            if not hostname:
-                if not fallback_ip or fallback_ip in ["localhost", "127.0.0.1", "::1"]:
-
-                    def get_local_ip():
-                        # Try private IPv4 routing first
-                        with suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                            s.connect(("10.255.255.255", 1))
-                            return s.getsockname()[0]
-
-                        # Fallback to IPv6 local routing (ULA prefix)
-                        with suppress(OSError), socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
-                            s.connect(("fd00::", 1))
-                            return s.getsockname()[0]
-
-                        with suppress(OSError):
-                            return socket.gethostbyname(socket.gethostname())
-
-                        return "127.0.0.1"
-
-                    hostname = await self.hass.async_add_executor_job(get_local_ip)
-                else:
-                    hostname = fallback_ip
-
-            # Wrap IPv6 addresses in brackets for URL compatibility
-            with suppress(ValueError):
-                if ipaddress.ip_address(hostname).version == 6:
-                    hostname = f"[{hostname}]"
-
-            return f"{hostname}:{port}"
-        except Exception as e:
-            _LOGGER.exception("Failed to determine HA address: %s", e)
-            return "127.0.0.1:8123"
 
     def _encrypt_block(self, data_str: str, mod: int, exp: int) -> str:
         """RSA encryption logic matching Comexio v11 (PKCS1v15)."""
@@ -2580,20 +2517,17 @@ class ComexioAPI:
         self,
         name: str,
         base_id: str | int,
-        ha_address: str | None = None,
+        ha_address: str,
         username: str = "",
         password: str = "",  # nosec B105
     ) -> bool:
-        """Creates a device instance. Automatically determines HA address if not provided.
+        """Creates a device instance pointing at ha_address ("host:port", see ha_address.py).
 
         username/password default to empty, matching every existing HA-webhook device (which
         needs no Basic-Auth on its own commands). The Phase 7 API-Loopback device is the first
         caller to pass real credentials — gated on the Web-IO class' own Login=3 ("vom Geraet
         abhaengig") setting, see ensure_knx_loopback_webio.
         """
-        if not ha_address:
-            ha_address = await self.get_ha_address()
-
         url = f"{self._base_url}/admin/web_io/saveDeviceWindow"
 
         payload = {

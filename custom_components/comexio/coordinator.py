@@ -147,6 +147,7 @@ from .function_plan_backup import (
 )
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .function_plan_render import render_plan_svg
+from .ha_address import HaAddressResolver, webio_device_hint
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
     legacy_statistic_prefixes,
@@ -331,6 +332,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id)
+        # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
+        # so the audit on every poll and the sync button don't repeat it.
+        self.ha_address = HaAddressResolver(hass)
         self._function_plan_backup_lock: asyncio.Lock = asyncio.Lock()
         self.last_changed_plans: list[dict[str, Any]] = []
         # Bulk snapshot of every live plan's elements/connections, refreshed each backup
@@ -838,7 +842,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # --- IP/Port Audit --- (checked independently per Web-IO class — marker and IO
             # devices can in theory drift out of sync with each other)
-            ha_address = await self.api.get_ha_address()
+            # The name a device already carries bounds the search, so a fresh resolver after a
+            # restart does not look up the KNOWN_DOMAINS behind the name Comexio already stores.
+            ha_address = await self.ha_address.async_get(hint=webio_device_hint(webio_devices))
 
             webio_device_audit: dict[str, dict[str, Any]] = {}
             for cls in WEBIO_CLASSES:
@@ -3627,7 +3633,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # poll's function_plan_load_all_plans() to pick this fub_id up. Without this, a plan
         # created earlier in THIS SAME sync run (e.g. Full Sync creating "HA - KNX [1-100]"
         # before wiring bridge Markers into it) is invisible to _relevant_plans_loaded() for
-        # the rest of the run — async_fresh_trigger_audit()/async_fresh_knx_bridge_audit() then
+        # the rest of the run — async_fresh_trigger_audit()/async_fresh_knx_audits() then
         # defer their whole check to "next poll" even though nothing is actually missing from
         # the data, silently pushing the wiring itself out to a second, separate button press.
         # {"elements": {}, "connections": {}} is the exact shape function_plan_load_elements()/
@@ -4030,8 +4036,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _has_active_function_plan(self) -> bool:
         """Whether a Managed Function Plan is configured and its selector isn't disabled/gone.
 
-        Shared has_active_plan guard for async_fresh_knx_bridge_audit and
-        async_fresh_knx_bridge_loopback_audit — both need it for the same reason (a fresh
+        Shared has_active_plan guard for async_fresh_knx_audits (bridge and loopback audit) —
+        both need it for the same reason (a fresh
         re-audit against a plan nobody actually has active would be meaningless work), factored
         out so the boolean expression isn't duplicated a third time and to keep each caller's
         own cognitive complexity down (SonarQube S3776).
@@ -4510,7 +4516,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Build one knx_bridge_loopback_missing audit item.
 
         Shared by the live-poll computation in _async_update_data and the fresh mid-sync
-        re-audit (async_fresh_knx_bridge_loopback_audit) — byte-identical dict shape in both,
+        re-audit (async_fresh_knx_audits) — byte-identical dict shape in both,
         factored out to avoid the two drifting apart and to keep each caller's own cognitive
         complexity down (SonarQube S3776; the two ternaries below cost +2 each inside a
         for-loop). k is None when the K-Element vanished from the live config between the
@@ -4824,7 +4830,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         doing a live fetch on every tick (this cache exists specifically to avoid a per-poll
         cost of ~0.5s per plan — see project_logikplan_services memory).
 
-        The "fresh" mid-sync audits (async_fresh_trigger_audit/async_fresh_knx_bridge_audit)
+        The "fresh" mid-sync audits (async_fresh_trigger_audit/async_fresh_knx_audits)
         cannot make that trade-off: right after an HA restart self.function_plan_plans starts
         completely empty, and the backup cycle that would normally fill it runs as a
         *background* task (see _async_update_data) that can still be mid-flight when Initial
@@ -4855,7 +4861,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         force=True skips the "already cached" skip entirely and refetches every relevant,
         still-existing fub_id regardless of cache presence. Needed by
-        async_fresh_knx_bridge_loopback_audit and (since 2026-09-21) async_fresh_trigger_audit:
+        async_fresh_knx_audits' loopback audit and (since 2026-09-21) async_fresh_trigger_audit:
         both can run in the same sync pass as _wire_knx_full/_wire_knx_cluster, right after
         those wrote new bridge Markers/sinks into the very plan this call is about to read
         back — by then that plan is virtually guaranteed to already be a cache entry (just a
@@ -4865,9 +4871,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         failed with "no write-path bridge marker yet" moments after its bridge was wired
         correctly in the same sync, once the KNX 3-leg consolidation removed the OLD design's
         own end-of-run re-audit that used to refresh this cache as an incidental side effect).
-        async_fresh_knx_bridge_audit is the one caller that genuinely doesn't have this shape —
-        it always runs FIRST in a sync pass (before any KNX writes happen), so the default
-        (cache-preserving) behavior is correct and cheaper there.
+        async_fresh_knx_audits without the loopback audit (no API credentials) is the one caller
+        that genuinely doesn't have this shape — the bridge audit alone runs before any KNX
+        writes happen, so the default (cache-preserving) behavior is correct and cheaper there.
 
         Returns True unless a force=True refetch could not confirm freshness for at least one
         candidate (its live fetch failed, leaving whatever was already cached — genuine data or,
@@ -5301,10 +5307,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
         orphan_ids = [mid for mid in all_marker_ids if mid not in trigger_id_set]
         return missing_ids, orphan_ids
 
+    async def async_ha_address(self) -> str:
+        """HA webhook address, hinted by the address the Web-IO devices of the last poll store."""
+        return await self.ha_address.async_get(hint=webio_device_hint((self.data or {}).get("webio_devices")))
+
     async def async_fresh_trigger_audit(
-        self,
+        self, snapshot: dict[str, Any] | None = None
     ) -> tuple[dict[int, list[int]], dict[int, list[int]], list[dict[str, Any]] | None]:
         """Fetch Comexio's config directly and re-run the trigger-pair audit against it.
+
+        snapshot: a parsed config from async_fresh_knx_audits whose relevant plans were
+        force-refetched along with it, handed over by the caller only when this sync wrote nothing to
+        Comexio since — then this sync cannot have changed the config or the plans, and fetching both
+        a second time (several seconds on a loaded server) is skipped. An edit made concurrently in
+        the Comexio web UI is picked up by the next poll, as for any fetch.
 
         Returns (missing_by_ref, orphan_by_ref, markers): markers is the freshly parsed marker
         list (None when the audit was skipped) — the caller's bridge-Marker title fallback
@@ -5342,21 +5358,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         audit's _knx_bridge_marker_by_k_id() lookup reads back (via _resolve_knx_trigger_bridge_markers,
         for a K-object that just got its [TRIG]/[TP] suffix wired) — the same
         write-then-read-back-in-the-same-pass shape _ensure_relevant_plans_cached's own
-        docstring already documents for async_fresh_knx_bridge_loopback_audit. Before the KNX
+        docstring already documents for async_fresh_knx_audits' loopback audit. Before the KNX
         3-leg consolidation, this cache happened to already be fresh by the time this ran, as an
         incidental side effect of that OLD design's own (now-removed) end-of-run
-        async_fresh_knx_bridge_loopback_audit() re-fetch. Without force=True here now, a
+        loopback re-fetch. Without force=True here now, a
         just-bridged K-object's trigger pair fails with "no write-path bridge marker yet,
         cannot wire trigger pair" even though the bridge itself was wired correctly moments
         earlier in the same sync (live-reproduced 2026-09-21, K2).
         """
-        raw_config = await self.api.get_raw_config()
-        if not raw_config:
-            _LOGGER.warning(
-                "[%s] Trigger re-audit: direct config fetch failed — skipping rather than risk "
-                "misreading it as zero trigger markers and deleting valid self-reset pairs",
-                self.server_id,
-            )
+        parsed = snapshot if snapshot is not None else await self._async_fetch_trigger_audit_config()
+        if parsed is None:
             return {}, {}, None
         # parse_config() itself doesn't know about import_* opt-in flags and returns every
         # category unfiltered — but that's fine here: _trigger_ids_by_ref() now does its own
@@ -5365,8 +5376,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # backfired — see that method's docstring for why an empty-but-present bucket reads
         # as "every existing trigger pair just got orphaned" rather than "category inactive,
         # don't touch its wiring").
-        parsed = self.api.parse_config(raw_config)
-        await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids(), force=True)
         trigger_audit_result = self._audit_all_trigger_pairs(self._trigger_ids_by_ref(parsed))
         if trigger_audit_result is None:
             _LOGGER.warning(
@@ -5379,59 +5388,85 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # "no bridge Markers" — None lets the caller fall back to the cached list instead.
         return (*trigger_audit_result, parsed.get("markers") or None)
 
-    async def async_fresh_knx_bridge_audit(self) -> list[dict[str, Any]]:
-        """Fetch Comexio's config directly and re-run the knx_bridge_missing audit against it.
-
-        Same staleness problem as async_fresh_trigger_audit (see its docstring for why
-        async_request_refresh() cannot be used mid-sync): last_audit_results is the snapshot
-        from the *previous* poll, which can still show 0 missing bridges even though every
-        K-element genuinely lacks one now — e.g. import_knx was only just switched on, or the
-        KNX cluster plan itself only came into existence earlier in *this same* sync run (a
-        Full Sync's Initial-Setup pass creates the Web-IO class, wires K -> WebIO pairs, and
-        wires Marker -> K bridges all in one press; without this refresh the last leg would
-        silently see "no bridges missing" and the user would have to run a second, separate
-        "Brücken-Merker anlegen" action afterwards to close the gap Full Sync already knew
-        about).
-
-        get_raw_config() returns {} on an HTTP failure rather than raising — an empty result
-        here skips the audit entirely (safe no-op) instead of misreading a transient fetch
-        failure as "no KNX objects, nothing to bridge".
-
-        _knx_bridge_marker_by_k_id() still reads the cached bulk plan snapshot
-        (self.function_plan_plans) for already-wired bridges, exactly like the live audit — a
-        plan not yet in that snapshot defers the whole check (returns []) rather than risk
-        misreading "not loaded yet" as "nothing wired, everything missing", mirroring
-        async_fresh_trigger_audit's own None-handling. _ensure_relevant_plans_cached() below
-        live-fetches every relevant, still-existing plan that isn't cached yet BEFORE that read,
-        for the same reason async_fresh_trigger_audit now calls it: right after an HA restart
-        the passive backup-cycle snapshot this otherwise depends on can still be completely
-        empty when Initial Setup is pressed, deferring even for plans that already existed long
-        before this sync (most commonly the trigger plan) — not just the KNX cluster plan this
-        same sync may have just created.
-
-        Gated on the same has_active_plan check the live knx_bridge_missing_items block uses
-        (see _async_update_data) — _knx_bridge_marker_by_k_id() alone is not a substitute: with
-        no active plan, _function_plan_check_fub_ids() returns an empty relevant-fub_id set,
-        which _relevant_plans_loaded() then treats as vacuously satisfied (an empty set is a
-        subset of anything) as long as *some* unrelated plan is cached in function_plan_plans —
-        so it would return {} (not None) and every KNX object would be misreported as
-        bridge-missing, potentially auto-creating a KNX cluster plan the user never opted into
-        via Managed Function Plan.
-        """
-        if WebioClass.KNX not in self.active_webio_classes:
-            return []
-        if not self._has_active_function_plan():
-            return []
+    async def _async_fetch_trigger_audit_config(self) -> dict[str, Any] | None:
+        """Fresh parsed config + force-refetched plans for async_fresh_trigger_audit; None on a failed fetch."""
         raw_config = await self.api.get_raw_config()
         if not raw_config:
             _LOGGER.warning(
-                "[%s] KNX bridge re-audit: direct config fetch failed — skipping rather than "
-                "risk misreading it as zero KNX objects",
+                "[%s] Trigger re-audit: direct config fetch failed — skipping rather than risk "
+                "misreading it as zero trigger markers and deleting valid self-reset pairs",
                 self.server_id,
             )
-            return []
+            return None
         parsed = self.api.parse_config(raw_config)
-        await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids())
+        await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids(), force=True)
+        return parsed
+
+    async def async_fresh_knx_audits(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+        """Fetch Comexio's config once and re-run the knx_bridge_missing and knx_bridge_loopback_missing audits.
+
+        Returns (bridge_missing, loopback_missing, snapshot). snapshot is the parsed config when every
+        relevant plan was also force-refetched successfully in this call — then it is exactly as fresh as
+        what async_fresh_trigger_audit would fetch itself, and the trigger step reuses it as long as
+        nothing was written to Comexio in between (button.py _wire_knx_full); None otherwise.
+
+        Same staleness problem as async_fresh_trigger_audit (see its docstring for why
+        async_request_refresh() cannot be used mid-sync): last_audit_results is the snapshot from the
+        *previous* poll, which can still show 0 missing bridges/fan-outs even though every K-element
+        genuinely lacks one now — e.g. import_knx was only just switched on, or the KNX cluster plan
+        itself only came into existence earlier in *this same* sync run (a Full Sync's Initial-Setup
+        pass creates the Web-IO class, wires K -> WebIO pairs, and wires Marker -> K bridges all in one
+        press; without this refresh the last legs would silently see "nothing missing" and the user
+        would have to run a second, separate action to close the gap Full Sync already knew about).
+
+        Both audits used to fetch the config on their own, back to back and before any KNX write —
+        two identical fetches of the same state. The plans are force-refetched once when the loopback
+        audit applies (it needs a view that includes this sync's earlier writes into the same plans,
+        see _ensure_relevant_plans_cached); the bridge audit alone keeps the cheaper cache top-up.
+
+        get_raw_config() returns {} on an HTTP failure rather than raising — an empty result skips
+        both audits (safe no-op) instead of misreading a transient fetch failure as "no KNX objects".
+        A relevant plan not yet in the bulk snapshot defers the affected check (returns []) rather than
+        risk misreading "not loaded yet" as "nothing wired, everything missing".
+
+        Gated on the same has_active_plan check the live audit uses (see _async_update_data) —
+        _knx_bridge_marker_by_k_id() alone is not a substitute: with no active plan,
+        _function_plan_check_fub_ids() returns an empty relevant-fub_id set, which
+        _relevant_plans_loaded() treats as vacuously satisfied as long as *some* unrelated plan is
+        cached — every KNX object would be misreported as bridge-missing, potentially auto-creating a
+        KNX cluster plan the user never opted into via Managed Function Plan.
+        """
+        if WebioClass.KNX not in self.active_webio_classes or not self._has_active_function_plan():
+            return [], [], None
+        raw_config = await self.api.get_raw_config()
+        if not raw_config:
+            _LOGGER.warning(
+                "[%s] KNX re-audit: direct config fetch failed — skipping rather than risk "
+                "misreading it as zero KNX objects",
+                self.server_id,
+            )
+            return [], [], None
+        parsed = self.api.parse_config(raw_config)
+        # The loopback repair needs the optional API username/password and aborts deterministically
+        # without them — no item (instead of a permanently-unfixable one), same as the live poll.
+        with_loopback = self._api_credentials_configured()
+        plans_fresh = await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids(), force=with_loopback)
+        bridge_missing = self._knx_bridge_missing_items(parsed)
+        if not with_loopback:
+            return bridge_missing, [], None
+        if not plans_fresh:
+            _LOGGER.warning(
+                "[%s] KNX loopback re-audit: forced refetch of a relevant plan failed — skipping "
+                "this sync's loopback check rather than risk auditing stale (pre-write) plan data",
+                self.server_id,
+            )
+            return bridge_missing, [], None
+        return bridge_missing, self._knx_loopback_missing_items(parsed), parsed
+
+    def _knx_bridge_missing_items(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
+        """knx_bridge_missing items for a freshly parsed config (see async_fresh_knx_audits)."""
         knx_bridge_marker_by_k_id = self._knx_bridge_marker_by_k_id()
         if knx_bridge_marker_by_k_id is None:
             _LOGGER.warning(
@@ -5441,68 +5476,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             return []
         ignored_ids = self.ignored_ids_for(WebioClass.KNX)
-        missing_items: list[dict[str, Any]] = []
-        for k in parsed.get("knx", []):
-            k_id = str(k["id"])
-            if int(k_id) in ignored_ids or k_id in knx_bridge_marker_by_k_id:
-                continue
-            missing_items.append(
-                {
-                    "name": k["name"],
-                    "ref_id": k_id,
-                    "title": k["title"],
-                    "type_raw": k["type_raw"],
-                    "webio_class": WEBIO_CLASS_KNX,
-                }
-            )
-        return missing_items
+        return [
+            {
+                "name": k["name"],
+                "ref_id": str(k["id"]),
+                "title": k["title"],
+                "type_raw": k["type_raw"],
+                "webio_class": WEBIO_CLASS_KNX,
+            }
+            for k in parsed.get("knx", [])
+            if int(k["id"]) not in ignored_ids and str(k["id"]) not in knx_bridge_marker_by_k_id
+        ]
 
-    async def async_fresh_knx_bridge_loopback_audit(self) -> list[dict[str, Any]]:
-        """Fetch Comexio's config directly and re-run the knx_bridge_loopback_missing audit.
+    def _knx_loopback_missing_items(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
+        """knx_bridge_loopback_missing items for a freshly parsed config (see async_fresh_knx_audits).
 
-        Phase 7 counterpart of async_fresh_knx_bridge_audit — same staleness problem and same
-        fix: a bridge Marker/K-Element pair created earlier in *this same* sync run (e.g. by
-        _wire_knx_full/_wire_knx_cluster in button.py) is invisible to last_audit_results (a
-        snapshot from the *previous* poll), so without this refresh the loopback fan-out would
-        never get wired in the same Full Sync that just created the bridge — the user would
-        need a second, separate run to close a gap this sync already knows about.
-
-        Mirrors async_fresh_knx_bridge_audit's guards: bails out (returns []) rather than risk
-        misreading a transient failure/not-yet-cached plan as "nothing to fan out", including
-        the same has_active_plan gate for the same _function_plan_check_fub_ids() reason.
+        Phase 7 counterpart of the bridge audit: a bridge Marker/K-Element pair created earlier in
+        *this same* sync run is invisible to last_audit_results, so without the fresh audit the
+        loopback fan-out would never get wired in the same Full Sync that just created the bridge.
         """
-        if WebioClass.KNX not in self.active_webio_classes:
-            return []
-        if not self._has_active_function_plan():
-            return []
-        if not self._api_credentials_configured():
-            # Same reasoning as the live-poll counterpart in _async_update_data: the repair for
-            # this gap needs the optional API username/password and aborts deterministically
-            # without them — returning [] here (instead of a permanently-unfixable item) avoids
-            # a repair flag that can never be resolved until credentials are configured.
-            return []
-        raw_config = await self.api.get_raw_config()
-        if not raw_config:
-            _LOGGER.warning(
-                "[%s] KNX loopback re-audit: direct config fetch failed — skipping rather than "
-                "risk misreading it as zero KNX objects",
-                self.server_id,
-            )
-            return []
-        parsed = self.api.parse_config(raw_config)
-        # force=True: this audit runs right after (or, for a just-created bridge, from within)
-        # _wire_knx_full/_wire_knx_cluster wrote new sinks into these same plans earlier in
-        # this sync pass — by now they are virtually guaranteed to already be cache entries
-        # (just stale ones), so the default
-        # "only fetch what's missing" behavior would silently skip the live refetch this specific
-        # audit needs. See _ensure_relevant_plans_cached's docstring.
-        if not await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids(), force=True):
-            _LOGGER.warning(
-                "[%s] KNX loopback re-audit: forced refetch of a relevant plan failed — skipping "
-                "this sync's loopback check rather than risk auditing stale (pre-write) plan data",
-                self.server_id,
-            )
-            return []
         knx_bridge_marker_by_k_id = self._knx_bridge_marker_by_k_id()
         wired_knx_webio_pairs = self._wired_source_webio_pairs("11")
         if knx_bridge_marker_by_k_id is None or wired_knx_webio_pairs is None:
