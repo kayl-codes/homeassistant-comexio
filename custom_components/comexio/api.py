@@ -4574,9 +4574,19 @@ class ComexioAPI:
             _LOGGER.error("prestage_knx_loopback_class: Loopback Web-IO device not found after upload")
             return names
         full_names = {f"{device_id}. {name}" for name in names}
-        await self._reload_config_until_commands_ready(
+        fresh_data = await self._reload_config_until_commands_ready(
             lambda _d: full_names, lambda d: {info["name"] for info in d.get("webio_names", {}).values()}
         )
+        # Still return every uploaded name: they are part of the class template the upload
+        # just created, so an unlisted one is only the admin page lagging — handing it to the
+        # per-cluster path would save it a second time. Log it so the lag stays visible.
+        if still_unlisted := full_names - {info["name"] for info in fresh_data.get("webio_names", {}).values()}:
+            _LOGGER.warning(
+                "prestage_knx_loopback_class: %d uploaded command(s) not yet listed by Comexio after "
+                "the readiness wait, treating them as present (they are part of the uploaded class): %s",
+                len(still_unlisted),
+                sorted(still_unlisted),
+            )
         return names
 
     async def function_plan_add_knx_bridge_pairs(
