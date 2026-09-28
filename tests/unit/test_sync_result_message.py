@@ -20,4 +20,5 @@ def test_per_class_note_lists_only_changed_classes_in_words() -> None:
     assert "2 added, 0 updated, 0 renamed, 1 removed" in note
     assert "0 added, 1 updated, 0 renamed, 0 removed" in note
     assert note.count("\n") == 2
-    assert "+" not in note and "-" not in note
+    assert "+" not in note
+    assert "-" not in note
