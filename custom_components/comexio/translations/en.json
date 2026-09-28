@@ -277,6 +277,9 @@
             "title": "Uninstall Cleanup",
             "description": "Choose what to remove from Comexio. In total, the integration created {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\n* **Everything** removes all of it.\n* **Markers only / IOs only / KNX only** remove just that part's Function Plans, Web-IO device and class. The shared trigger plan is only removed as a whole if it holds no trigger pairs of the other category — otherwise Markers/KNX remove just their own pairs from it.\n* **KNX only** and **Everything** also clear the titles of the KNX bridge markers, so they become free markers again. The markers themselves are not deleted.\n\nThis cannot be undone. Deleted Function Plans lose their wiring permanently."
           }
+        },
+        "abort": {
+          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished."
         }
       }
     },
@@ -288,6 +291,9 @@
             "title": "KNX pre-release cleanup",
             "description": "This installation still contains KNX Function Plans or Web-IO devices from a KNX pre-release (v0.10.0-rc1 to rc3). Their layout no longer matches this version.\n\n**KNX only** (preselected) removes the KNX Function Plans, the KNX Web-IO device and class and the KNX loopback Web-IO, and clears the titles of the KNX bridge markers so they can be reused. The next sync then rebuilds everything cleanly. Marker and IO plans are not touched; from the shared trigger plan only the KNX trigger pairs are removed (the whole plan only if it holds nothing else).\n\nThis cannot be undone. Choose Cancel to keep everything as it is."
           }
+        },
+        "abort": {
+          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished."
         }
       }
     },
@@ -303,6 +309,9 @@
             "title": "Classify KNX object",
             "description": "**{name}** ({remaining} more after this one) uses a KNX DPT1.x subtype (Schalter/Bool/Freigabe/Flanke/Binärwert) that KNX allows to wire as a real toggle switch, a momentary push-button (Taster), or a read-only status readback — the datapoint type alone can't tell which, only you know the actual wiring.\n\nHow should this object be treated?"
           }
+        },
+        "abort": {
+          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished."
         }
       }
     }

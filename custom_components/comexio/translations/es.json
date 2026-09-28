@@ -277,6 +277,9 @@
             "title": "Limpieza de desinstalación",
             "description": "Elige qué eliminar de Comexio. En total, la integración creó {plan_count} plan(es) de funciones, {device_count} dispositivo(s) Web-IO y {class_count} clase(s) Web-IO.\n\n* **Everything** lo elimina todo.\n* **Markers only / IOs only / KNX only** eliminan solo los planes de funciones, el dispositivo y la clase Web-IO de esa parte. El plan de disparo compartido solo se elimina por completo si no contiene pares de disparo de la otra categoría; de lo contrario, Markers/KNX solo eliminan sus propios pares.\n* **KNX only** y **Everything** también borran los títulos de los marcadores puente KNX, que vuelven a quedar libres. Los marcadores en sí no se eliminan.\n\nEsta acción no se puede deshacer. Los planes de funciones eliminados pierden su cableado permanentemente."
           }
+        },
+        "abort": {
+          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado."
         }
       }
     },
@@ -288,6 +291,9 @@
             "title": "Limpieza de la versión preliminar KNX",
             "description": "Esta instalación aún contiene planes de funciones KNX o dispositivos Web-IO de una versión preliminar KNX (v0.10.0-rc1 a rc3). Su estructura ya no coincide con esta versión.\n\n**KNX only** (preseleccionado) elimina los planes de funciones KNX, el dispositivo y la clase Web-IO KNX y el Web-IO de bucle KNX, y borra los títulos de los marcadores puente KNX para que puedan reutilizarse. La próxima sincronización lo vuelve a crear todo correctamente. Los planes de funciones de marcadores e IO no se modifican; del plan de disparadores compartido solo se eliminan los pares de disparo KNX (el plan completo solo si no contiene nada más).\n\nEsta acción no se puede deshacer. Elige Cancel para dejarlo todo como está."
           }
+        },
+        "abort": {
+          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado."
         }
       }
     },
@@ -303,6 +309,9 @@
             "title": "Clasificar objeto KNX",
             "description": "**{name}** ({remaining} más después de este) usa un subtipo KNX DPT1.x (Schalter/Bool/Freigabe/Flanke/Binärwert) que KNX permite cablear tanto como un interruptor real, un pulsador (Taster) o una simple lectura de estado — el tipo de punto de datos por sí solo no permite saber cuál es, solo tú conoces el cableado real.\n\n¿Cómo debe tratarse este objeto?"
           }
+        },
+        "abort": {
+          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado."
         }
       }
     }

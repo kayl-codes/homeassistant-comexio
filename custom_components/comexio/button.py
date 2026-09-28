@@ -2,9 +2,10 @@
 import asyncio
 from collections.abc import Callable
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import datetime
 from functools import partial
+import json
 import logging
 import time
 from typing import Any
@@ -164,12 +165,57 @@ def _plan_pair_progress(ctx: "_SyncContext", state: dict, plan_name: str, done: 
     state["last_t"] = now
     state["last_overall"] = overall_done
     ctx.update_status(
-        f"**Function Plan:** `{plan_name}`\n"
-        f"**Progress:** pair {overall_done} of {overall_total}\n\n---\n"
+        f"{_plan_step_header(plan_name, state.get('action'))}"
+        f"**Progress:** {state.get('unit', 'pair')} {overall_done} of {overall_total}{state.get('total_note', '')}"
+        "\n\n---\n"
         f"{ICON_FLAG} **Remaining:** ~{_mmss(remaining)} min",
         pct=_PCT_PLAN_PAIRS + int((_PCT_PLAN_FINALIZE - _PCT_PLAN_PAIRS) * (overall_done / overall_total)),
         step_info=f"Function Plan '{plan_name}': pair {done}/{total}",
     )
+
+
+def _plan_step_header(plan_name: str, action: str | None) -> str:
+    """Notification header naming the plan and the sub-step currently running on it."""
+    step = f"**Step:** {action}\n" if action else ""
+    return f"**Function Plan:** `{plan_name}`\n{step}"
+
+
+def _start_plan_step(ctx: "_SyncContext", state: dict, plan_name: str, action: str, step_info: str) -> None:
+    """Record the sub-step a plan leg is starting and show it in the progress notification.
+
+    Stored in the run-wide progress state so every throttled _plan_pair_progress update that
+    follows keeps naming it — the per-pair message used to overwrite the leg's own start
+    message, leaving the user unable to tell which part of the sync was running.
+    """
+    state["action"] = action
+    ctx.update_status(_plan_step_header(plan_name, action), pct=_PCT_PLAN_PAIRS, step_info=step_info)
+
+
+def _loopback_command_progress(
+    ctx: "_SyncContext", plan_name: str, n: int, total: int, k_id: int, marker_id: int
+) -> None:
+    """Show which API-Loopback Web-IO command is being saved — each blocks ~SYNC_DURATION_WRITE s."""
+    remaining = (total - n + 1) * SYNC_DURATION_WRITE
+    ctx.update_status(
+        f"{_plan_step_header(plan_name, 'creating API-Loopback Web-IO commands')}"
+        f"**Progress:** command {n} of {total} (K{k_id} → M{marker_id})\n\n---\n"
+        f"{ICON_CLOCK} Comexio needs about {SYNC_DURATION_WRITE} s per command\n"
+        f"{ICON_FLAG} **Remaining:** ~{_mmss(remaining)} min",
+        step_info=f"Function Plan '{plan_name}': loopback Web-IO command {n}/{total}",
+    )
+
+
+@dataclass
+class _KnxPrestage:
+    """Result of _prestage_knx_webio: work done once, before any KNX cluster plan is touched.
+
+    allocated: {k_id: bridge marker_id} for every open bridge, so leg 2 only wires them.
+    preembedded: loopback command names bulk-uploaded with a freshly created class, so
+    leg 3 only confirms them instead of saving each one (~35-40 s per single save).
+    """
+
+    allocated: dict[int, int] = field(default_factory=dict)
+    preembedded: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -190,6 +236,9 @@ class _SyncContext:
     start_time: datetime.datetime
     class_names: dict[str, str]
     update_status: Callable[..., None]
+    # Marker list fetched fresh mid-sync (async_fresh_trigger_audit) — coordinator.data stays
+    # frozen while in_sync, so it lacks the bridge Markers this same sync created.
+    fresh_markers: list[dict[str, Any]] | None = None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -323,6 +372,20 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 )
             return
         await self.coordinator._sync_lock.acquire()
+        if self.hass.data[DOMAIN].get(self.coordinator.config_entry.entry_id) is not self.coordinator:
+            # A reload (coordinator.async_reload_entry holds this lock through it) finished
+            # while this press waited: this coordinator and its API session are torn down.
+            self.coordinator._sync_lock.release()
+            _LOGGER.warning("[%s] Sync request dropped — the integration was reloaded meanwhile", self.server_id)
+            if notify_enabled:
+                persistent_notification.async_create(
+                    self.hass,
+                    f"{ICON_WARNING} Sync request ignored — the integration was reloaded while it waited. "
+                    "Please start the sync again.",
+                    title=f"Comexio Sync ({self.server_id})",
+                    notification_id=f"comexio_sync_blocked_{self.server_id}",
+                )
+            return
         self.coordinator.in_sync = True
         self.coordinator.sync_error = False
 
@@ -962,34 +1025,50 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def _finalize_sync(self) -> None:
         """Reset sync flags/UI state and force a full integration reload after a press."""
-        # 1. Flag reset
-        self.coordinator.in_sync = False
-        self.coordinator.cancel_sync = False
-        if not getattr(self.coordinator, "sync_error", False):
-            self.coordinator.sync_progress_text = "Idle"
-        self.coordinator.sync_progress_pct = None
-        self.coordinator.sync_current_step = None
-        self.coordinator.async_set_updated_data(self.coordinator.data)
+        # _sync_lock stays held until the reload below has finished: releasing it first left
+        # a >=0.5 s window in which a new sync (press_action, automation, UI) could start on
+        # this coordinator and have its API session closed by the reload — the exact
+        # "Session is closed" failure async_reload_entry guards against (review 28.09.2026).
+        # The finally guarantees the release on every path; the inner guards make sure a
+        # failing reset step can never skip the reload that covers every reload
+        # coordinator.async_reload_entry skipped during this sync.
+        try:
+            try:
+                # 1. Flag reset
+                self.coordinator.in_sync = False
+                self.coordinator.cancel_sync = False
+                if not getattr(self.coordinator, "sync_error", False):
+                    self.coordinator.sync_progress_text = "Idle"
+                self.coordinator.sync_progress_pct = None
+                self.coordinator.sync_current_step = None
+                self.coordinator.async_set_updated_data(self.coordinator.data)
 
-        # 2. Reset audit_ignored. Set the skip flag first so the update_listener
-        #    suppresses its reload — the explicit reload below is the single reload (R2).
-        new_options = dict(self.coordinator.config_entry.options)
-        new_options["audit_ignored"] = False
-        self.coordinator.request_options_update_without_reload(new_options)
+                # 2. Reset audit_ignored. Set the skip flag first so the update_listener
+                #    suppresses its reload — the explicit reload below is the single reload (R2).
+                new_options = dict(self.coordinator.config_entry.options)
+                new_options["audit_ignored"] = False
+                self.coordinator.request_options_update_without_reload(new_options)
+            except Exception:
+                _LOGGER.exception("[%s] Resetting the sync state failed — reloading anyway", self.server_id)
 
-        # 3. Release sync lock before reload (old coordinator is replaced by reload anyway)
-        self.coordinator._sync_lock.release()
+            # 3. Give the Comexio server a moment to finish the write operation;
+            #    the update_listener task runs here, sees the skip flag, and returns. (R2)
+            await asyncio.sleep(0.5)
 
-        # 4. Give the Comexio server a moment to finish the write operation;
-        #    the update_listener task runs here, sees the skip flag, and returns. (R2)
-        await asyncio.sleep(0.5)
+            # 4. Reset UI button
+            try:
+                self.async_write_ha_state()
+            except Exception:
+                _LOGGER.exception("[%s] Could not reset the sync button state — reloading anyway", self.server_id)
 
-        # 5. Reset UI button
-        self.async_write_ha_state()
-
-        # 6. Restart integration (necessary!)
-        _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
-        await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
+            # 5. Restart integration (necessary!)
+            _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
+            await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
+        finally:
+            # 6. Release the (old) coordinator's lock — the reload built a new coordinator
+            #    with its own lock; a press that waited on this one is dropped by
+            #    async_handle_press' coordinator-identity check.
+            self.coordinator._sync_lock.release()
 
     async def _decide_effective_action(
         self,
@@ -1062,10 +1141,22 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     ) -> None:
         """Delete-and-recreate a Web-IO class from scratch (Fast-Track / Initial Setup)."""
         api = ctx.api
+        # Built up front (pure, no network) so the status can name the command count — the
+        # upload itself gives no progress signal of its own.
+        web_io_json = api.generate_webio_json(
+            self.server_id,
+            class_name,
+            self.coordinator.data,
+            webio_class=cls,
+            ignored_marker_ids=self.coordinator.ignored_marker_ids,
+            ignored_knx_ids=self.coordinator.ignored_knx_ids,
+        )
+        n_commands = len(json.loads(web_io_json)["commands"])
         status_msg = (
-            f"{ICON_TOOLS} **Initial Setup ({label})**\nCreating Web-IO class..."
+            f"{ICON_TOOLS} **Initial Setup ({label})**\nCreating Web-IO class with {n_commands} command(s)..."
             if ctx.action == "full_sync" and not class_dev_id
-            else f"{ICON_ROCKET} **Fast-Track active ({label})**\nHigh-speed recreation in progress..."
+            else f"{ICON_ROCKET} **Fast-Track active ({label})**\n"
+            f"High-speed recreation of {n_commands} command(s) in progress..."
         )
         ctx.update_status(status_msg, pct=pct_start, step_info=f"Creating Web-IO class ({label})")
 
@@ -1092,17 +1183,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 )
 
         ctx.update_status(
-            f"{status_msg}\n\n{ICON_UPLOAD} Uploading configuration...",
+            f"{status_msg}\n\n{ICON_UPLOAD} Uploading configuration ({n_commands} command(s))...",
             pct=(pct_start + pct_end) // 2,
             step_info="Uploading configuration",
-        )
-        web_io_json = api.generate_webio_json(
-            self.server_id,
-            class_name,
-            self.coordinator.data,
-            webio_class=cls,
-            ignored_marker_ids=self.coordinator.ignored_marker_ids,
-            ignored_knx_ids=self.coordinator.ignored_knx_ids,
         )
         success, res_id = await api.upload_web_io(self.server_id, class_name, web_io_json)
         if not success:
@@ -1583,7 +1666,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if ctx.action not in {"full_sync", "function_plan_add_missing"}:
             return []
         if refresh_audit:
-            missing_by_ref, orphan_by_ref = await self.coordinator.async_fresh_trigger_audit()
+            missing_by_ref, orphan_by_ref, ctx.fresh_markers = await self.coordinator.async_fresh_trigger_audit()
         else:
             audit_data = getattr(self.coordinator, "last_audit_results", {})
             missing_by_ref = audit_data.get("function_plan_trigger_missing", {})
@@ -1600,7 +1683,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 summary.append(await self._remove_trigger_pairs(ctx, ids, ref_type))
         return summary
 
-    def _resolve_knx_trigger_bridge_markers(self, k_ids: list[int]) -> tuple[list[int], list[str]]:
+    def _resolve_knx_trigger_bridge_markers(self, ctx: _SyncContext, k_ids: list[int]) -> tuple[list[int], list[str]]:
         """Translate KNX trigger source ids to their write-path bridge marker ids.
 
         Comexio refuses to start a plan that wires a K element's own Flanke self-reset
@@ -1627,14 +1710,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         for k_id in k_ids:
             marker_id = bridge_marker_by_k_id.get(str(k_id))
             if marker_id is None:
-                marker_id = self._knx_bridge_marker_id_by_title(k_id)
+                marker_id = self._knx_bridge_marker_id_by_title(ctx, k_id)
             if marker_id is None:
                 errors.append(f"K{k_id}: no write-path bridge marker yet, cannot wire trigger pair")
             else:
                 marker_ids.append(int(marker_id))
         return marker_ids, errors
 
-    def _knx_bridge_marker_id_by_title(self, k_id: int) -> int | None:
+    def _knx_bridge_marker_id_by_title(self, ctx: _SyncContext, k_id: int) -> int | None:
         """Fallback bridge-Marker lookup via its title suffix "[K<k_id>]", for when
         _knx_bridge_marker_by_k_id()'s plan-wiring-derived map has no entry for k_id.
 
@@ -1648,10 +1731,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         reconsidered either, leaving its stale Marker+Flanke trigger-plan wiring stuck
         forever. Scanning the coordinator's cached marker list directly (kind==KNX_BRIDGE,
         the same classification MARKER_KNX_BRIDGE_SUFFIX_RE drives) sidesteps the
-        connection-wiring dependency entirely.
+        connection-wiring dependency entirely. Prefers ctx.fresh_markers: the cached list is
+        frozen for the whole sync and misses a bridge Marker created earlier in it.
         """
         suffix = f"[K{k_id}]"
-        for m in self.coordinator.data.get("markers", []):
+        markers = ctx.fresh_markers if ctx.fresh_markers is not None else self.coordinator.data.get("markers", [])
+        for m in markers:
             if m.get("kind") == MarkerKind.KNX_BRIDGE and (m.get("title") or "").rstrip().endswith(suffix):
                 return int(m["id"])
         return None
@@ -1677,7 +1762,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         wire_ref_type = ref_type
         wire_ids = missing_ids
         if ref_type == knx_ref_type:
-            wire_ids, bridge_errors = self._resolve_knx_trigger_bridge_markers(missing_ids)
+            wire_ids, bridge_errors = self._resolve_knx_trigger_bridge_markers(ctx, missing_ids)
             wire_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
 
         plan_name = self._plan_name(fub_id)
@@ -1740,7 +1825,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         remove_ref_type = ref_type
         remove_ids = orphan_ids
         if ref_type == knx_ref_type:
-            remove_ids, bridge_errors = self._resolve_knx_trigger_bridge_markers(orphan_ids)
+            remove_ids, bridge_errors = self._resolve_knx_trigger_bridge_markers(ctx, orphan_ids)
             if bridge_errors:
                 _LOGGER.warning("[%s] remove_trigger_pairs bridge lookup errors: %s", self.server_id, bridge_errors)
             remove_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
@@ -1833,6 +1918,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             instead of discarding it, so _wire_knx_cluster can wire leg 3 for a freshly-bridged
             K-object in the SAME cycle, with no re-audit and no follow-up pass at all.
 
+        Before the first cluster is touched, _prestage_knx_webio allocates every open bridge
+        Marker and bulk-creates the API-Loopback Web-IO class with ALL loopback commands
+        (28.09.2026) — the per-cluster legs then only wire those markers/commands instead of
+        saving loopback commands one by one for every cluster after the first.
+
         Runs for a Full Sync as well as the standalone knx_bridge_add_missing action (decided
         18.09.2026: that action completes every open KNX write-path leg, including the read
         path, rather than leaving a bridge with an incomplete K-Element behind) — but not for
@@ -1880,13 +1970,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # only contribute 1 to a union-based total, letting done run past total (>100%
         # progress, negative ETA). Sum of the three per-leg counts instead, so it lines up
         # 1:1 with the progress_state["done"] += len(...) calls in _wire_knx_cluster's three
-        # leg helpers below (including the one that grows "total" back when a bridge just
-        # created THIS run pulls in an extra loopback item mid-cluster).
+        # leg helpers below. Every open bridge counts twice — leg 2 AND the leg 3 it pulls in
+        # for the same K — so the total is fixed from the start instead of jumping mid-run
+        # (118 -> 177 for 59 new K-objects, noticed live 28.09.2026); a bridge that fails in
+        # leg 2 takes its leg-3 slot back out (see _wire_knx_cluster).
         progress_state = {
             "done": 0,
-            "total": len(read_path_ids) + len(bridge_by_id) + len(loopback_by_id),
+            "total": len(read_path_ids) + 2 * len(bridge_by_id) + len(loopback_by_id),
             "t0": time.monotonic(),
+            "unit": "step",
+            "total_note": f" ({len(all_k_ids)} KNX objects, up to 3 legs each)",
         }
+        prestage, prestage_errors = await self._prestage_knx_webio(ctx, bridge_by_id, loopback_by_id, progress_state)
+        if prestage_errors:
+            _LOGGER.warning("[%s] KNX prestage errors: %s", self.server_id, prestage_errors)
+            summary.append(
+                f"{ICON_WARNING} KNX upfront preparation incomplete ({len(prestage.allocated)} of"
+                f" {len(bridge_by_id)} bridge Marker(s) prepared) — retried per plan, see log"
+            )
         for fub_id, cluster_ids in plan_to_ids.items():
             # Checked only between clusters, same as _add_pairs_to_plan's existing pattern —
             # but each cluster here now wires all three legs (including leg 3 for a bridge it
@@ -1903,19 +2004,74 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 bridge_by_id,
                 loopback_by_id,
                 progress_state,
+                prestage,
             )
             if line:
                 summary.append(line)
         return summary
 
+    async def _prestage_knx_webio(
+        self,
+        ctx: _SyncContext,
+        bridge_by_id: dict[int, dict],
+        loopback_by_id: dict[int, dict],
+        progress_state: dict,
+    ) -> tuple[_KnxPrestage, list[str]]:
+        """Allocate every open bridge Marker and bulk-create the API-Loopback Web-IO class
+        with ALL loopback commands, before any KNX cluster plan is wired.
+
+        Live 28.09.2026: the loopback class was bulk-created with the first cluster's bridges
+        only, so every bridge of the next cluster fell back to save_single_command — ~35-40 s
+        each on the Comexio side (9 commands ≈ 5.5 min, looked like a hung sync). The user's
+        rule: all Web-IO classes are created upfront with all their commands, then the
+        function plans; single command saves are only for later top-ups of an existing class.
+        The bridge marker ids are needed for the command names, hence the allocation first.
+        """
+        if not bridge_by_id and not loopback_by_id:
+            return _KnxPrestage(), []
+        _start_plan_step(
+            ctx,
+            progress_state,
+            "KNX (all plans)",
+            f"preparing {len(bridge_by_id)} KNX bridge Marker(s) + API-Loopback Web-IO class",
+            "Web-IO: preparing KNX API-Loopback class",
+        )
+        # Only an optimization: on any failure the per-plan legs create the markers/commands
+        # themselves, so it must never abort the sync (no plan is stopped yet at this point).
+        api = ctx.api
+        prestage = _KnxPrestage()
+        errors: list[str] = []
+        bridges = [(int(i["ref_id"]), int(i["marker_id"]), bool(i["binary"])) for i in loopback_by_id.values()]
+        try:
+            if bridge_by_id:
+                marker_map, errors = await api.allocate_knx_bridge_markers(list(bridge_by_id.values()))
+                prestage.allocated = {k_id: marker_id for k_id, (marker_id, _binary) in marker_map.items()}
+                bridges += [(k_id, marker_id, binary) for k_id, (marker_id, binary) in marker_map.items()]
+            _start_plan_step(
+                ctx,
+                progress_state,
+                "KNX (all plans)",
+                f"API-Loopback Web-IO class: {len(bridges)} command(s) (one bulk upload if the class is new)",
+                "Web-IO: uploading KNX API-Loopback class",
+            )
+            prestage.preembedded = await api.prestage_knx_loopback_class(api.api_user, api.api_pass, bridges)
+        except (aiohttp.ClientError, TimeoutError, RuntimeError) as err:
+            _LOGGER.warning(
+                "[%s] KNX prestage failed — falling back to per-plan creation", self.server_id, exc_info=True
+            )
+            errors.append(f"KNX prestage failed: {err!r}")
+        return prestage, errors
+
     async def _wire_knx_leg_read_path(
         self, ctx: _SyncContext, fub_id: int, plan_name: str, read_ids: list[int], progress_state: dict
     ) -> tuple[list[int], list[str], str]:
         """Leg 1: K -> webIO-HA read path. Returns (added K ref_ids, errors, summary part)."""
-        ctx.update_status(
-            f"Adding {len(read_ids)} pair(s) to Function Plan '{plan_name}'...",
-            pct=_PCT_PLAN_PAIRS,
-            step_info="Function Plan: adding pairs",
+        _start_plan_step(
+            ctx,
+            progress_state,
+            plan_name,
+            f"adding {len(read_ids)} KNX read-path pair(s)",
+            "Function Plan: adding pairs",
         )
         added, errors = await ctx.api.function_plan_add_source_pairs(
             fub_id,
@@ -1939,15 +2095,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         bridge_items: list[dict],
         loopback_by_id: dict[int, dict],
         progress_state: dict,
+        preallocated: dict[int, int],
     ) -> tuple[list[int], list[str], str, list[dict]]:
         """Leg 2: Merker -> K write-path bridge. Returns (added, errors, summary part,
         loopback items for every K just bridged THIS call that still needs leg 3 — see
         _wire_knx_cluster, which wires these in the same stop/write/finalize cycle).
         """
-        ctx.update_status(
-            f"Adding {len(bridge_items)} KNX bridge(s) to Function Plan '{plan_name}'...",
-            pct=_PCT_PLAN_PAIRS,
-            step_info="Function Plan: adding KNX bridges",
+        _start_plan_step(
+            ctx,
+            progress_state,
+            plan_name,
+            f"adding {len(bridge_items)} KNX bridge Marker(s)",
+            "Function Plan: adding KNX bridges",
         )
         added, errors, bridged = await ctx.api.function_plan_add_knx_bridge_pairs(
             fub_id,
@@ -1965,6 +2124,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             # inactive and are cached that way — no default kicks in — see its comment there).
             fresh_plan=False,
             progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+            preallocated=preallocated,
         )
         progress_state["done"] += len(bridge_items)
         part = f"bridges +{len(added)}/{len(bridge_items)}"
@@ -1983,13 +2143,21 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return added, errors, part, newly_bridged_loopback_items
 
     async def _wire_knx_leg_loopback(
-        self, ctx: _SyncContext, fub_id: int, plan_name: str, loopback_items: list[dict], progress_state: dict
+        self,
+        ctx: _SyncContext,
+        fub_id: int,
+        plan_name: str,
+        loopback_items: list[dict],
+        progress_state: dict,
+        preembedded: set[str],
     ) -> tuple[list[int], list[str], str]:
         """Leg 3: K -> webIO-Loopback fan-out. Returns (added K ref_ids, errors, summary part)."""
-        ctx.update_status(
-            f"Wiring API-Loopback fan-out for {len(loopback_items)} KNX bridge(s) on '{plan_name}'...",
-            pct=_PCT_PLAN_PAIRS,
-            step_info="Function Plan: KNX loopback fan-out",
+        _start_plan_step(
+            ctx,
+            progress_state,
+            plan_name,
+            f"wiring API-Loopback fan-out for {len(loopback_items)} KNX bridge(s)",
+            "Function Plan: KNX loopback fan-out",
         )
         api = ctx.api
         bridges = [(int(i["ref_id"]), int(i["marker_id"]), bool(i["binary"])) for i in loopback_items]
@@ -2000,6 +2168,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             api.api_pass,
             fresh_plan=False,  # see _wire_knx_leg_bridge's docstring
             progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+            command_progress_cb=partial(_loopback_command_progress, ctx, plan_name),
+            preembedded=preembedded,
         )
         progress_state["done"] += len(loopback_items)
         skip_note = f" (+{len(skipped)} already wired)" if skipped else ""
@@ -2015,6 +2185,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         bridge_by_id: dict[int, dict],
         loopback_by_id: dict[int, dict],
         progress_state: dict,
+        prestage: _KnxPrestage,
     ) -> str:
         """Wire every open KNX leg for one cluster plan in a single stop -> write -> finalize cycle.
 
@@ -2087,21 +2258,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
             if bridge_items:
                 added, errors, part, new_loopback_items = await self._wire_knx_leg_bridge(
-                    ctx, fub_id, plan_name, bridge_items, loopback_by_id, progress_state
+                    ctx, fub_id, plan_name, bridge_items, loopback_by_id, progress_state, prestage.allocated
                 )
                 all_added.extend(added)
                 all_errors.extend(errors)
                 parts.append(part)
-                # A bridge just created THIS call has no slot in progress_state["total"] yet
-                # (_wire_knx_full's upfront count only knows about the pre-fetched
-                # knx_bridge_loopback_missing audit) — grow it here, same reasoning as
-                # _plan_pair_progress's "NOT len(all_k_ids)" note on that upfront sum.
-                progress_state["total"] += len(new_loopback_items)
+                # _wire_knx_full's upfront total already reserved a leg-3 slot for every open
+                # bridge — release the slots of bridges that did not come out of leg 2.
+                progress_state["total"] -= len(bridge_items) - len(new_loopback_items)
                 loopback_items = loopback_items + new_loopback_items
 
             if loopback_items:
                 added, errors, part = await self._wire_knx_leg_loopback(
-                    ctx, fub_id, plan_name, loopback_items, progress_state
+                    ctx, fub_id, plan_name, loopback_items, progress_state, prestage.preembedded
                 )
                 all_added.extend(added)
                 all_errors.extend(errors)

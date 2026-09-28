@@ -197,6 +197,31 @@ def _post_result_notification(hass: HomeAssistant, notif_id: str, msg: str, titl
     persistent_notification.async_create(hass, msg, title=title, notification_id=result_id)
 
 
+async def _async_reload_after_knx_classification(hass: HomeAssistant, coordinator) -> None:
+    """Background reload after the KNX classification repair renamed objects.
+
+    Runs after the repair flow has already closed, so a failure has no dialog to surface in:
+    log it and tell the user to reload manually, since the renamed objects otherwise stay on
+    their previous entity platform until the next reload or restart.
+    """
+    try:
+        await coordinator.async_reload_entry("KNX classification")
+    except Exception:
+        _LOGGER.exception(
+            "[%s] Reload after the KNX classification repair failed — renamed objects stay on "
+            "their previous entity platform until the next reload or restart",
+            coordinator.server_id,
+        )
+        persistent_notification.async_create(
+            hass,
+            "The KNX objects were renamed, but reloading the integration afterwards failed "
+            "(see the log). Reload the Comexio integration manually so the affected entities "
+            "switch to their new type.",
+            title="Comexio: reload after KNX classification failed",
+            notification_id=f"comexio_knx_classification_reload_{coordinator.server_id}",
+        )
+
+
 def _cleanup_incomplete(result: dict | None) -> bool:
     """Whether a cleanup run left something behind that a re-run could still remove."""
     if not result:
@@ -240,6 +265,15 @@ def _cleanup_result_message(result: dict, scope: str) -> str:
 async def async_setup_entry(hass: HomeAssistant, entry):
     """Set up the repairs platform."""
     return True
+
+
+ABORT_SYNC_RUNNING = "sync_running"
+
+
+def _sync_running(hass: HomeAssistant, entry_id: str | None) -> bool:
+    """Whether a sync or Web-IO range check currently runs for this entry (see _sync_lock / R4)."""
+    coordinator = hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
+    return coordinator is not None and (coordinator.in_sync or coordinator._sync_lock.locked())
 
 
 async def async_create_fix_flow(hass: HomeAssistant, issue_id: str, data: dict | None):
@@ -826,6 +860,10 @@ class ComexioRepairFlow(RepairsFlow):
         (the KNX pre-release cleanup issue preselects 'knx').
         """
         entry_id = self.issue_data.get("entry_id")
+        if _sync_running(self.hass, entry_id):
+            # Tearing down plans/devices a running sync is still writing into would leave
+            # both half-done. Checked before the pending hint is dismissed: nothing happened.
+            return self.async_abort(reason=ABORT_SYNC_RUNNING)
 
         if user_input is not None:
             action = user_input["action"]
@@ -878,6 +916,38 @@ class ComexioRepairFlow(RepairsFlow):
                 self.hass, uninstall_cleanup_pending_notification_id(coordinator.server_id)
             )
 
+    def _reraise_cleanup_issue(self, coordinator, scope: str) -> None:
+        """The issue was deleted when the dialog was confirmed (and for the pre-release issue
+        its trigger flag is long gone) — re-raise it so the retry the result message asks for
+        (or a retry after a crash) is one click away."""
+        translation_key = self.issue_id.removesuffix(f"_{coordinator.server_id}")
+        coordinator.create_uninstall_cleanup_issue(
+            translation_key,
+            default_scope=scope,
+            persistent=translation_key == ISSUE_KNX_PRERELEASE_CLEANUP,
+        )
+
+    def _cleanup_blocked_by_sync(self, coordinator, scope: str, notif_id: str, notify_enabled: bool) -> bool:
+        """Whether a sync, range check or reload holds _sync_lock, so the cleanup must not start.
+
+        Covers a sync pressed between the dialog's submit and the cleanup task starting; reports
+        it and re-raises the issue so the user can run the cleanup again afterwards. Split out of
+        _async_run_cleanup to keep its cognitive complexity within SonarQube S3776's limit.
+        """
+        if not coordinator._sync_lock.locked():
+            return False
+        _LOGGER.warning("[%s] Uninstall cleanup not started — a sync is running", coordinator.server_id)
+        if notify_enabled:
+            _post_result_notification(
+                self.hass,
+                notif_id,
+                "A sync, Web-IO range check or reload started before the cleanup could begin — nothing "
+                "was removed. Run the cleanup again once it has finished.",
+                f"Comexio Uninstall Cleanup ({coordinator.server_id})",
+            )
+        self._reraise_cleanup_issue(coordinator, scope)
+        return True
+
     async def _async_run_cleanup(self, coordinator, entry: ConfigEntry, scope: str = CLEANUP_SCOPE_FULL) -> None:
         """Background task: run the actual teardown, reload the integration so it
         picks up a clean state, and report the result.
@@ -893,8 +963,6 @@ class ComexioRepairFlow(RepairsFlow):
         conf = {**entry.data, **entry.options}
         notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
         notif_id = uninstall_cleanup_notification_id(coordinator.server_id)
-        result = None
-        succeeded = False
         t0 = time.monotonic()
 
         def _progress(text: str) -> None:
@@ -908,8 +976,29 @@ class ComexioRepairFlow(RepairsFlow):
                 notification_id=notif_id,
             )
 
+        if self._cleanup_blocked_by_sync(coordinator, scope, notif_id, notify_enabled):
+            return
+
+        # Held for the whole teardown AND the reload after it: a sync pressed meanwhile is
+        # rejected as concurrent instead of writing into plans/devices this is deleting, and
+        # none can start in the gap before the reload and have its API session closed by it
+        # (same reasoning as button._finalize_sync). The reload built a new coordinator with
+        # its own lock, so releasing this (old) one afterwards is safe.
+        async with coordinator._sync_lock:
+            await self._async_cleanup_then_reload(coordinator, entry, scope, notif_id, notify_enabled, _progress)
+
+    async def _async_cleanup_then_reload(
+        self, coordinator, entry: ConfigEntry, scope: str, notif_id: str, notify_enabled: bool, progress_cb
+    ) -> None:
+        """Run the teardown, report it, and reload on success — the caller holds _sync_lock.
+
+        Reloads via config_entries.async_reload directly: coordinator.async_reload_entry takes
+        _sync_lock itself and would deadlock against the caller's hold.
+        """
+        result = None
+        succeeded = False
         try:
-            result = await coordinator.async_uninstall_cleanup(scope, progress_cb=_progress)
+            result = await coordinator.async_uninstall_cleanup(scope, progress_cb=progress_cb)
             succeeded = True
         except asyncio.CancelledError:
             raise
@@ -924,15 +1013,7 @@ class ComexioRepairFlow(RepairsFlow):
                 )
 
         if not succeeded or _cleanup_incomplete(result):
-            # The issue was deleted when the dialog was confirmed (and for the pre-release
-            # issue its trigger flag is long gone) — re-raise it so the retry the result
-            # message asks for (or a retry after a crash) is one click away.
-            translation_key = self.issue_id.removesuffix(f"_{coordinator.server_id}")
-            coordinator.create_uninstall_cleanup_issue(
-                translation_key,
-                default_scope=scope,
-                persistent=translation_key == ISSUE_KNX_PRERELEASE_CLEANUP,
-            )
+            self._reraise_cleanup_issue(coordinator, scope)
 
         if succeeded and notify_enabled:
             if result:
@@ -952,7 +1033,22 @@ class ComexioRepairFlow(RepairsFlow):
         # moment to see the skip flag and return before we force our own explicit reload.
         await asyncio.sleep(0.5)
         _LOGGER.info("[%s] Reloading integration after uninstall cleanup...", coordinator.server_id)
-        await self.hass.config_entries.async_reload(entry.entry_id)
+        try:
+            await self.hass.config_entries.async_reload(entry.entry_id)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Reload after uninstall cleanup failed — reload the integration manually",
+                coordinator.server_id,
+            )
+            # Posted regardless of notify_enabled: the flow has already closed, and without a
+            # reload the entities keep reflecting the pre-cleanup state.
+            persistent_notification.async_create(
+                self.hass,
+                "The cleanup finished, but reloading the integration afterwards failed (see the log). "
+                "Reload the Comexio integration manually so its entities reflect the cleaned-up state.",
+                title="Comexio: reload after uninstall cleanup failed",
+                notification_id=f"comexio_cleanup_reload_{coordinator.server_id}",
+            )
 
     async def async_step_knx_dpt_suffix(self, user_input=None):
         """Handle the KNX DPT1.x ambiguous-classification repair flow.
@@ -964,6 +1060,9 @@ class ComexioRepairFlow(RepairsFlow):
         persists across the repeated calls to this same step as the user works through the list.
         """
         if not hasattr(self, "_knx_dpt_items"):
+            if _sync_running(self.hass, self.issue_data.get("entry_id")):
+                # Refused before the first form, so no classification gets typed in for nothing.
+                return self.async_abort(reason=ABORT_SYNC_RUNNING)
             self._knx_dpt_all_items: dict[str, dict] = {
                 str(item["id"]): item for item in self.issue_data.get("items", [])
             }
@@ -1010,8 +1109,17 @@ class ComexioRepairFlow(RepairsFlow):
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         if not entry or not coordinator:
             return self.async_abort(reason="entry_not_found")
+        if _sync_running(self.hass, entry_id):
+            # Last-moment re-check: a sync pressed while the user worked through the list.
+            # Renaming KNX objects under it would change titles it has already read.
+            return self.async_abort(reason=ABORT_SYNC_RUNNING)
 
-        renamed_count, failed, newly_ignored = await self._apply_knx_dpt_classifications(coordinator.api)
+        # Held for the renames so a sync or range check can't start while titles are changing.
+        # No await between the check above and the acquire: an unlocked asyncio.Lock is taken
+        # without yielding, so nothing can slip in between. Released before the reload below,
+        # which takes the lock itself (async_reload_entry) and would deadlock under it.
+        async with coordinator._sync_lock:
+            renamed_count, failed, newly_ignored = await self._apply_knx_dpt_classifications(coordinator.api)
 
         if newly_ignored:
             # R2: request_options_update_without_reload (not a plain async_update_entry) so
@@ -1032,8 +1140,10 @@ class ComexioRepairFlow(RepairsFlow):
             # required for it to actually appear correctly. Mirrors button.py's sync-button
             # reload (R2): give the listener a moment to see the skip flag before forcing our
             # own explicit reload.
+            # In the background: async_reload_entry waits for _sync_lock, and a sync or range
+            # check taking it after the renames must not stall this dialog step for minutes.
             await asyncio.sleep(0.5)
-            await self.hass.config_entries.async_reload(entry.entry_id)
+            self.hass.async_create_task(_async_reload_after_knx_classification(self.hass, coordinator))
         elif newly_ignored:
             await coordinator.async_refresh()
 

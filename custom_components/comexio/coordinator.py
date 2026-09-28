@@ -2337,6 +2337,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Cancel a pending preview refresh before the coordinator shuts down."""
         self._stop_connection_poll()
+        # A pending KNX auto-tag reload belongs to this instance — the new one after a reload
+        # re-detects anything still untagged on its own first poll.
+        if self._knx_dpt_reload_cancel is not None:
+            self._knx_dpt_reload_cancel()
+            self._knx_dpt_reload_cancel = None
         if self._preview_refresh_cancel is not None:
             self._preview_refresh_cancel()
             self._preview_refresh_cancel = None
@@ -4586,6 +4591,35 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if renamed_count:
             self._schedule_knx_dpt_reload(renamed_count)
 
+    async def async_reload_entry(self, reason: str) -> None:
+        """Reload this config entry — unless a sync is running, whose closing reload covers it.
+
+        A reload tears the coordinator down and detaches the API session (api.close()), so one
+        landing mid-sync kills every Comexio request the sync still has to make ("Session is
+        closed", seen in the field 2026-09-27 while a Full Sync wired the KNX bridges). Every
+        sync ends with its own reload (button.py _finalize_sync, in a finally), which picks up
+        whatever this reload was for — options written meanwhile included — so it is skipped
+        here instead of queued. Outside a sync the reload runs under _sync_lock, so it cannot
+        cut into a Web-IO range check, and a sync pressed meanwhile is rejected as concurrent
+        instead of running against the coordinator being torn down.
+
+        Checks the entry's *current* coordinator, not necessarily self: a caller that outlived
+        an earlier reload (the uninstall cleanup task, the KNX auto-tag timer) still holds the
+        torn-down instance, whose in_sync/_sync_lock say nothing about a sync on the new one.
+        """
+        current = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        target = current if current is not None else self
+        if target.in_sync:
+            _LOGGER.info(
+                "[%s] Reload requested (%s) while a sync is running — skipped, the sync reloads the "
+                "integration when it finishes",
+                self.server_id,
+                reason,
+            )
+            return
+        async with target._sync_lock:
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+
     def _schedule_knx_dpt_reload(self, renamed_count: int) -> None:
         """Reload the integration shortly after _auto_suffix_unambiguous_knx renamed at least
         one KNX object, so the entity platforms rebuild with its new MarkerKind (switch ->
@@ -4620,7 +4654,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         self._knx_dpt_reload_cancel = None
         try:
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            await self.async_reload_entry("KNX auto-tagging")
         except Exception:
             _LOGGER.exception(
                 "[%s] Reload after auto-tagging KNX object(s) as read-only failed — affected "
@@ -5267,8 +5301,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         orphan_ids = [mid for mid in all_marker_ids if mid not in trigger_id_set]
         return missing_ids, orphan_ids
 
-    async def async_fresh_trigger_audit(self) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
+    async def async_fresh_trigger_audit(
+        self,
+    ) -> tuple[dict[int, list[int]], dict[int, list[int]], list[dict[str, Any]] | None]:
         """Fetch Comexio's config directly and re-run the trigger-pair audit against it.
+
+        Returns (missing_by_ref, orphan_by_ref, markers): markers is the freshly parsed marker
+        list (None when the audit was skipped) — the caller's bridge-Marker title fallback
+        (button.py _knx_bridge_marker_id_by_title) needs the bridge Markers this same sync just
+        created, which self.data cannot show: it stays frozen for as long as in_sync is True.
 
         async_request_refresh() is *not* an option here: _async_update_data() returns the
         existing (possibly stale) self.data as-is whenever self.in_sync is True, which covers
@@ -5284,7 +5325,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         trigger id lists and make _audit_trigger_pairs() read every existing source element
         in the trigger plan as orphaned, deleting valid self-reset pairs over what was really
         just a transient fetch failure. So an empty result skips the audit entirely
-        ({}, {} — a safe no-op); the next successful poll or sync retries it.
+        ({}, {}, None — a safe no-op); the next successful poll or sync retries it.
 
         _audit_all_trigger_pairs() can itself return None (trigger plan exists but its data
         hasn't landed in the bulk snapshot yet) — no longer treated as an unavoidable dead end:
@@ -5316,7 +5357,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "misreading it as zero trigger markers and deleting valid self-reset pairs",
                 self.server_id,
             )
-            return {}, {}
+            return {}, {}, None
         # parse_config() itself doesn't know about import_* opt-in flags and returns every
         # category unfiltered — but that's fine here: _trigger_ids_by_ref() now does its own
         # active_webio_classes gating (an earlier version of this method instead blanked an
@@ -5333,8 +5374,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "this sync's trigger-pair check, will retry on the next poll",
                 self.server_id,
             )
-            return {}, {}
-        return trigger_audit_result
+            return {}, {}, None
+        # An empty list (config fetched but without the marker module) is no evidence of
+        # "no bridge Markers" — None lets the caller fall back to the cached list instead.
+        return (*trigger_audit_result, parsed.get("markers") or None)
 
     async def async_fresh_knx_bridge_audit(self) -> list[dict[str, Any]]:
         """Fetch Comexio's config directly and re-run the knx_bridge_missing audit against it.
