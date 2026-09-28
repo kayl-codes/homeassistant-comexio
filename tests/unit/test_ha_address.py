@@ -178,6 +178,20 @@ def test_timeout_keeps_the_known_name_instead_of_falling_back(dns, monkeypatch: 
     assert _get(resolver) == f"{HA_HOST_CANDIDATES[0]}:8123"
 
 
+def test_hung_lookup_is_joined_not_duplicated_by_the_next_search(dns, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ha_address, "HA_ADDRESS_DNS_TIMEOUT_SEC", 0.05)
+    fake = dns(set(), slow={HA_HOST_CANDIDATES[0]}, delay=0.5)
+    resolver = HaAddressResolver(_FakeHass("http://192.168.0.110:8123"))
+
+    async def _two_searches() -> None:
+        await resolver.async_get()
+        await resolver.async_get()
+
+    asyncio.run(_two_searches())
+
+    assert fake.calls.count(HA_HOST_CANDIDATES[0]) == 1
+
+
 def test_timeouts_are_not_cached_as_misses(dns, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ha_address, "HA_ADDRESS_DNS_TIMEOUT_SEC", 0.05)
     fake = dns(set(), slow=set(HA_HOST_CANDIDATES), delay=0.3)

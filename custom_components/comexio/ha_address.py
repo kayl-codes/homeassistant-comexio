@@ -115,6 +115,8 @@ class HaAddressResolver:
         self._dns_host: str | None = None
         # Known name currently kept without an answer — its warning is logged once, not every poll.
         self._kept_unanswered: str | None = None
+        # candidate -> its lookup still running in the executor (see _lookup_future)
+        self._in_flight: dict[str, asyncio.Future[_Lookup]] = {}
         # candidate -> monotonic time until which its definite miss is trusted
         self._misses: dict[str, float] = {}
 
@@ -198,15 +200,26 @@ class HaAddressResolver:
             return None
         finally:
             # Only the asyncio side is cancelled; a blocked gethostbyname thread runs until the OS
-            # resolver gives up, at most once per candidate and search.
+            # resolver gives up — and is joined, not duplicated, by later searches (_lookup_future).
             for task in tasks:
                 task.cancel()
 
+    def _lookup_future(self, host: str) -> asyncio.Future[_Lookup]:
+        """The lookup of host still running from an earlier search, or a new one.
+
+        A timed-out gethostbyname cannot be stopped; without this, every poll and sync during a DNS
+        outage would start another executor thread for the same name. Now at most one per candidate.
+        """
+        if (future := self._in_flight.get(host)) is None:
+            future = self.hass.async_add_executor_job(_lookup, host)
+            self._in_flight[host] = future
+            future.add_done_callback(lambda _: self._in_flight.pop(host, None))
+        return future
+
     async def _async_lookup(self, host: str) -> _Lookup:
         try:
-            return await asyncio.wait_for(
-                self.hass.async_add_executor_job(_lookup, host), timeout=HA_ADDRESS_DNS_TIMEOUT_SEC
-            )
+            # shield: the timeout must not cancel the shared future a later search may still join
+            return await asyncio.wait_for(asyncio.shield(self._lookup_future(host)), timeout=HA_ADDRESS_DNS_TIMEOUT_SEC)
         except TimeoutError:
             _LOGGER.debug("HA address: lookup of %s timed out after %s s", host, HA_ADDRESS_DNS_TIMEOUT_SEC)
             return _Lookup.NO_ANSWER
