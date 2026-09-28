@@ -5325,7 +5325,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         trigger id lists and make _audit_trigger_pairs() read every existing source element
         in the trigger plan as orphaned, deleting valid self-reset pairs over what was really
         just a transient fetch failure. So an empty result skips the audit entirely
-        ({}, {} — a safe no-op); the next successful poll or sync retries it.
+        ({}, {}, None — a safe no-op); the next successful poll or sync retries it.
 
         _audit_all_trigger_pairs() can itself return None (trigger plan exists but its data
         hasn't landed in the bulk snapshot yet) — no longer treated as an unavoidable dead end:
