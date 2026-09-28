@@ -116,6 +116,14 @@ def test_render_escapes_title(plan: dict[str, Any]) -> None:
     assert "<Plan>" not in svg
 
 
+def test_render_plan_id_marks_root_svg(plan: dict[str, Any]) -> None:
+    svg = _render(plan, plan_id='7"<x>')
+
+    assert svg.startswith("<svg ")
+    assert 'data-plan-id="7&quot;&lt;x&gt;"' in svg.split(">", 1)[0]
+    assert "data-plan-id" not in _render(plan)
+
+
 def test_render_empty_plan_does_not_crash() -> None:
     svg = render_plan_svg({}, {}, {}, {}, {}, {}, title="Leer")
 
