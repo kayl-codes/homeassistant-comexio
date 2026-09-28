@@ -197,6 +197,31 @@ def _post_result_notification(hass: HomeAssistant, notif_id: str, msg: str, titl
     persistent_notification.async_create(hass, msg, title=title, notification_id=result_id)
 
 
+async def _async_reload_after_knx_classification(hass: HomeAssistant, coordinator) -> None:
+    """Background reload after the KNX classification repair renamed objects.
+
+    Runs after the repair flow has already closed, so a failure has no dialog to surface in:
+    log it and tell the user to reload manually, since the renamed objects otherwise stay on
+    their previous entity platform until the next reload or restart.
+    """
+    try:
+        await coordinator.async_reload_entry("KNX classification")
+    except Exception:
+        _LOGGER.exception(
+            "[%s] Reload after the KNX classification repair failed — renamed objects stay on "
+            "their previous entity platform until the next reload or restart",
+            coordinator.server_id,
+        )
+        persistent_notification.async_create(
+            hass,
+            "The KNX objects were renamed, but reloading the integration afterwards failed "
+            "(see the log). Reload the Comexio integration manually so the affected entities "
+            "switch to their new type.",
+            title="Comexio: reload after KNX classification failed",
+            notification_id=f"comexio_knx_classification_reload_{coordinator.server_id}",
+        )
+
+
 def _cleanup_incomplete(result: dict | None) -> bool:
     """Whether a cleanup run left something behind that a re-run could still remove."""
     if not result:
@@ -1076,7 +1101,7 @@ class ComexioRepairFlow(RepairsFlow):
             # In the background: async_reload_entry waits for _sync_lock, and a sync or range
             # check taking it after the check above must not stall this dialog step for minutes.
             await asyncio.sleep(0.5)
-            self.hass.async_create_task(coordinator.async_reload_entry("KNX classification"))
+            self.hass.async_create_task(_async_reload_after_knx_classification(self.hass, coordinator))
         elif newly_ignored:
             await coordinator.async_refresh()
 
