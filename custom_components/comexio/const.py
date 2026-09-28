@@ -919,7 +919,7 @@ FUNCTION_PLAN_LAYOUT_X_KNX_LOOPBACK = 600.0
 FUNCTION_PLAN_LAYOUT_Y_START = 30.0  # first data row — leaves room for the managed-plan comment
 FUNCTION_PLAN_LAYOUT_COMMENT_Y = 7.5  # the managed-plan comment sits above the first data row
 FUNCTION_PLAN_LAYOUT_Y_STEP = 22.5
-# Studio's own port-row pitch (function_plan_render_constants._ROW_H mirrors this same value
+# Studio's own port-row pitch (aiocomexio.function_plan.render_constants._ROW_H mirrors this same value
 # for the renderer) — two elements this far apart sit directly adjacent with zero visual gap,
 # unlike FUNCTION_PLAN_LAYOUT_Y_STEP above (1.5 rows: the extra half-row is deliberate
 # breathing room between DIFFERENT marker/KNX pairs, not wanted WITHIN one pair's own hops —
@@ -964,7 +964,7 @@ FLANKE_PORT_OUT_RISING = 1  # "+", fires for one cycle on a rising edge only
 FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER = FUNCTION_PLAN_LAYOUT_X_MARKER
 FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE = FUNCTION_PLAN_LAYOUT_X_WEBIO
 # The Flanke block has 3 in-/3 out-ports -> renders 1+3 = 4 row-heights tall (see the
-# renderer's own geo["h"] formula, function_plan_render_geometry.py), unlike the single-row-tall
+# renderer's own geo["h"] formula, aiocomexio.function_plan.render_geometry), unlike the single-row-tall
 # marker/WebIO pills the generic FUNCTION_PLAN_LAYOUT_Y_STEP (22.5) was sized for. Reusing that
 # step let consecutive trigger rows' Flanke blocks visually overlap. 90.0 = 4 rows (60) + one
 # blank row (15) of breathing room between pairs, rounded up to the 7.5 grid snap.

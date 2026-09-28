@@ -9,13 +9,12 @@ without touching the stored backup catalog itself (that's backup.py's job).
 import logging
 import time
 
+from aiocomexio.function_plan import resolve_element_label, snapshot_label_maps
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 
 from ..const import FUNCTION_PLAN_KNX_LAYOUT_Y_STEP, FUNCTION_PLAN_LAYOUT_Y_STEP, FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
 from ..coordinator import ComexioCoordinator
-from ..function_plan_backup import snapshot_label_maps
-from ..function_plan_render import resolve_element_label
 from ._context import (
     _async_get_service_context,
     _get_canvas_grid_dims,

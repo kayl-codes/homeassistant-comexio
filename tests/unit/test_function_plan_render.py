@@ -6,15 +6,17 @@ import subprocess
 import sys
 from typing import Any
 
+from aiocomexio.function_plan import (
+    analyze_function_plan,
+    detect_self_reset_cycles,
+    element_id_sort_key,
+    render_flow_svg,
+    render_plan_svg,
+)
 import pytest
 from syrupy.assertion import SnapshotAssertion
 from syrupy.extensions.single_file import SingleFileSnapshotExtension, WriteMode
 
-from custom_components.comexio.function_plan_analysis import analyze_function_plan
-from custom_components.comexio.function_plan_render import render_plan_svg
-from custom_components.comexio.function_plan_render_flow import render_flow_svg
-from custom_components.comexio.function_plan_render_selfreset import detect_self_reset_cycles
-from custom_components.comexio.function_plan_render_values import element_id_sort_key
 from tests.common import load_json_fixture
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -22,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Renders the fixture plan's flow diagram in a fresh interpreter and writes the SVG to stdout.
 _FLOW_RENDER_SCRIPT = """
 import sys
-from custom_components.comexio.function_plan_render_flow import render_flow_svg
+from aiocomexio.function_plan import render_flow_svg
 from tests.common import load_json_fixture
 
 plan = load_json_fixture("function_plan.json")
@@ -41,7 +43,7 @@ sys.stdout.buffer.write(svg.encode("utf-8"))
 # Marker "1" feeds two on_pulse timers ("2", "10") that both reset it — two self-reset
 # cycles whose order came from set iteration (PYTHONHASHSEED) before the fix.
 _SELF_RESET_SCRIPT = """
-from custom_components.comexio.function_plan_render_selfreset import detect_self_reset_cycles
+from aiocomexio.function_plan import detect_self_reset_cycles
 
 elements = {
     "1": {"reference": {"type": 2, "ref_id": 1}},

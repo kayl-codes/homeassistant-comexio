@@ -7,12 +7,14 @@ everything that reads/writes the stored backup catalog (function_plan_backup.py)
 than acting on the live plan directly.
 """
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 import json
 import logging
 import time
 from typing import Any
 
+from aiocomexio.function_plan import diff_snapshots, resolve_element_label, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -29,8 +31,7 @@ from ..const import (
     TIMESTAMP_DISPLAY_FORMAT,
 )
 from ..coordinator import ComexioCoordinator
-from ..function_plan_backup import diff_snapshots, retention_cutoff, snapshot_label_maps
-from ..function_plan_render import resolve_element_label
+from ..function_plan_backup import retention_cutoff
 from ._context import (
     _LOGIN_FAILED_MSG,
     _async_get_service_context,
@@ -49,6 +50,9 @@ _TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
 _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
 
 _AGE_KEYS = ("days", "hours", "minutes", "seconds")
+
+# (markers_by_id, webio_by_id, ios_by_id) as snapshot_label_maps returns them.
+_LabelMaps = tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]
 
 
 def _coerce_int(value) -> int | None:
@@ -112,7 +116,7 @@ def _sort_backup_entries(entries: list[dict], order_by: str) -> list[dict]:
 
 
 def _label_backup_identity(
-    identity: tuple, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
+    identity: tuple, catalog: dict, markers_by_id: Mapping, webio_by_id: Mapping, ios_by_id: Mapping
 ) -> str:
     """Human-readable label for one diff_snapshots() element/endpoint identity tuple.
 
@@ -126,7 +130,9 @@ def _label_backup_identity(
     return resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id)
 
 
-def _label_backup_wire(wire: tuple, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict) -> str:
+def _label_backup_wire(
+    wire: tuple, catalog: dict, markers_by_id: Mapping, webio_by_id: Mapping, ios_by_id: Mapping
+) -> str:
     """Human-readable 'source → target' label for one diff_snapshots() connection tuple."""
     (src_identity, _src_port, src_inv), (dst_identity, _dst_port, dst_inv) = wire
     src_label = _label_backup_identity(src_identity, catalog, markers_by_id, webio_by_id, ios_by_id)
@@ -136,7 +142,7 @@ def _label_backup_wire(wire: tuple, catalog: dict, markers_by_id: dict, webio_by
 
 
 def _label_backup_moved_wire(
-    pair: tuple[tuple, tuple], catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
+    pair: tuple[tuple, tuple], catalog: dict, markers_by_id: Mapping, webio_by_id: Mapping, ios_by_id: Mapping
 ) -> str:
     """Human-readable label for one diff_snapshots() connections['moved'] (old_wire, new_wire) pair."""
     old_wire, new_wire = pair
@@ -155,8 +161,8 @@ def _label_backup_moved_wire(
 def _label_diff_group(
     group: dict[str, list],
     catalog: dict,
-    newer_maps: tuple[dict, dict, dict],
-    older_maps: tuple[dict, dict, dict],
+    newer_maps: _LabelMaps,
+    older_maps: _LabelMaps,
 ) -> dict[str, list[str]]:
     """Label an added/removed identity group.
 
@@ -173,11 +179,11 @@ def _label_diff_group(
 def _label_connection_diff(
     group: dict[str, list],
     catalog: dict,
-    newer_maps: tuple[dict, dict, dict],
-    older_maps: tuple[dict, dict, dict],
+    newer_maps: _LabelMaps,
+    older_maps: _LabelMaps,
 ) -> dict[str, list[str]]:
     """Like _label_diff_group, but also labels the 'moved' pairs diff_snapshots() reports for
-    connections (see _split_moved in function_plan_backup.py): a wire whose endpoint only shifted
+    connections (see _split_moved in aiocomexio.function_plan.backup_diff): a wire whose endpoint only shifted
     position, with no actual add/remove, shown as one entry instead of a confusing pair.
     """
     n_markers, n_webio, n_ios = newer_maps
@@ -195,7 +201,7 @@ async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[di
 
     Entries without a predecessor (the oldest known snapshot of that plan identity) are left
     without a 'diff' key. Each snapshot's own captured label metadata (if any — see
-    function_plan_backup.snapshot_label_maps) is overlaid on the live maps, per side of the diff,
+    aiocomexio.function_plan.snapshot_label_maps) is overlaid on the live maps, per side of the diff,
     so a renamed/deleted marker doesn't misrepresent an old backup with today's name.
     """
     live_markers, live_webio, live_ios = coordinator.function_plan_label_maps()
@@ -992,7 +998,7 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
       requires explicit `confirm: true` plus `on_conflict` ('new_id' rebuilds separately,
       'force_override' overwrites the live plan anyway).
     """
-    from ..function_plan_backup import plan_hash
+    from aiocomexio.function_plan import plan_hash
 
     ctx = await _async_get_service_context(hass, call, _TITLE_RESTORE_ERR, resolve_plan=False, do_login=False)
     if ctx is None:

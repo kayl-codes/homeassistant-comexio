@@ -13,12 +13,11 @@ included in Home Assistant's own backups.
 """
 
 from datetime import datetime, timedelta
-import hashlib
-import json
 import logging
 import re
 from typing import Any
 
+from aiocomexio.function_plan import plan_hash, referenced_label_metadata
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -35,241 +34,6 @@ STORAGE_VERSION = 1
 _FALLBACK_PAPER = "A3"
 _FALLBACK_DPI = 90
 _FALLBACK_ORIENTATION = "landscape"
-
-
-# reference.type values with a globally stable ref_id (survives Comexio renumbering the
-# plan-local FubElementId): 1=IO, 2=marker, 10=WebIO, 4=time module. Everything else (block
-# instances, constants, comments) has no such global identity — fubBase blocks in particular
-# share one ref_id across EVERY instance of that block type — so position is used instead.
-_STABLE_REF_TYPES = {1, 2, 10, 4}
-
-
-def _element_identity(elem: dict[str, Any]) -> tuple[Any, Any, float | None, float | None, Any]:
-    """Stable cross-snapshot identity for one plan element (see _STABLE_REF_TYPES).
-
-    Always a fixed-shape (type, ref_id, x, y, name) tuple — x/y/name are None for the
-    stable-ref-id types, since those need neither for identity. The position-based fallback
-    also carries ref_id and name — not needed for equality (position already disambiguates),
-    but this is the only place the caller-side label resolver (services.py's
-    _label_backup_identity) can still get them from, since the diff only ever sees identity
-    tuples, not the original element dicts. Carrying them also means a block swapped for a
-    different kind at the same spot, or a renamed constant/comment, correctly shows up as
-    removed+added instead of being silently treated as unchanged.
-
-    Position itself is NOT rounded/bucketed here — a plain float difference (even a sub-unit
-    Comexio re-save drift) is intentional: it lets _split_moved() downstream recognize a wire
-    whose endpoint only moved and report it as one "moved" entry, instead of either a
-    confusing added+removed pair (raw diff) or silently hiding the move (rounded diff).
-    """
-    ref = elem.get("reference", {})
-    etype = ref.get("type")
-    ref_id = ref.get("ref_id")
-    if etype in _STABLE_REF_TYPES:
-        return (etype, ref_id, None, None, None)
-    return (etype, ref_id, elem.get("position_x"), elem.get("position_y"), elem.get("name"))
-
-
-def build_source_id_translation(snapshot_elements: dict[str, Any], live_elements: dict[str, Any]) -> dict[str, str]:
-    """Map each stable-identity element's id in `snapshot_elements` to its id in `live_elements`.
-
-    A stored backup's local FubElementIds can be renumbered on the live plan by a later
-    Comexio-side sync (see _element_identity) even though nothing wired to that element
-    actually changed. This lets a live per-connection value lookup (keyed by the LIVE plan's
-    ids, see api.get_function_plan_connection_values / function_plan_render_wiring._render_net)
-    still be applied while rendering a frozen snapshot whose ids may have since shifted —
-    used by coordinator.async_generate_plan_preview to keep a displayed backup's wiring/values
-    live without swapping its structure back to the current live plan. Only covers the
-    _STABLE_REF_TYPES kinds (IO/marker/WebIO/time module); a block instance, constant or
-    comment has no cross-snapshot identity to match on and is simply left untranslated.
-    """
-    live_by_identity = {
-        _element_identity(elem): elem_id
-        for elem_id, elem in live_elements.items()
-        if elem.get("reference", {}).get("type") in _STABLE_REF_TYPES
-    }
-    return {
-        elem_id: live_by_identity[identity]
-        for elem_id, elem in snapshot_elements.items()
-        if elem.get("reference", {}).get("type") in _STABLE_REF_TYPES
-        and (identity := _element_identity(elem)) in live_by_identity
-    }
-
-
-def _strip_position(identity: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Position-agnostic form of an element identity, used to pair up moved connections."""
-    etype, ref_id, _pos_x, _pos_y, name = identity
-    return (etype, ref_id, name)
-
-
-def _wire_key(wire: tuple[Any, ...]) -> tuple[Any, ...]:
-    (src_id, src_pos, src_inv), (dst_id, dst_pos, dst_inv) = wire
-    return (_strip_position(src_id), src_pos, src_inv), (_strip_position(dst_id), dst_pos, dst_inv)
-
-
-def _split_moved(added: set, removed: set) -> tuple[list, list, list]:
-    """Pair up added/removed wires that differ only by a block's position.
-
-    A block instance (fubBase/constant/comment — identified via position since its ref_id is
-    shared across every instance of that kind) that gets dragged to a new spot, or drifts by a
-    sub-unit float amount on a Comexio re-save, without the wiring itself actually changing,
-    would otherwise show up as one bogus "removed" wire plus one bogus "added" wire with an
-    identical resolved label. This surfaces it as a single "moved" entry instead.
-    """
-    added_by_key: dict[tuple, list] = {}
-    for wire in added:
-        added_by_key.setdefault(_wire_key(wire), []).append(wire)
-    removed_by_key: dict[tuple, list] = {}
-    for wire in removed:
-        removed_by_key.setdefault(_wire_key(wire), []).append(wire)
-
-    moved: list[tuple[Any, Any]] = []
-    for key in added_by_key.keys() & removed_by_key.keys():
-        pairs = zip(sorted(removed_by_key[key], key=str), sorted(added_by_key[key], key=str), strict=False)
-        for old_wire, new_wire in pairs:
-            moved.append((old_wire, new_wire))
-            removed.discard(old_wire)
-            added.discard(new_wire)
-
-    return sorted(added, key=str), sorted(removed, key=str), sorted(moved, key=str)
-
-
-def _named_identities(elements: dict[str, Any], ref_type: int) -> set[tuple[Any, ...]]:
-    return {_element_identity(elem) for elem in elements.values() if elem.get("reference", {}).get("type") == ref_type}
-
-
-def _connection_wires(snapshot: dict[str, Any]) -> set[tuple[Any, ...]]:
-    """Every individual source->sink wire, as a tuple of stable endpoint identities."""
-    elements = snapshot.get("elements", {})
-
-    def _endpoint(port: dict[str, Any]) -> tuple[Any, ...]:
-        elem = elements.get(str(port.get("FubElementId")), {})
-        return (_element_identity(elem), port.get("IOPos"), bool(port.get("Inverted")))
-
-    wires: set[tuple[Any, ...]] = set()
-    for conn in snapshot.get("connections", {}).values():
-        src = _endpoint(conn.get("input", {}))
-        outputs = conn.get("output", [])
-        outputs = outputs.values() if isinstance(outputs, dict) else outputs
-        wires.update((src, _endpoint(out)) for out in outputs)
-    return wires
-
-
-def _canonical_plan_content(plan_data: dict[str, Any]) -> dict[str, list]:
-    """Renumbering-tolerant content of a plan for plan_hash(): every element keyed by its own
-    stable identity (see _element_identity) instead of Comexio's raw, renumberable
-    FubElementId, plus every wire keyed by its endpoints' stable identities (see
-    _connection_wires) instead of the raw connection dict.
-    """
-    elements = plan_data.get("elements", {})
-    return {
-        "elements": sorted((_element_identity(elem) for elem in elements.values()), key=str),
-        "wires": sorted(_connection_wires(plan_data), key=str),
-    }
-
-
-def plan_hash(plan_data: dict[str, Any]) -> str:
-    """Return a canonical, renumbering-tolerant SHA-256 over a plan's elements + wiring.
-
-    Hashed over each element/wire's stable identity (see _canonical_plan_content), not
-    Comexio's raw FubElementIds — those get renumbered wholesale by some Comexio-side sync
-    operations without the wiring itself actually changing (see diff_snapshots for the
-    confirmed 2026-07-13 case), which would otherwise make async_auto_backup treat such a
-    sync as a real content change on every single run.
-    """
-    canonical = json.dumps(_canonical_plan_content(plan_data), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-def diff_snapshots(newer: dict[str, Any], older: dict[str, Any]) -> dict[str, Any]:
-    """Semantic added/removed diff between two snapshots of the SAME plan identity.
-
-    Identity is reference-based (see _element_identity), not the raw FubElementId Comexio
-    assigns each plan element — those get renumbered wholesale during some bulk operations
-    without the wiring itself actually changing, which a raw-ID diff would otherwise report
-    as a wall of false-positive removals/additions (confirmed against a real snapshot pair
-    2026-07-13: ~130 elements renumbered by a constant offset within one poll interval).
-    Returns raw identity tuples, not human-readable labels — resolving those against the
-    live catalog/marker/IO maps is the caller's job (see services.py's function_plan_list_backups).
-    """
-    newer_elements, older_elements = newer.get("elements", {}), older.get("elements", {})
-    newer_wires, older_wires = _connection_wires(newer), _connection_wires(older)
-
-    def _added_removed(newer_set: set, older_set: set) -> dict[str, list]:
-        return {"added": sorted(newer_set - older_set, key=str), "removed": sorted(older_set - newer_set, key=str)}
-
-    added_wires, removed_wires = newer_wires - older_wires, older_wires - newer_wires
-    added_c, removed_c, moved_c = _split_moved(added_wires, removed_wires)
-
-    return {
-        "markers": _added_removed(_named_identities(newer_elements, 2), _named_identities(older_elements, 2)),
-        "ios": _added_removed(_named_identities(newer_elements, 1), _named_identities(older_elements, 1)),
-        "connections": {"added": added_c, "removed": removed_c, "moved": moved_c},
-    }
-
-
-# reference.type -> key under snapshot["labels"], for the same three ref kinds that get a
-# resolvable display name in function_plan_render.resolve_element_label (marker/WebIO/IO).
-_LABEL_REF_TYPES = {2: "markers", 10: "webio", 1: "ios"}
-
-
-def _referenced_label_metadata(
-    plan_data: dict[str, Any], markers_by_id: dict[str, Any], webio_by_id: dict[str, Any], ios_by_id: dict[str, Any]
-) -> dict[str, dict[str, str]]:
-    """Capture the display name of every marker/WebIO/IO this plan references, right now.
-
-    Stored alongside the snapshot (see _build_snapshot) so a later diff/preview of THIS
-    snapshot can show names as they were at capture time instead of resolving them against
-    whatever the live coordinator data says later (see snapshot_label_maps) — a renamed or
-    deleted marker would otherwise make an old backup look like it was wired to something it
-    never was. Kept minimal (only referenced ids, name only) since a snapshot is already
-    stored on every wiring change.
-    """
-    by_type = {2: markers_by_id, 10: webio_by_id, 1: ios_by_id}
-    metadata: dict[str, dict[str, str]] = {}
-    for elem in plan_data.get("elements", {}).values():
-        ref = elem.get("reference") or {}
-        key = _LABEL_REF_TYPES.get(ref.get("type"))
-        if key is None:
-            continue
-        ref_id = str(ref.get("ref_id"))
-        entry = by_type[ref["type"]].get(ref_id)
-        if entry and "name" in entry:
-            metadata.setdefault(key, {})[ref_id] = entry["name"]
-    return metadata
-
-
-def snapshot_label_maps(
-    labels: dict[str, dict[str, str]] | None,
-    live_markers: dict[str, Any],
-    live_webio: dict[str, Any],
-    live_ios: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Overlay a snapshot's captured-at-backup-time names onto the live label maps.
-
-    `labels` is one snapshot's stored metadata (snapshot.get("labels"), see
-    _referenced_label_metadata) — None/empty for a snapshot captured before this feature
-    existed, in which case this is a no-op and callers keep resolving against live data
-    exactly as before. Where present, a captured name overrides the live one; other fields
-    (e.g. analog/digital classification) are kept from the live entry when the id still
-    exists there, so a still-live marker keeps its correct pill styling while showing its
-    historical name. An id no longer present live gets a bare {"name": ...} entry instead of
-    falling through to resolve_element_label()'s generic "(unknown)" fallback.
-    """
-    labels = labels or {}
-
-    def _overlay(live: dict[str, Any], captured: dict[str, str]) -> dict[str, Any]:
-        if not captured:
-            return live
-        merged = dict(live)
-        for ref_id, name in captured.items():
-            merged[ref_id] = {**merged.get(ref_id, {}), "name": name}
-        return merged
-
-    return (
-        _overlay(live_markers, labels.get("markers", {})),
-        _overlay(live_webio, labels.get("webio", {})),
-        _overlay(live_ios, labels.get("ios", {})),
-    )
 
 
 def _backfill_identity_group(
@@ -532,7 +296,7 @@ class FunctionPlanBackupManager:
         record the canvas settings needed to recreate the plan identically on restore.
         markers_by_id/webio_by_id/ios_by_id: live label maps (coordinator.function_plan_label_maps())
         at capture time, used to freeze each snapshot's element names — see
-        _referenced_label_metadata.
+        referenced_label_metadata.
         Returns one {fub_id, plan_name, captured_at} entry per plan that produced a new
         snapshot this call — feeds the "changed plans" diagnostic sensor, whose whole point
         is to let a user confirm that an intentional edit changed exactly the plan(s) they
@@ -548,7 +312,7 @@ class FunctionPlanBackupManager:
             if history and history[0].get("hash") == new_hash:
                 continue
             paper, dpi, orientation = (plan_format or {}).get(key, (None, None, None))
-            label_metadata = _referenced_label_metadata(
+            label_metadata = referenced_label_metadata(
                 plan_data, markers_by_id or {}, webio_by_id or {}, ios_by_id or {}
             )
             snapshot = self._build_snapshot(
@@ -594,11 +358,11 @@ class FunctionPlanBackupManager:
         """Rotate in a pre-mutation snapshot for one plan (call BEFORE HA modifies it).
 
         markers_by_id/webio_by_id/ios_by_id: live label maps at capture time — see
-        async_auto_backup / _referenced_label_metadata.
+        async_auto_backup / referenced_label_metadata.
         """
         await self._async_ensure_loaded()
         history = self._change_data.setdefault(str(fub_id), {}).setdefault(plan_name, [])
-        label_metadata = _referenced_label_metadata(plan_data, markers_by_id or {}, webio_by_id or {}, ios_by_id or {})
+        label_metadata = referenced_label_metadata(plan_data, markers_by_id or {}, webio_by_id or {}, ios_by_id or {})
         snapshot = self._build_snapshot(
             plan_data, plan_name, operation, paper, dpi, orientation, comexio_version, label_metadata
         )

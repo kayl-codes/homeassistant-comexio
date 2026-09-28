@@ -3,14 +3,10 @@
 import copy
 from typing import Any
 
+from aiocomexio.function_plan import build_source_id_translation, diff_snapshots, plan_hash
 import pytest
 
-from custom_components.comexio.function_plan_backup import (
-    build_source_id_translation,
-    diff_snapshots,
-    format_backup_label,
-    plan_hash,
-)
+from custom_components.comexio.function_plan_backup import format_backup_label
 from tests.common import load_json_fixture
 
 _ID_OFFSET = 1000

@@ -60,7 +60,7 @@ def _extract_fub_base_catalog(fub_modules: dict[str, Any], fub_base_i18n: dict[s
     Entries missing a Name or without an I18N match are skipped individually rather
     than failing the whole extraction.
 
-    Geometry fields (for the SVG renderer, function_plan_render.py): "width" is Comexio's
+    Geometry fields (for the SVG renderer, aiocomexio.function_plan.render): "width" is Comexio's
     canvas width in block units (1=narrow Oder/Nicht, 2=Auswahl, 3=Smart-Lighting —
     NOT pixels), "n_in"/"n_out" the exact port count of THIS block variant (the four
     "or" entries are 2/3/4/5-input variants sharing one I18N text), "autogrow" the

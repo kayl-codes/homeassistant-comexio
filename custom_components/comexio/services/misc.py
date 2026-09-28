@@ -12,6 +12,7 @@ import re
 import time
 from typing import Any
 
+from aiocomexio.function_plan import element_search_id, resolve_element_label
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.const import STATE_UNAVAILABLE
@@ -21,8 +22,6 @@ from homeassistant.helpers import entity_registry as er
 
 from ..const import DOMAIN, MarkerKind, webio_class_name
 from ..coordinator import ComexioCoordinator
-from ..function_plan_render import resolve_element_label
-from ..function_plan_render_values import element_search_id
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context
 
 _LOGGER = logging.getLogger(__name__)
