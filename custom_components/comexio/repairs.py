@@ -927,6 +927,27 @@ class ComexioRepairFlow(RepairsFlow):
             persistent=translation_key == ISSUE_KNX_PRERELEASE_CLEANUP,
         )
 
+    def _cleanup_blocked_by_sync(self, coordinator, scope: str, notif_id: str, notify_enabled: bool) -> bool:
+        """Whether a sync, range check or reload holds _sync_lock, so the cleanup must not start.
+
+        Covers a sync pressed between the dialog's submit and the cleanup task starting; reports
+        it and re-raises the issue so the user can run the cleanup again afterwards. Split out of
+        _async_run_cleanup to keep its cognitive complexity within SonarQube S3776's limit.
+        """
+        if not coordinator._sync_lock.locked():
+            return False
+        _LOGGER.warning("[%s] Uninstall cleanup not started — a sync is running", coordinator.server_id)
+        if notify_enabled:
+            _post_result_notification(
+                self.hass,
+                notif_id,
+                "A sync, Web-IO range check or reload started before the cleanup could begin — nothing "
+                "was removed. Run the cleanup again once it has finished.",
+                f"Comexio Uninstall Cleanup ({coordinator.server_id})",
+            )
+        self._reraise_cleanup_issue(coordinator, scope)
+        return True
+
     async def _async_run_cleanup(self, coordinator, entry: ConfigEntry, scope: str = CLEANUP_SCOPE_FULL) -> None:
         """Background task: run the actual teardown, reload the integration so it
         picks up a clean state, and report the result.
@@ -957,18 +978,7 @@ class ComexioRepairFlow(RepairsFlow):
                 notification_id=notif_id,
             )
 
-        if coordinator._sync_lock.locked():
-            # A sync pressed between the dialog's submit and this task starting.
-            _LOGGER.warning("[%s] Uninstall cleanup not started — a sync is running", coordinator.server_id)
-            if notify_enabled:
-                _post_result_notification(
-                    self.hass,
-                    notif_id,
-                    "A sync, Web-IO range check or reload started before the cleanup could begin — nothing "
-                    "was removed. Run the cleanup again once it has finished.",
-                    f"Comexio Uninstall Cleanup ({coordinator.server_id})",
-                )
-            self._reraise_cleanup_issue(coordinator, scope)
+        if self._cleanup_blocked_by_sync(coordinator, scope, notif_id, notify_enabled):
             return
 
         try:
