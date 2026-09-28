@@ -226,7 +226,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # log line instead of the generic "orphaned entity" one — an admin renaming a marker into a
     # bridge is a deliberate, non-obvious cause for an entity to disappear.
     bridge_reclassified_uids: set[str] = set()
-    # DPT3.x composite members (cover.py/light.py, see api._attach_knx_dpt3_composites) no
+    # DPT3.x composite members (cover.py/light.py, see aiocomexio parse_config's DPT3 pairing) no
     # longer get their own switch/number entity on this platform — switch.py/number.py skip
     # any item with knx_composite set. Their old per-K-element uid must NOT stay in
     # active_unique_ids, or the stale pre-upgrade switch/number registry entry never gets
@@ -248,7 +248,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             active_unique_ids.add(uid)
 
     # DPT3.x composite cover/light entities (cover.py/light.py, see
-    # api._attach_knx_dpt3_composites) use their own two-K-element unique_id shape
+    # aiocomexio parse_config's DPT3 pairing) use their own two-K-element unique_id shape
     # (ComexioKnxDpt3Entity.__init__) — distinct from the per-K-element uid excluded above,
     # which both halves of a composite keep unused: they still exist as $FubModules["11"]
     # entries, just without their own switch/number entity on this platform.

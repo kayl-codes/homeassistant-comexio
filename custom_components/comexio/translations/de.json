@@ -133,7 +133,8 @@
       }
     },
     "error": {
-      "invalid_number": "Bitte eine gültige Ganzzahl eingeben."
+      "invalid_number": "Bitte eine gültige Ganzzahl eingeben.",
+      "invalid_schema": "Ungültiges Namensschema. Nur die aufgeführten Variablennamen in geschweiften Klammern verwenden und jede Klammer schließen."
     }
   },
   "entity": {

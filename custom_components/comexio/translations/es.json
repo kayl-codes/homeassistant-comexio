@@ -133,7 +133,8 @@
       }
     },
     "error": {
-      "invalid_number": "Introduzca un número entero válido."
+      "invalid_number": "Introduzca un número entero válido.",
+      "invalid_schema": "Esquema de nombres no válido. Use solo los nombres de variables indicados entre llaves y cierre cada llave."
     }
   },
   "entity": {

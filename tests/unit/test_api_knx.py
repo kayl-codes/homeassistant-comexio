@@ -1,4 +1,4 @@
-"""KNX objects: DPT resolution chain, DPT metadata and DPT3.x composite pairing in parse_config."""
+"""KNX objects: DPT metadata and DPT3.x composite pairing in parse_config."""
 
 from typing import Any
 
@@ -20,32 +20,6 @@ def knx_items(parsing_api: ComexioAPI, catalog: dict[str, Any]) -> dict[str, dic
         load_json_fixture("config_basic.json"), knx_live_states={"1": "19,5"}, knx_dpt_catalog=catalog
     )
     return {item["id"]: item for item in result["knx"]}
-
-
-def test_resolve_knx_dpt_follows_point_device_dpt_chain(catalog: dict[str, Any]) -> None:
-    assert ComexioAPI._resolve_knx_dpt(catalog, "1") == (9, 1)
-    assert ComexioAPI._resolve_knx_dpt(catalog, "3") == (3, 8)
-
-
-@pytest.mark.parametrize(
-    "broken",
-    [
-        {},
-        {"KnxPoints": [], "KnxDevices": {}, "KnxDpt": {}},
-        {"KnxPoints": {"1": {"KnxDeviceId": 10}}, "KnxDevices": {}, "KnxDpt": {}},
-        {
-            "KnxPoints": {"1": {"KnxDeviceId": 10}},
-            "KnxDevices": {"10": {"KnxDptId": 20}},
-            "KnxDpt": {"20": {"KnxBaseTypeId": "9", "KnxSubId": 1}},
-        },
-    ],
-)
-def test_resolve_knx_dpt_returns_none_for_broken_chain(broken: dict[str, Any]) -> None:
-    assert ComexioAPI._resolve_knx_dpt(broken, "1") is None
-
-
-def test_resolve_knx_dpt_unknown_point(catalog: dict[str, Any]) -> None:
-    assert ComexioAPI._resolve_knx_dpt(catalog, "99") is None
 
 
 def test_unnamed_knx_object_is_not_imported(knx_items: dict[str, dict[str, Any]]) -> None:

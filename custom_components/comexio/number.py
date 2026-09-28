@@ -130,19 +130,19 @@ class ComexioKnxNumber(ComexioKnxEntity, ComexioMarkerNumber):
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, knx: dict[str, Any]) -> None:
         super().__init__(coordinator, server_id, knx)
 
-        # The KNX DPT's own value range (resolved by api._resolve_knx_dpt, see
+        # The KNX DPT's own value range (resolved by aiocomexio.knx.resolve_knx_dpt, see
         # project_knx_write_path_design memory) takes precedence over
         # ComexioMarkerNumber.__init__'s name-guessing heuristic above — Comexio's own
         # $IOTypesBinary catalog carries no usable min/max for KNX object types (min=max=0
         # placeholder), so the real range only comes from resolving the K-element's DPT.
-        # api._process_knx always sets dpt_min/dpt_max/dpt_unit together from one
+        # aiocomexio parse_config always sets dpt_min/dpt_max/dpt_unit together from one
         # KNX_DPT_ANALOG_RANGES tuple (or none of them) — this guard is defensive only,
         # against a future refactor that separates those three keys.
         dpt_min, dpt_max = knx.get("dpt_min"), knx.get("dpt_max")
         if dpt_min is not None and dpt_max is not None:
             self._attr_native_min_value = float(dpt_min)
             self._attr_native_max_value = float(dpt_max)
-            # dpt_step is always set together with dpt_min/dpt_max (see api._process_knx /
+            # dpt_step is always set together with dpt_min/dpt_max (see aiocomexio parse_config /
             # KNX_DPT_ANALOG_RANGES) — without this, every KNX number silently kept
             # ComexioMarkerNumber's hardcoded 0.1 step regardless of the DPT's actual
             # resolution (found live 2026-09-20: a 2-octet counter DPT showed a 0.1 step that

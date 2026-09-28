@@ -1,12 +1,10 @@
 # Version: 0.7.5
 import asyncio
 import base64
-from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 import io
-import ipaddress
 import json
 import logging
 import re
@@ -14,6 +12,11 @@ import secrets
 import time
 from typing import Any
 
+from aiocomexio import config as comexio_config, webio as comexio_webio
+from aiocomexio.config import ParseOptions, iter_group
+from aiocomexio.const import WebioClass
+from aiocomexio.scrape import parse_comexio_version, parse_io_input_types, parse_io_types, scrape_js_vars
+from aiocomexio.session import is_local_address, session_kwargs
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from homeassistant.config_entries import ConfigEntry
@@ -46,65 +49,23 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
-    KNX_DPT3_COMPOSITE_DOMAIN,
-    KNX_DPT_ANALOG_RANGES,
-    KNX_DPT_DEVICE_CLASS,
-    KNX_DPT_DIGITAL_AMBIGUOUS,
-    KNX_DPT_DIGITAL_DEVICE_CLASS,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
-    MARKER_READ_ONLY_SUFFIX,
-    MARKER_TRIGGER_SUFFIXES,
-    WEBIO_CLASS_IO,
-    WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
-    WEBIO_CLASSES,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
-    WEBIO_INT16_DANGER_ZONE,
-    WEBIO_MARKER_ANALOG_MAX,
-    WEBIO_MARKER_ANALOG_MIN,
-    MarkerKind,
     category_by_fub_module_type,
     io_column_rows,
     io_sort_key,
+    is_valid_entity_name_schema,
     knx_loopback_command_name,
     source_category,
-    webio_class_label,
-    webio_class_name,
 )
-
-
-class SafeDict(dict):
-    """Safe dictionary for string formatting that doesn't crash on missing keys."""
-
-    def __missing__(self, key: str) -> str:
-        return "{" + key + "}"
-
-
-LOCAL_HOSTNAME_RE = re.compile(r"^(?:localhost|[a-zA-Z0-9_-]+\.local|[a-zA-Z0-9_-]+\.lan|[a-zA-Z0-9_-]+\.home)\.?$")
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
 FUNCTION_PLAN_CONSTANT_TYPE = 16
 
-# Module-level compiled patterns for get_raw_config (used on every coordinator refresh).
-# $ioTypes = legacy (pre-v11); $IOTypesBinary = v11+ replacement with identical structure.
-_IO_TYPES_DECL_RE = re.compile(r"var\s+\$ioTypes\s*=\s*")
-_IO_BINARY_TYPES_DECL_RE = re.compile(r"var\s+\$IOTypesBinary\s*=\s*")
-_IO_INPUT_TYPES_DECL_RE = re.compile(r"var\s+\$IOInputTypes\s*=\s*")
-_SCRIPT_BLOCK_RE = re.compile(r"<script[^>]*>(.*?)</script[^>]{0,32}>", re.DOTALL | re.IGNORECASE)
-# Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
-# (cache-busting), e.g. src="/11.0.2/js/cmb_admin.js" — cmb_admin.js is the generic
-# admin-wide script, cmb_function_function_module.js is specific to the page we fetch;
-# matching either is redundancy against a future filename change.
-_COMEXIO_VERSION_RE = re.compile(
-    r'src="/(\d+\.\d+\.\d+)/(?:js/cmb_admin\.js|'
-    r'module/admin/function_function_module/js/cmb_function_function_module\.js)"'
-)
-_VAR_DECL_RE = re.compile(r"var\s+\$(\w+)\s*=\s*", re.DOTALL)
-_EMPTY_JS_ARRAY_RE = re.compile(r"\[\s*\]")
-_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 _CONTENT_TYPE_JSON = "Content-Type: application/json"
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
 
@@ -121,126 +82,17 @@ def _js_timestamp() -> str:
     return datetime.now(UTC).strftime(_TIMESTAMP_FORMAT)[:-3] + "Z"
 
 
-def _is_local_address(host: str) -> bool:
-    """Return True if host looks like a local IP or local hostname."""
-    if not host:
-        return False
-
-    host = host.strip()
-    if host.startswith("["):
-        closing = host.find("]")
-        if closing == -1:
-            return False
-        host = host[1:closing]
-    elif ":" in host:
-        host, _, _ = host.partition(":")
-
-    with suppress(ValueError):
-        ip = ipaddress.ip_address(host)
-        if ip.is_private or ip.is_loopback or ip.is_link_local:
-            return True
-    return bool(LOCAL_HOSTNAME_RE.match(host))
-
-
-def _normalize_js_like_object(obj_str: str) -> str:
-    """Remove trailing commas before closing braces/brackets to make JS objects JSON-compatible."""
-    return _TRAILING_COMMA_RE.sub(r"\1", obj_str)
-
-
-def _extract_js_object_literal(script_text: str, start_index: int) -> tuple[str | None, int]:
-    """Extract a JS object literal starting at start_index (pointing at '{')."""
-    if start_index >= len(script_text) or script_text[start_index] != "{":
-        return None, start_index
-
-    depth = 0
-    i = start_index
-    in_string: str | None = None
-    escape = False
-
-    while i < len(script_text):
-        ch = script_text[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == in_string:
-                in_string = None
-        elif ch in ("'", '"'):
-            in_string = ch
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return script_text[start_index : i + 1], i + 1
-        i += 1
-    return None, start_index
-
-
 _LOGGER = logging.getLogger(__name__)
+
+
+def _webhook_path(server_id: str) -> str:
+    """Path of HA's webhook that the Web-IO commands of this server POST to."""
+    return f"/api/webhook/comexio_{server_id}"
+
 
 # get_live_states' dashboard/refresh request/response key prefix for KNX objects ($FubModules
 # type "11") — distinguishes them from markers, which share the same plain numeric id space.
 _KNX_LIVE_KEY_PREFIX = "knxIo_11_"
-
-
-def _is_extension_offline(identifier: str) -> bool:
-    """Return True when identifier indicates an offline extension module.
-
-    Online extensions report a serial number in 'XXXX-XXXX-XXXX' format;
-    offline ones carry only a short model code without dashes (e.g. '5010').
-    An empty string (missing field) is also treated as offline.
-    """
-    return "-" not in identifier
-
-
-async def _tick_comexio_request_progress(method: str, path: str) -> None:
-    """Log a 'still waiting' line every COMEXIO_PROGRESS_LOG_INTERVAL_SEC until cancelled.
-
-    Cancelled by _on_comexio_request_end/_exception as soon as the request finishes, so a
-    normal, fast call never logs anything -- only a request still open after the first
-    interval does. This is what makes a long, otherwise-silent wait (e.g. a Comexio admin
-    call that gets slow after a heavy write batch) visible instead of looking hung.
-    """
-    elapsed = 0
-    while True:
-        await asyncio.sleep(COMEXIO_PROGRESS_LOG_INTERVAL_SEC)
-        elapsed += COMEXIO_PROGRESS_LOG_INTERVAL_SEC
-        _LOGGER.info("Warte weiterhin auf Antwort von Comexio: %s %s (%ds)", method, path, elapsed)
-
-
-# aiohttp TraceConfig requires an async callback signature regardless of body (python:S7503 false positive).
-async def _on_comexio_request_start(_session: aiohttp.ClientSession, trace_ctx: Any, params: Any) -> None:  # NOSONAR
-    trace_ctx.progress_task = asyncio.ensure_future(_tick_comexio_request_progress(params.method, params.url.path))
-
-
-async def _cancel_comexio_progress_task(trace_ctx: Any) -> None:
-    task = trace_ctx.progress_task
-    task.cancel()
-    with suppress(asyncio.CancelledError):
-        await task
-
-
-async def _on_comexio_request_end(_session: aiohttp.ClientSession, trace_ctx: Any, _params: Any) -> None:
-    await _cancel_comexio_progress_task(trace_ctx)
-
-
-async def _on_comexio_request_exception(_session: aiohttp.ClientSession, trace_ctx: Any, _params: Any) -> None:
-    await _cancel_comexio_progress_task(trace_ctx)
-
-
-def _build_comexio_trace_config() -> aiohttp.TraceConfig:
-    """TraceConfig that logs a periodic 'still waiting' line for any slow Comexio HTTP call.
-
-    A single instance is shared by the whole session; aiohttp gives each individual request
-    its own trace_ctx, so concurrent requests never interfere with each other's timers.
-    """
-    trace_config = aiohttp.TraceConfig()
-    trace_config.on_request_start.append(_on_comexio_request_start)
-    trace_config.on_request_end.append(_on_comexio_request_end)
-    trace_config.on_request_exception.append(_on_comexio_request_exception)
-    return trace_config
 
 
 def _balanced_rows_per_col(n_items: int, max_rows_per_col: int) -> int:
@@ -509,6 +361,22 @@ def _stale_knx_bridge_marker_ids(items: Any, min_id: int, keep_titles: set[str])
     }
 
 
+def _saved_schema(conf_data: Mapping[str, Any], key: str, default: str) -> str:
+    """Saved entity-name schema, or default if aiocomexio would reject it.
+
+    ParseOptions validates every schema up front, so a malformed one saved before the options
+    flow validated schemas (possibly for a category the form now hides) would otherwise fail
+    every poll and keep the whole entry from setting up.
+    """
+    schema = conf_data.get(key, default)
+    if is_valid_entity_name_schema(schema):
+        return schema
+    _LOGGER.warning(
+        "Ignoring the invalid saved %s %r and using the default %r, fix it in the options", key, schema, default
+    )
+    return default
+
+
 class ComexioAPI:
     """
     Detailed interface to communicate with the Comexio API.
@@ -589,13 +457,7 @@ class ComexioAPI:
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
-        session_kwargs: dict[str, Any] = {
-            "timeout": aiohttp.ClientTimeout(total=COMEXIO_HTTP_TIMEOUT_SEC),
-            "trace_configs": [_build_comexio_trace_config()],
-        }
-        if _is_local_address(self.host):
-            session_kwargs["cookie_jar"] = aiohttp.CookieJar(unsafe=True)
-        return session_kwargs
+        return session_kwargs(timeout=COMEXIO_HTTP_TIMEOUT_SEC, progress_log_interval=COMEXIO_PROGRESS_LOG_INTERVAL_SEC)
 
     async def ensure_preview_session(self) -> aiohttp.ClientSession | None:
         """Lazily create + log in the dedicated Stufe-2 preview session, reused after that.
@@ -645,18 +507,6 @@ class ComexioAPI:
         """Refresh a single plan's cached metadata (e.g. after an out-of-band get_raw_config() lookup)."""
         self._fub_data[str(fub_id)] = fub_info
 
-    def _clean_value(self, val: Any) -> float:
-        """Standardizes values: replaces German comma with dot and converts to numbers."""
-        if val is None:
-            return 0
-        if isinstance(val, str):
-            val = val.replace(",", ".")
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            _LOGGER.warning("Failed to clean value: %s", val)
-            return 0
-
     def _encrypt_block(self, data_str: str, mod: int, exp: int) -> str:
         """RSA encryption logic matching Comexio v11 (PKCS1v15)."""
         try:
@@ -675,7 +525,7 @@ class ComexioAPI:
         (see ensure_preview_session) to log that one in independently instead.
         """
         sess = session if session is not None else self.session
-        if not _is_local_address(self.host) and not self._login_warned:
+        if not is_local_address(self.host) and not self._login_warned:
             _LOGGER.warning(
                 "Logging into Comexio over plain HTTP on a non-local address (%s). "
                 "Credentials may be transmitted in clear text.",
@@ -738,38 +588,9 @@ class ComexioAPI:
 
             main_html = await resp.text()
 
-        # Try $ioTypes (legacy) then $IOTypesBinary (Comexio v11+) — both have identical structure.
-        self.io_types = {}
-        for decl_re, var_name in (
-            (_IO_TYPES_DECL_RE, "$ioTypes"),
-            (_IO_BINARY_TYPES_DECL_RE, "$IOTypesBinary"),
-        ):
-            if assign_match := decl_re.search(main_html):
-                brace_index = main_html.find("{", assign_match.end())
-                if brace_index != -1:
-                    raw_object, _ = _extract_js_object_literal(main_html, brace_index)
-                    if raw_object:
-                        try:
-                            self.io_types = json.loads(_normalize_js_like_object(raw_object))
-                            _LOGGER.debug("Loaded %d IO types from %s", len(self.io_types), var_name)
-                            break
-                        except json.JSONDecodeError as exc:
-                            _LOGGER.warning("Failed to decode %s: %s", var_name, exc)
-        else:
-            _LOGGER.warning("No IO type data found ($ioTypes / $IOTypesBinary) — using identifier fallback")
-
-        # Extract $IOInputTypes: TypeId → {input: bool}  (input=True means read-only sensor)
-        self.io_input_types = {}
-        if assign_match := _IO_INPUT_TYPES_DECL_RE.search(main_html):
-            brace_index = main_html.find("{", assign_match.end())
-            if brace_index != -1:
-                raw_object, _ = _extract_js_object_literal(main_html, brace_index)
-                if raw_object:
-                    try:
-                        self.io_input_types = json.loads(_normalize_js_like_object(raw_object))
-                        _LOGGER.debug("Loaded %d IO input types", len(self.io_input_types))
-                    except json.JSONDecodeError as exc:
-                        _LOGGER.warning("Failed to decode $IOInputTypes: %s", exc)
+        # $ioTypes (legacy) or $IOTypesBinary (Comexio v11+), plus $IOInputTypes (input=True means read-only sensor)
+        self.io_types = parse_io_types(main_html)
+        self.io_input_types = parse_io_input_types(main_html)
 
         # 2. Fetch the function module page for the technical device configuration
         url_conf = f"{self._base_url}/admin/function_function_module/home"
@@ -779,59 +600,16 @@ class ComexioAPI:
                 return {}
             html = await resp.text()
 
-        if version_match := _COMEXIO_VERSION_RE.search(html):
-            self.comexio_version = version_match.group(1)
+        if version := parse_comexio_version(html):
+            self.comexio_version = version
 
-        return self._scrape_js_vars(html, page_label="function module")
-
-    @staticmethod
-    def _scrape_js_vars(html: str, *, page_label: str) -> dict[str, Any]:
-        """Extract every top-level `var $Name = {...}` JS object literal from an HTML page.
-
-        Shared between get_raw_config (function module page) and get_knx_dpt_catalog (KNX
-        admin page) — both pages embed their config as inline script-block JS objects in the
-        same style.
-        """
-        # Restrict search to script tags to avoid scanning entire HTML with a single DOTALL regex
-        script_blocks = _SCRIPT_BLOCK_RE.findall(html)
-
-        result: dict[str, Any] = {}
-        for script in script_blocks:
-            for m in _VAR_DECL_RE.finditer(script):
-                var_name = m.group(1)
-                search_start = m.end()
-                if _EMPTY_JS_ARRAY_RE.match(script, search_start):
-                    # PHP json_encode renders an empty array as `[]` (e.g. $Fubs without any
-                    # plan) — searching on for "{" would grab the NEXT variable's object.
-                    result[var_name] = {}
-                    continue
-                brace_index = script.find("{", search_start)
-                if brace_index == -1:
-                    continue
-
-                raw_obj, _ = _extract_js_object_literal(script, brace_index)
-                if raw_obj is None:
-                    continue
-
-                normalized_obj = _normalize_js_like_object(raw_obj)
-
-                try:
-                    result[var_name] = json.loads(normalized_obj)
-                except json.JSONDecodeError as exc:
-                    _LOGGER.warning(
-                        "Failed to decode JSON for variable $%s on %s page: %s",
-                        var_name,
-                        page_label,
-                        exc,
-                    )
-                    continue
-        return result
+        return scrape_js_vars(html, page_label="function module")
 
     async def get_knx_dpt_catalog(self) -> dict[str, Any]:
         """Fetch $KnxPoints/$KnxDevices/$KnxDpt from the KNX admin page.
 
         Resolves each existing K-element's real KNX DPT (KnxBaseTypeId.KnxSubId) via the
-        Point -> Device -> Dpt chain (see _resolve_knx_dpt) — neither $FubModules["11"] nor
+        Point -> Device -> Dpt chain (see aiocomexio.knx.resolve_knx_dpt) — neither $FubModules["11"] nor
         $IOTypesBinary carry a usable analog value range for KNX objects (both report a
         min=max=0 placeholder, see KNX_DPT_ANALOG_RANGES in const.py). Returns the last
         known-good catalog (or {} if none exists yet) on HTTP failure or connection error;
@@ -840,7 +618,7 @@ class ComexioAPI:
         the whole coordinator poll (found in review 2026-09-20: the bare aiohttp call
         previously let a connection error propagate uncaught into _async_update_data's
         poll-wide try/except). Falling back to the stale cache instead of {} matters
-        specifically for DPT3.x composite pairing (_attach_knx_dpt3_composites): an empty
+        specifically for DPT3.x composite pairing (aiocomexio parse_config): an empty
         catalog means no item gets tagged knx_composite this poll, which drops the
         composite's unique_id from __init__.py's active_unique_ids whitelist and gets its
         cover/light entity permanently deleted from the registry — a single transient
@@ -864,7 +642,7 @@ class ComexioAPI:
         except (aiohttp.ClientError, TimeoutError) as err:
             _LOGGER.warning("Failed to fetch KNX DPT catalog: %s", err)
             return self._knx_dpt_catalog or {}
-        result = self._scrape_js_vars(html, page_label="KNX DPT catalog")
+        result = scrape_js_vars(html, page_label="KNX DPT catalog")
         if not result:
             # HTTP 200 with no parseable `var $Name = {...}` block (changed/malformed page) —
             # same "couldn't get a real catalog this time" outcome as the HTTP-failure branches
@@ -901,42 +679,6 @@ class ComexioAPI:
         self._knx_dpt_catalog = catalog
         self._knx_dpt_catalog_version = version
 
-    @staticmethod
-    def _resolve_knx_dpt(knx_dpt_catalog: dict[str, Any], k_id: str) -> tuple[int, int] | None:
-        """Resolve a K-element's real KNX DPT (KnxBaseTypeId, KnxSubId) via Point -> Device -> Dpt.
-
-        knx_dpt_catalog is get_knx_dpt_catalog()'s raw dict ($KnxPoints/$KnxDevices/$KnxDpt,
-        each id-keyed like Comexio's other JS-object dumps — a K-element's own id IS its
-        $KnxPoints entry's id, confirmed against $FubModules["11"]). Returns None if any link
-        in the chain is missing or malformed, so callers can fall back to the generic range
-        rather than crash on an unexpected shape.
-
-        Unlike $FubModules groups (see _process_source_items), these three never need the
-        JSON-array-vs-object handling: their ids are 1-based with gaps (verified against
-        comexio-KNX-data.trace.txt 2026-09-20, e.g. $KnxDpt skips id 11), so the "keys are
-        exactly 0..N-1" shape PHP's json_encode needs to emit an array can't occur here.
-        """
-        points = knx_dpt_catalog.get("KnxPoints")
-        devices = knx_dpt_catalog.get("KnxDevices")
-        dpts = knx_dpt_catalog.get("KnxDpt")
-        if not isinstance(points, dict) or not isinstance(devices, dict) or not isinstance(dpts, dict):
-            return None
-
-        point = points.get(k_id)
-        if not isinstance(point, dict):
-            return None
-        device = devices.get(str(point.get("KnxDeviceId")))
-        if not isinstance(device, dict):
-            return None
-        dpt = dpts.get(str(device.get("KnxDptId")))
-        if not isinstance(dpt, dict):
-            return None
-
-        base_type_id, sub_id = dpt.get("KnxBaseTypeId"), dpt.get("KnxSubId")
-        if not isinstance(base_type_id, int) or not isinstance(sub_id, int):
-            return None
-        return base_type_id, sub_id
-
     async def get_live_states(
         self, marker_count: int, knx_max_id: int = 0
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -950,13 +692,13 @@ class ComexioAPI:
         long-standing bare-numeric-id request key ("5": {...}); KNX entries use a
         f"{_KNX_LIVE_KEY_PREFIX}<id>" request key instead specifically so the response can be
         split back apart by prefix afterwards. "11" is $FubModules' own KNX module type id
-        (see _process_knx) — a Comexio-wide constant, not per-installation.
+        (see aiocomexio parse_config) — a Comexio-wide constant, not per-installation.
 
         Live-tested against a real KNX-equipped Comexio instance (2026-09-20, see
         project_knx_write_path_design memory): a bare "KnxIo": "K<id>" key returns that
         object's own value, confirmed distinct from the same numeric marker id — the "no known
         bulk live-value endpoint for KNX" assumption the KNX-objects feature originally
-        shipped with (_process_knx docstring) was simply never tested against real hardware.
+        shipped with (aiocomexio parse_config) was simply never tested against real hardware.
 
         Returns (None, None) on any fetch/parse failure — never ({}, {}) — so callers can tell
         "endpoint failed this cycle" apart from "nothing to report" and keep last-known values
@@ -1121,47 +863,27 @@ class ComexioAPI:
         than one merged dict — see get_live_states' docstring for why merging them would be
         unsafe (markers and KNX objects share the same plain numeric id space).
         """
-        data = {
-            "markers": [],
-            "io": [],
-            "io_all": [],
-            "knx": [],
-            "webio_commands": {},
-            "webio_names": {},
-            # One Web-IO device class per source category on the Comexio server — see const.webio_class_name.
-            "webio_devices": {cls: {"device_id": None, "device_ip": None, "base_id": None} for cls in WEBIO_CLASSES},
-            # Per-extension identity (name + stable serial), see _process_ios — used by the
-            # coordinator's extension-rename migration to detect a Comexio-side rename.
-            "extensions": {},
-        }
-        live_states = live_states or {}
-
         # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection)
         self._fub_data = conf.get("Fubs", {})
         self._paper_data = conf.get("Paper", {})
 
-        # Load configuration
-        config_names = self._load_config_names()
-        webio_name, schema_marker, schema_io, schema_knx, server_alias = config_names
-
-        # Extract FubModules once
-        fub_modules = conf.get("FubModules", {})
-
-        # 2. Map Webhooks and device info
-        self._process_device_info(conf, data, webio_name, fub_modules)
-
-        # 3. Process Markers
-        self._process_markers(data, live_states, schema_marker, server_alias, fub_modules, referenced_markers)
-
-        # 4. Process IOs
-        self._process_ios(data, schema_io, server_alias, fub_modules)
-
-        # 5. Process KNX objects (opt-in via import_knx; coordinator drops the list when disabled).
-        # No "wired but unnamed" import for KNX: marker and KNX ids share a numeric space, so the
-        # marker reference set cannot be reused here without cross-contamination. A KNX object is
-        # imported only when it carries a real Comexio label.
-        self._process_knx(data, schema_knx, server_alias, fub_modules, knx_live_states, knx_dpt_catalog)
-
+        webio_name, schema_marker, schema_io, schema_knx, server_alias = self._load_config_names()
+        data = comexio_config.parse_config(
+            conf,
+            io_types=self.io_types,
+            io_input_types=self.io_input_types,
+            options=ParseOptions(
+                webio_name=webio_name,
+                server_alias=server_alias,
+                schema_marker=schema_marker,
+                schema_io=schema_io,
+                schema_knx=schema_knx,
+            ),
+            live_states=live_states,
+            referenced_markers=referenced_markers,
+            knx_live_states=knx_live_states,
+            knx_dpt_catalog=knx_dpt_catalog,
+        )
         _LOGGER.info(
             "Audit: %d Markers, %d IOs, %d KNX, %d Webhooks in Comexio for %s",
             len(data["markers"]),
@@ -1183,9 +905,9 @@ class ComexioAPI:
         if self.config_entry:
             conf_data = {**self.config_entry.data, **self.config_entry.options}
             webio_name = conf_data.get("webio_name", webio_name)
-            schema_marker = conf_data.get(CONF_SCHEMA_MARKER, schema_marker)
-            schema_io = conf_data.get(CONF_SCHEMA_IO, schema_io)
-            schema_knx = conf_data.get(CONF_SCHEMA_KNX, schema_knx)
+            schema_marker = _saved_schema(conf_data, CONF_SCHEMA_MARKER, schema_marker)
+            schema_io = _saved_schema(conf_data, CONF_SCHEMA_IO, schema_io)
+            schema_knx = _saved_schema(conf_data, CONF_SCHEMA_KNX, schema_knx)
             server_alias = conf_data.get("server_id", server_alias)
 
         return webio_name, schema_marker, schema_io, schema_knx, server_alias
@@ -1263,651 +985,6 @@ class ComexioAPI:
         x_max = self._CANVAS_REF_X * (width_mm / self._CANVAS_REF_MM_LONG) * (res / self._CANVAS_REF_RES)
         y_max = self._CANVAS_REF_Y * (height_mm / self._CANVAS_REF_MM_SHORT) * (res / self._CANVAS_REF_RES)
         return x_max, y_max
-
-    @staticmethod
-    def _iter_group(group: Any) -> Iterable[tuple[str, Any]]:
-        """Iterate a Comexio id group as (id, member) pairs, ids normalized to str.
-
-        Comexio serializes a gap-free id group as a JSON array instead of an object
-        (observed for both $FubModules groups and Web-IO command groups) — the array
-        index then IS the id, so both shapes yield the same (id, member) pairs.
-        """
-        items = group.items() if isinstance(group, dict) else enumerate(group or [])
-        return ((str(gid), member) for gid, member in items)
-
-    def _process_device_info(
-        self,
-        conf: dict[str, Any],
-        data: dict[str, Any],
-        webio_name: str,
-        fub_modules: dict[str, Any],
-    ) -> None:
-        """Process device info and webhooks for both Web-IO classes (marker/io)."""
-        web_devices = conf.get("WebDevices", {})
-        fub_10 = fub_modules.get("10", {})
-        fub_10_by_dev_id = dict(self._iter_group(fub_10))
-
-        missing_classes = []
-        for webio_class in WEBIO_CLASSES:
-            target_dev_id = self._assign_webio_device_id(web_devices, data, webio_name, webio_class)
-            if not target_dev_id:
-                missing_classes.append(webio_class)
-                continue
-            commands = fub_10_by_dev_id.get(target_dev_id)
-            if commands is None:
-                continue
-            for w_id, w_obj in self._iter_group(commands):
-                if not isinstance(w_obj, dict):
-                    _LOGGER.debug(
-                        "Skipping non-dict Web-IO command entry %s in device %s (webio_class=%s): %r",
-                        w_id,
-                        target_dev_id,
-                        webio_class,
-                        w_obj,
-                    )
-                    continue
-                self._add_webhook_command(data, w_id, w_obj, webio_class)
-
-        if missing_classes and any(d.get("Name") == webio_name for d in web_devices.values()):
-            # Pre-split installs have a single Web-IO device named exactly `webio_name`; it
-            # won't match the new "<name> [M]"/"<name> [IO]" class names, so both classes look
-            # missing right after upgrading. No automatic migration on purpose (see CLAUDE.md:
-            # no backwards-compat shims) — a Full Sync creates the new class(es); the old device
-            # is left untouched and can be removed manually once no longer needed.
-            _LOGGER.warning(
-                "Found a legacy Web-IO device named '%s' without a Marker/IO class suffix. "
-                "This version splits Web-IO into separate classes ('%s' / '%s'); run a Full Sync "
-                "to create the missing class(es): %s. The old device is left in place.",
-                webio_name,
-                webio_class_name(webio_name, WEBIO_CLASS_MARKER),
-                webio_class_name(webio_name, WEBIO_CLASS_IO),
-                ", ".join(webio_class_label(c) for c in missing_classes),
-            )
-
-        self._build_webio_name_lexicon(data, fub_10)
-
-    def _assign_webio_device_id(
-        self,
-        web_devices: dict[str, Any],
-        data: dict[str, Any],
-        webio_name: str,
-        webio_class: str,
-    ) -> str | None:
-        """Find the WebDevices entry for one Web-IO class, populate its device_info, return its id."""
-        class_name = webio_class_name(webio_name, webio_class)
-        for d_id, d_data in web_devices.items():
-            if d_data.get("Name") != class_name:
-                continue
-            target_dev_id = str(d_id)
-            dev_info = data["webio_devices"][webio_class]
-            dev_info["device_id"] = target_dev_id
-            # Comexio has been observed to scrape a leading space into the Ip field, which
-            # broke the IP-mismatch audit (mismatch reported against an otherwise-identical
-            # address) — stripped here, at the single point the value enters HA.
-            raw_ip = d_data.get("Ip")
-            dev_info["device_ip"] = raw_ip.strip() if isinstance(raw_ip, str) else raw_ip
-            # The class id is WebDeviceBaseId in $WebDevices — "BaseId" only exists in the
-            # upload/save payloads. Reading "BaseId" here left base_id None for every class, so
-            # the uninstall cleanup never deleted a single Web-IO class (live-verified 2026-09-25).
-            raw_base_id = d_data.get("WebDeviceBaseId")
-            dev_info["base_id"] = str(raw_base_id) if raw_base_id is not None else None
-            return target_dev_id
-        return None
-
-    def _build_webio_name_lexicon(self, data: dict[str, Any], fub_10: dict[str, Any]) -> None:
-        """Build the webio_names label lexicon over ALL Web-IO classes (read-only, for Function Plan rendering).
-
-        Plans may wire commands of foreign Web-IO devices, whose names are otherwise unknown to
-        HA. Names mirror Comexio Studio's pill labels: '{deviceId}. {commandName}' (e.g.
-        '16. R1 SZ Rollo % IST') — Studio does NOT include the device name in the pill (verified
-        against the Netzteil plan). Kept separate from webio_commands on purpose — that dict
-        drives the sync/audit logic and must only ever contain HA's own class.
-        """
-        for dev_id, dev_commands in self._iter_group(fub_10):
-            prefix = f"{dev_id}. "
-            for w_id, w_obj in self._iter_group(dev_commands):
-                if not isinstance(w_obj, dict):
-                    continue
-                name = w_obj.get("Name")
-                if name:
-                    data["webio_names"][w_id] = {
-                        "name": f"{prefix}{name}",
-                        "analog": w_obj.get("TypeId") in {2, "2"},
-                    }
-
-    def _add_webhook_command(self, data: dict[str, Any], w_id: str, w_obj: dict[str, Any], webio_class: str) -> None:
-        """Add a webhook command to data."""
-        raw_type = w_obj.get("TypeId")
-        try:
-            val_type = int(raw_type) if raw_type is not None else 1
-        except (ValueError, TypeError):
-            val_type = 1
-
-        # webIoId (w_id) is a global counter across ALL Web-IO devices on the server (verified
-        # live) — safe to key this single flat dict by command name regardless of webio_class.
-        data["webio_commands"][w_obj.get("Name")] = {
-            "webIoId": w_id,
-            "cmdId": w_obj.get("WebCommandId"),
-            "typeId": val_type,
-            "webioClass": webio_class,
-        }
-
-    # Placeholder title for a Comexio marker with an empty label that is still wired into a
-    # plan (see _process_markers) — kept out of the entity/name comparison logic nowhere
-    # special-cased on purpose: once imported, it behaves exactly like any other marker name,
-    # so a later real rename in Comexio is picked up by the normal sync/rename detection.
-    # Also the {IoTitle} of an IO without a description (see _io_schema_title), so unnamed
-    # markers and IOs read the same way in HA.
-    _NO_NAME_TITLE = "#nn"
-
-    def _process_markers(
-        self,
-        data: dict[str, Any],
-        live_states: dict[str, Any],
-        schema_marker: str,
-        server_alias: str,
-        fub_modules: dict[str, Any],
-        referenced_marker_ids: set[str] | None = None,
-    ) -> None:
-        """Process markers from config ($FubModules["2"]).
-
-        A marker without a Comexio label is normally excluded entirely — but one that is
-        actually wired into a function plan (referenced_marker_ids) is imported anyway with
-        a synthetic "#nn" title, so it gets a real HA entity/webhook/Web-IO command and the
-        plan preview knows its type + live value. If the marker later gets a real name in
-        Comexio, or drops out of every plan, it naturally reverts to the normal path (named
-        marker, or orphaned like any other unused marker) — no special-case cleanup needed.
-        """
-        data["markers"].extend(
-            self._process_source_items(
-                fub_modules,
-                module_key="2",
-                schema=schema_marker,
-                id_prefix="M",
-                id_placeholder="MarkerId",
-                title_placeholder="MarkerTitle",
-                server_alias=server_alias,
-                live_states=live_states,
-                referenced_ids=referenced_marker_ids,
-            )
-        )
-
-    def _process_knx(
-        self,
-        data: dict[str, Any],
-        schema_knx: str,
-        server_alias: str,
-        fub_modules: dict[str, Any],
-        live_states: dict[str, Any] | None = None,
-        knx_dpt_catalog: dict[str, Any] | None = None,
-    ) -> None:
-        """Process KNX objects from config ($FubModules["11"], "knxIo" per $FubTypes).
-
-        Structurally modeled 1:1 on markers (see _process_markers) — same title-suffix kind
-        heuristic ([RO]/[TRIG]/[TP]), same analog/digital Type mapping.
-
-        live_states here is the SEPARATE knx-keyed dict get_live_states() now also returns
-        (its "knxIo_11_<id>" query, live-tested 2026-09-20 against a real KNX-equipped
-        Comexio instance — see project_knx_write_path_design memory) — never the marker dict,
-        since markers and KNX objects share the same plain numeric id space and mixing them
-        would silently hand e.g. KNX object 5 marker 5's live value.
-
-        knx_dpt_catalog (get_knx_dpt_catalog()'s result, only fetched when import_knx is on)
-        is used to attach each analog item's real KNX-standard value range AND step (native
-        resolution) — see _resolve_knx_dpt / KNX_DPT_ANALOG_RANGES. Items whose DPT can't be
-        resolved, or whose DPT has no entry in the table, are left without dpt_min/dpt_max/
-        dpt_unit/dpt_step so ComexioKnxNumber falls back to its generic heuristic. The same
-        resolved DPT also drives dpt_device_class — KNX_DPT_DEVICE_CLASS (a plain HA
-        NumberDeviceClass value string) for analog items, or KNX_DPT_DIGITAL_DEVICE_CLASS (a
-        plain HA BinarySensorDeviceClass value string, only meaningful once ComexioKnxBinarySensor
-        picks it up for a "[RO]" item) for digital ones — absent from either when the DPT has no
-        matching device class (e.g. the DPT3.x step/direction values). A digital item whose DPT
-        is instead one of the physically ambivalent DPT1.x subtypes (KNX_DPT_DIGITAL_AMBIGUOUS)
-        gets dpt_ambiguous=True — see coordinator._auto_suffix_unambiguous_knx /
-        _audit_knx_dpt_ambiguous for what consumes these two flags. An item whose raw Type
-        has no entry at all in self.io_types (_source_item_type's dpt_type_unresolved) also
-        gets dpt_ambiguous=True unconditionally, routing it into the same human-review repair
-        flow instead of _build_source_item silently guessing "analog" for a possibly-digital
-        object (Sourcery finding, review 2026-09-21).
-        """
-        items = self._process_source_items(
-            fub_modules,
-            module_key="11",
-            schema=schema_knx,
-            id_prefix="K",
-            id_placeholder="KnxId",
-            title_placeholder="KnxTitle",
-            server_alias=server_alias,
-            live_states=live_states or {},
-        )
-        for item in items:
-            if item.pop("dpt_type_unresolved", False):
-                # Set by _source_item_type: no $IOTypesBinary entry at all for this KNX
-                # object's raw Type, so its digital/analog split is genuinely unknown rather
-                # than merely unresolved-but-analog. Routed into the same human-review repair
-                # flow as a physically ambivalent DPT1.x subtype (_audit_knx_dpt_ambiguous)
-                # regardless of knx_dpt_catalog availability below — that catalog is unrelated
-                # to io_types, and this must not depend on a second, independent fetch
-                # succeeding too.
-                item["dpt_ambiguous"] = True
-        if knx_dpt_catalog:
-            for item in items:
-                self._apply_knx_dpt_metadata(item, knx_dpt_catalog)
-            self._attach_knx_dpt3_composites(items, knx_dpt_catalog)
-        data["knx"].extend(items)
-
-    def _apply_knx_dpt_metadata(self, item: dict[str, Any], knx_dpt_catalog: dict[str, Any]) -> None:
-        """Resolve one KNX item's DPT and attach unit/device_class/ambiguous metadata in place.
-
-        Split out of _process_knx to keep its own cognitive complexity within SonarQube
-        S3776's limit — see _process_knx's docstring for the full semantics implemented here.
-        """
-        if item.get("dpt_ambiguous"):
-            # Already forced True in _process_knx because io_types had no entry for this
-            # object's raw Type at all (dpt_type_unresolved) — a device_class this DPT chain
-            # might independently resolve to is not corroborating evidence worth auto-tagging
-            # on (KNX_DPT_DIGITAL_DEVICE_CLASS below would otherwise make it eligible for
-            # coordinator._auto_suffix_unambiguous_knx's auto-rename, racing the human-review
-            # repair flow this item is already queued for). Leave it on the generic fallback.
-            return
-        dpt = self._resolve_knx_dpt(knx_dpt_catalog, item["id"])
-        if dpt is None:
-            _LOGGER.debug("KNX item %s: could not resolve DPT chain, using generic fallback", item["id"])
-            return
-        if item["type"] != "analog":
-            if device_class := KNX_DPT_DIGITAL_DEVICE_CLASS.get(dpt):
-                item["dpt_device_class"] = device_class
-            elif dpt in KNX_DPT_DIGITAL_AMBIGUOUS:
-                # Physically ambivalent DPT1.x subtype (see KNX_DPT_DIGITAL_AMBIGUOUS
-                # docstring) — flagged for coordinator._audit_knx_dpt_ambiguous rather
-                # than auto-classified.
-                item["dpt_ambiguous"] = True
-            return
-        dpt_range = KNX_DPT_ANALOG_RANGES.get(dpt)
-        if dpt_range is None:
-            _LOGGER.debug(
-                "KNX item %s: resolved DPT%s.%s has no entry in KNX_DPT_ANALOG_RANGES, using generic fallback range",
-                item["id"],
-                dpt[0],
-                dpt[1],
-            )
-            return
-        item["dpt_min"], item["dpt_max"], item["dpt_unit"], item["dpt_step"] = dpt_range
-        if device_class := KNX_DPT_DEVICE_CLASS.get(dpt):
-            item["dpt_device_class"] = device_class
-
-    def _attach_knx_dpt3_composites(self, items: list[dict[str, Any]], knx_dpt_catalog: dict[str, Any]) -> None:
-        """Tag DPT3.x (Dimmer 3.007 / Blinds 3.008) K-element pairs with composite metadata.
-
-        Comexio splits each DPT3.x KNX object into two K-elements sharing one KnxDeviceId —
-        a digital control bit (direction) and an analog 3-bit step code (0=break, 1-7=move),
-        see dev-tools/knx_seed_test_matrix.py's save_device()/points[0]/points[1]. Tags each
-        item in place with a "knx_composite" dict ({"role": "direction"|"stepcode", "domain":
-        "light"|"cover", "partner_id": <other K-element's id>}) so cover.py/light.py can build
-        one composite entity per pair, and switch.py/number.py can skip the pair's individual
-        generic entities. Only annotates `items` — sync/audit/wiring logic (button.py,
-        coordinator.py) is untouched, since both K-elements keep their own bridge Marker
-        exactly as before.
-        """
-        points = knx_dpt_catalog.get("KnxPoints")
-        if not isinstance(points, dict):
-            return
-
-        by_device: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for item in items:
-            point = points.get(item["id"])
-            device_id = point.get("KnxDeviceId") if isinstance(point, dict) else None
-            if device_id is not None:
-                by_device[str(device_id)].append(item)
-
-        for device_id, pair in by_device.items():
-            self._tag_knx_dpt3_pair(device_id, pair, knx_dpt_catalog)
-
-    def _tag_knx_dpt3_pair(self, device_id: str, pair: list[dict[str, Any]], knx_dpt_catalog: dict[str, Any]) -> None:
-        """Tag one KnxDeviceId's 2-point group with knx_composite metadata, if it qualifies.
-
-        Split out of _attach_knx_dpt3_composites to keep its own cognitive complexity within
-        SonarQube S3776's limit — see that method's docstring for the full DPT3.x pairing
-        semantics.
-        """
-        if len(pair) != 2:
-            if len(pair) > 2:
-                _LOGGER.debug(
-                    "KNX device %s has %d points sharing one KnxDeviceId (expected at most 2), "
-                    "skipping composite grouping",
-                    device_id,
-                    len(pair),
-                )
-            return
-        dpt = self._resolve_knx_dpt(knx_dpt_catalog, pair[0]["id"])
-        domain = KNX_DPT3_COMPOSITE_DOMAIN.get(dpt) if dpt else None
-        if domain is None:
-            _LOGGER.debug(
-                "KNX device %s has 2 points but resolved DPT %s isn't a DPT3.x composite, skipping composite grouping",
-                device_id,
-                dpt,
-            )
-            return
-        direction_item = next((i for i in pair if i["type"] == "digital"), None)
-        stepcode_item = next((i for i in pair if i["type"] == "analog"), None)
-        if direction_item is None or stepcode_item is None:
-            _LOGGER.debug(
-                "KNX device %s resolved to DPT%s.%s but its 2 points aren't one digital + "
-                "one analog K-element, skipping composite grouping",
-                device_id,
-                dpt[0],
-                dpt[1],
-            )
-            return
-        direction_item["knx_composite"] = {
-            "role": "direction",
-            "domain": domain,
-            "partner_id": stepcode_item["id"],
-        }
-        stepcode_item["knx_composite"] = {
-            "role": "stepcode",
-            "domain": domain,
-            "partner_id": direction_item["id"],
-        }
-
-    def _process_source_items(
-        self,
-        fub_modules: dict[str, Any],
-        *,
-        module_key: str,
-        schema: str,
-        id_prefix: str,
-        id_placeholder: str,
-        title_placeholder: str,
-        server_alias: str,
-        live_states: dict[str, Any],
-        referenced_ids: set[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Shared Marker/KNX item processing over one $FubModules category.
-
-        Both categories carry the same relevant fields (Id, Name, Type) and are exposed to
-        HA identically, so the per-item build is a single code path parametrized by the
-        id prefix and the entity-name schema placeholder keys.
-        """
-        referenced_ids = referenced_ids or set()
-        items: list[dict[str, Any]] = []
-        group = fub_modules.get(module_key)
-        # Comexio serializes gap-free id groups as JSON arrays instead of objects (same
-        # quirk as $FubModules["10"], see _build_webio_name_lexicon) — group members are
-        # values either way, so the array case just iterates it directly.
-        group_items = group.values() if isinstance(group, dict) else (group or [])
-        for raw in group_items:
-            if not isinstance(raw, dict) or raw.get("Id") is None:
-                continue
-
-            item_id = str(raw.get("Id"))
-            has_name = bool(raw.get("Name"))
-            if not has_name and item_id not in referenced_ids:
-                continue
-
-            items.append(
-                self._build_source_item(
-                    raw,
-                    item_id=item_id,
-                    has_name=has_name,
-                    module_key=module_key,
-                    schema=schema,
-                    id_prefix=id_prefix,
-                    id_placeholder=id_placeholder,
-                    title_placeholder=title_placeholder,
-                    server_alias=server_alias,
-                    live_states=live_states,
-                )
-            )
-        return items
-
-    def _build_source_item(
-        self,
-        raw: dict[str, Any],
-        *,
-        item_id: str,
-        has_name: bool,
-        module_key: str,
-        schema: str,
-        id_prefix: str,
-        id_placeholder: str,
-        title_placeholder: str,
-        server_alias: str,
-        live_states: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Build one Marker/KNX item dict from its raw $FubModules entry.
-
-        Split out of _process_source_items to keep its own cognitive complexity within
-        SonarQube S3776's limit — see that method's docstring for the shared semantics.
-        """
-        type_raw = raw.get("Type", 1)
-        type_str, type_unresolved = self._source_item_type(module_key, type_raw)
-        title = raw.get("Name") or self._NO_NAME_TITLE
-
-        ha_name = schema.format_map(
-            SafeDict(ServerAlias=server_alias, **{id_placeholder: item_id, title_placeholder: title})
-        )
-
-        item = {
-            "id": item_id,
-            "ha_name": " ".join(ha_name.split()),
-            "name": f"{id_prefix}{item_id} {title}",
-            # Bare Comexio title, without the id prefix "name" carries — needed e.g.
-            # by create_knx_bridge_marker() to build the bridge marker's own title.
-            "title": title,
-            # Unnamed-but-referenced item ("#nn"): the plan preview greys it out
-            # like an inactive IO as a visual hint that it has no label in Comexio.
-            "no_name": not has_name,
-            "type": type_str,
-            "type_raw": type_raw,
-            "value": self._clean_value(live_states.get(item_id, 0)),
-            "kind": self._marker_kind(title, module_key=module_key),
-        }
-        if type_unresolved:
-            # Only ever True for module_key=="11" (see _source_item_type) — a transient
-            # signal, popped by _process_knx right after building these items (converted into
-            # dpt_ambiguous=True there) and never present on a marker item.
-            item["dpt_type_unresolved"] = True
-        return item
-
-    def _source_item_type(self, module_key: str, type_raw: Any) -> tuple[str, bool]:
-        """digital/analog classification for one raw Marker/KNX Type value.
-
-        Returns (type_str, unresolved) — unresolved is only ever True for a KNX item whose
-        raw Type has no entry at all in self.io_types (Comexio hasn't provided an
-        $IOTypesBinary entry for it yet, e.g. a very new/uncommon DPT). Split out of
-        _process_source_items for SonarQube S3776.
-        """
-        if module_key == "11":
-            # KNX ($FubModules["11"]): Type is a rich catalog code (same value space as
-            # normal IOs' $IOTypesBinary), NOT the simple {1,2,3} scale markers use — the
-            # marker-only heuristic below would e.g. misclassify Type=121 (DPT17 scene
-            # number, analog) as digital. Reuse the same self.io_types lookup
-            # _add_io_entry() already uses for IOs (confirmed live 2026-09-14 against real
-            # KNX wiring on a function plan — see project_knx_write_path_design memory).
-            entry = self.io_types.get(str(type_raw))
-            if entry is None:
-                # Genuinely unresolved, not just "resolved and analog" — defaulting to
-                # "analog" here would silently expose a possibly-digital object as a
-                # writable number entity (Sourcery finding, review 2026-09-21). "digital"
-                # is the safer default of the two: it only risks a spurious switch/[RO]
-                # sensor rather than pushing an out-of-range analog write to what might
-                # be a binary KNX datapoint, and dpt_type_unresolved=True routes it
-                # through the same human-review repair flow as a physically ambivalent
-                # DPT1.x subtype either way.
-                return "digital", True
-            return ("digital" if entry.get("binary", False) else "analog"), False
-        return ("analog" if type_raw in [2, 3] else "digital"), False
-
-    @staticmethod
-    def _marker_kind(m_title: str, *, module_key: str) -> MarkerKind:
-        """Derive a source item's HA exposure kind from its Comexio-side title suffix.
-
-        A trailing "[K<id>]" (auto-created write-path bridge Marker, see
-        MARKER_KNX_BRIDGE_SUFFIX_RE) is checked first: it is machine-titled by
-        create_knx_bridge_marker() as "<k_title> [K<k_id>]", and since all three suffix
-        checks below are end-anchored they're mutually exclusive anyway — the ordering
-        itself has no effect on a Marker. It matters only for module_key: this classification
-        is Marker-only (module_key "2") — a KNX object (module_key "11") can never itself be
-        a bridge, only be fed by one, so a KNX object whose own (user/ETS-given) title
-        happens to end in the same bracket-and-digits shape must not be swept into
-        KNX_BRIDGE, which would silently drop it from the audit and from every HA platform.
-        Failing that, "[RO]" wins over a simultaneous "[TRIG]"/"[TP]" suffix (nonsensical
-        combination, but must resolve to exactly one kind rather than crash).
-        """
-        title = m_title.rstrip()
-        if MARKER_KNX_BRIDGE_SUFFIX_RE.search(title):
-            if module_key != "2":
-                _LOGGER.warning(
-                    "KNX object '%s' has a title ending in '[K<id>]' — that suffix is reserved for "
-                    "auto-created write-path bridge Markers and is ignored here (treating as normal).",
-                    title,
-                )
-            else:
-                return MarkerKind.KNX_BRIDGE
-        if title.endswith(MARKER_READ_ONLY_SUFFIX):
-            if any(suffix in title for suffix in MARKER_TRIGGER_SUFFIXES):
-                _LOGGER.warning("Marker '%s' has both [RO] and a trigger suffix — treating as read-only.", title)
-            return MarkerKind.READ_ONLY
-        if title.endswith(MARKER_TRIGGER_SUFFIXES):
-            return MarkerKind.TRIGGER
-        return MarkerKind.NORMAL
-
-    def _process_ios(
-        self,
-        data: dict[str, Any],
-        schema_io: str,
-        server_alias: str,
-        fub_modules: dict[str, Any],
-    ) -> None:
-        """Process IOs from config.
-
-        Inactive IOs (Active=False, e.g. an extension slot the user prepared but hasn't
-        wired up yet) get no entity/webhook — Comexio itself refuses to wire a connection
-        to an inactive IO, so there is nothing meaningful to read/write. They still get a
-        proper label in "io_all" (unfiltered) so the Function Plan preview can resolve their
-        name instead of falling back to a bare "IO ref=N".
-        """
-        for ext_id, ext_content in fub_modules.get("1", {}).items():
-            ext_meta = ext_content.get("extension", {})
-            ext_name = ext_meta.get("Name", f"Ext{ext_id}")
-            ext_serial = ext_meta.get("Identifier", "")
-            ext_offline = _is_extension_offline(ext_serial)
-            data["extensions"][ext_id] = {"name": ext_name, "serial": ext_serial}
-
-            for io_item in ext_content.get("inoutput", {}).values():
-                if not io_item:
-                    continue
-
-                io_type_id = str(io_item.get("InOutputTypeId"))
-                type_info = self.io_types.get(io_type_id, {})
-
-                ident = io_item.get("Identifier") or str(io_item.get("Id", "unknown"))
-                desc = io_item.get("Description") or ident
-
-                self._add_io_entry(
-                    data, io_item, ext_name, ident, desc, type_info, schema_io, server_alias, ext_offline
-                )
-
-    @staticmethod
-    def _normalize_io_unit(unit: str) -> str:
-        """Normalize Comexio IO unit strings to HA-compatible values."""
-        if unit in ("\\u00b0C", "°C", "°C", "C"):
-            return "°C"
-        return "" if unit in ("0/1", "1/0", "?") else unit
-
-    @classmethod
-    def _io_schema_title(cls, desc: str, ident: str) -> str:
-        """{IoTitle} for the entity name schema: the Comexio description, or "#nn" if there is none.
-
-        An IO without a description arrives here with desc == ident (see _process_ios), and a
-        description that merely repeats the identifier carries no information either — using it
-        as the title would render "IOX1 I6 I6" under the default schema, so both get the same
-        placeholder unnamed markers use. Never empty, so no schema can render an empty name or a
-        dangling separator.
-        """
-        title = (desc or "").strip()
-        if not title or title.casefold() == ident.strip().casefold():
-            return cls._NO_NAME_TITLE
-        return title
-
-    def _add_io_entry(
-        self,
-        data: dict[str, Any],
-        io_item: dict[str, Any],
-        ext_name: str,
-        ident: str,
-        desc: str,
-        type_info: dict[str, Any],
-        schema_io: str,
-        server_alias: str,
-        ext_offline: bool = False,
-    ) -> None:
-        """Add an IO entry to data."""
-        is_binary = type_info.get("binary", False)
-        v_min = type_info.get("min", 0)
-        v_max = type_info.get("max", 1)
-        unit = type_info.get("unit", "")
-        ident_upper = ident.upper()
-
-        try:
-            type_id_raw = int(io_item.get("InOutputTypeId", 1))
-        except (ValueError, TypeError):
-            type_id_raw = 1
-
-        # Fallback classification when $IOTypesBinary unavailable.
-        if not self.io_types:
-            if re.match(r"^QI\d+$", ident_upper):
-                is_binary, v_max = False, 0
-            elif re.match(r"^Q\d+$", ident_upper) or re.match(r"^I\d+$", ident_upper):
-                is_binary, v_max = True, 1
-
-        # is_input=True → read-only sensor/binary_sensor; False → writable switch/number.
-        # Identifier prefix is the reliable source: Q* are relay/dimmer outputs (writable),
-        # I*/AI*/QI* and special names are inputs. $IOInputTypes cannot be used here because
-        # the same TypeId (e.g. 2 = binary 0/1) is shared by both inputs and outputs.
-        if re.match(r"^Q\d+$", ident_upper):
-            is_input = False
-        elif re.match(r"^(?:I|AI|QI)\d+$", ident_upper):
-            is_input = True
-        elif self.io_input_types:
-            is_input = self.io_input_types.get(str(type_id_raw), {}).get("input", True)
-        else:
-            is_input = True
-
-        unit = self._normalize_io_unit(unit)
-
-        if desc and desc.strip() and desc != ident:
-            io_name = f"{ext_name} {ident} {desc.strip()}"
-        else:
-            io_name = f"{ext_name} {ident}"
-
-        ha_name = schema_io.format_map(
-            SafeDict(ServerAlias=server_alias, ExtName=ext_name, IoId=ident, IoTitle=self._io_schema_title(desc, ident))
-        )
-
-        entry = {
-            "id": str(io_item.get("Id")),
-            "ext_name": ext_name,
-            "identifier": ident,
-            "ha_name": " ".join(ha_name.split()),
-            "name": io_name,
-            "is_binary": is_binary,
-            "is_input": is_input,
-            "unit": unit,
-            "min": v_min,
-            "max": v_max,
-            "type_id_raw": type_id_raw,
-            "value": self._clean_value(io_item.get("Value", 0)),
-            "offline": ext_offline,
-            # Inactive IOs get no entity/webhook (see _process_ios) but still need a label
-            # for the Function Plan preview — "io_all" carries every IO, this flag tells the
-            # renderer to grey the pill (Studio's own convention for an inactive element).
-            "inactive": not io_item.get("Active"),
-        }
-        data["io_all"].append(entry)
-        if not entry["inactive"]:
-            data["io"].append(entry)
 
     # --- WEB-IO MANAGEMENT ---
     async def get_webio_base_info(self, webio_name: str) -> tuple[str, bool] | None:
@@ -2160,7 +1237,7 @@ class ComexioAPI:
     ) -> tuple[float | None, float | None]:
         """Reads a single Web-IO command's live Min/Max from its edit form.
 
-        The bulk config scrape ($FubModules["10"], see _add_webhook_command) never returns
+        The bulk config scrape ($FubModules["10"], see aiocomexio.config._add_webhook_command) never returns
         Min/Max for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
         edit form is the only reliable source. Used by the nightly range check (see
         WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against
@@ -2204,7 +1281,7 @@ class ComexioAPI:
         self,
         server_id: str,
         parsed_data: dict[str, Any],
-        webio_class: str | None = None,
+        webio_class: WebioClass | None = None,
         ignored_marker_ids: set[int] | None = None,
         ignored_knx_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
@@ -2217,248 +1294,22 @@ class ComexioAPI:
         they have no HA entity, so they need no Web-IO command pushing values back via webhook.
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
         """
-        webhook_path = f"/api/webhook/comexio_{server_id}"
-        commands: list[dict[str, Any]] = []
-
-        # 1. Create Web-IO for markers
-        markers = parsed_data.get("markers", []) if webio_class in (None, WEBIO_CLASS_MARKER) else []
-        for m in markers:
-            if ignored_marker_ids and int(m["id"]) in ignored_marker_ids:
-                continue
-            commands.append(self._build_marker_webio_command(m, webhook_path))
-
-        # 2. Create Web-IO for IOs
-        io_entries = parsed_data.get("io", []) if webio_class in (None, WEBIO_CLASS_IO) else []
-        for io_item in io_entries:
-            commands.append(self._build_io_webio_command(io_item, webhook_path))
-
-        # 3. Create Web-IO for KNX objects
-        knx_entries = parsed_data.get("knx", []) if webio_class in (None, WEBIO_CLASS_KNX) else []
-        for knx_item in knx_entries:
-            if ignored_knx_ids and int(knx_item["id"]) in ignored_knx_ids:
-                continue
-            commands.append(self._build_marker_webio_command(knx_item, webhook_path, source_type=WEBIO_CLASS_KNX))
-
-        return commands
-
-    @staticmethod
-    def _lua_escape(value: Any) -> str:
-        """Escape a value for embedding in a double-quoted Lua string literal."""
-        return str(value).replace("\\", "\\\\").replace('"', '\\"')
-
-    @staticmethod
-    def _webio_data_lua(payload: str) -> str:
-        """Build the Lua `data(a)` webhook body for a Web-IO command, given its JSON payload fields."""
-        return f"function data(a)\r\n  local d = {{ {payload} }}\r\n  return json_stringify(d)\r\nend"
-
-    @staticmethod
-    def _webio_command(
-        *, name: str, type_id: int, min_v: float, max_v: float, data: str, webhook_path: str
-    ) -> dict[str, Any]:
-        """Build a Web-IO command dict, filling in the fields shared by markers and IOs."""
-        return {
-            "Name": name,
-            "TypeId": type_id,
-            "Min": min_v,
-            "Max": max_v,
-            "Parameter": webhook_path,
-            "HeaderModifier": _CONTENT_TYPE_JSON,
-            "Data": data,
-            "Protocol": 0,
-            "PostGet": 1,
-            "WebDeviceId": 0,
-            "Authentication": 0,
-            "Input": 1,
-            "ReqFreq": "",
-            "ReplyInterpreter": "",
-            "Port": "",
-            "SendOnOne": 0,
-            "Changed": 1,
-            "BaseId": 0,
-            "DefaultValue": "",
-            "DefaultActive": 1,
-            "io": [],
-        }
-
-    @staticmethod
-    def _knx_webio_range(dpt_min: float | None, dpt_max: float | None) -> tuple[float, float]:
-        """Resolve the Min/Max to embed in an analog KNX Web-IO command from a resolved DPT range.
-
-        Uses the real DPT range verbatim (only the pre-existing _safe_webio_range int16
-        danger-zone guard still applies) rather than capping it to WEBIO_MARKER_ANALOG_MIN/MAX —
-        deliberate per user decision 2026-09-20 after live-testing both ends of the scale: K8
-        (DPT9.004, 0..670760) round-trips fine, K5 (DPT12.001, 0..4294967295) gets corrupted by a
-        still-open Comexio firmware bug that rounds analog values above ~1,000,000 (see README for
-        the documented limitation). Capping the range here would dodge that bug silently today but
-        would need undoing again once Comexio ships a fix — the user chose to expose the true DPT
-        range and document the caveat instead ("dann sind wir damit aus dem Boot").
-        None (DPT unresolved, see _resolve_knx_dpt) falls back to the fully generic
-        WEBIO_MARKER_ANALOG_MIN/MAX range, unchanged from before this method existed.
-        """
-        if dpt_min is None or dpt_max is None:
-            return WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
-        return ComexioAPI._safe_webio_range(dpt_min, dpt_max)
-
-    def _resolve_knx_loopback_range(self, k_id: int, marker_id: int) -> tuple[float, float]:
-        """Resolve the Min/Max for one analog K-Element's Phase 7 loopback Web-IO command.
-
-        Unlike _build_marker_webio_command's KNX branch (which reads dpt_min/dpt_max already
-        resolved during the current poll, via _process_knx), this command is built from
-        on-demand Sync-button wiring code, so it must resolve the DPT itself against whatever
-        self._knx_dpt_catalog happens to hold right now — which can be None (no poll has ever
-        populated it yet) or stale (comexio_version has moved on since the cached fetch; see
-        get_knx_dpt_catalog's own freshness check, not applied by _resolve_knx_dpt itself).
-        Both degrade to the generic WEBIO_MARKER_ANALOG_MIN/MAX range rather than risk trusting
-        a stale chain, same as a genuinely-unresolvable DPT — but each case is logged
-        separately (mirroring _process_knx's own split for the identical situation on the HA
-        Number entity's side, found missing here in review 2026-09-20) since this path creates
-        a permanent Web-IO command that nothing later re-checks against a fresher catalog.
-        """
-        catalog = self._knx_dpt_catalog
-        catalog_fresh = catalog is not None and self._knx_dpt_catalog_version == self.comexio_version
-        dpt = self._resolve_knx_dpt(catalog or {}, str(k_id)) if catalog_fresh else None
-        if dpt is None:
-            if catalog is None:
-                reason = "catalog not yet fetched"
-            elif not catalog_fresh:
-                reason = "catalog stale (comexio_version changed since last fetch)"
-            else:
-                reason = "DPT chain resolution failed"
-            _LOGGER.debug(
-                "KNX loopback command K%s->M%s: could not resolve DPT (%s), using generic fallback range",
-                k_id,
-                marker_id,
-                reason,
-            )
-            return WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
-
-        dpt_range = KNX_DPT_ANALOG_RANGES.get(dpt)
-        if dpt_range is None:
-            _LOGGER.debug(
-                "KNX loopback command K%s->M%s: resolved DPT%s.%s has no entry in "
-                "KNX_DPT_ANALOG_RANGES, using generic fallback range",
-                k_id,
-                marker_id,
-                dpt[0],
-                dpt[1],
-            )
-            return WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
-
-        return self._knx_webio_range(dpt_range[0], dpt_range[1])
-
-    @staticmethod
-    def _build_marker_webio_command(
-        m: dict[str, Any], webhook_path: str, source_type: str = WEBIO_CLASS_MARKER
-    ) -> dict[str, Any]:
-        """Build the Web-IO command dict for a single marker or KNX object.
-
-        source_type is the literal written into the webhook Lua payload's ``type=`` field
-        ("marker" or "knx"); it decides which coordinator update path the pushed value hits.
-        For a KNX object, m may already carry dpt_min/dpt_max (set by _process_knx) — see
-        _knx_webio_range for how those replace the generic ±500,000 range with the real DPT range.
-        """
-        is_ana = m["type"] == "analog"
-        if is_ana and source_type == WEBIO_CLASS_KNX:
-            min_v, max_v = ComexioAPI._knx_webio_range(m.get("dpt_min"), m.get("dpt_max"))
-        elif is_ana:
-            min_v, max_v = WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
-        else:
-            min_v, max_v = 0, 1
-        safe_id = ComexioAPI._lua_escape(m["id"])
-        safe_type = ComexioAPI._lua_escape(source_type)
-        lua = ComexioAPI._webio_data_lua(f'id="{safe_id}", value=a, type="{safe_type}"')
-        return ComexioAPI._webio_command(
-            name=f"HA {m['name']}",
-            type_id=2 if is_ana else 1,
-            min_v=min_v,
-            max_v=max_v,
-            data=lua,
-            webhook_path=webhook_path,
+        return comexio_webio.build_webio_commands(
+            _webhook_path(server_id), parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
         )
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
-        """Build the Web-IO command dict for one K-Element's Phase 7 API-Loopback command.
+        """Web-IO command dict for one K-Element's Phase 7 API-Loopback command (aiocomexio.webio).
 
-        Unlike _webio_command's HA-webhook shape (POST, JSON body, no auth, target = HA's own
-        webhook), this command GETs Comexio's OWN /api/?action=set endpoint on every change of
-        the wired K-Element's output, writing the bridge Marker directly and closing the
-        "Punkt 4" stuck-marker loop entirely inside Comexio (see WEBIO_CLASS_NAME_KNX_LOOPBACK
-        in const.py for the full rationale). Field combination confirmed live 17.09.2026 after
-        three rounds of debugging (see project_knx_write_path_design memory, "Phase 7"):
-          - PostGet=0 (GET, not POST)
-          - Authentication=1 ("Ja") — the actual root cause found; without it the device's
-            Basic-Auth credentials (see create_webio_device) never attach to this command's
-            own outgoing request, even with the class Login=3 and correct device credentials
-            (401 Unauthorized).
-        Min/Max: resolved via _resolve_knx_loopback_range, same DPT chain and _knx_webio_range
-        logic as _build_marker_webio_command's KNX branch — see that method's own docstring for
-        exactly which situations fall back to the generic WEBIO_MARKER_ANALOG_MIN/MAX range, and
-        why each is logged.
+        The DPT range is resolved against the cached KNX DPT catalog — treated as stale once
+        comexio_version has moved on since it was fetched (see get_knx_dpt_catalog).
         """
-        min_v: float
-        max_v: float
-        min_v, max_v = (0, 1) if not is_analog else self._resolve_knx_loopback_range(k_id, marker_id)
-        param_lua = f'function parameter(a)\r\n  return "/api/?action=set&marker=M{marker_id}&value="..a\r\nend'
-        return {
-            "Name": knx_loopback_command_name(k_id, marker_id),
-            "TypeId": 2 if is_analog else 1,
-            "Min": min_v,
-            "Max": max_v,
-            "Parameter": param_lua,
-            "HeaderModifier": "",
-            "Data": "",
-            "Protocol": 0,
-            "PostGet": 0,
-            "WebDeviceId": 0,
-            "Authentication": 1,
-            "Input": 1,
-            "ReqFreq": "",
-            "ReplyInterpreter": "",
-            "Port": "",
-            "SendOnOne": 0,
-            "Changed": 1,
-            "BaseId": 0,
-            "DefaultValue": "",
-            "DefaultActive": 1,
-            "io": [],
-        }
-
-    @staticmethod
-    def _safe_webio_range(v_min: float, v_max: float) -> tuple[float, float]:
-        """Widen a Web-IO Min/Max pair whose bounds land in the int16 clamp-bug danger zone.
-
-        See WEBIO_INT16_DANGER_ZONE / WEBIO_MARKER_ANALOG_MIN docstrings for the underlying
-        Comexio bug this guards against.
-        """
-        lo, hi = WEBIO_INT16_DANGER_ZONE
-        if lo <= abs(v_min) <= hi or lo <= abs(v_max) <= hi:
-            return WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX
-        return v_min, v_max
-
-    @staticmethod
-    def _build_io_webio_command(io_item: dict[str, Any], webhook_path: str) -> dict[str, Any]:
-        """Build the Web-IO command dict for a single physical IO."""
-        is_ana = not io_item.get("is_binary", False)
-        # Use the authentic min/max from the Comexio type definition, unless it lands in the
-        # int16 danger zone (see _safe_webio_range). io_item["min"/"max"] can be present but
-        # None (scraped $ioTypes value missing) — .get()'s default only covers a missing key,
-        # so None is coerced explicitly before the abs() calls in _safe_webio_range.
-        raw_min = io_item.get("min")
-        raw_max = io_item.get("max")
-        v_min = 0 if raw_min is None else raw_min
-        default_max = 100 if is_ana else 1
-        v_max = default_max if raw_max is None else raw_max
-        v_min, v_max = ComexioAPI._safe_webio_range(v_min, v_max)
-        safe_ext = ComexioAPI._lua_escape(io_item["ext_name"])
-        safe_io_id = ComexioAPI._lua_escape(io_item["identifier"])
-        lua = ComexioAPI._webio_data_lua(f'ext="{safe_ext}", io="{safe_io_id}", value=a, type="io"')
-        return ComexioAPI._webio_command(
-            name=f"HA IO {io_item['ext_name']} {io_item['identifier']}",
-            type_id=2 if is_ana else 1,
-            min_v=v_min,
-            max_v=v_max,
-            data=lua,
-            webhook_path=webhook_path,
+        return comexio_webio.build_knx_loopback_webio_command(
+            k_id=k_id,
+            marker_id=marker_id,
+            is_analog=is_analog,
+            knx_dpt_catalog=self._knx_dpt_catalog,
+            catalog_stale=self._knx_dpt_catalog_version != self.comexio_version,
         )
 
     def generate_webio_json(
@@ -2466,7 +1317,7 @@ class ComexioAPI:
         server_id: str,
         webio_name: str,
         parsed_data: dict[str, Any],
-        webio_class: str | None = None,
+        webio_class: WebioClass | None = None,
         ignored_marker_ids: set[int] | None = None,
         ignored_knx_ids: set[int] | None = None,
     ) -> str:
@@ -2477,15 +1328,8 @@ class ComexioAPI:
         ignored_marker_ids / ignored_knx_ids are forwarded to build_webio_commands() to
         exclude ignored items.
         """
-        return json.dumps(
-            {
-                "data": "web_io",
-                "format": 1,
-                "base": {"Identifier": webio_name, "UseCookies": 0, "Login": 2, "BaseId": 0},
-                "commands": self.build_webio_commands(
-                    server_id, parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
-                ),
-            }
+        return comexio_webio.generate_webio_json(
+            _webhook_path(server_id), webio_name, parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
         )
 
     async def upload_web_io(self, server_id: str, webio_name: str, web_io_json: str) -> tuple[bool, str]:
@@ -2552,32 +1396,6 @@ class ComexioAPI:
                 "create_webio_device('%s', base_id=%s): HTTP %s, body=%r", name, base_id, resp.status, raw_text
             )
             return resp.status == 200
-
-    @staticmethod
-    def _knx_loopback_class_json(commands: list[dict[str, Any]] | None = None) -> str:
-        """Upload-ready JSON for the ComexioAPI Loopback Web-IO class.
-
-        Login=3 ("vom Geraet abhaengig") is required so the device's own username/password
-        (see create_webio_device) get attached as Basic-Auth to this class' commands — gated
-        additionally by each individual command's own Authentication=1 field (see
-        _build_knx_loopback_webio_command's docstring for why both are needed).
-
-        commands: the full initial command set to embed right away, same bulk-upload
-        pattern every per-category Marker/IO/KNX class uses (generate_webio_json ->
-        upload_web_io) — see ensure_knx_loopback_webio, whose caller already knows every
-        K-Element that needs a command at bootstrap time. Defaults to empty only for a
-        caller with nothing to embed yet; growing an existing class afterward still goes
-        through save_single_command one command at a time (button.py's Delta-Sync), same
-        as every other Web-IO class.
-        """
-        return json.dumps(
-            {
-                "data": "web_io",
-                "format": 1,
-                "base": {"Identifier": WEBIO_CLASS_NAME_KNX_LOOPBACK, "UseCookies": 0, "Login": 3, "BaseId": 0},
-                "commands": commands or [],
-            }
-        )
 
     async def ensure_knx_loopback_webio(
         self,
@@ -2676,7 +1494,7 @@ class ComexioAPI:
                 for k_id, marker_id, binary in (bridges or [])
             ]
             success, res_id = await self.upload_web_io(
-                "knx_loopback", WEBIO_CLASS_NAME_KNX_LOOPBACK, self._knx_loopback_class_json(initial_commands)
+                "knx_loopback", WEBIO_CLASS_NAME_KNX_LOOPBACK, comexio_webio.knx_loopback_class_json(initial_commands)
             )
             if not success:
                 _LOGGER.error("ensure_knx_loopback_webio: class upload failed: %s", res_id)
@@ -4105,7 +2923,7 @@ class ComexioAPI:
         project_knx_write_path_design memory).
 
         binary/analog is derived from k_type_raw via the same $IOTypesBinary catalog
-        lookup _process_source_items() uses for KNX classification (self.io_types) — the
+        lookup aiocomexio parse_config uses for KNX classification (self.io_types) — the
         bridge marker's type must match the K-element's own pin class, nothing else is
         wireable onto it (confirmed live 2026-09-14).
 
@@ -4786,7 +3604,7 @@ class ComexioAPI:
 
         The Phase 7 Loopback class lives outside WEBIO_CLASSES, so its commands are never
         keys of parse_config()'s webio_commands (that dict only ever holds HA's own Marker/IO/
-        KNX classes — see _build_webio_name_lexicon's docstring). Existence/readiness checks
+        KNX classes — see aiocomexio.config._build_webio_name_lexicon's docstring). Existence/readiness checks
         here go through webio_names instead (the all-devices lexicon), matched by the Studio
         pill-label convention "{deviceId}. {commandName}".
 
@@ -5007,7 +3825,7 @@ class ComexioAPI:
 
         present_names_fn overrides what counts as "already visible" — defaults to
         webio_commands' keys (HA's own Marker/IO/KNX classes only, see
-        _build_webio_name_lexicon's docstring for why that dict is scoped that way). A
+        aiocomexio.config._build_webio_name_lexicon's docstring for why that dict is scoped that way). A
         command living in a Web-IO class HA doesn't own the audit for (e.g. the Phase 7
         API-Loopback class) is never a key of webio_commands and would wait out every retry
         here regardless of how fast it actually appears — such callers must pass a
@@ -5127,7 +3945,7 @@ class ComexioAPI:
         if not fub_modules:
             return None
         titles: dict[int, str] = {}
-        for mid, marker in self._iter_group(fub_modules.get("2")):
+        for mid, marker in iter_group(fub_modules.get("2")):
             with suppress(TypeError, ValueError):
                 titles[int(mid)] = str((marker or {}).get("Name") or "")
         return titles
@@ -6274,7 +5092,7 @@ class ComexioAPI:
         """API write via Basic Auth."""
         auth = aiohttp.BasicAuth(self.api_user, self.api_pass or "") if self.api_user else None
 
-        if auth is not None and not self._auth_warned and not _is_local_address(self.host):
+        if auth is not None and not self._auth_warned and not is_local_address(self.host):
             _LOGGER.warning(
                 "Using Basic Auth over plain HTTP on a non-local address. Credentials may be transmitted in clear text."
             )

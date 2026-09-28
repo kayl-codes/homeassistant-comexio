@@ -349,7 +349,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._last_bulk_snapshot_fub_ids: frozenset[int] = frozenset()
         # Marker IDs (type-2 element ref_ids) referenced in a plan as of the last parse_config
         # call — an unnamed marker still needs a real entity/value if it's wired somewhere (see
-        # api._process_markers). Tracked here so a change triggers an immediate extra refresh
+        # aiocomexio parse_config). Tracked here so a change triggers an immediate extra refresh
         # instead of waiting for the next scheduled poll (which could be hours away with a long
         # scan_interval).
         self._last_referenced_marker_ids: set[str] = set()
@@ -550,11 +550,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
             # KNX groups are frequently small and gap-free (e.g. K1-K10), which is exactly the
             # shape Comexio serializes as a JSON array instead of an object (see
-            # api._process_source_items's docstring) — handle both shapes, unlike marker_data
+            # aiocomexio parse_config docstring) — handle both shapes, unlike marker_data
             # above, which has never been observed as an array in practice.
             knx_group = raw_config.get("FubModules", {}).get("11", {})
             knx_items = knx_group.values() if isinstance(knx_group, dict) else (knx_group or [])
-            # Same per-item guard as api._process_source_items, which parses this exact group:
+            # Same per-item guard as aiocomexio parse_config, which parses this exact group:
             # a malformed entry (non-dict, or Id missing/None) must be skipped here too, or a
             # single bad KNX record raises out of this comprehension and fails the entire poll.
             knx_max_id = max(
@@ -637,7 +637,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # snapshot; otherwise the fresh, authoritative poll value wins and is cached.
             #
             # knx_live_states membership is checked explicitly (not just "value differs from
-            # cache") because api._build_source_item defaults a KNX id absent from the dashboard
+            # cache") because aiocomexio.config._build_source_item defaults a KNX id absent from the dashboard
             # response to 0 — an HTTP 200 that simply omits one requested key (partial refresh,
             # unsupported/stale K-element) would otherwise overwrite a real cached value with
             # that 0 and make the entity report off/0 until the object reappears in a response
@@ -1290,7 +1290,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 return
             self.function_plan_plans = plans
             # Re-evaluate which unlabeled markers are now referenced in a plan (see
-            # api._process_markers). Compared against the set last USED by parse_config —
+            # aiocomexio parse_config). Compared against the set last USED by parse_config —
             # a no-op on every normal cycle; only an actual change (marker newly wired in,
             # or dropped from every plan) triggers an extra refresh, so the fix isn't tied
             # to (potentially very long) scan_interval waits. _last_referenced_marker_ids
@@ -1469,7 +1469,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for name, cmd in data.get("webio_commands", {}).items():
             w_id = cmd.get("webIoId")
             if w_id is not None and str(w_id) not in webio_by_id:
-                # Same {2, "2"} check as _build_webio_name_lexicon, for consistency across
+                # Same {2, "2"} check as aiocomexio.config._build_webio_name_lexicon, for consistency across
                 # both Web-IO label sources even though this one is already int-normalized.
                 webio_by_id[str(w_id)] = {"name": name, "analog": cmd.get("typeId") in {2, "2"}}
         # io_all (unfiltered, includes inactive IOs) so a plan wired to an inactive IO still
@@ -2512,7 +2512,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         orphan-cleanup in __init__.py builds its active-unique-ids set, so migrated entities
         already carry their new unique_id/device identifiers when cleanup compares against it.
         Extensions currently offline are skipped: their serial's format changes (see
-        api._is_extension_offline) when a module drops offline, which would make it
+        aiocomexio.config.is_extension_offline) when a module drops offline, which would make it
         indistinguishable from an unrelated serial.
         """
         renames: list[dict[str, str]] = []

@@ -216,7 +216,7 @@ class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity):
 
     Comexio splits a DPT3.x KNX object into two K-elements sharing one KnxDeviceId — a
     digital control bit (direction) and an analog 3-bit step code (0=break, 1-7=move), see
-    api._attach_knx_dpt3_composites and project_knx_write_path_design memory ("Punkt 4,
+    aiocomexio parse_config's DPT3 pairing and project_knx_write_path_design memory ("Punkt 4,
     Hälfte (b)"). cover.py (Blinds) and light.py (Dimmer, best-effort brightness) each build
     one HA entity per pair instead of exposing the two K-elements as separate generic
     switch/number entities. Both halves write through their own bridge Marker exactly like

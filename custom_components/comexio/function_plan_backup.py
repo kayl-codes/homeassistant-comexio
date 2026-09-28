@@ -658,7 +658,7 @@ class FunctionPlanBackupManager:
         Cold-start seed for coordinator._referenced_marker_ids(): the live bulk plan snapshot
         is loaded asynchronously AFTER the first poll cycle, but platform setup creates
         entities right after that first cycle — so an unlabeled-but-wired marker (see
-        api._process_markers) would miss entity creation on every restart without this
+        aiocomexio parse_config) would miss entity creation on every restart without this
         offline approximation. Slightly stale data (e.g. an identity whose plan was since
         deleted) is corrected by the refresh-on-change trigger once the bulk load lands.
         """

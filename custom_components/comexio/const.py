@@ -1,10 +1,33 @@
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from enum import StrEnum
 import logging
 import re
 from typing import Any
 
+# Pure Comexio/KNX domain tables live in aiocomexio and are re-exported here, so the platforms
+# keep importing them from const.
+from aiocomexio.config import ParseOptions
+from aiocomexio.const import (
+    MARKER_KNX_BRIDGE_SUFFIX_RE as MARKER_KNX_BRIDGE_SUFFIX_RE,
+    MARKER_READ_ONLY_SUFFIX as MARKER_READ_ONLY_SUFFIX,
+    MARKER_TRIGGER_SUFFIXES as MARKER_TRIGGER_SUFFIXES,
+    WEBIO_MARKER_ANALOG_MAX as WEBIO_MARKER_ANALOG_MAX,
+    WEBIO_MARKER_ANALOG_MIN as WEBIO_MARKER_ANALOG_MIN,
+    MarkerKind as MarkerKind,
+    WebioClass,
+)
+from aiocomexio.knx import (
+    KNX_DPT3_COVER_DIRECTION_DOWN as KNX_DPT3_COVER_DIRECTION_DOWN,
+    KNX_DPT3_COVER_DIRECTION_UP as KNX_DPT3_COVER_DIRECTION_UP,
+    KNX_DPT3_LIGHT_DIRECTION_DECREASE as KNX_DPT3_LIGHT_DIRECTION_DECREASE,
+    KNX_DPT3_LIGHT_DIRECTION_INCREASE as KNX_DPT3_LIGHT_DIRECTION_INCREASE,
+    KNX_DPT3_STEPCODE_BREAK as KNX_DPT3_STEPCODE_BREAK,
+    KNX_DPT3_STEPCODE_MOVE as KNX_DPT3_STEPCODE_MOVE,
+    KNX_DPT_ANALOG_RANGES as KNX_DPT_ANALOG_RANGES,
+    KNX_DPT_DEVICE_CLASS as KNX_DPT_DEVICE_CLASS,
+    KNX_DPT_DIGITAL_AMBIGUOUS as KNX_DPT_DIGITAL_AMBIGUOUS,
+    KNX_DPT_DIGITAL_DEVICE_CLASS as KNX_DPT_DIGITAL_DEVICE_CLASS,
+)
 from homeassistant.util import slugify
 
 _LOGGER = logging.getLogger(__name__)
@@ -111,19 +134,7 @@ CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
 # (the per-command key inside $FubModules["10"]) is a global counter across ALL Web-IO
 # devices on a Comexio server, never reused per-device (verified live 2026-07-27), so
 # commands from every class can share one flat webio_commands lookup without ambiguity.
-class WebioClass(StrEnum):
-    """The Web-IO device classes HA manages on the Comexio server.
-
-    A StrEnum so every existing string-based usage (dict keys, equality checks,
-    f-string interpolation, JSON payloads sent to/scraped back from Comexio)
-    keeps working unchanged, while call sites gain typo-safety via the members.
-    """
-
-    MARKER = "marker"
-    IO = "io"
-    KNX = "knx"
-
-
+# WebioClass and MarkerKind come from aiocomexio (re-exported here).
 WEBIO_CLASS_MARKER = WebioClass.MARKER
 WEBIO_CLASS_IO = WebioClass.IO
 WEBIO_CLASS_KNX = WebioClass.KNX
@@ -417,21 +428,6 @@ SYNC_DURATION_FUNCTION_PLAN_ELEMENT = (
 MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400
 
-# A marker whose Comexio-side title ends with this suffix is exposed to HA as a
-# read-only sensor/binary_sensor instead of a writable number/switch (e.g. "Boiler Temp [RO]").
-MARKER_READ_ONLY_SUFFIX = "[RO]"
-
-# "Virtueller Taster" markers: exposed to HA as a button instead of a switch. "[TP]" (Time
-# Pulse) is the legacy alias from the original 2026-06-27 discovery; "[TRIG]" is the current,
-# preferred name — both are recognized so existing [TP] markers don't need renaming.
-MARKER_TRIGGER_SUFFIXES = ("[TRIG]", "[TP]")
-
-# Auto-created write-path bridge Markers (Entwurf A "Merker-Brücke", see
-# project_knx_write_path_design memory) are titled "<K-Titel> [K<k_id>]" by
-# create_knx_bridge_marker() — purely internal wiring glue with no HA entity of its own and
-# no expected Web-IO command (the KNX object it feeds already gets its own K-entity/Web-IO).
-MARKER_KNX_BRIDGE_SUFFIX_RE = re.compile(r"\[K\d+\]$")
-
 # Round-boundary size the KNX bridge marker block is aligned to (user decision 2026-09-14,
 # see project_knx_write_path_design memory) — also caps how far _free_marker_ids() looks
 # above an already-established block's start when hunting for a reusable blank marker, so
@@ -466,208 +462,6 @@ def knx_loopback_command_name(k_id: int, marker_id: int) -> str:
 # since it's checked once per call, not once per resolved id.
 MARKER_DELETE_MAX_COUNT = 200
 
-
-class MarkerKind(StrEnum):
-    """How a marker is exposed to HA, derived from its Comexio-side title suffix."""
-
-    NORMAL = "normal"
-    READ_ONLY = "read_only"
-    TRIGGER = "trigger"
-    KNX_BRIDGE = "knx_bridge"
-
-
-# Analog markers have no configurable value range on the Comexio side, so their Web-IO
-# datapoints must not clamp. Comexio's Web-IO push mechanism has two independently verified,
-# server-side bugs (systematically reproduced 2026-08-30, unrelated to the HA integration
-# code): (1) json_stringify() rounds numeric values to 6 significant decimal digits, and
-# (2) whenever a Web-IO command's own Min/Max bounds sit at/near the signed-16-bit boundary
-# (~±32767/32768), EVERY pushed value is silently clamped to the configured Max regardless of
-# the actual input. ±500,000 was empirically confirmed to dodge both: it clears the int16
-# danger zone by a wide margin, and its own magnitude never exceeds 6 significant digits.
-# Physical IOs keep the authentic min/max from their Comexio type definition instead, but
-# see WEBIO_INT16_DANGER_ZONE for the same guard applied there.
-WEBIO_MARKER_ANALOG_MIN = -500_000
-WEBIO_MARKER_ANALOG_MAX = 500_000
-
-# Physical IO ranges scraped from Comexio's own type definitions (percent, temperature,
-# voltage, ...) normally sit far outside the int16 danger zone described above, but a raw or
-# counter-style IO type could plausibly land its Min/Max right on that boundary. Any IO whose
-# authentic Min or Max falls in this band gets widened to the same verified-safe
-# WEBIO_MARKER_ANALOG_MIN/MAX range before being sent as a Web-IO command.
-WEBIO_INT16_DANGER_ZONE = (30_000, 40_000)
-
-# KNX DPT (Datenpunkttyp) analog value ranges, keyed by the official KNX Association
-# datapoint type numbering (KnxBaseTypeId, KnxSubId) — e.g. (9, 7) = DPT9.007 Humidity.
-# Comexio's own $FubModules["11"]/$IOTypesBinary catalogs carry no usable value range for
-# KNX object types (min/max come back as a 0/0 placeholder), so the real range is instead
-# resolved per K-element via ComexioAPI.get_knx_dpt_catalog() (the $KnxDpt/$KnxDevices/
-# $KnxPoints chain scraped from /admin/knx_one_wire/knx/). This widens the HA Number entity's
-# own displayed/validated range, and is also used verbatim (see ComexioAPI._knx_webio_range) as
-# the Min/Max embedded in the two Web-IO commands built for a KNX object (the HA-webhook push
-# command and the Phase 7 API-Loopback command) instead of the generic WEBIO_MARKER_ANALOG_MIN/MAX
-# range — deliberately NOT capped to that range, even though Comexio itself still has an open
-# firmware bug (confirmed live by the user 2026-09-20, fix targeted for 11.1.4) that rounds/
-# corrupts analog values above ~1,000,000; see README for the documented limitation.
-# Composite DPTs (DPT3.x control+step, DPT18.001 control+scene number) split into two
-# Comexio Points from one Device; the binary half never reaches this table (it becomes a
-# switch/binary_sensor entity, not a Number), so only each composite's analog component is
-# listed here.
-# Deliberately excluded: DPT1 (binary, never reaches this table), DPT10/11/19 (Time/Date/
-# DateTime — Comexio itself refuses to create K-elements for these), and DPT14 (4-byte
-# float — no tighter KNX-standard-defined range than the IEEE754 span, so it falls back to
-# WEBIO_MARKER_ANALOG_MIN/MAX like any other unresolved KNX analog element).
-# The 4th tuple element is the HA Number entity's native_step (found missing entirely in
-# review 2026-09-20: ComexioKnxNumber never set a DPT-derived step, so every KNX number
-# entity silently inherited ComexioMarkerNumber's hardcoded 0.1 regardless of the underlying
-# encoding — wrong for every whole-number DPT below, e.g. a 2-octet counter got a 0.1 step
-# that doesn't exist in the actual 1-count resolution). Two kinds of encoding occur here:
-# - Raw N-octet integer values (DPT5.4/5.5/5.6/5.10, 6.x, 7.x, 8.x, 12.x, 13.x, 17.1, 18.1,
-#   and the DPT3.x step code): the wire value IS an integer 1:1, so step=1.
-# - KNX "scaled" 1-byte types (DPT5.1 Scaling, DPT5.3 Angle): the wire value is a raw byte
-#   0-255 linearly mapped onto the listed min..max span, so the real resolution is
-#   (max-min)/255 — using step=1 here would make the actual on-the-wire granularity
-#   unreachable via the HA slider/stepper, and using the old flat 0.1 doesn't line up with
-#   the grid either (see K7/DPT5.001 in dev-tools/knx_seed_test_matrix.py: raw byte 12 ->
-#   12*100/255 = 4.70588..., not a multiple of 0.1 — exactly the "enter a valid value, next
-#   are 4.7 and 4.8" glitch reported live 2026-09-20).
-# - DPT9 (2-octet float) keeps the pre-existing flat 0.1 default explicitly here (no simple
-#   universal resolution across its whole span) — unchanged behavior, just made explicit now
-#   that every entry must carry a step.
-# Format: {(base_type_id, sub_id): (min, max, unit, step)}
-KNX_DPT_ANALOG_RANGES: dict[tuple[int, int], tuple[float, float, str, float]] = {
-    # DPT3 - 1-Bit control + 3-Bit step code (Dimming/Blinds), analog half is the step value.
-    (3, 7): (0, 7, "", 1),
-    (3, 8): (0, 7, "", 1),
-    # DPT5 - 8-Bit unsigned value.
-    (5, 1): (0, 100, "%", 100 / 255),  # Scaling
-    (5, 3): (0, 360, "°", 360 / 255),  # Angle
-    (5, 4): (0, 255, "%", 1),  # Percent_U8
-    (5, 5): (0, 255, "", 1),  # DecimalFactor
-    (5, 6): (0, 254, "", 1),  # Tariff
-    (5, 10): (0, 255, "", 1),  # Value_1_Ucount (pulse counter)
-    # DPT6 - 8-Bit signed value.
-    (6, 1): (-128, 127, "%", 1),  # Percent_V8
-    (6, 10): (-128, 127, "", 1),  # Value_1_Count
-    # DPT7 - 2-Octet unsigned value.
-    (7, 1): (0, 65535, "", 1),
-    (7, 2): (0, 65535, "ms", 1),
-    (7, 3): (0, 65535, "10ms", 1),
-    (7, 4): (0, 65535, "100ms", 1),
-    (7, 5): (0, 65535, "s", 1),
-    (7, 6): (0, 65535, "min", 1),
-    (7, 7): (0, 65535, "h", 1),
-    (7, 10): (0, 65535, "", 1),
-    # DPT8 - 2-Octet signed value.
-    (8, 1): (-32768, 32767, "", 1),
-    (8, 2): (-32768, 32767, "ms", 1),
-    (8, 3): (-32768, 32767, "10ms", 1),
-    (8, 4): (-32768, 32767, "100ms", 1),
-    (8, 5): (-32768, 32767, "s", 1),
-    (8, 6): (-32768, 32767, "min", 1),
-    (8, 7): (-32768, 32767, "h", 1),
-    (8, 10): (-32768, 32767, "%", 1),
-    # DPT9 - 2-Octet float value (KNX floating-point-16, format range -671088.64..670760.96).
-    (9, 1): (-273, 670760, "°C", 0.1),  # Value_Temp
-    (9, 2): (-670760, 670760, "K", 0.1),  # Value_Tempd (temperature difference)
-    (9, 4): (0, 670760, "lx", 0.1),  # Value_Lux
-    (9, 5): (0, 670760, "m/s", 0.1),  # Value_Wsp
-    (9, 6): (0, 670760, "Pa", 0.1),  # Value_Pres
-    (9, 7): (0, 100, "%", 0.1),  # Value_Humidity (physically bounded)
-    (9, 8): (0, 670760, "ppm", 0.1),  # Value_AirQuality
-    (9, 20): (-670760, 670760, "V", 0.1),  # Value_Volt
-    (9, 21): (-670760, 670760, "mA", 0.1),  # Value_Curr
-    (9, 24): (-670760, 670760, "kW", 0.1),  # Power
-    # DPT12 - 4-Octet unsigned value.
-    (12, 1): (0, 4294967295, "", 1),
-    # DPT13 - 4-Octet signed value.
-    (13, 1): (-2147483648, 2147483647, "", 1),
-    (13, 10): (-2147483648, 2147483647, "Wh", 1),
-    (13, 11): (-2147483648, 2147483647, "VAh", 1),
-    (13, 12): (-2147483648, 2147483647, "VARh", 1),
-    (13, 13): (-2147483648, 2147483647, "kWh", 1),
-    (13, 14): (-2147483648, 2147483647, "kVAh", 1),
-    (13, 15): (-2147483648, 2147483647, "kVARh", 1),
-    (13, 100): (-2147483648, 2147483647, "s", 1),
-    # DPT17 - Scene number.
-    (17, 1): (0, 63, "", 1),
-    # DPT18 - Scene control (1-Bit learn/execute + 6-Bit scene number); analog half is the
-    # scene-number component.
-    (18, 1): (0, 63, "", 1),
-}
-
-# Value shared by both homeassistant.components.number.NumberDeviceClass.DURATION and
-# homeassistant.components.sensor.SensorDeviceClass.DURATION (verified identical, see
-# KNX_DPT_DEVICE_CLASS docstring below) — extracted to avoid the S1192 duplicated-literal
-# finding the raw string triggers at 8 occurrences.
-_DC_DURATION = "duration"
-
-# Device class (as its plain .value string, so this module doesn't have to import either
-# entity-platform's enum) for the DPTs above whose KNX_DPT_ANALOG_RANGES unit exactly matches
-# one of that device class's HA-allowed units — checked against both
-# homeassistant.components.number.const.DEVICE_CLASS_UNITS and
-# homeassistant.components.sensor.const.DEVICE_CLASS_UNITS (2026-09-20): every value below
-# resolves to the identical allowed-unit set on both platforms, so this one table serves
-# ComexioKnxNumber (NumberDeviceClass) and ComexioKnxSensor (SensorDeviceClass) alike.
-# Deliberately excludes every "%"-unit DPT (5.1 Scaling, 5.4 Percent_U8, 6.1 Percent_V8,
-# 8.10) — HUMIDITY is only correct for 9.7, and a shared "%" unit does not imply a shared
-# meaning. Also excludes the composite control DPTs (3.7/3.8), the *Ah/*ARh energy variants
-# (their unit casing/reactive vs. apparent split doesn't match any HA device class), and the
-# 10ms/100ms DPT7/8 sub-types (not valid HA duration units). Missing from this table ==
-# no device_class; the entity still gets its own icon regardless (ComexioKnxNumber always
-# sets "mdi:knx" unconditionally — a device_class here changes unit-conversion/statistics
-# behavior, not the icon).
-KNX_DPT_DEVICE_CLASS: dict[tuple[int, int], str] = {
-    (7, 2): _DC_DURATION,  # Value_2_Ucount, ms
-    (7, 5): _DC_DURATION,  # s
-    (7, 6): _DC_DURATION,  # min
-    (7, 7): _DC_DURATION,  # h
-    (8, 2): _DC_DURATION,  # ms
-    (8, 5): _DC_DURATION,  # s
-    (8, 6): _DC_DURATION,  # min
-    (8, 7): _DC_DURATION,  # h
-    (9, 1): "temperature",  # Value_Temp
-    (9, 2): "temperature_delta",  # Value_Tempd
-    (9, 4): "illuminance",  # Value_Lux
-    (9, 5): "wind_speed",  # Value_Wsp
-    (9, 6): "pressure",  # Value_Pres
-    (9, 7): "humidity",  # Value_Humidity
-    (9, 20): "voltage",  # Value_Volt
-    (9, 21): "current",  # Value_Curr
-    (9, 24): "power",  # Power
-    (13, 10): "energy",  # Wh
-    (13, 13): "energy",  # kWh
-    (13, 100): _DC_DURATION,  # LongDeltaTimeSec, s
-}
-
-# DPT1.x (Binary) digital device_class mapping — consumed only by ComexioKnxBinarySensor
-# (a plain HomeAssistant BinarySensorDeviceClass value string). A digital KNX K-element
-# defaults to ComexioKnxSwitch (writable) unless titled "[RO]" (see the MarkerKind title-
-# suffix heuristic in _process_source_items); SwitchDeviceClass has no matching values
-# (only SWITCH/OUTLET), so this table only ever applies once an item is read-only and lands
-# on the binary_sensor platform instead. Missing from this table == no device_class (plain
-# on/off) — same convention as KNX_DPT_DEVICE_CLASS above; covers Schalter/Bool/Freigabe/
-# Flanke/Binärwert (1.001-1.004/1.006), none of which carry HA-recognized semantics beyond
-# generic on/off (found missing entirely in review 2026-09-20, user needs these to set
-# entity types correctly — see project_knx_write_path_design memory).
-# DPT1.019 ("Tür/Fenster") can't be told apart from the DPT alone — KNX itself uses one type
-# for both door and window contacts — so DOOR is a best-effort default here, same limitation
-# ComexioBinarySensor's plain-IO name heuristic already has (see binary_sensor.py).
-KNX_DPT_DIGITAL_DEVICE_CLASS: dict[tuple[int, int], str] = {
-    (1, 5): "problem",  # Alarm
-    (1, 18): "occupancy",  # Anwesenheit
-    (1, 19): "door",  # Tür/Fenster (best-effort, see comment above)
-}
-
-# The remaining DPT1.x subtypes (Schalter/Bool/Freigabe/Flanke/Binärwert) are physically
-# ambivalent: KNX uses the identical DPT for a real toggle switch, a momentary push-button
-# ("Taster" -> HA "[TRIG]"), and a pure status readback ("[RO]") alike — the DPT alone
-# cannot decide which, only the installer knows the real wiring (user decision 2026-09-20,
-# see project_knx_write_path_design memory). Unlike KNX_DPT_DIGITAL_DEVICE_CLASS's 3 entries
-# (which api._auto_suffix_unambiguous_knx tags "[RO]" automatically, no user input needed),
-# a digital item whose DPT is in this set instead raises a Repair issue
-# (coordinator._audit_knx_dpt_ambiguous) letting the user classify it manually.
-KNX_DPT_DIGITAL_AMBIGUOUS: set[tuple[int, int]] = {(1, 1), (1, 2), (1, 3), (1, 4), (1, 6)}
-
 # How many consecutive poll cycles coordinator._auto_suffix_unambiguous_knx retries a KNX
 # object whose rename_knx_object() call failed, before giving up on it for the rest of this
 # coordinator's runtime. Bounds a transient failure (e.g. a momentary HTTP error while Comexio
@@ -675,27 +469,6 @@ KNX_DPT_DIGITAL_AMBIGUOUS: set[tuple[int, int]] = {(1, 1), (1, 2), (1, 3), (1, 4
 # genuinely persistent failure (stale admin session, name collision) to a handful of attempts
 # rather than hammering the API every ~15 min forever.
 KNX_DPT_AUTOTAG_MAX_RETRIES = 3
-
-# DPT3.x (Dimmer 3.007 / Blinds 3.008) composite objects: Comexio splits each into two
-# K-elements sharing one KnxDeviceId — a digital control bit (direction) and an analog
-# 3-bit step code (0=break, 1-7=move), see dev-tools/knx_seed_test_matrix.py's
-# save_device()/points[0]/points[1]. api._attach_knx_dpt3_composites() tags both halves so
-# cover.py/light.py can expose the pair as one composite entity instead of two disconnected
-# generic switch/number entities (see project_knx_write_path_design memory, "Punkt 4,
-# Hälfte (b)"). Sync/audit/wiring logic (button.py, coordinator.py) is untouched by this —
-# both K-elements keep their own bridge Marker exactly as before.
-KNX_DPT3_COMPOSITE_DOMAIN: dict[tuple[int, int], str] = {
-    (3, 7): "light",
-    (3, 8): "cover",
-}
-
-# KNX Association DPT3 control-bit encoding (public standard, not Comexio-specific).
-KNX_DPT3_COVER_DIRECTION_UP = 0
-KNX_DPT3_COVER_DIRECTION_DOWN = 1
-KNX_DPT3_LIGHT_DIRECTION_DECREASE = 0
-KNX_DPT3_LIGHT_DIRECTION_INCREASE = 1
-KNX_DPT3_STEPCODE_BREAK = 0
-KNX_DPT3_STEPCODE_MOVE = 1
 
 # Best-effort Dimmer (DPT3.007) brightness tracking (see light.ComexioKnxLight): DPT3.007
 # carries no absolute value at all, only relative increase/decrease telegrams — assumed
@@ -722,7 +495,7 @@ def fw_update_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_fw_update"
 
 
-# Web-IO analog range check: the bulk config scrape ($FubModules["10"], see api.py
+# Web-IO analog range check: the bulk config scrape ($FubModules["10"], see aiocomexio.config
 # _add_webhook_command) never returns a Web-IO command's actual Min/Max for HA's own
 # commands (confirmed live 2026-08-30) — Comexio only exposes those via each command's
 # individual edit form. Reading that form costs one HTTP GET per analog command
@@ -1144,3 +917,16 @@ def expand_ignored_marker_ids(raw: str, prefix_chars: str = "Mm") -> set[int]:
         else:
             result.add(parsed)
     return result
+
+
+def is_valid_entity_name_schema(schema: Any) -> bool:
+    """True if aiocomexio accepts schema as an entity-name template (str.format_map with named keys).
+
+    parse_config validates all schemas up front and rejects the whole config over one malformed
+    schema, so callers check a schema before saving or using it.
+    """
+    try:
+        ParseOptions(schema_marker=schema)
+    except ValueError:
+        return False
+    return True
