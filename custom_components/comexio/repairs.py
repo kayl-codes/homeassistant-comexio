@@ -1040,6 +1040,15 @@ class ComexioRepairFlow(RepairsFlow):
                 "[%s] Reload after uninstall cleanup failed — reload the integration manually",
                 coordinator.server_id,
             )
+            # Posted regardless of notify_enabled: the flow has already closed, and without a
+            # reload the entities keep reflecting the pre-cleanup state.
+            persistent_notification.async_create(
+                self.hass,
+                "The cleanup finished, but reloading the integration afterwards failed (see the log). "
+                "Reload the Comexio integration manually so its entities reflect the cleaned-up state.",
+                title="Comexio: reload after uninstall cleanup failed",
+                notification_id=f"comexio_cleanup_reload_{coordinator.server_id}",
+            )
 
     async def async_step_knx_dpt_suffix(self, user_input=None):
         """Handle the KNX DPT1.x ambiguous-classification repair flow.
