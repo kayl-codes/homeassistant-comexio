@@ -5313,7 +5313,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def async_fresh_trigger_audit(
         self, snapshot: dict[str, Any] | None = None
-    ) -> tuple[dict[int, list[int]], dict[int, list[int]], list[dict[str, Any]] | None]:
+    ) -> tuple[dict[int, list[int]], dict[int, list[int]], list[dict[str, Any]] | None] | None:
         """Fetch Comexio's config directly and re-run the trigger-pair audit against it.
 
         snapshot: a parsed config from async_fresh_knx_audits whose relevant plans were
@@ -5322,10 +5322,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         a second time (several seconds on a loaded server) is skipped. An edit made concurrently in
         the Comexio web UI is picked up by the next poll, as for any fetch.
 
-        Returns (missing_by_ref, orphan_by_ref, markers): markers is the freshly parsed marker
-        list (None when the audit was skipped) — the caller's bridge-Marker title fallback
-        (button.py _knx_bridge_marker_id_by_title) needs the bridge Markers this same sync just
-        created, which self.data cannot show: it stays frozen for as long as in_sync is True.
+        Returns (missing_by_ref, orphan_by_ref, markers), or None when the audit was skipped (config
+        or plan fetch failed, trigger plan not loaded) — distinct from "nothing to wire" so the sync
+        result can say the check did not run. markers is the freshly parsed marker list — the caller's
+        bridge-Marker title fallback (button.py _knx_bridge_marker_id_by_title) needs the bridge
+        Markers this same sync just created, which self.data cannot show: it stays frozen for as long
+        as in_sync is True.
 
         async_request_refresh() is *not* an option here: _async_update_data() returns the
         existing (possibly stale) self.data as-is whenever self.in_sync is True, which covers
@@ -5341,7 +5343,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         trigger id lists and make _audit_trigger_pairs() read every existing source element
         in the trigger plan as orphaned, deleting valid self-reset pairs over what was really
         just a transient fetch failure. So an empty result skips the audit entirely
-        ({}, {}, None — a safe no-op); the next successful poll or sync retries it.
+        (None — a safe no-op); the next successful poll or sync retries it.
 
         _audit_all_trigger_pairs() can itself return None (trigger plan exists but its data
         hasn't landed in the bulk snapshot yet) — no longer treated as an unavoidable dead end:
@@ -5368,7 +5370,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         parsed = snapshot if snapshot is not None else await self._async_fetch_trigger_audit_config()
         if parsed is None:
-            return {}, {}, None
+            return None
         # parse_config() itself doesn't know about import_* opt-in flags and returns every
         # category unfiltered — but that's fine here: _trigger_ids_by_ref() now does its own
         # active_webio_classes gating (an earlier version of this method instead blanked an
@@ -5383,7 +5385,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "this sync's trigger-pair check, will retry on the next poll",
                 self.server_id,
             )
-            return {}, {}, None
+            return None
         # An empty list (config fetched but without the marker module) is no evidence of
         # "no bridge Markers" — None lets the caller fall back to the cached list instead.
         return (*trigger_audit_result, parsed.get("markers") or None)
@@ -5412,10 +5414,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def async_fresh_knx_audits(
         self,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+    ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None, dict[str, Any] | None]:
         """Fetch Comexio's config once and re-run the knx_bridge_missing and knx_bridge_loopback_missing audits.
 
-        Returns (bridge_missing, loopback_missing, snapshot). snapshot is the parsed config when every
+        Returns (bridge_missing, loopback_missing, snapshot). A list is None when that check was
+        skipped (fetch failed, relevant plan not loaded) — distinct from [] ("nothing missing", or the
+        check does not apply) so the sync result can say it did not run. snapshot is the parsed config when every
         relevant plan was also force-refetched successfully in this call — then it is exactly as fresh as
         what async_fresh_trigger_audit would fetch itself, and the trigger step reuses it as long as
         nothing was written to Comexio in between (button.py _wire_knx_full); None otherwise.
@@ -5436,7 +5440,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         get_raw_config() returns {} on an HTTP failure rather than raising — an empty result skips
         both audits (safe no-op) instead of misreading a transient fetch failure as "no KNX objects".
-        A relevant plan not yet in the bulk snapshot defers the affected check (returns []) rather than
+        A relevant plan not yet in the bulk snapshot defers the affected check (None) rather than
         risk misreading "not loaded yet" as "nothing wired, everything missing".
 
         Gated on the same has_active_plan check the live audit uses (see _async_update_data) —
@@ -5446,7 +5450,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cached — every KNX object would be misreported as bridge-missing, potentially auto-creating a
         KNX cluster plan the user never opted into via Managed Function Plan.
         """
-        if WebioClass.KNX not in self.active_webio_classes or not self._has_active_function_plan():
+        # No relevant plan at all (legacy "auto" selection without a plan map) is "does not apply",
+        # not "skipped": _knx_bridge_marker_by_k_id() would return None on every sync, and the next
+        # poll could never resolve the reported skip.
+        if (
+            WebioClass.KNX not in self.active_webio_classes
+            or not self._has_active_function_plan()
+            or not self._function_plan_check_fub_ids()
+        ):
             return [], [], None
         raw_config = await self.api.get_raw_config()
         if not raw_config:
@@ -5455,7 +5466,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "misreading it as zero KNX objects",
                 self.server_id,
             )
-            return [], [], None
+            return None, None, None
         parsed = self.api.parse_config(raw_config)
         # The loopback repair needs the optional API username/password and aborts deterministically
         # without them — no item (instead of a permanently-unfixable one), same as the live poll.
@@ -5470,11 +5481,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "this sync's loopback check rather than risk auditing stale (pre-write) plan data",
                 self.server_id,
             )
-            return bridge_missing, [], None
+            return bridge_missing, None, None
         return bridge_missing, self._knx_loopback_missing_items(parsed), parsed
 
-    def _knx_bridge_missing_items(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
-        """knx_bridge_missing items for a freshly parsed config (see async_fresh_knx_audits)."""
+    def _knx_bridge_missing_items(self, parsed: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """knx_bridge_missing items for a freshly parsed config; None when skipped (see async_fresh_knx_audits)."""
         knx_bridge_marker_by_k_id = self._knx_bridge_marker_by_k_id()
         if knx_bridge_marker_by_k_id is None:
             _LOGGER.warning(
@@ -5482,7 +5493,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "snapshot — skipping this sync's bridge check, will retry on the next poll",
                 self.server_id,
             )
-            return []
+            return None
         ignored_ids = self.ignored_ids_for(WebioClass.KNX)
         return [
             {
@@ -5496,8 +5507,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if int(k["id"]) not in ignored_ids and str(k["id"]) not in knx_bridge_marker_by_k_id
         ]
 
-    def _knx_loopback_missing_items(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
-        """knx_bridge_loopback_missing items for a freshly parsed config (see async_fresh_knx_audits).
+    def _knx_loopback_missing_items(self, parsed: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """knx_bridge_loopback_missing items for a fresh config; None when skipped (see async_fresh_knx_audits).
 
         Phase 7 counterpart of the bridge audit: a bridge Marker/K-Element pair created earlier in
         *this same* sync run is invisible to last_audit_results, so without the fresh audit the
@@ -5511,7 +5522,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "snapshot — skipping this sync's loopback check, will retry on the next poll",
                 self.server_id,
             )
-            return []
+            return None
         sink_counts: dict[str, int] = {}
         for k_ref_id, _webio_ref_id in wired_knx_webio_pairs:
             sink_counts[k_ref_id] = sink_counts.get(k_ref_id, 0) + 1

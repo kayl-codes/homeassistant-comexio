@@ -131,6 +131,18 @@ def _post_result_notification(hass: HomeAssistant, notif_id: str, msg: str, titl
     persistent_notification.async_create(hass, msg, title=title, notification_id=result_id)
 
 
+def _skipped_check_line(check: str) -> str:
+    """Function Plan block line for a mid-sync re-check that could not run.
+
+    Without it a skipped check reads exactly like "nothing to wire"; the gap itself is not lost,
+    the next poll re-audits it and raises the usual repair issue.
+    """
+    return (
+        f"{ICON_WARNING} {check}: check skipped, Comexio's current state could not be read"
+        " — re-checked on the next poll, see log"
+    )
+
+
 def _plan_summary_line(
     plan_name: str,
     is_fresh: bool,
@@ -1695,9 +1707,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if refresh_audit:
             # One-shot: the snapshot is only valid right after the KNX step that left it.
             snapshot, ctx.unchanged_config_snapshot = ctx.unchanged_config_snapshot, None
-            missing_by_ref, orphan_by_ref, ctx.fresh_markers = await self.coordinator.async_fresh_trigger_audit(
-                snapshot
-            )
+            fresh = await self.coordinator.async_fresh_trigger_audit(snapshot)
+            if fresh is None:
+                ctx.fresh_markers = None
+                return [_skipped_check_line("Trigger pairs")]
+            missing_by_ref, orphan_by_ref, ctx.fresh_markers = fresh
         else:
             audit_data = getattr(self.coordinator, "last_audit_results", {})
             missing_by_ref = audit_data.get("function_plan_trigger_missing", {})
@@ -1971,13 +1985,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self._merge_gap_source_ids(source_ids_by_cat, gap_items, gap_keys)
         read_path_ids = set(source_ids_by_cat.get(WebioClass.KNX, []))
 
-        snapshot = None
-        if refresh_audit:
-            bridge_missing, loopback_missing, snapshot = await self.coordinator.async_fresh_knx_audits()
-        else:
-            audit_data = getattr(self.coordinator, "last_audit_results", {})
-            bridge_missing = audit_data.get("knx_bridge_missing", [])
-            loopback_missing = audit_data.get("knx_bridge_loopback_missing", [])
+        bridge_missing, loopback_missing, snapshot, skipped = await self._knx_audit_items(refresh_audit)
         bridge_by_id = {int(item["ref_id"]): item for item in bridge_missing}
         loopback_by_id = {int(item["ref_id"]): item for item in loopback_missing}
 
@@ -1985,11 +1993,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if not all_k_ids:
             # Nothing is written below, so Comexio still matches the snapshot.
             ctx.unchanged_config_snapshot = snapshot
-            return []
+            return skipped
 
         plan_to_ids, created_plans, failed_plans = await self.coordinator.resolve_knx_clusters(sorted(all_k_ids))
         # Surface a resolve failure to the user, not just the log — see _wire_source_clusters.
-        summary: list[str] = [
+        summary: list[str] = skipped + [
             f"{ICON_WARNING} KNX cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
         ]
         if not plan_to_ids:
@@ -2042,6 +2050,30 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             if line:
                 summary.append(line)
         return summary
+
+    async def _knx_audit_items(
+        self, refresh_audit: bool
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, list[str]]:
+        """(bridge_missing, loopback_missing, snapshot, skipped-check lines) for _wire_knx_full.
+
+        refresh_audit re-audits against Comexio's current config (async_fresh_knx_audits); a check
+        it had to skip counts as nothing missing for this run and gets its own result line.
+        """
+        if not refresh_audit:
+            audit_data = getattr(self.coordinator, "last_audit_results", {})
+            return (
+                audit_data.get("knx_bridge_missing", []),
+                audit_data.get("knx_bridge_loopback_missing", []),
+                None,
+                [],
+            )
+        bridge_missing, loopback_missing, snapshot = await self.coordinator.async_fresh_knx_audits()
+        skipped = [
+            _skipped_check_line(check)
+            for check, items in (("KNX write-path bridges", bridge_missing), ("KNX API-Loopback", loopback_missing))
+            if items is None
+        ]
+        return bridge_missing or [], loopback_missing or [], snapshot, skipped
 
     async def _prestage_knx_webio(
         self,
