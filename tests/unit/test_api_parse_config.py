@@ -169,19 +169,3 @@ def test_io_without_description_gets_placeholder_title(basic_result: dict[str, A
     io = _by_id(basic_result["io"])["13"]
 
     assert (io["ha_name"], io["name"]) == ("AI1 #nn", "BASE AI1")
-
-
-@pytest.mark.parametrize(
-    ("desc", "ident", "expected"),
-    [
-        ("Licht Flur", "Q1", "Licht Flur"),
-        ("  Licht Flur ", "Q1", "Licht Flur"),
-        ("", "I6", "#nn"),
-        ("   ", "I6", "#nn"),
-        ("I6", "I6", "#nn"),
-        ("i6", "I6", "#nn"),
-        ("I6 Diele", "I6", "I6 Diele"),
-    ],
-)
-def test_io_schema_title(desc: str, ident: str, expected: str) -> None:
-    assert ComexioAPI._io_schema_title(desc, ident) == expected

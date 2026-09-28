@@ -90,7 +90,7 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 | File | Role |
 |------|------|
 | `__init__.py` | Entry setup, webhook registration, orphan entity cleanup, `update_listener` |
-| `api.py` | `ComexioAPI`: RSA login, config HTML scraping/parsing, full Web-IO lifecycle |
+| `api.py` | `ComexioAPI`: RSA login, config fetch, full Web-IO lifecycle; parsing, scraping and Web-IO command building come from `aiocomexio` (`config`, `scrape`, `webio`) |
 | `coordinator.py` | `ComexioCoordinator`: polling, audit logic, webhook state merging, sync lock |
 | `button.py` | Sync button (delta vs. recreate strategy), cancel button, `press_action` service |
 | `repairs.py` | HA Repairs flow — lets user pick audit fix action from the UI |
@@ -139,7 +139,7 @@ The entity_id is `const.stable_object_id(unique_id)`, requested by `entity.Comex
 
 ### Entity naming (configurable)
 
-Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templates. `SafeDict` (in `api.py`) leaves unknown `{keys}` unchanged. Default schemas:
+Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templates. `SafeDict` (in `aiocomexio.config`) leaves unknown `{keys}` unchanged. Default schemas:
 
 - Marker: `"M{MarkerId} {MarkerTitle}"`
 - IO: `"{IoId} {IoTitle}"` — no `{ExtName}`: IO entities sit on one device per extension and use `has_entity_name`, so the friendly name is already "`<server> <ext>` + entity name". The old default `"{ExtName} {IoId} {IoTitle}"` (`LEGACY_DEFAULT_SCHEMA_IO`) is pinned into config entries that never saved a schema (entry migration 1.2 → 1.3), so existing installs keep their names.

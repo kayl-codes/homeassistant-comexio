@@ -30,6 +30,7 @@ from .const import (
     SourceCategory,
     WebioClass,
     ignore_list_categories,
+    is_valid_entity_name_schema,
     parse_ignored_marker_tokens,
 )
 
@@ -277,6 +278,12 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 _LOGGER.debug("Invalid numeric option %s=%r: %s", key, user_input[key], e)
                 errors["base"] = "invalid_number"
                 return
+
+        schema_keys = [cat.schema_conf_key for cat in source_cats if cat.key not in hidden_cats]
+        schema_keys.append(CONF_SCHEMA_IO)
+        for key in schema_keys:
+            if key in user_input and not is_valid_entity_name_schema(user_input[key]):
+                errors[key] = "invalid_schema"
 
         for cat in source_cats:
             try:

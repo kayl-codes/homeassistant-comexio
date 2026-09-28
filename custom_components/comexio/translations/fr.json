@@ -133,7 +133,8 @@
       }
     },
     "error": {
-      "invalid_number": "Veuillez saisir un nombre entier valide."
+      "invalid_number": "Veuillez saisir un nombre entier valide.",
+      "invalid_schema": "Schéma de nommage invalide. Utilisez uniquement les noms de variables indiqués entre accolades et fermez chaque accolade."
     }
   },
   "entity": {

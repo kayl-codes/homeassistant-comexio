@@ -133,7 +133,8 @@
       }
     },
     "error": {
-      "invalid_number": "Please enter a valid whole number."
+      "invalid_number": "Please enter a valid whole number.",
+      "invalid_schema": "Invalid naming schema. Only use the listed variable names inside curly braces, and close every brace."
     }
   },
   "entity": {
