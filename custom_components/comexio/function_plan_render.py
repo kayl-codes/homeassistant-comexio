@@ -1,4 +1,4 @@
-# Version: 0.8.5
+# Version: 0.8.6
 """Renders a Function Plan (elements + connections) as a labelled diagram.
 
 Pure functions only — no Comexio API calls, no HA dependencies. Works identically for a
@@ -75,6 +75,7 @@ def render_plan_svg(
     canvas: tuple[float, float] | None = None,
     connection_values: dict[str, Any] | None = None,
     knx_by_id: dict | None = None,
+    plan_id: str | None = None,
 ) -> str:
     """Render elements at Comexio's own position_x/position_y with port-accurate wiring.
 
@@ -100,6 +101,11 @@ def render_plan_svg(
 
     knx_by_id: optional KNX object id -> item map (coordinator.function_plan_knx_label_map)
     for "K{id}" pills; without it KNX elements still render as "K{id}" pills, just unnamed.
+
+    plan_id: optional stable plan identity (the fub_id), emitted as data-plan-id on the root
+    <svg>. The plan card keeps its scroll position across a refresh only while this stays the
+    same — the viewBox alone can't tell plans apart, since every plan on the same paper
+    renders with the same one; plan names aren't unique either.
     """
     geos = _build_geometries(elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id)
     if canvas:
@@ -124,7 +130,8 @@ def render_plan_svg(
         # is embedded (the plan card styles it width:100%; inline style wins over that).
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0f} {height:.0f}" '
         f'style="max-width:{width:.0f}px" '
-        f'font-family="sans-serif" font-size="{_FONT_SIZE:.1f}">',
+        + (f'data-plan-id="{escape(plan_id)}" ' if plan_id is not None else "")
+        + f'font-family="sans-serif" font-size="{_FONT_SIZE:.1f}">',
         _STYLE,
         '<rect class="canvas-bg" width="100%" height="100%"/>',
         f'<text class="plan-title" x="{_MARGIN}" y="24" font-size="20" font-weight="bold">{escape(title)}'

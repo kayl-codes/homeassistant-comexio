@@ -1095,8 +1095,9 @@ class ComexioPlanCard extends HTMLElement {
       // Parsed off-DOM and zoom-sized BEFORE the swap: inserted at its unzoomed fit size, the
       // new SVG briefly shrank the scroll range to zero on the next layout, which reset the
       // horizontal scroll and (shorter card) the dashboard's vertical scroll on every refresh
-      // (user feedback, 2026-09-27). Same viewBox = same plan with new values → keep the view;
-      // another plan starts at the left edge again.
+      // (user feedback, 2026-09-27). Same plan (data-plan-id = fub_id; the viewBox alone is
+      // shared by every plan on the same paper) with the same viewBox → keep the view; another
+      // plan starts at the left edge again.
       const tpl = document.createElement("template");
       // nosemgrep: javascript.browser.security.insecure-document-method, javascript.browser.security.insecure-innerhtml
       tpl.innerHTML = text;
@@ -1104,11 +1105,16 @@ class ComexioPlanCard extends HTMLElement {
       if (!newSvg) {
         throw new Error("response contains no <svg>"); // keep the previous plan (catch below)
       }
-      const oldViewBox = this._planEl.querySelector("svg")?.getAttribute("viewBox");
+      const oldSvg = this._planEl.querySelector("svg");
+      const samePlan =
+        !!oldSvg &&
+        newSvg.hasAttribute("data-plan-id") &&
+        oldSvg.getAttribute("data-plan-id") === newSvg.getAttribute("data-plan-id") &&
+        oldSvg.getAttribute("viewBox") === newSvg.getAttribute("viewBox");
       const scrollLeft = this._planEl.scrollLeft;
       this._applyZoom(newSvg);
       this._planEl.replaceChildren(tpl.content);
-      if (oldViewBox && newSvg.getAttribute("viewBox") === oldViewBox) {
+      if (samePlan) {
         this._planEl.scrollLeft = scrollLeft;
       }
       this._enhance();

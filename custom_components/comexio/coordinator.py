@@ -1,4 +1,4 @@
-# Version: 0.8.1
+# Version: 0.8.2
 import asyncio
 from collections import deque
 from collections.abc import Callable
@@ -1950,6 +1950,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             canvas=canvas,
             connection_values=connection_values,
             knx_by_id=self.function_plan_knx_label_map(),
+            plan_id=str(fub_id),
         )
 
         filename = f"comexio_{self.server_id}_plan_preview.svg"
