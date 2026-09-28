@@ -2,6 +2,8 @@
 # homeassistant is pinned to the same version as homeassistant-stubs in .github/workflows/ci.yml:
 # the tested modules import it at module level even though the unit tests never start an HA instance.
 homeassistant==2026.8.3
+# The integration's own runtime library (manifest.json requirements), kept at the same pin.
+aiocomexio==0.1.0
 pytest==9.1.1
 pytest-cov==7.1.0
 syrupy==6.1.1

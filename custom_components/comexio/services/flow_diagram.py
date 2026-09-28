@@ -5,17 +5,16 @@ Same source resolution and "always return a dict" contract as function_plan_anal
 module's docstring for why: function_plan_visualize's text-diagram path returns None, which
 crashes an MCP caller that requests return_response — this handler avoids that trap since the
 Plan Preview card always requests a response). Renders via
-function_plan_render_flow.render_flow_svg instead of the Studio-position render_plan_svg — the
+aiocomexio.function_plan.render_flow_svg instead of the Studio-position render_plan_svg — the
 SVG comes back inline in the response, not written to a file (unlike the cached/polled preview
 path behind function_plan_visualize's format='svg').
 """
 
 from typing import Any
 
+from aiocomexio.function_plan import render_flow_svg, snapshot_label_maps
 from homeassistant.core import HomeAssistant, ServiceCall
 
-from ..function_plan_backup import snapshot_label_maps
-from ..function_plan_render_flow import render_flow_svg
 from .plan_actions import _resolve_visualize_live_source, _resolve_visualize_snapshot_source
 
 _TITLE_FLOW_ERR = "Function Plan Flow Diagram — Error"

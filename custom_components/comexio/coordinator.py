@@ -1,7 +1,7 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 import logging
 import pathlib
@@ -10,6 +10,7 @@ import socket
 import time
 from typing import Any
 
+from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
@@ -139,14 +140,8 @@ from .const import (
     trigger_pair_categories,
     webio_class_label,
 )
-from .function_plan_backup import (
-    FunctionPlanBackupManager,
-    build_source_id_translation,
-    retention_cutoff,
-    snapshot_label_maps,
-)
+from .function_plan_backup import FunctionPlanBackupManager, retention_cutoff
 from .function_plan_catalog import FunctionPlanCatalogManager
-from .function_plan_render import render_plan_svg
 from .ha_address import HaAddressResolver, webio_device_hint
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
@@ -210,7 +205,7 @@ _SUN_ATTR_BY_FREQ = {
 def _build_sun_times(hass: HomeAssistant) -> dict[str, str]:
     """Pre-format sun.sun's next-occurrence attributes for the plan-preview tooltip.
 
-    Formatting (not just parsing) happens here rather than in function_plan_render.py, which is
+    Formatting (not just parsing) happens here rather than in aiocomexio.function_plan.render, which is
     deliberately HA-free (see its module docstring) — the renderer only ever sees a plain
     {Freq: "DD.MM. HH:MM"} string dict.
     """
@@ -1924,7 +1919,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         renumbered ids since the snapshot was captured (see _resolve_preview_connection_values).
 
         label_metadata: a snapshot's stored labels (snapshot.get("labels"), see
-        function_plan_backup._referenced_label_metadata) — when given, overlaid onto the live
+        aiocomexio.function_plan.referenced_label_metadata) — when given, overlaid onto the live
         label maps so a historical snapshot shows the names it had at capture time rather
         than today's (possibly since-renamed) live names. None for a live render.
         """
@@ -2028,14 +2023,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         return connection_values, live_id_map
 
-    def _resolve_preview_label_maps(self, label_metadata: dict[str, dict[str, str]] | None) -> tuple[dict, dict, dict]:
+    def _resolve_preview_label_maps(
+        self, label_metadata: dict[str, dict[str, str]] | None
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
         """Return (markers_by_id, webio_by_id, ios_by_id), overlaid with snapshot labels if given."""
-        markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
+        label_maps: tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]] = self.function_plan_label_maps()
         if label_metadata:
-            markers_by_id, webio_by_id, ios_by_id = snapshot_label_maps(
-                label_metadata, markers_by_id, webio_by_id, ios_by_id
-            )
-        return markers_by_id, webio_by_id, ios_by_id
+            label_maps = snapshot_label_maps(label_metadata, *label_maps)
+        return label_maps
 
     def _build_preview_title_and_canvas(self, fub_id: int) -> tuple[str, Any]:
         """Build the Studio-style title suffix (state + paper/DPI) and canvas bounds for a live plan.

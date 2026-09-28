@@ -12,10 +12,9 @@ this handler avoids the same trap since the card always requests a response.
 
 from typing import Any
 
+from aiocomexio.function_plan import analyze_function_plan, snapshot_label_maps
 from homeassistant.core import HomeAssistant, ServiceCall
 
-from ..function_plan_analysis import analyze_function_plan
-from ..function_plan_backup import snapshot_label_maps
 from .plan_actions import _resolve_visualize_live_source, _resolve_visualize_snapshot_source
 
 _TITLE_ANALYZE_ERR = "Function Plan Analyze — Error"

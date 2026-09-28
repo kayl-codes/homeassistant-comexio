@@ -226,7 +226,7 @@ _KNX_WEBIO_STEP = _LAYOUT_X_WEBIO - _LAYOUT_X_MARKER
 # _KNX_WEBIO_X + _KNX_WEBIO_STEP - _LAYOUT_X_MARKER (585) is the exact minimum span with NO
 # margin — the next column's marker pillar would land only 15 units past this column's WebIO
 # pillar (vs. 75 units in the standard non-KNX layout, per _PILL_WIDTH=180 in
-# function_plan_render_constants.py), so two adjacent KNX columns visually read as barely
+# aiocomexio.function_plan.render_constants), so two adjacent KNX columns visually read as barely
 # separated (user-reported, 2026-09-21 screenshots: "der rechte Block ist immer noch nicht
 # verschoben"). A first fix (585->600, +15 margin) was still not visually distinct enough
 # (same user, same day, re-tested). _KNX_COLUMN_MARGIN=215 (total width 800) matches the gap
@@ -255,7 +255,7 @@ _KNX_MAX_COLS = 2
 # hop_index>=1 (Phase 7 loopback and any further hop) is pushed this many units BELOW the
 # K-object's own row, one sub-row per extra hop. Without ANY offset, hop 0 and hop 1 sit on
 # the exact same row/y as their shared source K — verified against the Studio-clone renderer
-# (function_plan_render_wiring.py): _edge_route treats two same-row sinks as "stays on row"
+# (aiocomexio.function_plan.render_wiring): _edge_route treats two same-row sinks as "stays on row"
 # for BOTH branches (no lane-change column, no vertical run), and _junction_points then never
 # emits a T-junction dot for a same-row-only fan-out. The result is two flat, fully
 # overlapping straight lines from the K-object's output pin to each sink, rendered with no
