@@ -1086,6 +1086,13 @@ KNOWN_DOMAINS = [
     "internal",
 ]
 
+# HA address resolution (ha_address.py): the homeassistant.<domain> candidates are looked up in
+# parallel, each capped at this timeout, so a slow NXDOMAIN/mDNS miss no longer adds up per domain.
+HA_ADDRESS_DNS_TIMEOUT_SEC = 5.0
+# How long a definite miss (the name does not exist) of one homeassistant.<domain> candidate is
+# trusted before it is looked up again. Timeouts are never cached.
+HA_ADDRESS_NEGATIVE_CACHE_SEC = 3600
+
 
 def parse_ignored_marker_tokens(
     raw: str, prefix_chars: str = "Mm"
