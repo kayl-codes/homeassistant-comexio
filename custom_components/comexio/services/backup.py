@@ -122,7 +122,7 @@ def _label_backup_identity(
 
     identity is a fixed-shape (type, ref_id, x, y, name) tuple — x/y/name are None for types
     with a globally stable reference (marker/IO/WebIO/time module — see
-    function_plan_backup._STABLE_REF_TYPES); populated as a position-based fallback for
+    aiocomexio.function_plan.backup_diff._STABLE_REF_TYPES); populated as a position-based fallback for
     everything else (blocks/constants/comments have no stable cross-snapshot ID).
     """
     etype, ref_id, _pos_x, _pos_y, name = identity
