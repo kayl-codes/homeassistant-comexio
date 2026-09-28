@@ -1105,7 +1105,12 @@ class ComexioRepairFlow(RepairsFlow):
             # Renaming KNX objects under it would change titles it has already read.
             return self.async_abort(reason=ABORT_SYNC_RUNNING)
 
-        renamed_count, failed, newly_ignored = await self._apply_knx_dpt_classifications(coordinator.api)
+        # Held for the renames so a sync or range check can't start while titles are changing.
+        # No await between the check above and the acquire: an unlocked asyncio.Lock is taken
+        # without yielding, so nothing can slip in between. Released before the reload below,
+        # which takes the lock itself (async_reload_entry) and would deadlock under it.
+        async with coordinator._sync_lock:
+            renamed_count, failed, newly_ignored = await self._apply_knx_dpt_classifications(coordinator.api)
 
         if newly_ignored:
             # R2: request_options_update_without_reload (not a plain async_update_entry) so
@@ -1127,7 +1132,7 @@ class ComexioRepairFlow(RepairsFlow):
             # reload (R2): give the listener a moment to see the skip flag before forcing our
             # own explicit reload.
             # In the background: async_reload_entry waits for _sync_lock, and a sync or range
-            # check taking it after the check above must not stall this dialog step for minutes.
+            # check taking it after the renames must not stall this dialog step for minutes.
             await asyncio.sleep(0.5)
             self.hass.async_create_task(_async_reload_after_knx_classification(self.hass, coordinator))
         elif newly_ignored:
