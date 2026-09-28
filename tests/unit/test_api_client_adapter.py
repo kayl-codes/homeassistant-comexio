@@ -126,8 +126,9 @@ def test_client_is_rebuilt_on_new_credentials(comexio_api: ComexioAPI) -> None:
 def test_get_raw_config_reraises_the_transport_error(comexio_api: ComexioAPI, client: MagicMock) -> None:
     # Callers (and DataUpdateCoordinator) have always seen transport failures as aiohttp errors.
     _fail(client, "get_raw_config", _connection_error())
+    call = comexio_api.get_raw_config()
     with pytest.raises(aiohttp.ServerDisconnectedError):
-        asyncio.run(comexio_api.get_raw_config())
+        asyncio.run(call)
 
 
 @pytest.mark.parametrize("err", [HTTP_ERROR, ComexioDataError("no $FubModules")])
@@ -218,16 +219,18 @@ def test_connection_values_failure_reaches_the_circuit_breaker(
 ) -> None:
     # Regression (#75): a failure must not pass as the "plan not running" {}.
     _fail(client, "get_function_plan_connection_values", err)
+    call = comexio_api.get_function_plan_connection_values(3)
     with pytest.raises(type(err)):
-        asyncio.run(comexio_api.get_function_plan_connection_values(3))
+        asyncio.run(call)
 
 
 def test_lapsed_preview_session_is_dropped(comexio_api: ComexioAPI) -> None:
     session, preview = MagicMock(), MagicMock()
     _fail(preview, "get_function_plan_connection_values", ComexioAuthenticationError("lapsed"))
     comexio_api._preview_session, comexio_api._preview_client = session, preview
+    call = comexio_api.get_function_plan_connection_values(3, session=session)
     with pytest.raises(ComexioAuthenticationError):
-        asyncio.run(comexio_api.get_function_plan_connection_values(3, session=session))
+        asyncio.run(call)
     assert comexio_api._preview_session is None
     assert comexio_api._preview_client is None
     session.detach.assert_called_once()
@@ -235,8 +238,9 @@ def test_lapsed_preview_session_is_dropped(comexio_api: ComexioAPI) -> None:
 
 def test_replaced_preview_session_is_not_used(comexio_api: ComexioAPI) -> None:
     comexio_api._preview_session, comexio_api._preview_client = MagicMock(), MagicMock()
+    call = comexio_api.get_function_plan_connection_values(3, session=MagicMock())
     with pytest.raises(ComexioAuthenticationError):
-        asyncio.run(comexio_api.get_function_plan_connection_values(3, session=MagicMock()))
+        asyncio.run(call)
 
 
 def test_load_elements_failure_is_none(comexio_api: ComexioAPI, client: MagicMock) -> None:

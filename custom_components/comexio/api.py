@@ -1935,7 +1935,9 @@ class ComexioAPI:
         request per plan — Comexio serializes requests server-side anyway, so N sequential
         per-plan calls gain nothing over a single bulk call. Result is filtered down to the
         fub list cached by parse_config (self._fub_data). strict=True drops entries without a
-        real elements collection instead of treating them as empty plans.
+        real elements collection instead of treating them as empty plans. Unlike
+        function_plan_load_elements(strict=True) it does not check connections, so a result here
+        is no source for run_fup (a restore or rewrite).
         Returns {fub_id: {"elements": {...}, "connections": {...}}}, {} on failure.
         """
         fub_ids = {int(fid) for fid in self._fub_data}
