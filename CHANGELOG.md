@@ -7,6 +7,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### ✨ New Features
+- **Stable, address-based entity_ids:** new IO, Marker and KNX entities get their entity_id from the technical address (`binary_sensor.iosrv1_iox1_ai7`, `switch.iosrv1_m12`, `sensor.iosrv1_k5`) instead of the display name, so renaming something in Comexio only changes the name, never the id. Existing entities keep their entity_id (#97).
+- **Opt-in entity_id migration for existing installations:** the "Entity IDs not following the Comexio scheme" repair issue and the new **Fix Entity IDs** diagnostic button move existing entities to the stable ids. History and statistics move along; automations, scripts and dashboards are not rewritten — the repair shows how many automations/scripts still reference the old ids (#98).
+- **IO naming default without `{ExtName}`:** the default IO schema is now `{IoId} {IoTitle}`, since the extension already appears in the device name. Installations that never saved a schema keep the old `{ExtName} {IoId} {IoTitle}` (config entry migration), so existing names do not change (#97).
+
+### 🛠️ Core & Stability Improvements
+- **Faster, more robust HA address resolution:** the `homeassistant.<domain>` candidates are looked up in parallel with a 5 s cap, the search stops at the already known name, and definite misses are cached. A DNS timeout never replaces a known name with the IP fallback, which rules out false IP-mismatch repairs during a DNS hiccup (#104).
+- **Quicker sync wiring checks:** the KNX and trigger re-checks at the end of a sync share one config and plan fetch when nothing was written in between (one live sync went from ~30 s to 15 s). The status now shows each wiring step, and the result says "no changes needed" instead of `+0 … -0` (#104).
+- **KNX Web-IO bulk prestage:** all KNX bridge Markers are allocated and the API-Loopback Web-IO class is created with all its commands before the first KNX plan is wired, instead of saving loopback commands one by one (~35–40 s each on the Comexio side) (#103).
+- **Skipped sync checks are reported:** a trigger or KNX bridge/loopback re-check that could not read Comexio's current state now adds a warning line to the sync result instead of looking like "nothing to wire" (#105).
+- **Plan preview retries failed loads:** a failed preview fetch is retried with backoff (2 s up to 60 s) with at most one fetch in flight, and each phase logs its own message (#102).
+
+### 🐛 Bug Fixes & Refactoring
+- **Doubled IO names:** an IO without a description rendered as e.g. `IOX1 I6 I6`; its title is now `#nn`, like unnamed Markers (#96).
+- **Sync failing with `Session is closed`:** a config entry reload during a running sync closed the API session. A reload requested during a sync is now left to the sync's own closing reload, and repair flows refuse to start while a sync is running (#103).
+- **KNX trigger pairs** resolve their bridge Markers from a fresh config instead of the snapshot frozen during a sync (#103).
+- **Trigger re-check on stale plan data:** when the forced plan refetch fails, the trigger re-check is skipped instead of auditing a plan cached before this sync's writes (#104).
+- **Statistics helpers inactive on current installations:** the unit-label fix and the orphaned-statistics detection only matched the `sensor.comexio_<server>_` prefix, which neither the stable nor the device-name-based entity_ids carry (#99).
+- **Flow diagram changed on every restart:** the function plan flow diagram and the self-reset analysis depended on `PYTHONHASHSEED` (#100).
+- **Plan preview jumped back to the start** on every live refresh when scrolled (#101).
+
+### ⚠️ Requirements & Notes
+- **Restart required** after updating.
+- **The entity_id migration is opt-in.** Before confirming it, check the number of automations/scripts the repair lists — they, and dashboards, must be updated to the new ids manually.
+
 ---
 
 ## [0.10.0] — 2026-09-25
