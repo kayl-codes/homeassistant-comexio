@@ -3,7 +3,13 @@
 import pytest
 
 from custom_components.comexio.api import _saved_schema
-from custom_components.comexio.const import CONF_SCHEMA_IO, CONF_SCHEMA_KNX, DEFAULT_SCHEMA_IO, ignore_list_categories
+from custom_components.comexio.const import (
+    CONF_SCHEMA_IO,
+    CONF_SCHEMA_KNX,
+    DEFAULT_SCHEMA_IO,
+    ignore_list_categories,
+    is_valid_entity_name_schema,
+)
 from custom_components.comexio.options_flow import ComexioOptionsFlow
 
 
@@ -35,3 +41,10 @@ def test_invalid_saved_schema_falls_back_to_the_default(caplog: pytest.LogCaptur
     assert "invalid saved" in caplog.text
     assert _saved_schema(conf, CONF_SCHEMA_KNX, "unused") == "K{KnxId} {KnxTitle}"
     assert _saved_schema({}, CONF_SCHEMA_KNX, "K{KnxId}") == "K{KnxId}"
+
+
+@pytest.mark.parametrize("schema", [None, 42, ["{IoId}"], b"{IoId}"])
+def test_non_string_schema_is_invalid_not_an_exception(schema: object) -> None:
+    # aiocomexio turns format_map's AttributeError/TypeError into ValueError; pin that contract.
+    assert not is_valid_entity_name_schema(schema)
+    assert _saved_schema({CONF_SCHEMA_IO: schema}, CONF_SCHEMA_IO, DEFAULT_SCHEMA_IO) == DEFAULT_SCHEMA_IO
