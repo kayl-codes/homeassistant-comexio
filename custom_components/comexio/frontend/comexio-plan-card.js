@@ -1160,8 +1160,9 @@ class ComexioPlanCard extends HTMLElement {
     // entity_picture is a stable proxy URL — bust the browser cache per update.
     const sep = url.includes("?") ? "&" : "?";
     // AbortSignal.timeout is missing on older WebViews (iOS < 16) — fetch without a timeout there.
-    const opts =
-      typeof AbortSignal.timeout === "function" ? { signal: AbortSignal.timeout(_PREVIEW_FETCH_TIMEOUT_MS) } : {};
+    // globalThis lookup: a bare `AbortSignal` would throw a ReferenceError where it's undefined.
+    const timeout = globalThis.AbortSignal?.timeout;
+    const opts = typeof timeout === "function" ? { signal: AbortSignal.timeout(_PREVIEW_FETCH_TIMEOUT_MS) } : {};
     const resp = await fetch(`${url}${sep}state=${encodeURIComponent(stamp)}`, opts);
     if (!resp.ok) {
       throw new Error(`HTTP ${resp.status}`);
@@ -1215,10 +1216,16 @@ class ComexioPlanCard extends HTMLElement {
     }, delay);
   }
 
-  // A newer stamp arrived while this one was in flight (gated in `set hass`) — fetch it now.
+  // A newer stamp arrived while this one was in flight (gated in `set hass`) — fetch it now,
+  // or on reattach if the card was detached meanwhile.
   _loadIfNewer(stamp) {
-    if (this._stamp && stamp !== this._stamp) {
+    if (!this._stamp || stamp === this._stamp) {
+      return;
+    }
+    if (this.isConnected) {
       this._reloadCurrentStamp();
+    } else {
+      this._refetchOnConnect = true;
     }
   }
 
