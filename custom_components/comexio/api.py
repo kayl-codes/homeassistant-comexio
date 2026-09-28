@@ -4574,9 +4574,15 @@ class ComexioAPI:
             _LOGGER.error("prestage_knx_loopback_class: Loopback Web-IO device not found after upload")
             return names
         full_names = {f"{device_id}. {name}" for name in names}
-        fresh_data = await self._reload_config_until_commands_ready(
-            lambda _d: full_names, lambda d: {info["name"] for info in d.get("webio_names", {}).values()}
-        )
+        try:
+            fresh_data = await self._reload_config_until_commands_ready(
+                lambda _d: full_names, lambda d: {info["name"] for info in d.get("webio_names", {}).values()}
+            )
+        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+            # Same as the device check above: the upload already succeeded, so the names must
+            # still reach the caller — raising here would drop them and get them saved twice.
+            _LOGGER.warning("prestage_knx_loopback_class: readiness check failed after upload: %s", err)
+            return names
         # Still return every uploaded name: they are part of the class template the upload
         # just created, so an unlisted one is only the admin page lagging — handing it to the
         # per-cluster path would save it a second time. Log it so the lag stays visible.
