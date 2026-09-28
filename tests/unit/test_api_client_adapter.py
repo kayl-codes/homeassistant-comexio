@@ -123,6 +123,31 @@ def test_client_is_rebuilt_on_new_credentials(comexio_api: ComexioAPI) -> None:
     assert comexio_api.client is not first
 
 
+def test_new_connection_settings_drop_the_preview_session(comexio_api: ComexioAPI) -> None:
+    # The preview client and its cookie belong to the old host / credentials.
+    comexio_api.client  # noqa: B018 - build the client for the current settings
+    session = MagicMock()
+    comexio_api._preview_session, comexio_api._preview_client = session, MagicMock()
+    comexio_api.host = "10.0.0.2"
+    comexio_api.client  # noqa: B018 - the rebuild is what drops the preview session
+    assert comexio_api._preview_session is None
+    assert comexio_api._preview_client is None
+    session.detach.assert_called_once()
+
+
+def test_preview_login_under_old_settings_is_discarded(comexio_api: ComexioAPI) -> None:
+    # Settings that change while the preview login is in flight must not leave a session
+    # bound to the old host behind; the next poll opens a fresh one.
+    async def login_while_reconfigured(_client: object) -> bool:
+        comexio_api.host = "10.0.0.2"
+        return True
+
+    comexio_api._login = login_while_reconfigured  # type: ignore[method-assign]
+    assert asyncio.run(comexio_api.ensure_preview_session()) is None
+    assert comexio_api._preview_session is None
+    assert comexio_api._preview_client is None
+
+
 def test_get_raw_config_reraises_the_transport_error(comexio_api: ComexioAPI, client: MagicMock) -> None:
     # Callers (and DataUpdateCoordinator) have always seen transport failures as aiohttp errors.
     _fail(client, "get_raw_config", _connection_error())

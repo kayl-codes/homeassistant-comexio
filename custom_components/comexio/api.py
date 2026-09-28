@@ -493,17 +493,23 @@ class ComexioAPI:
             if self._closed:
                 return None
             session = async_create_clientsession(self.hass, **self._build_session_kwargs())
+            credentials = self._credentials()
             client = self._new_client(session)
             login_ok = False
             try:
                 login_ok = await self._login(client)
             finally:
-                # Any non-success path (failed login, close() during the await above, or
-                # _login() raising) must not leave an authenticated session orphaned.
-                if not login_ok or self._closed:
+                # Any non-success path (failed login, close() or new connection settings during
+                # the await above, or _login() raising) must not leave an authenticated session
+                # orphaned.
+                settings_changed = credentials != self._credentials()
+                if not login_ok or self._closed or settings_changed:
                     session.detach()
             if not login_ok:
                 _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
+                return None
+            if settings_changed:
+                _LOGGER.info("Connection settings changed during the preview login — opening a new session next poll")
                 return None
             if self._closed:
                 return None
@@ -524,8 +530,15 @@ class ComexioAPI:
 
         Rebuilt whenever host or credentials change — the coordinator's reconfigure path
         assigns new values to host / username / password / api_user / api_pass and logs in again.
+        The preview session is dropped with it: its client and cookie belong to the old settings,
+        so ensure_preview_session opens a new one on the next poll.
         """
         if self._client is None or self._client_credentials != self._credentials():
+            if self._client is not None and self._preview_session is not None:
+                _LOGGER.info("Comexio connection settings changed — reopening the preview session")
+                self._preview_session.detach()
+                self._preview_session = None
+                self._preview_client = None
             self._client = self._new_client(self.session)
             self._client_credentials = self._credentials()
         return self._client
