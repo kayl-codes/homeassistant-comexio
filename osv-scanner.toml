@@ -1,0 +1,20 @@
+# OSV-Scanner config for the repo root (osv-scanner.toml applies to its own directory only;
+# tests/ has its own). The root requirements.txt is generated from manifest.json and lists the
+# runtime dependencies; their transitive packages are resolved through deps.dev.
+#
+# Only the specific advisories below are ignored, each with its reason — any NEW advisory still
+# fails the scan. Every entry expires so it gets re-checked; on expiry re-run the scan and drop
+# what's fixed.
+
+# --- idna: transitive only (aiocomexio -> aiohttp -> yarl, which requires idna>=2.0). The scanner
+# reports 3.9.0 from its deps.dev resolution, but pip installs the current release (3.20, fixed
+# in 3.15), and the version on a live install comes from Home Assistant's own environment.
+[[IgnoredVulns]]
+id = "PYSEC-2026-215"
+ignoreUntil = 2027-03-31
+reason = "idna: transitive via aiocomexio -> aiohttp -> yarl (idna>=2.0); scanner reports 3.9.0, pip resolves 3.20 (fixed in 3.15)"
+
+[[IgnoredVulns]]
+id = "GHSA-65pc-fj4g-8rjx"
+ignoreUntil = 2027-03-31
+reason = "Alias of PYSEC-2026-215 (transitive idna, resolved 3.20)"
