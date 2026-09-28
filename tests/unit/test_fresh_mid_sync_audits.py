@@ -118,6 +118,13 @@ def test_trigger_audit_without_snapshot_fetches_config_and_forces_plans() -> Non
     assert coordinator.plan_refetches == [True]
 
 
+def test_trigger_audit_skips_when_the_forced_plan_refetch_fails() -> None:
+    coordinator = _coordinator(plans_fresh=False)
+
+    assert asyncio.run(coordinator.async_fresh_trigger_audit()) == ({}, {}, None)
+    assert coordinator.plan_refetches == [True]
+
+
 class _FakeSyncCoordinator:
     def __init__(self, bridge: list[dict[str, Any]]) -> None:
         self.bridge = bridge

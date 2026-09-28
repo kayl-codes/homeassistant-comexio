@@ -5389,7 +5389,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return (*trigger_audit_result, parsed.get("markers") or None)
 
     async def _async_fetch_trigger_audit_config(self) -> dict[str, Any] | None:
-        """Fresh parsed config + force-refetched plans for async_fresh_trigger_audit; None on a failed fetch."""
+        """Fresh parsed config + force-refetched plans for async_fresh_trigger_audit; None when either fetch failed."""
         raw_config = await self.api.get_raw_config()
         if not raw_config:
             _LOGGER.warning(
@@ -5399,7 +5399,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             return None
         parsed = self.api.parse_config(raw_config)
-        await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids(), force=True)
+        if not await self._ensure_relevant_plans_cached(self._function_plan_check_fub_ids(), force=True):
+            # Same stale-data guard as the loopback audit: a cached plan from before this sync's
+            # writes would misread just-wired bridge Markers and add/remove the wrong trigger pairs.
+            _LOGGER.warning(
+                "[%s] Trigger re-audit: forced refetch of a relevant plan failed — skipping "
+                "this sync's trigger-pair check, will retry on the next poll",
+                self.server_id,
+            )
+            return None
         return parsed
 
     async def async_fresh_knx_audits(
