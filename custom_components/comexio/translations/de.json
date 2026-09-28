@@ -277,6 +277,9 @@
             "title": "Deinstallations-Bereinigung",
             "description": "Wähle, was aus Comexio entfernt werden soll. Insgesamt hat die Integration {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e) und {class_count} Web-IO-Klasse(n) angelegt.\n\n* **Everything** entfernt alles.\n* **Markers only / IOs only / KNX only** entfernen nur die Logikpläne, das Web-IO-Gerät und die Klasse dieses Bereichs. Der gemeinsame Trigger-Plan wird nur dann komplett entfernt, wenn er keine Trigger-Paare der anderen Kategorie enthält — sonst entfernen Merker/KNX nur ihre eigenen Paare daraus.\n* **KNX only** und **Everything** leeren außerdem die Titel der KNX-Brücken-Merker, damit sie wieder als freie Merker verfügbar sind. Die Merker selbst werden nicht gelöscht.\n\nDies kann nicht rückgängig gemacht werden. Gelöschte Logikpläne verlieren ihre Verdrahtung endgültig."
           }
+        },
+        "abort": {
+          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist."
         }
       }
     },
@@ -288,6 +291,9 @@
             "title": "Bereinigung KNX-Vorabversion",
             "description": "Diese Installation enthält noch KNX-Logikpläne oder Web-IO-Geräte aus einer KNX-Vorabversion (v0.10.0-rc1 bis rc3). Deren Aufbau passt nicht mehr zu dieser Version.\n\n**KNX only** (vorausgewählt) entfernt die KNX-Logikpläne, das KNX-Web-IO-Gerät samt Klasse und das KNX-Loopback-Web-IO und leert die Titel der KNX-Brücken-Merker, damit sie wiederverwendet werden können. Die nächste Synchronisation legt danach alles sauber neu an. Merker- und IO-Logikpläne bleiben unberührt; aus dem gemeinsamen Trigger-Plan werden nur die KNX-Trigger-Paare entfernt (der ganze Plan nur, wenn er sonst nichts enthält).\n\nDies kann nicht rückgängig gemacht werden. Wähle Cancel, um alles unverändert zu lassen."
           }
+        },
+        "abort": {
+          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist."
         }
       }
     },
@@ -303,6 +309,9 @@
             "title": "KNX-Objekt klassifizieren",
             "description": "**{name}** (noch {remaining} weitere danach) verwendet einen KNX-DPT1.x-Untertyp (Schalter/Bool/Freigabe/Flanke/Binärwert), den KNX sowohl als echten Umschalter, als Taster (Momentkontakt) als auch als reine Statusrückmeldung verdrahten lässt — der Datenpunkttyp allein verrät nicht, welcher Fall vorliegt, das weißt nur du anhand der tatsächlichen Verdrahtung.\n\nWie soll dieses Objekt behandelt werden?"
           }
+        },
+        "abort": {
+          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist."
         }
       }
     }

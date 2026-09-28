@@ -577,7 +577,11 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
             "[%s] update_listener: options changed since the internal write this skip was meant for — reloading anyway",
             coordinator.server_id,
         )
-    await hass.config_entries.async_reload(entry.entry_id)
+    if coordinator is None:
+        await hass.config_entries.async_reload(entry.entry_id)
+        return
+    # e.g. a repair's "Ignore" or an options-flow save during a sync — see async_reload_entry
+    await coordinator.async_reload_entry("options changed")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):

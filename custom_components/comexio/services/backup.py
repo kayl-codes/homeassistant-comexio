@@ -720,7 +720,7 @@ async def _restore_plan_as_new(
         purged = 0
     updated_consumers = await coordinator.async_repoint_function_plan_fub_id(plan_name, old_fub_id, new_fub_id)
     if updated_consumers:
-        await hass.config_entries.async_reload(coordinator.config_entry.entry_id)
+        await coordinator.async_reload_entry("function plan restore")
 
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))

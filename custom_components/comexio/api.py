@@ -2663,10 +2663,11 @@ class ComexioAPI:
         Web-IO class uses, instead of creating an empty class and adding every command one at
         a time afterwards via save_single_command (measured live 17.09.2026: >5 min for 10
         K-Elements vs. instant bulk upload for the other classes — see
-        project_knx_write_path_design memory). Ignored once the class already exists; growing
-        an existing class with newly-added bridges still goes through save_single_command in
-        the caller (function_plan_add_knx_bridge_loopback_pairs), same as every other class'
-        Delta-Sync.
+        project_knx_write_path_design memory). A full sync therefore calls this ONCE with every
+        bridge of every KNX plan before any plan is wired (prestage_knx_loopback_class).
+        Ignored once the class already exists; topping up an existing class with a few new
+        bridges still goes through save_single_command in the caller
+        (function_plan_add_knx_bridge_loopback_pairs), same as every other class' Delta-Sync.
 
         Returns (base_id, freshly_created) on success — freshly_created tells the caller
         whether bridges was just bulk-embedded (so it must wait for the commands to become
@@ -4503,12 +4504,88 @@ class ComexioAPI:
         )
         return fub_modules, free_marker_ids, None
 
+    async def allocate_knx_bridge_markers(
+        self, missing_items: list[dict[str, Any]]
+    ) -> tuple[dict[int, tuple[int, bool]], list[str]]:
+        """Create + title the bridge Marker of every item up front, without touching any plan.
+
+        Lets a full sync learn every (k_id, marker_id) pair BEFORE the first cluster plan is
+        written, so the API-Loopback Web-IO class can be bulk-created with ALL its commands
+        in one upload (prestage_knx_loopback_class) instead of 50 in the first cluster's
+        upload plus one save_single_command per bridge of every later cluster — each of those
+        blocks the Comexio server for ~35-40 s (live 28.09.2026: 9 commands for
+        'HA - KNX [51-100]' took ~5.5 min). Same marker-selection rules as the in-plan path
+        (block start, title reuse, free-marker reuse — see create_knx_bridge_marker);
+        function_plan_add_knx_bridge_pairs then takes the result as `preallocated` and only
+        wires.
+
+        missing_items are {"ref_id", "title", "type_raw"} dicts. Returns
+        ({k_id: (marker_id, binary)} for every marker obtained, error messages) — a K-element
+        missing from the map is simply retried by the in-plan path.
+        """
+        batch_titles = {_knx_bridge_title(int(it["ref_id"]), it["title"]) for it in missing_items}
+        fub_modules, free_marker_ids, error = await self._prepare_knx_bridge_batch(batch_titles)
+        if error or fub_modules is None:
+            return {}, [error or "could not prepare the KNX bridge marker block — see log"]
+        allocated: dict[int, tuple[int, bool]] = {}
+        errors: list[str] = []
+        for item in sorted(missing_items, key=lambda it: int(it["ref_id"])):
+            k_id = int(item["ref_id"])
+            created = await self.create_knx_bridge_marker(
+                k_id, item["title"], item["type_raw"], fub_modules, free_marker_ids
+            )
+            if created is None:
+                errors.append(f"KNX bridge K{k_id}: create_knx_bridge_marker failed — see log")
+                continue
+            allocated[k_id] = (created[0], self.io_types.get(str(item["type_raw"]), {}).get("binary", False))
+        return allocated, errors
+
+    async def prestage_knx_loopback_class(
+        self, api_username: str, api_password: str, bridges: list[tuple[int, int, bool]]
+    ) -> set[str]:
+        """Bulk-create the API-Loopback Web-IO class with every bridge's command, before any plan work.
+
+        Only acts when the class does not exist yet — that is exactly the case where one
+        upload is fast and per-command saves are slow. An already-existing class is left to
+        the per-cluster path (function_plan_add_knx_bridge_loopback_pairs), where adding
+        single commands is the intended way to top up a few new bridges.
+
+        Returns the command names (knx_loopback_command_name, without the "{deviceId}. "
+        prefix, so they stay valid even if the device lookup below fails) that went into the
+        upload, so the per-cluster calls treat them as already present even if Comexio has not
+        listed them yet (see _ensure_knx_loopback_commands' `preembedded`) — without that, a
+        slow admin-page refresh would make them look missing and get them saved a second time.
+        Empty set when nothing was uploaded here (no bridges, no API credentials, class
+        already present, or any bootstrap failure — the per-cluster path reports those).
+        """
+        if not bridges:
+            return set()
+        bridges = sorted(bridges, key=lambda b: (b[0], b[1]))
+        bootstrap = await self.ensure_knx_loopback_webio(api_username, api_password, bridges)
+        if bootstrap is None or not bootstrap[1]:
+            return set()
+        names = {knx_loopback_command_name(k_id, marker_id) for k_id, marker_id, _ in bridges}
+        try:
+            device_id = await self.get_webio_device_info(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
+        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.warning("prestage_knx_loopback_class: device check failed after upload: %s", err)
+            return names
+        if device_id is None:
+            _LOGGER.error("prestage_knx_loopback_class: Loopback Web-IO device not found after upload")
+            return names
+        full_names = {f"{device_id}. {name}" for name in names}
+        await self._reload_config_until_commands_ready(
+            lambda _d: full_names, lambda d: {info["name"] for info in d.get("webio_names", {}).values()}
+        )
+        return names
+
     async def function_plan_add_knx_bridge_pairs(
         self,
         fub_id: int,
         missing_items: list[dict[str, Any]],
         fresh_plan: bool = False,
         progress_cb: Callable[[int, int], None] | None = None,
+        preallocated: dict[int, int] | None = None,
     ) -> tuple[list[int], list[str], dict[int, tuple[int, bool]]]:
         """Create a bridge Marker + wire it to its KNX object, for every item, on a stopped plan.
 
@@ -4530,7 +4607,11 @@ class ComexioAPI:
         newly-added K — the caller uses this to wire the API-Loopback fan-out (leg 3) for a
         brand-new bridge immediately, in the same cycle, instead of re-auditing for the
         marker_id later (see _add_single_knx_bridge's docstring)).
+        preallocated ({k_id: marker_id}, from allocate_knx_bridge_markers) skips marker
+        creation for those K-elements and only wires the given marker — their ids are also
+        kept out of the free-marker pool, in case Comexio does not list the new titles yet.
         """
+        preallocated = preallocated or {}
         batch_titles = {_knx_bridge_title(int(it["ref_id"]), it["title"]) for it in missing_items}
         fub_modules, free_marker_ids, error = await self._prepare_knx_bridge_batch(batch_titles)
         if error:
@@ -4539,6 +4620,8 @@ class ComexioAPI:
             # Only reachable if _prepare_knx_bridge_batch's error-is-None contract is
             # violated — see its docstring. Fail loudly rather than silently proceed.
             raise AssertionError("_prepare_knx_bridge_batch returned fub_modules=None with error=None")
+        reserved = set(preallocated.values())
+        free_marker_ids = [m for m in free_marker_ids if m not in reserved]
 
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
@@ -4581,6 +4664,7 @@ class ComexioAPI:
                 _pair_pos(len(added), i),
                 free_marker_ids,
                 plan_data=plan_data,
+                preallocated_marker_id=preallocated.get(k_id),
             )
             if err is None:
                 added.append(k_id)
@@ -4610,6 +4694,7 @@ class ComexioAPI:
         pos: tuple[float, float, float],
         free_marker_ids: list[int],
         plan_data: dict | None = None,
+        preallocated_marker_id: int | None = None,
     ) -> tuple[int | None, str | None]:
         """Create (or reuse an unwired remnant/free marker for) the bridge Marker for one
         K-element, then wire it in.
@@ -4627,12 +4712,16 @@ class ComexioAPI:
         Returning marker_id here (instead of the caller re-discovering it via a fresh audit
         later) is what lets function_plan_add_knx_bridge_pairs' caller wire the API-Loopback
         fan-out (leg 3) for a brand-new bridge in the SAME stop/write/sort cycle — see that
-        function's docstring.
+        function's docstring. preallocated_marker_id (see allocate_knx_bridge_markers) skips
+        the marker creation and wires that marker directly.
         """
-        created = await self.create_knx_bridge_marker(k_id, k_title, k_type_raw, fub_modules, free_marker_ids)
-        if created is None:
-            return None, f"KNX bridge K{k_id}: create_knx_bridge_marker failed — see log"
-        marker_id, _title = created
+        if preallocated_marker_id is not None:
+            marker_id = preallocated_marker_id
+        else:
+            created = await self.create_knx_bridge_marker(k_id, k_title, k_type_raw, fub_modules, free_marker_ids)
+            if created is None:
+                return None, f"KNX bridge K{k_id}: create_knx_bridge_marker failed — see log"
+            marker_id, _title = created
         binary = self.io_types.get(str(k_type_raw), {}).get("binary", False)
         err = await self.wire_knx_bridge_pair(
             fub_id,
@@ -4653,6 +4742,8 @@ class ComexioAPI:
         base_id: str | int,
         existing_full_names: set[str],
         freshly_created: bool,
+        command_progress_cb: Callable[[int, int, int, int], None] | None = None,
+        preembedded: set[str] | None = None,
     ) -> tuple[dict[str, tuple[int, int]], set[str], list[str]]:
         """Resolve which loopback Web-IO commands still need creating for this batch.
 
@@ -4664,6 +4755,15 @@ class ComexioAPI:
         branch — that would duplicate whatever the bulk upload already created.
         freshly_created=False: per-bridge existing-check + save_single_command fallback, same
         as growing any other Web-IO class' Delta-Sync.
+        preembedded: command names (knx_loopback_command_name, no device prefix) the caller
+        already bulk-embedded in a fresh class upload of its own (prestage_knx_loopback_class)
+        — handled exactly like freshly_created=True for those names, so they are never saved a
+        second time.
+
+        command_progress_cb(n, total, k_id, marker_id) fires right before each
+        save_single_command call (n is 1-based, total counts only the commands this call
+        actually saves) — each one blocks for ~35-40 s on the Comexio side (measured live
+        28.09.2026), so the caller needs a per-command signal to show the sync is still moving.
 
         Returns (pending: cmd_name -> (k_id, marker_id), names_to_confirm: full_names not yet
         proven present in the caller's already-fetched config, errors).
@@ -4671,16 +4771,30 @@ class ComexioAPI:
         pending: dict[str, tuple[int, int]] = {}
         names_to_confirm: set[str] = set()
         errors: list[str] = []
+        bulk_embedded = preembedded or set()
+
+        def _needs_save(cmd_name: str) -> bool:
+            return (
+                not freshly_created
+                and f"{device_id}. {cmd_name}" not in existing_full_names
+                and cmd_name not in bulk_embedded
+            )
+
+        to_save = sum(1 for k_id, marker_id, _ in bridges if _needs_save(knx_loopback_command_name(k_id, marker_id)))
+        n_saved = 0
         for k_id, marker_id, binary in bridges:
             cmd_name = knx_loopback_command_name(k_id, marker_id)
             full_name = f"{device_id}. {cmd_name}"
             if full_name in existing_full_names:
                 pending[cmd_name] = (k_id, marker_id)
                 continue
-            if freshly_created:
+            if not _needs_save(cmd_name):
                 pending[cmd_name] = (k_id, marker_id)
                 names_to_confirm.add(full_name)
                 continue
+            n_saved += 1
+            if command_progress_cb is not None:
+                command_progress_cb(n_saved, to_save, k_id, marker_id)
             command = self._build_knx_loopback_webio_command(k_id=k_id, marker_id=marker_id, is_analog=not binary)
             if await self.save_single_command(base_id, device_id, command):
                 pending[cmd_name] = (k_id, marker_id)
@@ -4697,6 +4811,8 @@ class ComexioAPI:
         api_password: str,
         fresh_plan: bool = False,
         progress_cb: Callable[[int, int], None] | None = None,
+        command_progress_cb: Callable[[int, int, int, int], None] | None = None,
+        preembedded: set[str] | None = None,
     ) -> tuple[list[int], list[int], list[str]]:
         """Add the Phase 7 API-Loopback Web-IO fan-out for a batch of already-wired KNX bridges.
 
@@ -4728,7 +4844,10 @@ class ComexioAPI:
         column, same as the fresh_plan=False off-canvas parking case below — this is NEVER the
         final column, a follow-up sort pass (see services/_grid.py) always runs afterward and
         moves each Loopback Web-IO into the SAME column as its read-path sibling, one row
-        below it. progress_cb(done, total) fires after each item.
+        below it. progress_cb(done, total) fires after each item; command_progress_cb fires
+        before each slow per-command Web-IO save (see _ensure_knx_loopback_commands).
+        preembedded: command names already bulk-uploaded by prestage_knx_loopback_class
+        before any plan was wired — never saved again here, only confirmed.
         Returns (added K ref_ids, already-wired K ref_ids skipped as a routine no-op, error
         messages) — len(added) + len(skipped) + len(errors) always accounts for every item in
         bridges once the batch reaches the per-item wiring loop.
@@ -4776,7 +4895,7 @@ class ComexioAPI:
         existing_full_names = _present_names(current)
 
         pending, names_to_confirm, errors = await self._ensure_knx_loopback_commands(
-            bridges, device_id, base_id, existing_full_names, freshly_created
+            bridges, device_id, base_id, existing_full_names, freshly_created, command_progress_cb, preembedded
         )
 
         if not pending:
