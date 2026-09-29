@@ -371,6 +371,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # unfiltered parse, since data["markers"] is empty when marker import is off.
         self._knx_bridge_markers_present: bool = False
         self.sync_error: bool = False
+        # Web-IO writes the last sync reported as failed — non-empty means it finished only partially.
+        self.sync_failed_writes: list[str] = []
         self.sync_progress_text: str = "Idle"
         self.sync_progress_pct: int | None = None
         self.sync_current_step: str | None = None

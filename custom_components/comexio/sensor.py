@@ -15,9 +15,10 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
@@ -25,6 +26,11 @@ from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_TYPE_INTERVAL,
+    SYNC_STATE_ERROR,
+    SYNC_STATE_IDLE,
+    SYNC_STATE_PARTIAL,
+    SYNC_STATE_SYNCING,
+    SYNC_STATES,
     MarkerKind,
     bus_load_signal,
 )
@@ -202,11 +208,17 @@ class ComexioKnxSensor(ComexioKnxEntity, ComexioMarkerSensor):
             self._attr_icon = "mdi:knx"
 
 
-class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
+ATTR_FAILED_WRITES = "failed_writes"
+ATTR_PROGRESS_DETAILS = "progress_details"
+
+
+class ComexioSyncStatusSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
     """Representation of the integration's sync status."""
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = SYNC_STATES
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
@@ -223,16 +235,53 @@ class ComexioSyncStatusSensor(CoordinatorEntity, SensorEntity):
             "model": "IO-Server",
         }
 
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._restore_last_outcome(await self.async_get_last_state())
+
+    def _restore_last_outcome(self, last_state: State | None) -> None:
+        """Carry an aborted or partial sync's outcome over a reload or HA restart.
+
+        Every sync ends with a reload, which builds a new coordinator whose sync_error and
+        sync_failed_writes start empty — without this the sensor read "idle" right after every
+        failed sync. A coordinator that already has an outcome of its own keeps it.
+        """
+        coordinator = self.coordinator
+        if last_state is None or coordinator.in_sync or coordinator.sync_error or coordinator.sync_failed_writes:
+            return
+        failed = last_state.attributes.get(ATTR_FAILED_WRITES)
+        if isinstance(failed, str):
+            failed = [failed]
+        restored = [str(name) for name in failed] if isinstance(failed, list) else []
+        if last_state.state == SYNC_STATE_ERROR:
+            coordinator.sync_error = True
+            coordinator.sync_failed_writes = restored
+        elif last_state.state == SYNC_STATE_PARTIAL:
+            if not restored:
+                # The list is always written with the state; this only keeps a damaged restore
+                # entry from silently turning "partial" into "idle".
+                _LOGGER.warning("Restored a partial sync state without its failed_writes list")
+                restored = ["(names not restored)"]
+            coordinator.sync_failed_writes = restored
+        else:
+            return
+        details = last_state.attributes.get(ATTR_PROGRESS_DETAILS)
+        if isinstance(details, str):
+            coordinator.sync_progress_text = details
+
     @property
     def native_value(self) -> str:
         if getattr(self.coordinator, "in_sync", False):
-            return "syncing"
-        else:
-            return "error" if getattr(self.coordinator, "sync_error", False) else "idle"
+            return SYNC_STATE_SYNCING
+        if getattr(self.coordinator, "sync_error", False):
+            return SYNC_STATE_ERROR
+        return SYNC_STATE_PARTIAL if getattr(self.coordinator, "sync_failed_writes", None) else SYNC_STATE_IDLE
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        attrs = {"progress_details": getattr(self.coordinator, "sync_progress_text", "Idle")}
+        attrs: dict[str, Any] = {ATTR_PROGRESS_DETAILS: getattr(self.coordinator, "sync_progress_text", "Idle")}
+        if failed_writes := getattr(self.coordinator, "sync_failed_writes", None):
+            attrs[ATTR_FAILED_WRITES] = list(failed_writes)
         if getattr(self.coordinator, "sync_progress_pct", None) is not None:
             attrs["progress"] = self.coordinator.sync_progress_pct
         if getattr(self.coordinator, "sync_current_step", None) is not None:

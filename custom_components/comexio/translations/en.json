@@ -175,7 +175,8 @@
         "state": {
           "idle": "Idle",
           "syncing": "Syncing",
-          "error": "Error"
+          "error": "Error",
+          "partial": "Finished with errors"
         }
       },
       "offline_extensions": {

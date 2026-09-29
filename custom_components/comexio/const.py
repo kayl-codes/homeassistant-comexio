@@ -361,6 +361,15 @@ def source_audit_key(category: SourceCategory, item_id: object) -> str:
 SYNC_PROGRESS_START_PCT = 5
 SYNC_PROGRESS_END_PCT = 95
 
+# States of the sync status sensor. "partial": the run finished, but some Web-IO writes failed;
+# "error": the run aborted. Both stay until the next sync starts, across the reload every sync
+# ends with and across an HA restart.
+SYNC_STATE_IDLE = "idle"
+SYNC_STATE_SYNCING = "syncing"
+SYNC_STATE_PARTIAL = "partial"
+SYNC_STATE_ERROR = "error"
+SYNC_STATES = [SYNC_STATE_IDLE, SYNC_STATE_SYNCING, SYNC_STATE_PARTIAL, SYNC_STATE_ERROR]
+
 
 # UI icon literals — centralized so emoji usage stays consistent and easy to audit
 ICON_WARNING = "⚠️"
