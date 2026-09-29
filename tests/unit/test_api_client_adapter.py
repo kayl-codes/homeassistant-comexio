@@ -458,6 +458,14 @@ def test_upload_web_io_failure_carries_the_reason(comexio_api: ComexioAPI, clien
     assert "refused" in reason
 
 
+def test_upload_web_io_without_base_id_is_a_failure(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # A device must never be created on a missing class id, whatever the client hands back.
+    client.upload_webio_class = AsyncMock(return_value="")
+    ok, reason = asyncio.run(comexio_api.upload_web_io("iosrv1", "HA [M]", "{}"))
+    assert ok is False
+    assert "no base_id" in reason
+
+
 _COMMAND = {"Name": "M1 Test", "Parameter": "/api/webhook/x", "Data": "{}", "TypeId": 1, "Min": 0, "Max": 1}
 
 

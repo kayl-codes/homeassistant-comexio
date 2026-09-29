@@ -1150,6 +1150,9 @@ class ComexioAPI:
         except ComexioError as err:
             _LOGGER.warning("Uploading Web-IO class %r failed: %s", webio_name, err)
             return False, str(err)
+        if not base_id:
+            # aiocomexio already raises on a missing id; kept so no caller ever creates a device on None.
+            return False, "Comexio returned no base_id for the uploaded class"
         return True, base_id
 
     async def create_webio_device(
