@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 from aiocomexio import (
     ComexioAuthenticationError,
     ComexioConnectionError,
+    ComexioCreatedWithoutIdError,
     ComexioDataError,
     ComexioRequestRejectedError,
     ComexioResponseError,
+    CreatedFunctionPlan,
     LiveStates,
     RawConfig,
     WebioBaseInfo,
@@ -75,18 +77,40 @@ def test_login_keeps_a_session_that_is_still_logged_in(comexio_api: ComexioAPI, 
     # Regression (review 8b-2a): the lib's login clears the cookie jar, which would log out the
     # session a running poll or sync is using on every service call.
     comexio_api._logged_in_client = client
-    client.get_bus_workload = AsyncMock(return_value={})
+    client.is_logged_in = AsyncMock(return_value=True)
     client.login = AsyncMock()
     assert asyncio.run(comexio_api.login()) is True
     client.login.assert_not_awaited()
 
 
-def test_login_logs_in_again_when_the_probe_fails(comexio_api: ComexioAPI, client: MagicMock) -> None:
+def test_login_logs_in_again_when_the_session_has_expired(comexio_api: ComexioAPI, client: MagicMock) -> None:
     comexio_api._logged_in_client = client
-    _fail(client, "get_bus_workload", ComexioAuthenticationError("lapsed"))
+    client.is_logged_in = AsyncMock(return_value=False)
     client.login = AsyncMock()
     assert asyncio.run(comexio_api.login()) is True
     client.login.assert_awaited_once()
+
+
+@pytest.mark.parametrize("err", [ComexioDataError("an error page"), ComexioAuthenticationError("lapsed")])
+def test_login_logs_in_again_when_the_session_state_is_unknown(
+    comexio_api: ComexioAPI, client: MagicMock, err: Exception
+) -> None:
+    # Neither the session's answer nor the login form: only a full login leads back to a known state.
+    comexio_api._logged_in_client = client
+    _fail(client, "is_logged_in", err)
+    client.login = AsyncMock()
+    assert asyncio.run(comexio_api.login()) is True
+    client.login.assert_awaited_once()
+
+
+def test_unknown_session_state_reports_connection_when_the_login_fails(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    comexio_api._logged_in_client = client
+    _fail(client, "is_logged_in", ComexioDataError("an error page"))
+    _fail(client, "login", HTTP_ERROR)
+    assert asyncio.run(comexio_api.login()) is False
+    assert comexio_api.last_login_error == "connection"
 
 
 @pytest.mark.parametrize("err", [HTTP_ERROR, _connection_error()])
@@ -95,7 +119,7 @@ def test_login_keeps_the_session_when_the_probe_cannot_reach_comexio(
 ) -> None:
     # Review 8b-2a: a busy or unreachable server is no lapsed login — no jar-clearing full login.
     comexio_api._logged_in_client = client
-    _fail(client, "get_bus_workload", err)
+    _fail(client, "is_logged_in", err)
     client.login = AsyncMock()
     assert asyncio.run(comexio_api.login()) is False
     assert comexio_api.last_login_error == "connection"
@@ -118,7 +142,7 @@ def test_concurrent_full_logins_log_in_once(comexio_api: ComexioAPI, client: Mag
 
 def test_failed_login_forgets_the_logged_in_client(comexio_api: ComexioAPI, client: MagicMock) -> None:
     comexio_api._logged_in_client = client
-    _fail(client, "get_bus_workload", ComexioAuthenticationError("lapsed"))
+    client.is_logged_in = AsyncMock(return_value=False)
     _fail(client, "login", _connection_error())
     assert asyncio.run(comexio_api.login()) is False
     assert comexio_api._logged_in_client is None
@@ -445,6 +469,15 @@ def test_webio_device_in_use_is_false(comexio_api: ComexioAPI, client: MagicMock
     assert asyncio.run(comexio_api.delete_webio_device(3)) is False
 
 
+def test_webio_delete_errors_name_the_reason(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.delete_webio_device = AsyncMock(return_value=False)
+    assert asyncio.run(comexio_api.webio_device_delete_error(3)) == "still used in a function plan"
+    _fail(client, "delete_webio_device", HTTP_ERROR)
+    assert asyncio.run(comexio_api.webio_device_delete_error(3)) == "request failed: HTTP 500"
+    _fail(client, "delete_webio_base", HTTP_ERROR)
+    assert asyncio.run(comexio_api.webio_base_delete_error(3)) == "request failed: HTTP 500"
+
+
 def test_upload_web_io_returns_the_base_id(comexio_api: ComexioAPI, client: MagicMock) -> None:
     client.upload_webio_class = AsyncMock(return_value="42")
     assert asyncio.run(comexio_api.upload_web_io("iosrv1", "HA [M]", "{}")) == (True, "42")
@@ -516,6 +549,32 @@ def test_plan_write_failure_is_false(
 def test_plan_write_success_is_true(comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str) -> None:
     setattr(client, method, AsyncMock(return_value=None))
     assert asyncio.run(call(comexio_api)) is True
+
+
+def test_stopping_a_plan_that_is_not_running_is_success(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Regression (r): routine on every restore/connect of a stopped plan — no warning, no failure.
+    refusal = (
+        "Stopping function plan 33 was refused: {'error': 'stop_error', 'id': 33, 'state': 0, 'return': '0:not_found'}"
+    )
+    _fail(client, "stop_function_plan", ComexioRequestRejectedError(refusal))
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(comexio_api.function_plan_stop_fup(33)) is True
+    assert "the plan was not running" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_cleanup_leaves_a_plan_alone_that_is_not_running(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Review: a restart after the cleanup would start a plan the user had stopped.
+    refusal = "Stopping function plan 33 was refused: {'error': 'stop_error', 'state': 0, 'return': '0:not_found'}"
+    _fail(client, "stop_function_plan", ComexioRequestRejectedError(refusal))
+    client.delete_function_plan_elements = AsyncMock()
+    client.run_function_plan = AsyncMock()
+    result = asyncio.run(comexio_api._delete_plan_elements_and_restart(33, [1, 2], [], "TestPlan"))
+    assert result["stop_failed"] is True
+    client.delete_function_plan_elements.assert_not_awaited()
+    client.run_function_plan.assert_not_awaited()
 
 
 _PLAN_WRITES_ID = [
@@ -612,24 +671,57 @@ def test_failed_comment_placing_skips_the_width(comexio_api: ComexioAPI, client:
     client.save_function_plan_comment.assert_not_awaited()
 
 
+NEW_PLAN = {"Id": 8, "Name": "HA - IO", "Paper": 2, "Resolution": 90, "Orientation": 0, "Active": 0}
+
+
+def _created_without_id() -> ComexioCreatedWithoutIdError:
+    return ComexioCreatedWithoutIdError("Creating function plan 'HA - IO': reading back its id failed")
+
+
 def test_create_fup_caches_the_new_plan(comexio_api: ComexioAPI, client: MagicMock) -> None:
-    new_plan = {"Id": 8, "Name": "HA - IO", "Paper": 2, "Resolution": 90, "Orientation": 0, "Active": 0}
-    client.create_function_plan = AsyncMock(return_value=8)
-    client.get_raw_config = AsyncMock(return_value=RawConfig({"Fubs": {"8": new_plan}}, {}, {}, None))
+    client.create_function_plan = AsyncMock(return_value=CreatedFunctionPlan(8, NEW_PLAN))
+    client.get_raw_config = AsyncMock()
     assert asyncio.run(comexio_api.create_fup("HA - IO", paper_format="A3")) == 8
-    assert comexio_api.fub_data["8"] == new_plan
+    assert comexio_api.fub_data["8"] == NEW_PLAN
+    client.get_raw_config.assert_not_awaited()  # the lib already read the entry back
+
+
+def test_create_fup_finds_a_plan_created_without_id(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Regression (p): the plan exists once Comexio confirmed it — None read as "name in use" before.
+    comexio_api.update_fub_cache_entry(3, {"Id": 3, "Name": "HA - IO"})  # an older namesake
+    _fail(client, "create_function_plan", _created_without_id())
+    fubs = {"3": {"Id": 3, "Name": "HA - IO"}, "8": NEW_PLAN}
+    client.get_raw_config = AsyncMock(return_value=RawConfig({"Fubs": fubs}, {}, {}, None))
+    assert asyncio.run(comexio_api.create_fup("HA - IO")) == 8
+    assert comexio_api.fub_data["8"] == NEW_PLAN
+
+
+@pytest.mark.parametrize(
+    "fubs",
+    [{}, {"8": NEW_PLAN, "9": {"Id": 9, "Name": "HA - IO"}}, {"8": {"Id": 8, "Name": "Other"}}],
+    ids=["missing", "twice", "renamed"],
+)
+def test_create_fup_does_not_guess_the_id(
+    comexio_api: ComexioAPI, client: MagicMock, fubs: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    _fail(client, "create_function_plan", _created_without_id())
+    client.get_raw_config = AsyncMock(return_value=RawConfig({"Fubs": fubs}, {}, {}, None))
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(comexio_api.create_fup("HA - IO")) is None
+    assert "do not create it again" in caplog.text
 
 
 @pytest.mark.parametrize("err", [_connection_error(), ComexioDataError("no $FubModules")])
-def test_create_fup_keeps_the_id_when_the_read_back_fails(
-    comexio_api: ComexioAPI, client: MagicMock, err: Exception
+def test_create_fup_logs_a_failed_second_read_back(
+    comexio_api: ComexioAPI, client: MagicMock, err: Exception, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The plan exists once Comexio confirmed it — reporting None would make the caller create it again.
-    # A failed scrape makes get_raw_config() return {}: no "Fubs", which must not raise either.
-    client.create_function_plan = AsyncMock(return_value=8)
+    # A failed scrape makes get_raw_config() return {} or raise a transport error — neither may escape.
+    _fail(client, "create_function_plan", _created_without_id())
     _fail(client, "get_raw_config", err)
-    assert asyncio.run(comexio_api.create_fup("HA - IO")) == 8
-    assert "8" not in comexio_api.fub_data
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(comexio_api.create_fup("HA - IO")) is None
+    assert "do not create it again" in caplog.text
+    assert "reading the config failed" in caplog.text
 
 
 def test_create_fup_failure_is_none(comexio_api: ComexioAPI, client: MagicMock) -> None:

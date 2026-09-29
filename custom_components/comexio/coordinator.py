@@ -1,7 +1,7 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 import logging
 import pathlib
@@ -139,6 +139,7 @@ from .const import (
     source_category,
     trigger_pair_categories,
     webio_class_label,
+    webio_class_name,
 )
 from .function_plan_backup import FunctionPlanBackupManager, retention_cutoff
 from .function_plan_catalog import FunctionPlanCatalogManager
@@ -171,6 +172,8 @@ _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 # seeded entry can already be stale by the time it's consulted (real wiring written afterward,
 # e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache).
 _SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
+
+_UNINSTALL_CLEANUP_LOG = "[%s] Uninstall cleanup: %s"
 
 # Debounce for live plan-preview refreshes: webhook bursts (e.g. a dimmer ramp) collapse
 # into one re-render at most every ~0.5 s; single value pushes still show up promptly.
@@ -309,6 +312,15 @@ def _marker_reset_progress(report: Callable[[str], None], step: str) -> Callable
         report(f"{step}: resetting KNX bridge markers {done}/{total} (about {int(remaining)} s left)")
 
     return _cb
+
+
+async def webio_still_present(lookup: Callable[[str], Awaitable[Any]], name: str) -> str | None:
+    """None once lookup(name) finds no Web-IO device/class of that name, else why a delete is unconfirmed."""
+    try:
+        found = await lookup(name)
+    except RuntimeError as err:
+        return f"could not be verified ({err})"
+    return None if found is None else "still present after the delete request"
 
 
 class ComexioCoordinator(DataUpdateCoordinator):
@@ -1563,40 +1575,62 @@ class ComexioCoordinator(DataUpdateCoordinator):
         await self.async_refresh()
         if not (self.last_update_success and self._last_poll_scraped):
             reason = f"refresh from Comexio failed ({self.last_exception or 'no data'}) — Web-IO not deleted"
-            _LOGGER.warning("[%s] Uninstall cleanup: %s", self.server_id, reason)
+            _LOGGER.warning(_UNINSTALL_CLEANUP_LOG, self.server_id, reason)
             for cls in webio_classes:
                 skipped[cls] = reason
             return devices, classes, failed_classes, skipped
         webio_devices = self._parsed_webio_devices()
+        webio_name = self.config_entry.data.get("webio_name", "HomeAssistant")
         for cls in webio_classes:
             dev = webio_devices.get(cls) or {}
+            name = webio_class_name(webio_name, cls)
             await self._delete_webio_class_entry(
-                cls, dev.get("device_id"), dev.get("base_id"), (devices, classes, failed_classes, skipped)
+                cls,
+                (name, name),
+                dev.get("device_id"),
+                dev.get("base_id"),
+                (devices, classes, failed_classes, skipped),
             )
         return devices, classes, failed_classes, skipped
 
     async def _delete_webio_class_entry(
         self,
-        cls: str,
+        key: str,
+        names: tuple[str, str],
         device_id: Any,
         base_id: Any,
         results: tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]],
     ) -> None:
         """Delete one class's Web-IO device, then its class; record the outcome in results
-        (devices, classes, failed_classes, skipped). A class whose device is already gone is
-        still deleted — nothing can use it anymore, and skipping it silently left an orphan."""
+        (devices, classes, failed_classes, skipped) under key. A class whose device is already
+        gone is still deleted — nothing can use it anymore, and skipping it silently left an
+        orphan.
+
+        names are the device's and the class's name. Comexio's answers to both deletes carry no
+        verdict, so each only counts once a lookup by name no longer finds it; a failure
+        records why.
+        """
         devices, classes, failed_classes, skipped = results
+        device_name, class_name = names
         if device_id:
-            if not await self.api.delete_webio_device(device_id):
-                skipped[cls] = "delete_webio_device failed"
+            error = await self.api.webio_device_delete_error(device_id) or await webio_still_present(
+                self.api.get_webio_device_info, device_name
+            )
+            if error:
+                skipped[key] = f"Web-IO device {device_id} not deleted: {error}"
+                _LOGGER.warning(_UNINSTALL_CLEANUP_LOG, self.server_id, skipped[key])
                 return
-            devices[cls] = str(device_id)
+            devices[key] = str(device_id)
         if not base_id:
             return
-        if await self.api.delete_webio_base(base_id):
-            classes[cls] = str(base_id)
+        error = await self.api.webio_base_delete_error(base_id) or await webio_still_present(
+            self.api.get_webio_base_info, class_name
+        )
+        if error:
+            failed_classes[key] = f"Web-IO class {base_id} not deleted: {error}"
+            _LOGGER.warning(_UNINSTALL_CLEANUP_LOG, self.server_id, failed_classes[key])
         else:
-            failed_classes[cls] = "delete_webio_base failed"
+            classes[key] = str(base_id)
 
     async def _delete_knx_loopback_webio(
         self,
@@ -1630,20 +1664,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # class behind with no retry path. Skip everything instead.
             skipped["knx_loopback"] = f"get_webio_base_info failed: {err}"
             return
-        if device_id:
-            if not await self.api.delete_webio_device(device_id):
-                skipped["knx_loopback"] = "delete_webio_device failed"
-                return
-            devices["knx_loopback"] = str(device_id)
-        # No device but a class: a retry after a failed class delete — delete the orphan too.
-        if base_info is None:
-            # A successful lookup that found no class: genuinely already gone, nothing to delete.
-            return
-        base_id = base_info[0]
-        if await self.api.delete_webio_base(base_id):
-            classes["knx_loopback"] = str(base_id)
-        else:
-            failed_classes["knx_loopback"] = "delete_webio_base failed"
+        # No device but a class: a retry after a failed class delete — the orphan is deleted too.
+        # A successful lookup that found no class (base_info None): genuinely gone already.
+        await self._delete_webio_class_entry(
+            "knx_loopback",
+            (WEBIO_DEVICE_NAME_KNX_LOOPBACK, WEBIO_CLASS_NAME_KNX_LOOPBACK),
+            device_id,
+            base_info[0] if base_info else None,
+            (devices, classes, failed_classes, skipped),
+        )
 
     def uninstall_cleanup_counts(self) -> dict[str, dict[str, int]]:
         """Per cleanup scope: managed plans / Web-IO devices / classes it would delete (from

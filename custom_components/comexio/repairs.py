@@ -245,6 +245,7 @@ def _cleanup_result_message(result: dict, scope: str) -> str:
         f"Devices removed: {len(result['deleted_devices'])}",
         f"Classes removed: {len(result['deleted_classes'])} (failed: {len(result['failed_classes'])})",
     ]
+    lines.extend(f"* {key}: {reason}" for key, reason in result["failed_classes"].items())
     if scope_includes_knx(scope):
         lines.append(
             f"KNX bridge markers reset: {len(result.get('reset_markers', []))} "

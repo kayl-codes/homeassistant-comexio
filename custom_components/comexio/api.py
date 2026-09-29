@@ -10,10 +10,12 @@ from aiocomexio import (
     ComexioAuthenticationError,
     ComexioClient,
     ComexioConnectionError,
+    ComexioCreatedWithoutIdError,
     ComexioDataError,
     ComexioError,
     ComexioRequestRejectedError,
     ComexioResponseError,
+    CreatedFunctionPlan,
     config as comexio_config,
     webio as comexio_webio,
 )
@@ -67,6 +69,8 @@ FUNCTION_PLAN_CONSTANT_TYPE = 16
 # Comexio's paper ids ($Fubs "Paper") per format aiocomexio accepts, for the plan cache after a settings save.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
 _PLAN_PAPER_FALLBACK = "A4"
+# Comexio's answer (as quoted in aiocomexio's refusal message) for a plan that is not running.
+_PLAN_NOT_RUNNING_ANSWER = "0:not_found"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -605,8 +609,18 @@ class ComexioAPI:
         Services call this before every run, while the coordinator poll or a sync may be using
         the same session. aiocomexio's login clears the session's cookie jar first, so an
         unconditional login would log a working session out for its duration — and for good if
-        that login then fails on a transient error. A still logged-in session (probed with the
-        cheap bus workload request) is therefore kept as it is.
+        that login then fails on a transient error. A session is therefore first checked with
+        the client's is_logged_in() (which already asks once more after a dropped keep-alive
+        connection), and each of its outcomes is handled on its own:
+
+        - True: the session is kept as it is.
+        - False (Comexio served its login form): full login.
+        - ComexioConnectionError / ComexioResponseError: unreachable or busy, not logged out —
+          False with "connection"; a full login would clear the still valid session and most
+          likely fail the same way.
+        - ComexioDataError (neither the session's answer nor the login form): the session's
+          state is unknown, and only a full login leads back to a known one. Should Comexio be
+          broken rather than logged out, that login fails and reports "connection" itself.
 
         Returns False on failure and sets last_login_error to "rejected" (credentials refused
         — setup asks for reauth) or "connection" (server unreachable or answering garbage —
@@ -615,18 +629,20 @@ class ComexioAPI:
         client = self.client
         if client is self._logged_in_client:
             try:
-                await client.get_bus_workload()
+                logged_in = await client.is_logged_in()
             except (ComexioConnectionError, ComexioResponseError) as err:
-                # Unreachable or busy, not logged out: a full login would clear the still valid
-                # session and most likely fail the same way.
-                _LOGGER.warning("Comexio admin session probe failed: %s", err)
+                _LOGGER.warning("Comexio admin session check failed: %s", err)
                 self.last_login_error = "connection"
                 return False
+            except ComexioDataError as err:
+                _LOGGER.warning("Comexio admin session check gave an unexpected answer, logging in again: %s", err)
             except ComexioError as err:
-                _LOGGER.debug("Comexio admin session probe failed, logging in again: %s", err)
+                _LOGGER.debug("Comexio admin session check failed, logging in again: %s", err)
             else:
-                self.last_login_error = None
-                return True
+                if logged_in:
+                    self.last_login_error = None
+                    return True
+                _LOGGER.debug("Comexio admin session has expired, logging in again")
         return await self._full_login()
 
     async def _full_login(self) -> bool:
@@ -994,11 +1010,21 @@ class ComexioAPI:
 
     async def delete_webio_device(self, device_id: str | int) -> bool:
         """Delete a Web-IO device; False if Comexio logic still uses it or the request failed."""
+        return await self.webio_device_delete_error(device_id) is None
+
+    async def webio_device_delete_error(self, device_id: str | int) -> str | None:
+        """Delete a Web-IO device; None if Comexio accepted it, else why it did not.
+
+        None only means Comexio reported no in-use error — get_webio_device_info shows whether
+        the device is really gone.
+        """
         try:
-            return await self.client.delete_webio_device(device_id)
+            if await self.client.delete_webio_device(device_id):
+                return None
         except ComexioError as err:
             _LOGGER.warning("Deleting Web-IO device %s failed: %s", device_id, err)
-            return False
+            return f"request failed: {err}"
+        return "still used in a function plan"
 
     async def delete_webio_base(self, base_id: str | int) -> bool:
         """Delete a Web-IO class; False if the request failed.
@@ -1006,12 +1032,19 @@ class ComexioAPI:
         True only means Comexio accepted the request — it refuses silently while a device of
         the class still exists (see get_webio_base_info's deletable flag).
         """
+        return await self.webio_base_delete_error(base_id) is None
+
+    async def webio_base_delete_error(self, base_id: str | int) -> str | None:
+        """Delete a Web-IO class; None if Comexio accepted the request, else why it failed.
+
+        Like delete_webio_base, None does not prove the class is gone — get_webio_base_info does.
+        """
         try:
             await self.client.delete_webio_base(base_id)
         except ComexioError as err:
             _LOGGER.warning("Deleting Web-IO class %s failed: %s", base_id, err)
-            return False
-        return True
+            return f"request failed: {err}"
+        return None
 
     async def delete_fup(self, fub_id: int) -> bool:
         """Delete an entire function plan (not just elements within it); False if that failed."""
@@ -1683,10 +1716,36 @@ class ComexioAPI:
         return plans
 
     async def function_plan_stop_fup(self, fub_id: int) -> bool:
-        """Stop/pause a function plan (stop_fup); False if Comexio did not confirm it."""
-        ok = await _succeeded(f"Stopping function plan {fub_id}", lambda: self.client.stop_function_plan(int(fub_id)))
+        """Stop/pause a function plan (stop_fup); False if Comexio did not confirm it.
+
+        A plan that is not running counts as stopped — see _stop_plan.
+        """
+        ok = await self._stop_plan(fub_id) is not False
         _LOGGER.info("function_plan_stop_fup: fub=%s result=%s", fub_id, ok)
         return ok
+
+    async def _stop_plan(self, fub_id: int) -> bool | None:
+        """Stop a function plan: True once it is stopped, None if it was not running, False on failure.
+
+        A plan that is not running cannot be stopped: Comexio refuses with
+        {"error": "stop_error", "state": 0, "return": "0:not_found"} (seen live 2026-09-29).
+        That is routine for every restore or connect on a stopped plan, so it is logged at
+        INFO instead of as a failed request. Callers that restart the plan afterwards need
+        to tell it apart (None), or they would start a plan the user had stopped.
+        """
+        what = f"Stopping function plan {fub_id}"
+
+        async def stop() -> bool | None:
+            try:
+                await self.client.stop_function_plan(int(fub_id))
+            except ComexioRequestRejectedError as err:
+                if _PLAN_NOT_RUNNING_ANSWER not in str(err):
+                    raise
+                _LOGGER.info("%s: the plan was not running", what)
+                return None
+            return True
+
+        return await _attempt(what, stop, False)
 
     async def function_plan_add_comment_element(
         self,
@@ -1755,39 +1814,62 @@ class ComexioAPI:
             orientation: 'landscape' or 'portrait' (defaults to landscape, and so does any other value)
             dpi: Resolution in dots per inch, 45-120 (defaults to 90)
 
-        The new plan's $Fubs entry is cached right away (see _cache_fub_entry).
+        The new plan's $Fubs entry is cached right away, so function_plan_update_paper and the
+        canvas lookups find it before the next poll refreshes the whole cache. If Comexio
+        confirmed the plan but its id could not be read back, the plan is looked up by name
+        once more (_find_created_plan); None then means the plan may exist without an id.
         """
         paper, orient = _plan_paper_and_orientation(paper_format, orientation)
-        fub_id = await _attempt(
-            f"Creating function plan {plan_name!r}",
-            lambda: self.client.create_function_plan(
-                plan_name, comment=plan_comment, paper_format=paper, orientation=orient, dpi=dpi
-            ),
-            None,
-        )
-        if fub_id is None:
+        known_ids = set(self._fub_data)
+
+        async def create() -> CreatedFunctionPlan | None:
+            try:
+                return await self.client.create_function_plan(
+                    plan_name, comment=plan_comment, paper_format=paper, orientation=orient, dpi=dpi
+                )
+            except ComexioCreatedWithoutIdError as err:
+                _LOGGER.warning("create_fup: %s — looking the plan up by name once more", err)
+                return await self._find_created_plan(plan_name, known_ids)
+
+        created = await _attempt(f"Creating function plan {plan_name!r}", create, None)
+        if created is None:
             return None
-        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, fub_id)
-        await self._cache_fub_entry(fub_id)
-        return fub_id
+        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, created.fub_id)
+        self._fub_data[str(created.fub_id)] = created.fubs_entry
+        return created.fub_id
 
-    async def _cache_fub_entry(self, fub_id: int) -> None:
-        """Put a just-created plan's $Fubs entry into the plan cache.
+    async def _find_created_plan(self, plan_name: str, known_ids: set[str]) -> CreatedFunctionPlan | None:
+        """The plan Comexio confirmed under plan_name, found in a fresh $Fubs; None after an error log.
 
-        aiocomexio returns only the new plan's id, but function_plan_update_paper and the
-        canvas lookups read the entry before the next poll refreshes the whole cache. A failed
-        lookup is only logged: the plan exists, and the next poll caches it.
+        Only a plan the cache did not know before the create counts, and only if exactly one
+        such plan carries the name — a guessed id could make a restore write into another plan.
         """
         try:
             fubs = (await self.get_raw_config()).get("Fubs")
-        except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.warning("create_fup: reading back plan %s failed: %s", fub_id, err)
-            return
-        fub_info = dict(iter_group(fubs)).get(str(fub_id))
-        if not isinstance(fub_info, dict):
-            _LOGGER.warning("create_fup: plan %s not found in the config read back — cached with the next poll", fub_id)
-            return
-        self._fub_data[str(fub_id)] = fub_info
+        except (aiohttp.ClientError, TimeoutError, ComexioConnectionError) as err:
+            fubs, reason = None, f"reading the config failed: {err!r}"
+        else:
+            # get_raw_config() answers {} (after its own error log) when the scrape failed.
+            reason = (
+                "it is not listed exactly once among the new plans"
+                if fubs is not None
+                else "reading the config failed (see the error above)"
+            )
+        matches = [
+            (fid, info)
+            for fid, info in iter_group(fubs)
+            if fid.isdigit() and fid not in known_ids and isinstance(info, dict) and info.get("Name") == plan_name
+        ]
+        if len(matches) == 1:
+            fid, info = matches[0]
+            return CreatedFunctionPlan(int(fid), info)
+        _LOGGER.error(
+            "create_fup: plan '%s' was created in Comexio, but its id is still unknown (%s) — "
+            "it shows up with the next poll; do not create it again",
+            plan_name,
+            reason,
+        )
+        return None
 
     async def function_plan_update_paper(
         self, fub_id: int, paper_format: str, dpi: int, orientation: str, name: str | None = None
@@ -4293,13 +4375,18 @@ class ComexioAPI:
     async def _delete_plan_elements_and_restart(
         self, fub_id: int, elem_ids_to_delete: list[int], webio_cmd_ids: list[int], plan_name: str
     ) -> dict:
-        """Stop the plan, delete the given elements, restart it, and build the result dict."""
-        stop_ok = await self.function_plan_stop_fup(fub_id)
-        if not stop_ok:
-            _LOGGER.error(
-                "_delete_plan_elements_and_restart: failed to stop plan '%s' (fub=%s), aborting cleanup",
+        """Stop the plan, delete the given elements, restart it, and build the result dict.
+
+        A plan that is not running is left alone (reported as stop_failed, as before): the
+        restart would start a plan the user had stopped.
+        """
+        stopped = await self._stop_plan(fub_id)
+        if not stopped:
+            _LOGGER.warning(
+                "_delete_plan_elements_and_restart: plan '%s' (fub=%s) %s, cleanup skipped",
                 plan_name,
                 fub_id,
+                "is not running — left untouched" if stopped is None else "could not be stopped",
             )
             return {
                 "deleted_elem_count": 0,

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from homeassistant.core import State
 import pytest
 
-from custom_components.comexio.button import _sync_notification_title
+from custom_components.comexio.button import _sync_login_error, _sync_notification_title
 from custom_components.comexio.const import (
     SYNC_STATE_ERROR,
     SYNC_STATE_IDLE,
@@ -141,3 +141,10 @@ def test_notification_title() -> None:
         "Comexio Sync Finished with errors (iosrv1)"
     )
     assert _sync_notification_title("iosrv1", is_error=False, partial=False) == "Comexio Sync (iosrv1)"
+
+
+def test_sync_login_error_names_the_cause() -> None:
+    # (o): a lapsed session is logged in again at the sync start; only a failed login aborts.
+    assert "check the credentials" in str(_sync_login_error("rejected"))
+    assert "not reachable" in str(_sync_login_error("connection"))
+    assert "not reachable" in str(_sync_login_error(None))
