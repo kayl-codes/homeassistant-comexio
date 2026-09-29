@@ -1,10 +1,7 @@
 # Version: 0.7.5
 import asyncio
-import base64
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
-from datetime import UTC, datetime
-import json
 import logging
 import time
 from typing import Any, NoReturn
@@ -15,6 +12,7 @@ from aiocomexio import (
     ComexioConnectionError,
     ComexioDataError,
     ComexioError,
+    ComexioRequestRejectedError,
     ComexioResponseError,
     config as comexio_config,
     webio as comexio_webio,
@@ -54,7 +52,6 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
-    WEBIO_CLASS_MARKER,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     category_by_fub_module_type,
@@ -62,20 +59,14 @@ from .const import (
     io_sort_key,
     is_valid_entity_name_schema,
     knx_loopback_command_name,
-    source_category,
 )
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
 FUNCTION_PLAN_CONSTANT_TYPE = 16
-
-_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
-
-
-def _js_timestamp() -> str:
-    """Return a millisecond-precision UTC timestamp in JS Date.toISOString() format."""
-    return datetime.now(UTC).strftime(_TIMESTAMP_FORMAT)[:-3] + "Z"
-
+# Comexio's paper ids ($Fubs "Paper") per format aiocomexio accepts, for the plan cache after a settings save.
+_PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
+_PLAN_PAPER_FALLBACK = "A4"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +87,57 @@ def _raise_transport_error(err: ComexioConnectionError) -> NoReturn:
     if isinstance(cause, (aiohttp.ClientError, TimeoutError)):
         raise cause from None
     raise err
+
+
+async def _attempt[T, F](
+    what: str, call: Callable[[], Awaitable[T]], failed: F, *, transport_raises: bool = False
+) -> T | F:
+    """call()'s result, or `failed` after a warning naming `what` if it raised.
+
+    The adapters for the aiocomexio write requests keep their callers' bool / id-or-None
+    contract this way. TypeError / ValueError: aiocomexio checks ids, coordinates and plan
+    settings before it sends anything, and the int() / float() casts the adapters apply to
+    ids read from plan payloads happen inside call() as well. A TypeError is logged with its
+    traceback — it may just as well be a call that no longer fits the library.
+
+    transport_raises: re-raise a transport failure as aiohttp.ClientError / TimeoutError, for
+    the adapters whose callers (the restore paths in services/backup.py) abort on those.
+    """
+    try:
+        return await call()
+    except ComexioConnectionError as err:
+        if transport_raises:
+            _raise_transport_error(err)
+        _LOGGER.warning("%s failed: %s", what, err)
+        return failed
+    except (ComexioError, TypeError, ValueError) as err:
+        # A note tells e.g. that a plan was created although reading back its id failed.
+        notes = "".join(f" ({note})" for note in getattr(err, "__notes__", ()))
+        _LOGGER.warning("%s failed: %s%s", what, err, notes, exc_info=isinstance(err, TypeError))
+        return failed
+
+
+def _plan_paper_and_orientation(paper_format: str, orientation: str) -> tuple[str, str]:
+    """Paper format and orientation as aiocomexio accepts them.
+
+    Comexio offers only A3/A4/A5; any other value (e.g. from a damaged backup) falls back to
+    A4 / landscape, as the requests before aiocomexio did, instead of failing the whole restore.
+    """
+    paper = paper_format.upper()
+    if paper not in _PLAN_PAPER_IDS:
+        _LOGGER.warning("Paper format %r is not supported for plans — using %s", paper_format, _PLAN_PAPER_FALLBACK)
+        paper = _PLAN_PAPER_FALLBACK
+    return paper, "portrait" if orientation.lower() == "portrait" else "landscape"
+
+
+async def _succeeded(what: str, call: Callable[[], Awaitable[object]], *, transport_raises: bool = False) -> bool:
+    """_attempt for a request without an answer worth returning: True, or False after a warning."""
+
+    async def run() -> bool:
+        await call()
+        return True
+
+    return await _attempt(what, run, False, transport_raises=transport_raises)
 
 
 def _balanced_rows_per_col(n_items: int, max_rows_per_col: int) -> int:
@@ -972,38 +1014,11 @@ class ComexioAPI:
         return True
 
     async def delete_fup(self, fub_id: int) -> bool:
-        """Delete an entire Function Plan (not just elements within it).
-
-        Same redirect-verification pattern as create_fup: the server responds with a
-        302 redirect to the plan overview, carrying 'delete=ok' in the Location header
-        on success.
-        """
-        url = f"{self._base_url}/admin/function_function_module/delete/?id={fub_id}"
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
+        """Delete an entire function plan (not just elements within it); False if that failed."""
         _LOGGER.info("delete_fup: deleting Function Plan fub_id=%s", fub_id)
-        try:
-            async with self.session.get(url, headers=headers, allow_redirects=False) as resp:
-                if resp.status not in (301, 302, 303):
-                    _LOGGER.error("delete_fup: unexpected HTTP status %s for fub_id=%s", resp.status, fub_id)
-                    return False
-                redirect_location = resp.headers.get("Location", "")
-                success = "delete=ok" in redirect_location
-                if not success:
-                    _LOGGER.error(
-                        "delete_fup: redirect missing 'delete=ok' (fub_id=%s, location: %s)",
-                        fub_id,
-                        redirect_location,
-                    )
-                return success
-        except aiohttp.ClientError:
-            _LOGGER.exception("delete_fup: HTTP request error deleting fub_id=%s", fub_id)
-            return False
-        except Exception:
-            _LOGGER.exception("delete_fup: unexpected error deleting fub_id=%s", fub_id)
-            return False
+        return await _succeeded(
+            f"Deleting function plan {fub_id}", lambda: self.client.delete_function_plan(int(fub_id))
+        )
 
     async def update_webio_device_ip(self, device_id: str | int, ha_address: str, webio_name: str) -> bool:
         """
@@ -1321,59 +1336,17 @@ class ComexioAPI:
         Comment (type=14) and Constant (type=16) blocks aren't backed by a catalog ref_id —
         use function_plan_add_comment_element / function_plan_add_constant_element instead.
 
-        Returns the fubElementId assigned by the server, or None on failure.
+        Returns the fubElementId assigned by the server, or None on failure; a transport failure
+        raises aiohttp.ClientError / TimeoutError.
         """
-        url = f"{self._base_url}/admin/function_function_module/add_element/"
-        timestamp = _js_timestamp()
-        payload = {
-            "fubid": str(fub_id),
-            "name": "",
-            "ref_id": str(ref_id),
-            "type": str(element_type),
-            "id": "undefined",
-            "x": str(x),
-            "y": str(y),
-            "timestamp": timestamp,
-        }
-        if connection is not None:
-            payload["connection"] = json.dumps(connection, separators=(",", ":"))
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error(
-                    "function_plan_add_element failed (HTTP %s, fub=%s, ref=%s, type=%s)",
-                    resp.status,
-                    fub_id,
-                    ref_id,
-                    element_type,
-                )
-                return None
-            try:
-                result = await resp.json(content_type=None)
-                elem_id = result.get("id")
-                if elem_id is None:
-                    _LOGGER.error(
-                        "function_plan_add_element: no id in response (fub=%s, ref=%s, type=%s): %s",
-                        fub_id,
-                        ref_id,
-                        element_type,
-                        result,
-                    )
-                    return None
-                _LOGGER.debug(
-                    "function_plan_add_element: fub=%s ref=%s type=%s → elem_id=%s",
-                    fub_id,
-                    ref_id,
-                    element_type,
-                    elem_id,
-                )
-                return int(elem_id)
-            except Exception:
-                _LOGGER.exception("function_plan_add_element: failed to parse response")
-                return None
+        return await _attempt(
+            f"function_plan_add_element (fub={fub_id}, ref={ref_id}, type={element_type})",
+            lambda: self.client.add_function_plan_element(
+                int(fub_id), int(ref_id), int(element_type), x=float(x), y=float(y), connection=connection
+            ),
+            None,
+            transport_raises=True,
+        )
 
     async def function_plan_save_connection(
         self,
@@ -1408,190 +1381,81 @@ class ComexioAPI:
         connection 1:1; resaving the second time with the real id instead preserved it.
         Callers that read an existing connection via _function_plan_find_connection_by_source
         MUST pass its id back here.
-        Returns the connection ID assigned by the server, or None on failure.
+        Returns the connection ID assigned by the server, or None on failure; a transport failure
+        raises aiohttp.ClientError / TimeoutError.
         """
-        url = f"{self._base_url}/admin/function_function_module/saveconnection/"
-        timestamp = _js_timestamp()
-        output_dict = {
-            str(i): {"element": str(dst), "pos": str(pos), "inverted": inverted}
-            for i, (dst, pos, inverted) in enumerate(outputs)
-        }
-        # Logged verbatim below on both the error and success path — a save that resends "new"
-        # for a source that already HAS a connection is exactly the corrupting case this whole
-        # existing_conn_id mechanism exists to prevent, so a failure here is materially riskier
-        # (see function_plan_save_connection's docstring) than a failure creating a fresh wire.
+        # Part of the warning: a failed save that resends "new" for a source that already HAS a
+        # connection is exactly the corrupting case existing_conn_id exists to prevent.
         mode = "new" if existing_conn_id is None else f"update(id={existing_conn_id})"
-        conn_json = json.dumps(
-            {
-                "id": "new" if existing_conn_id is None else str(existing_conn_id),
-                "fub_id": fub_id,
-                "input": {"element": str(input_elem_id), "pos": str(input_pos), "inverted": input_inverted},
-                "type": value_type,
-                "output": output_dict,
-            },
-            separators=(",", ":"),
-        )
-        payload = {"JSON": conn_json, "timestamp": timestamp}
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
         dst_ids = [dst for dst, _pos, _inv in outputs]
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error(
-                    "function_plan_save_connection failed (HTTP %s, fub=%s, %s→%s, mode=%s)",
-                    resp.status,
-                    fub_id,
-                    input_elem_id,
-                    dst_ids,
-                    mode,
-                )
-                return None
-            try:
-                result = await resp.json(content_type=None)
-                saved_conn_id = result.get("id")
-                if saved_conn_id is None:
-                    # HTTP 200 with a parseable body but no "id" — Comexio accepted the request
-                    # but didn't return a connection id (e.g. a rejected/invalid save). Distinct
-                    # from the except-block below (which is a genuine parse failure): log the
-                    # raw body at ERROR so this is diagnosable later instead of looking identical
-                    # to a normal successful save on DEBUG.
-                    _LOGGER.error(
-                        "function_plan_save_connection: HTTP 200 but no 'id' in response "
-                        "(fub=%s, %s→%s, mode=%s, body=%r)",
-                        fub_id,
-                        input_elem_id,
-                        dst_ids,
-                        mode,
-                        result,
-                    )
-                    return None
-                _LOGGER.debug(
-                    "function_plan_save_connection: fub=%s %s→%s mode=%s conn_id=%s",
-                    fub_id,
-                    input_elem_id,
-                    dst_ids,
-                    mode,
-                    saved_conn_id,
-                )
-                return int(saved_conn_id)
-            except Exception:
-                _LOGGER.exception("function_plan_save_connection: failed to parse response (mode=%s)", mode)
-                return None
+        return await _attempt(
+            f"function_plan_save_connection (fub={fub_id}, {input_elem_id}→{dst_ids}, mode={mode})",
+            lambda: self.client.save_function_plan_connection(
+                int(fub_id),
+                int(input_elem_id),
+                [(int(dst), int(pos), bool(inverted)) for dst, pos, inverted in outputs],
+                value_type=value_type,
+                source_pos=int(input_pos),
+                source_inverted=bool(input_inverted),
+                connection_id=None if existing_conn_id is None else int(existing_conn_id),
+            ),
+            None,
+            transport_raises=True,
+        )
 
     async def function_plan_save_elements_pos(self, positions: list[tuple[int, float, float]]) -> bool:
         """Reposition multiple function plan elements in one call.
 
-        positions: list of (fubElementId, x, y) tuples.
-        Returns True on success.
+        positions: list of (fubElementId, x, y) tuples. Returns True on success, and for an
+        empty list (nothing to move); a transport failure
+        raises aiohttp.ClientError / TimeoutError.
         """
-        url = f"{self._base_url}/admin/function_function_module/saveelementspos/"
-        timestamp = _js_timestamp()
-        pos_dict = {str(i): {"x": x, "y": y, "id": elem_id} for i, (elem_id, x, y) in enumerate(positions)}
-        payload = {
-            "Json": json.dumps(pos_dict, separators=(",", ":")),
-            "timestamp": timestamp,
-        }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
+        if not positions:
+            return True
         _LOGGER.info("function_plan_save_elements_pos: repositioning %d elements", len(positions))
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("function_plan_save_elements_pos failed (HTTP %s)", resp.status)
-                return False
-            try:
-                result = await resp.json(content_type=None)
-                success = result.get("result") == 1
-                _LOGGER.info("function_plan_save_elements_pos: result=%s (raw: %s)", success, result)
-                return success
-            except Exception:
-                _LOGGER.exception("function_plan_save_elements_pos: failed to parse response")
-                return False
+        return await _succeeded(
+            f"Repositioning {len(positions)} function plan element(s)",
+            lambda: self.client.move_function_plan_elements(
+                [(int(elem_id), float(x), float(y)) for elem_id, x, y in positions]
+            ),
+            transport_raises=True,
+        )
 
     async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:
         """Delete elements from a function plan (removes elements + their connections).
 
-        elem_ids: list of fubElementId integers to delete.
-        Returns True on success.
+        elem_ids: list of fubElementId integers to delete. Returns True on success, and for an
+        empty list (nothing to delete).
         """
-        url = f"{self._base_url}/admin/function_function_module/deleteelements/"
-        timestamp = _js_timestamp()
-        payload = {
-            "Json": json.dumps([str(eid) for eid in elem_ids]),
-            "timestamp": timestamp,
-        }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        _LOGGER.info("function_plan_delete_elements: %d Elemente löschen: %s", len(elem_ids), elem_ids)
-        try:
-            async with self.session.post(url, data=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("function_plan_delete_elements failed (HTTP %s)", resp.status)
-                    return False
-                try:
-                    result = await resp.json(content_type=None)
-                    success = result.get("delete") is True
-                    _LOGGER.info("function_plan_delete_elements: result=%s", success)
-                    return success
-                except Exception:
-                    _LOGGER.exception("function_plan_delete_elements: failed to parse response")
-                    return False
-        except aiohttp.ClientError:
-            _LOGGER.exception("function_plan_delete_elements: HTTP request error")
-            return False
+        if not elem_ids:
+            return True
+        _LOGGER.info("function_plan_delete_elements: deleting %d element(s): %s", len(elem_ids), elem_ids)
+        return await _succeeded(
+            f"Deleting function plan elements {elem_ids}",
+            lambda: self.client.delete_function_plan_elements([int(elem_id) for elem_id in elem_ids]),
+        )
 
     async def delete_marker(self, marker_id: int) -> bool | None:
         """Delete a Marker directly from Comexio's marker list (not a function plan element).
 
-        POSTs to delete_element/ with elementId=<marker_id>, type=<Marker's fub_module_type,
-        "2">, full=true. Tri-state return so the caller (marker_delete service) can tell a
-        "nothing changed" outcome apart from a genuine request failure — collapsing both to
-        one bool would let a session/HTTP/parse failure be misreported as "marker already
-        absent" for what is an irreversible action:
-        - True: {"result": "1"} — deleted.
-        - False: request completed (HTTP 200, valid JSON object) but result wasn't "1" — most
-          often because the marker id doesn't (or no longer) exist, but the server could also
-          be reporting a rejection this way; the caller cross-checks against a fresh presence
-          lookup (get_marker_delete_eligibility's third return value) to tell those apart
-          rather than assuming this is always the harmless case.
-        - None: the request itself failed (non-200, unparsable or non-object JSON body,
+        Tri-state return so the caller (marker_delete service) can tell a "nothing changed"
+        outcome apart from a genuine request failure — collapsing both to one bool would let a
+        session/HTTP/parse failure be misreported as "marker already absent" for what is an
+        irreversible action:
+        - True: Comexio reports the marker deleted.
+        - False: Comexio answered but did not delete it — most often because the marker id
+          doesn't (or no longer) exist, but the server could also be reporting a rejection this
+          way; the caller cross-checks against a fresh presence lookup
+          (get_marker_delete_eligibility's third return value) to tell those apart rather than
+          assuming this is always the harmless case.
+        - None: the request itself failed (HTTP error, unparsable or non-object answer,
           transport error, timeout) — a real failure, must NOT be reported as "already absent".
         """
-        url = f"{self._base_url}/admin/function_function_module/delete_element/"
-        payload = {
-            "elementId": str(marker_id),
-            "type": source_category(WEBIO_CLASS_MARKER).fub_module_type,
-            "full": "true",
-            "timestamp": _js_timestamp(),
-        }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        try:
-            async with self.session.post(url, data=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("delete_marker: HTTP %s deleting marker_id=%s", resp.status, marker_id)
-                    return None
-                try:
-                    result = await resp.json(content_type=None)
-                except Exception:
-                    _LOGGER.exception("delete_marker: failed to parse response for marker_id=%s", marker_id)
-                    return None
-                if not isinstance(result, dict):
-                    _LOGGER.error("delete_marker: unexpected response shape for marker_id=%s: %r", marker_id, result)
-                    return None
-                success = str(result.get("result")) == "1"
-                _LOGGER.info("delete_marker: marker_id=%s result=%s", marker_id, success)
-                return success
-        except (aiohttp.ClientError, TimeoutError):
-            _LOGGER.exception("delete_marker: HTTP request error deleting marker_id=%s", marker_id)
-            return None
+        result = await _attempt(
+            f"Deleting marker M{marker_id}", lambda: self.client.delete_marker(int(marker_id)), None
+        )
+        _LOGGER.info("delete_marker: marker_id=%s result=%s", marker_id, result)
+        return result
 
     async def get_marker_delete_eligibility(
         self, marker_ids: list[int], force: bool = False
@@ -1819,24 +1683,10 @@ class ComexioAPI:
         return plans
 
     async def function_plan_stop_fup(self, fub_id: int) -> bool:
-        """Stop/pause a function plan (stop_fup)."""
-        url = f"{self._base_url}/admin/function_function_module/stop_fup/"
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        try:
-            async with self.session.post(url, data={"id": str(fub_id)}, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("function_plan_stop_fup failed (HTTP %s, fub=%s)", resp.status, fub_id)
-                    return False
-                result = await resp.json(content_type=None)
-                success = result.get("result") is True
-                _LOGGER.info("function_plan_stop_fup: fub=%s result=%s state=%s", fub_id, success, result.get("state"))
-                return success
-        except Exception:
-            _LOGGER.exception("function_plan_stop_fup: fub_id=%s failed", fub_id)
-            return False
+        """Stop/pause a function plan (stop_fup); False if Comexio did not confirm it."""
+        ok = await _succeeded(f"Stopping function plan {fub_id}", lambda: self.client.stop_function_plan(int(fub_id)))
+        _LOGGER.info("function_plan_stop_fup: fub=%s result=%s", fub_id, ok)
+        return ok
 
     async def function_plan_add_comment_element(
         self,
@@ -1845,49 +1695,21 @@ class ComexioAPI:
         x: float = 100.0,
         y: float = 7.5,
     ) -> int | None:
-        """Place a text/comment block (type=14, ref_id=3) on a function plan canvas.
+        """Place a text/comment block (type=14) on a function plan canvas, set to Comexio's widest width.
 
-        Returns the fubElementId assigned by the server, or None on failure.
+        Returns the fubElementId assigned by the server, or None on failure. A failed width
+        update is only logged — the comment itself is placed.
         """
-        url = f"{self._base_url}/admin/function_function_module/add_element/"
-        timestamp = _js_timestamp()
-        payload = {
-            "fubid": str(fub_id),
-            "name": text,
-            "ref_id": "3",
-            "type": "14",
-            "id": "0",
-            "x": str(x),
-            "y": str(y),
-            "timestamp": timestamp,
-        }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        try:
-            async with self.session.post(url, data=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("function_plan_add_comment_element failed (HTTP %s, fub=%s)", resp.status, fub_id)
-                    return None
-                try:
-                    result = await resp.json(content_type=None)
-                    elem_id = result.get("id")
-                    if elem_id is None:
-                        _LOGGER.error(
-                            "function_plan_add_comment_element: no id in response (fub=%s): %s", fub_id, result
-                        )
-                        return None
-                    _LOGGER.debug("function_plan_add_comment_element: fub=%s → elem_id=%s", fub_id, elem_id)
-                except Exception:
-                    _LOGGER.exception("function_plan_add_comment_element: failed to parse response")
-                    return None
-        except aiohttp.ClientError:
-            _LOGGER.exception("function_plan_add_comment_element: HTTP request error (fub=%s)", fub_id)
+        elem_id = await _attempt(
+            f"Placing a comment on function plan {fub_id}",
+            lambda: self.client.add_function_plan_comment(int(fub_id), text, x=float(x), y=float(y)),
+            None,
+        )
+        if elem_id is None:
             return None
         # add_element has no width parameter — the width lives in the comment
         # properties dialog, saved via a separate endpoint.
-        await self._function_plan_set_comment_width(int(elem_id), text)
+        await self._function_plan_set_comment_width(elem_id, text)
         return elem_id
 
     async def function_plan_add_constant_element(
@@ -1899,77 +1721,22 @@ class ComexioAPI:
     ) -> int | None:
         """Place a Constant block (type=16) on a function plan canvas.
 
-        The server always normalizes a saved Constant's reference.ref_id back to 0 (see
-        function_plan_catalog.py's docstring — $FubModules["16"] is empty, nothing to
-        reference), but the *create* call itself rejects ref_id="0" with
-        {"error": "data faulty"} — confirmed live 2026-08-22 via a throwaway test plan.
-        Any positive placeholder (ref_id="1") is accepted and gets normalized away.
-
-        Returns the fubElementId assigned by the server, or None on failure.
+        Returns the fubElementId assigned by the server, or None on failure; a transport failure
+        raises aiohttp.ClientError / TimeoutError.
         """
-        url = f"{self._base_url}/admin/function_function_module/add_element/"
-        timestamp = _js_timestamp()
-        payload = {
-            "fubid": str(fub_id),
-            "name": value,
-            "ref_id": "1",
-            "type": "16",
-            "id": "undefined",
-            "x": str(x),
-            "y": str(y),
-            "timestamp": timestamp,
-        }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("function_plan_add_constant_element failed (HTTP %s, fub=%s)", resp.status, fub_id)
-                return None
-            try:
-                result = await resp.json(content_type=None)
-                elem_id = result.get("id")
-                if elem_id is None:
-                    _LOGGER.error("function_plan_add_constant_element: no id in response (fub=%s): %s", fub_id, result)
-                    return None
-                _LOGGER.debug("function_plan_add_constant_element: fub=%s → elem_id=%s", fub_id, elem_id)
-                return int(elem_id)
-            except Exception:
-                _LOGGER.exception("function_plan_add_constant_element: failed to parse response")
-                return None
+        return await _attempt(
+            f"Placing a constant on function plan {fub_id}",
+            lambda: self.client.add_function_plan_constant(int(fub_id), str(value), x=float(x), y=float(y)),
+            None,
+            transport_raises=True,
+        )
 
     async def _function_plan_set_comment_width(self, elem_id: int, text: str, width: int = 5) -> bool:
         """Set a comment element's text width via savefupcommentelement (5 = 'Sehr Breit')."""
-        url = f"{self._base_url}/admin/function_function_module/savefupcommentelement/"
-        payload = {
-            "id": str(elem_id),
-            "use_base_64": "1",
-            "name": base64.b64encode(text.encode("utf-8")).decode("ascii"),
-            "width": str(width),
-        }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        try:
-            async with self.session.post(url, data=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.warning("savefupcommentelement failed (HTTP %s, elem=%s)", resp.status, elem_id)
-                    return False
-                try:
-                    result = await resp.json(content_type=None)
-                except Exception:
-                    _LOGGER.exception("savefupcommentelement: failed to parse response (elem=%s)", elem_id)
-                    return False
-        except aiohttp.ClientError:
-            _LOGGER.exception("savefupcommentelement: HTTP request error (elem=%s)", elem_id)
-            return False
-        if result.get("result") != 1:
-            _LOGGER.warning("savefupcommentelement rejected (elem=%s): %s", elem_id, result)
-            return False
-        _LOGGER.debug("savefupcommentelement: elem=%s width=%s → %s", elem_id, width, result.get("data"))
-        return True
+        return await _succeeded(
+            f"Setting the width of comment element {elem_id}",
+            lambda: self.client.save_function_plan_comment(int(elem_id), text, width=width),
+        )
 
     async def create_fup(
         self,
@@ -1982,99 +1749,50 @@ class ComexioAPI:
         """Create a new function plan. Returns the new fub_id on success, None on failure.
 
         Args:
-            plan_name: Name of the new plan
+            plan_name: Name of the new plan (must not be in use yet)
             plan_comment: Optional comment/description
-            paper_format: Paper size (A3, A4, A5; defaults to A4)
-            orientation: 'landscape' or 'portrait' (defaults to landscape)
+            paper_format: Paper size (A3, A4, A5; defaults to A4, and so does any other value)
+            orientation: 'landscape' or 'portrait' (defaults to landscape, and so does any other value)
             dpi: Resolution in dots per inch, 45-120 (defaults to 90)
 
-        Steps:
-        1. Check uniqueness via /admin/_helper/isunique
-        2. POST to /admin/function_function_module/save_fub
-        3. Verify plan was created by checking the response redirect
+        The new plan's $Fubs entry is cached right away (see _cache_fub_entry).
         """
-        # Step 1: Unique check
-        url_check = f"{self._base_url}/admin/_helper/isunique"
+        paper, orient = _plan_paper_and_orientation(paper_format, orientation)
+        fub_id = await _attempt(
+            f"Creating function plan {plan_name!r}",
+            lambda: self.client.create_function_plan(
+                plan_name, comment=plan_comment, paper_format=paper, orientation=orient, dpi=dpi
+            ),
+            None,
+        )
+        if fub_id is None:
+            return None
+        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, fub_id)
+        await self._cache_fub_entry(fub_id)
+        return fub_id
+
+    async def _cache_fub_entry(self, fub_id: int) -> None:
+        """Put a just-created plan's $Fubs entry into the plan cache.
+
+        aiocomexio returns only the new plan's id, but function_plan_update_paper and the
+        canvas lookups read the entry before the next poll refreshes the whole cache. A failed
+        lookup is only logged: the plan exists, and the next poll caches it.
+        """
         try:
-            async with self.session.post(url_check, data={"model": "fub", "field": "name", "value": plan_name}) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("create_fup: uniqueness check failed (HTTP %s)", resp.status)
-                    return None
-                result = await resp.json(content_type=None)
-                if not result.get("result"):
-                    _LOGGER.error("create_fup: plan name '%s' already exists", plan_name)
-                    return None
-        except Exception:
-            _LOGGER.exception("create_fup: uniqueness check failed")
-            return None
-
-        # Step 2: Create the plan
-        paper_map = {"A3": "2", "A4": "3", "A5": "4"}
-        paper_id = paper_map.get(paper_format.upper(), "3")
-        orient_id = "1" if orientation.lower() == "portrait" else "0"
-
-        url_create = f"{self._base_url}/admin/function_function_module/save_fub"
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        payload = {
-            "fub_position": "-1",
-            "fub_type": "1",
-            "fub_page_count_x": "1",
-            "fub_page_count_y": "1",
-            "fub_name": plan_name,
-            "fub_comment": plan_comment,
-            "fub_active": "0",
-            "fub_reset_on_close": "0",
-            "fub_paper": paper_id,
-            "fub_orientation": orient_id,
-            "fub_resolution": str(dpi),
-            "fub_create": "Erzeugen",
-        }
-
-        try:
-            async with self.session.post(url_create, data=payload, headers=headers, allow_redirects=False) as resp:
-                if resp.status not in (301, 302, 303):
-                    _LOGGER.error("create_fup: save_fub failed (HTTP %s)", resp.status)
-                    return None
-
-                redirect_location = resp.headers.get("Location", "")
-                if "added=1" not in redirect_location:
-                    _LOGGER.error("create_fup: redirect missing 'added=1' (location: %s)", redirect_location)
-                    return None
-
-                _LOGGER.info("create_fup: plan '%s' created successfully (redirect: %s)", plan_name, redirect_location)
-        except Exception:
-            _LOGGER.exception("create_fup: save_fub request failed")
-            return None
-
-        # Step 3: Verify plan was created by reloading config and checking $Fubs
-        # (same key parse_config() uses for _fub_data — "FubModules" holds
-        # markers/IOs, not plans, and would never see the new entry here)
-        try:
-            raw_config = await self.get_raw_config()
-            fub_data = raw_config.get("Fubs", {})
-            for fub_id_str, fub_info in fub_data.items():
-                if fub_info.get("Name") == plan_name:
-                    new_fub_id = int(fub_id_str)
-                    _LOGGER.info("create_fup: verification successful, new fub_id=%s", new_fub_id)
-                    # Update internal _fub_data
-                    if not hasattr(self, "_fub_data"):
-                        self._fub_data = {}
-                    self._fub_data[fub_id_str] = fub_info
-                    return new_fub_id
-            _LOGGER.error("create_fup: verification failed — plan '%s' not found in $Fubs after creation", plan_name)
-            return None
-        except Exception:
-            _LOGGER.exception("create_fup: verification (config reload) failed")
-            return None
+            fubs = (await self.get_raw_config()).get("Fubs")
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.warning("create_fup: reading back plan %s failed: %s", fub_id, err)
+            return
+        fub_info = dict(iter_group(fubs)).get(str(fub_id))
+        if not isinstance(fub_info, dict):
+            _LOGGER.warning("create_fup: plan %s not found in the config read back — cached with the next poll", fub_id)
+            return
+        self._fub_data[str(fub_id)] = fub_info
 
     async def function_plan_update_paper(
         self, fub_id: int, paper_format: str, dpi: int, orientation: str, name: str | None = None
     ) -> bool:
-        """Update an EXISTING plan's paper format/DPI/orientation (same save_fub endpoint as
-        create_fup, but with fub_id set and fub_save='Speichern' instead of fub_create).
+        """Update an EXISTING plan's paper format/DPI/orientation (Comexio's plan settings save).
 
         Needed before an in-place restore whose snapshot's canvas settings differ from the
         live plan's current ones (e.g. force_override onto an unrelated plan) — otherwise
@@ -2087,7 +1805,7 @@ class ComexioAPI:
 
         All other plan properties (comment, position, active state) are read from the
         current live data and passed through UNCHANGED. Known gap: Comexio's $Fubs dump does
-        not expose "reset on close", so that flag is always sent as "0" (Comexio's own
+        not expose "reset on close", so that flag is always sent as off (Comexio's own
         create-time default) rather than preserved — a cosmetic Comexio Studio setting this
         integration doesn't otherwise manage.
         """
@@ -2096,61 +1814,34 @@ class ComexioAPI:
             _LOGGER.error("function_plan_update_paper: fub_id=%s not found in live data", fub_id)
             return False
 
-        paper_map = {"A3": "2", "A4": "3", "A5": "4"}
-        paper_id = paper_map.get(paper_format.upper(), "3")
-        orient_id = "1" if orientation.lower() == "portrait" else "0"
-        target_name = name if name is not None else fub.get("Name", "")
-
-        url = f"{self._base_url}/admin/function_function_module/save_fub"
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        payload = {
-            "fub_id": str(fub_id),
-            "fub_position": str(fub.get("Position", "-1")),
-            "fub_type": "1",
-            "fub_page_count_x": "1",
-            "fub_page_count_y": "1",
-            "fub_name": target_name,
-            "fub_comment": fub.get("Comment", ""),
-            "fub_active": str(int(bool(fub.get("Active", False)))),
-            "fub_reset_on_close": "0",
-            "fub_paper": paper_id,
-            "fub_orientation": orient_id,
-            "fub_resolution": str(dpi),
-            "fub_save": "Speichern",
-        }
-
-        try:
-            async with self.session.post(url, data=payload, headers=headers, allow_redirects=False) as resp:
-                if resp.status not in (301, 302, 303):
-                    _LOGGER.error("function_plan_update_paper: save_fub failed (HTTP %s, fub=%s)", resp.status, fub_id)
-                    return False
-                redirect_location = resp.headers.get("Location", "")
-                if "saved=1" not in redirect_location:
-                    _LOGGER.error(
-                        "function_plan_update_paper: redirect missing 'saved=1' (fub=%s, location: %s)",
-                        fub_id,
-                        redirect_location,
-                    )
-                    return False
-        except Exception:
-            _LOGGER.exception("function_plan_update_paper: save_fub request failed (fub=%s)", fub_id)
+        paper, orient = _plan_paper_and_orientation(paper_format, orientation)
+        if not await _succeeded(
+            f"Saving settings of function plan {fub_id}",
+            lambda: self.client.update_function_plan(
+                int(fub_id),
+                name=name if name is not None else fub.get("Name", ""),
+                comment=fub.get("Comment") or "",
+                position=int(fub.get("Position", -1)),
+                active=bool(int(fub.get("Active") or 0)),
+                paper_format=paper,
+                orientation=orient,
+                dpi=int(dpi),
+            ),
+        ):
             return False
 
         # Keep the local cache in sync so get_fub_paper_format/dpi/orientation reflect the change
-        fub["Paper"] = paper_id
+        fub["Paper"] = _PLAN_PAPER_IDS[paper]
         fub["Resolution"] = dpi
-        fub["Orientation"] = int(orient_id)
+        fub["Orientation"] = 1 if orient == "portrait" else 0
         if name is not None:
             fub["Name"] = name
         _LOGGER.info(
             "function_plan_update_paper: fub=%s -> paper=%s dpi=%s orientation=%s name=%s",
             fub_id,
-            paper_format,
+            paper,
             dpi,
-            orientation,
+            orient,
             name,
         )
         return True
@@ -2158,8 +1849,8 @@ class ComexioAPI:
     async def create_marker(self, binary: bool) -> int | None:
         """Create a new marker ('flag') and return its server-assigned numeric ID.
 
-        Wraps POST /admin/flag/add/. The new marker starts unlabeled (empty Name,
-        default value 0) — use rename_marker() afterwards to give it a title.
+        The new marker starts unlabeled (empty Name, default value 0) — use rename_marker()
+        afterwards to give it a title.
 
         IMPORTANT: the server assigns the new ID strictly sequentially (next free
         integer) — there is no way to request a specific target ID (confirmed live
@@ -2167,173 +1858,51 @@ class ComexioAPI:
         bridge markers on a round boundary) must consume IDs one at a time via
         repeated calls until the desired ID comes back.
 
-        binary: True for a digital marker (type=1), False for analog (type=2).
+        binary: True for a digital marker, False for analog.
 
         Returns the new marker's Id, or None on failure.
         """
-        url = f"{self._base_url}/admin/flag/add/"
-        payload = {"type": "1" if binary else "2"}
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/flag/home",
-        }
-        try:
-            async with self.session.post(url, data=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("create_marker: flag/add failed (HTTP %s, binary=%s)", resp.status, binary)
-                    return None
-                result = await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("create_marker: HTTP request error (binary=%s): %s", binary, err)
-            return None
-        except Exception:
-            _LOGGER.exception("create_marker: failed to parse response (binary=%s)", binary)
-            return None
-
-        if not result.get("ok"):
-            _LOGGER.error("create_marker: server rejected flag/add (binary=%s): %s", binary, result)
-            return None
-        marker_id = result.get("saved")
-        if marker_id is None:
-            _LOGGER.error("create_marker: no 'saved' id in response (binary=%s): %s", binary, result)
-            return None
-        _LOGGER.info("create_marker: created marker M%s (binary=%s)", marker_id, binary)
-        return int(marker_id)
+        marker_id = await _attempt(
+            f"Creating a {'digital' if binary else 'analog'} marker",
+            lambda: self.client.create_marker(binary=binary),
+            None,
+        )
+        if marker_id is not None:
+            _LOGGER.info("create_marker: created marker M%s (binary=%s)", marker_id, binary)
+        return marker_id
 
     async def rename_marker(self, marker_id: int, name: str, binary: bool) -> bool:
-        """Set an existing marker's title via Comexio's own save flow.
+        """Set an existing marker's title via Comexio's own save flow (after its uniqueness check).
 
-        Mirrors what Comexio's own admin UI does when saving a marker:
-        1. POST /admin/_helper/isunique to check the name isn't already taken.
-        2. POST /admin/flag/saveOne with the full form payload — Comexio's saveOne
-           looks like a full form save rather than a title-only patch, so
-           default/store_memory/value_<id> must be sent along even though we only
-           intend to change the name.
+        Comexio's marker save takes the whole form, so this also resets the marker's default
+        value and "store in memory" flag to 0. Only safe to call on a marker whose current
+        state is already known (e.g. one just created via create_marker()). Do NOT call this on
+        a pre-existing user marker without first reading its live default/store_memory values.
 
-        Only safe to call on a marker whose current state is already known (e.g.
-        one just created via create_marker()). Do NOT call this on a pre-existing
-        user marker without first reading its live default/store_memory values —
-        this would silently reset them to the values sent here.
+        binary: True for digital, False for analog — must match the marker's actual type; it
+        is not looked up here.
 
-        binary: True for digital (type=1), False for analog (type=2) — must match
-        the marker's actual type; it is not looked up here.
-
-        Returns True on success.
+        Returns True on success; False if the name is taken or the save was not confirmed.
         """
-        marker_type = "1" if binary else "2"
-
-        url_check = f"{self._base_url}/admin/_helper/isunique"
-        check_payload = {"model": "memory", "field": "name", "value": name, "id": str(marker_id)}
-        try:
-            async with self.session.post(url_check, data=check_payload) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("rename_marker: isunique check failed (HTTP %s, id=%s)", resp.status, marker_id)
-                    return False
-                result = await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("rename_marker: isunique HTTP error (id=%s): %s", marker_id, err)
+        if not await _succeeded(
+            f"Renaming marker M{marker_id}", lambda: self.client.rename_marker(int(marker_id), name, binary=binary)
+        ):
             return False
-        except Exception:
-            _LOGGER.exception("rename_marker: isunique request failed (id=%s)", marker_id)
-            return False
-
-        if not result.get("result"):
-            _LOGGER.error("rename_marker: name '%s' already in use (id=%s)", name, marker_id)
-            return False
-
-        url_save = f"{self._base_url}/admin/flag/saveOne"
-        save_payload = {
-            "id": str(marker_id),
-            "default_default": "0",
-            "default_type": marker_type,
-            "name": name,
-            "type": marker_type,
-            f"value_{marker_id}": "0",
-            "default": "0",
-            "store_memory": "0",
-        }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/flag/home",
-        }
-        try:
-            async with self.session.post(url_save, data=save_payload, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("rename_marker: saveOne failed (HTTP %s, id=%s)", resp.status, marker_id)
-                    return False
-                result = await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("rename_marker: saveOne HTTP error (id=%s): %s", marker_id, err)
-            return False
-        except Exception:
-            _LOGGER.exception("rename_marker: saveOne request failed (id=%s)", marker_id)
-            return False
-
-        if str(result.get("saved")) != str(marker_id):
-            _LOGGER.error("rename_marker: saveOne response mismatch (id=%s): %s", marker_id, result)
-            return False
-
         _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, name, binary)
         return True
 
     async def rename_knx_object(self, k_id: str | int, name: str) -> bool:
         """Set an existing KNX object's ("K-Element") title via Comexio's own save flow.
 
-        Mirrors rename_marker but targets the KNX one-wire object endpoint instead:
-        1. POST /admin/_helper/isunique (model=oneWire) to check the name isn't already taken.
-        2. POST /admin/knx_one_wire/saveKnx/ with field=name&value=<name> — unlike
-           flag/saveOne this is a genuine single-field patch, not a full-form save, so no
-           other K-Element state needs to be read/resent first.
+        Unlike rename_marker this is a genuine single-field patch — no other K-Element state
+        is touched. Only ever called with the existing title plus a trailing "[RO]"/"[TRIG]"
+        suffix (see coordinator._auto_suffix_unambiguous_knx / _audit_knx_dpt_ambiguous), never
+        a full rename; Comexio's uniqueness check still runs first, as in its own admin UI.
 
-        Only ever called with the existing title plus a trailing "[RO]"/"[TRIG]" suffix
-        (see coordinator._auto_suffix_unambiguous_knx / _audit_knx_dpt_ambiguous), never a
-        full rename — collisions should be rare in practice, but this still guards against
-        one exactly like Comexio's own admin UI would.
-
-        Returns True on success.
+        Returns True on success; False if the name is taken or the save was not confirmed.
         """
-        url_check = f"{self._base_url}/admin/_helper/isunique"
-        check_payload = {"model": "oneWire", "field": "name", "value": name, "id": str(k_id)}
-        try:
-            async with self.session.post(url_check, data=check_payload) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("rename_knx_object: isunique check failed (HTTP %s, id=%s)", resp.status, k_id)
-                    return False
-                result = await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("rename_knx_object: isunique HTTP error (id=%s): %s", k_id, err)
+        if not await _succeeded(f"Renaming KNX object K{k_id}", lambda: self.client.rename_knx_object(int(k_id), name)):
             return False
-        except Exception:
-            _LOGGER.exception("rename_knx_object: isunique request failed (id=%s)", k_id)
-            return False
-
-        if not isinstance(result, dict) or not result.get("result"):
-            _LOGGER.error("rename_knx_object: name '%s' already in use (id=%s): %s", name, k_id, result)
-            return False
-
-        url_save = f"{self._base_url}/admin/knx_one_wire/saveKnx/"
-        save_payload = {"id": str(k_id), "field": "name", "value": name}
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/knx_one_wire/home",
-        }
-        try:
-            async with self.session.post(url_save, data=save_payload, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("rename_knx_object: saveKnx failed (HTTP %s, id=%s)", resp.status, k_id)
-                    return False
-                result = await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("rename_knx_object: saveKnx HTTP error (id=%s): %s", k_id, err)
-            return False
-        except Exception:
-            _LOGGER.exception("rename_knx_object: saveKnx request failed (id=%s)", k_id)
-            return False
-
-        if not isinstance(result, dict) or str(result.get("Ok")) != "1":
-            _LOGGER.error("rename_knx_object: saveKnx response mismatch (id=%s): %s", k_id, result)
-            return False
-
         _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, name)
         return True
 
@@ -3479,46 +3048,24 @@ class ComexioAPI:
     async def function_plan_run_fup(self, fub_id: int, plan_data: dict | None = None) -> bool:
         """Save and activate a function plan (run_fup).
 
-        By default the CURRENT state is loaded via loadelements; pass an explicit
-        plan_data (e.g. a backup snapshot with 'elements' and 'connections') to
-        restore that state instead.
-        The output field in connections is converted from list (loadelements)
-        to indexed dict (run_fup expectation).
+        By default the CURRENT state is loaded first (aiocomexio refuses to run a plan whose
+        load came back without elements or connections); pass an explicit plan_data (e.g. a
+        backup snapshot with 'elements' and 'connections') to restore that state instead.
+        Returns True only if Comexio confirmed the run.
         """
-        if plan_data is None:
-            plan_data = await self.function_plan_load_elements(fub_id)
-        if plan_data is None:
-            _LOGGER.error("function_plan_run_fup: could not load plan %s", fub_id)
-            return False
-
-        connections_transformed = {
-            conn_id: {
-                **conn,
-                "output": {str(i): item for i, item in enumerate(conn.get("output", []))},
-            }
-            for conn_id, conn in plan_data.get("connections", {}).items()
-        }
-        data_payload = {"elements": plan_data.get("elements", {}), "connections": connections_transformed}
-
-        url = f"{self._base_url}/admin/function_function_module/run_fup/"
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
         try:
-            async with self.session.post(
-                url, data={"id": str(fub_id), "data": json.dumps(data_payload)}, headers=headers
-            ) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("function_plan_run_fup failed (HTTP %s, fub=%s)", resp.status, fub_id)
-                    return False
-                result = await resp.json(content_type=None)
-                success = result.get("result") is True
-                _LOGGER.info("function_plan_run_fup: fub=%s result=%s state=%s", fub_id, success, result.get("state"))
-                return success
-        except Exception:
-            _LOGGER.exception("function_plan_run_fup: fub_id=%s failed", fub_id)
+            await self.client.run_function_plan(int(fub_id), plan_data)
+        except ComexioRequestRejectedError as err:
+            # After a restore payload Comexio routinely answers result=false although it applied
+            # the plan (see services/backup.py); a plain reactivation refused is a stopped plan.
+            level = logging.INFO if plan_data is not None else logging.WARNING
+            _LOGGER.log(level, "function_plan_run_fup: fub=%s not confirmed: %s", fub_id, err)
             return False
+        except (ComexioError, TypeError, ValueError) as err:
+            _LOGGER.warning("function_plan_run_fup: fub=%s failed: %s", fub_id, err)
+            return False
+        _LOGGER.info("function_plan_run_fup: fub=%s result=True", fub_id)
+        return True
 
     async def _reload_config_until_commands_ready(
         self,
