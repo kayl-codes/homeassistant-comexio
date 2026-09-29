@@ -551,6 +551,14 @@ def test_plan_ids_from_payloads_are_passed_as_ints(comexio_api: ComexioAPI, clie
     client.delete_function_plan_elements.assert_awaited_once_with([3, 4])
 
 
+def test_knx_rename_passes_the_id_as_int(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Regression (Sourcery, 8b-2c): the coordinator and the repair flow pass registry ids, which can
+    # be strings; aiocomexio insists on an int and would refuse the [RO]/[TRIG] rename.
+    client.rename_knx_object = AsyncMock()
+    assert asyncio.run(comexio_api.rename_knx_object("3", "K3 Test [RO]")) is True
+    client.rename_knx_object.assert_awaited_once_with(3, "K3 Test [RO]")
+
+
 @pytest.mark.parametrize(
     ("call", "method"),
     [

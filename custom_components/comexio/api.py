@@ -1901,7 +1901,7 @@ class ComexioAPI:
 
         Returns True on success; False if the name is taken or the save was not confirmed.
         """
-        if not await _succeeded(f"Renaming KNX object K{k_id}", lambda: self.client.rename_knx_object(k_id, name)):
+        if not await _succeeded(f"Renaming KNX object K{k_id}", lambda: self.client.rename_knx_object(int(k_id), name)):
             return False
         _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, name)
         return True
