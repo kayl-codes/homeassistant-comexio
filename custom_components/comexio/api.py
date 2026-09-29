@@ -120,8 +120,8 @@ async def _attempt[T, F](
 def _plan_paper_and_orientation(paper_format: str, orientation: str) -> tuple[str, str]:
     """Paper format and orientation as aiocomexio accepts them.
 
-    Anything else falls back to A4 / landscape, as the requests before aiocomexio did — e.g. a
-    backup of an A2 plan still restores, on A4, instead of failing the whole restore.
+    Comexio offers only A3/A4/A5; any other value (e.g. from a damaged backup) falls back to
+    A4 / landscape, as the requests before aiocomexio did, instead of failing the whole restore.
     """
     paper = paper_format.upper()
     if paper not in _PLAN_PAPER_IDS:

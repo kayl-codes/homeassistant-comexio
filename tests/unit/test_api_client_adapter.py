@@ -612,10 +612,14 @@ def test_create_fup_caches_the_new_plan(comexio_api: ComexioAPI, client: MagicMo
     assert comexio_api.fub_data["8"] == new_plan
 
 
-def test_create_fup_keeps_the_id_when_the_read_back_fails(comexio_api: ComexioAPI, client: MagicMock) -> None:
+@pytest.mark.parametrize("err", [_connection_error(), ComexioDataError("no $FubModules")])
+def test_create_fup_keeps_the_id_when_the_read_back_fails(
+    comexio_api: ComexioAPI, client: MagicMock, err: Exception
+) -> None:
     # The plan exists once Comexio confirmed it — reporting None would make the caller create it again.
+    # A failed scrape makes get_raw_config() return {}: no "Fubs", which must not raise either.
     client.create_function_plan = AsyncMock(return_value=8)
-    _fail(client, "get_raw_config", _connection_error())
+    _fail(client, "get_raw_config", err)
     assert asyncio.run(comexio_api.create_fup("HA - IO")) == 8
     assert "8" not in comexio_api.fub_data
 
@@ -667,8 +671,9 @@ def test_plan_build_transport_failure_raises(
     # Regression (review 8b-2c): the restore paths in services/backup.py abort on these instead
     # of trying every further element of the snapshot against an unreachable server.
     _fail(client, method, _connection_error())
+    coro = call(comexio_api)
     with pytest.raises(aiohttp.ServerDisconnectedError):
-        asyncio.run(call(comexio_api))
+        asyncio.run(coro)
 
 
 def test_save_elements_pos_rejection_is_false(comexio_api: ComexioAPI, client: MagicMock) -> None:
@@ -686,11 +691,11 @@ def test_run_fup_reactivation_refused_is_a_warning(
 
 
 def test_unsupported_paper_falls_back_to_a4(comexio_api: ComexioAPI, client: MagicMock) -> None:
-    # Regression (review 8b-2c): a backup of an A2 plan used to restore on A4; aiocomexio only
-    # takes A3/A4/A5, so without the fallback the whole restore would fail.
+    # Regression (review 8b-2c): an unknown paper value in a backup used to restore on A4;
+    # aiocomexio only takes A3/A4/A5, so without the fallback the whole restore would fail.
     comexio_api.update_fub_cache_entry(7, {"Name": "Old", "Paper": 1})
     client.update_function_plan = AsyncMock()
-    assert asyncio.run(comexio_api.function_plan_update_paper(7, "A2", 90, "Landscape")) is True
+    assert asyncio.run(comexio_api.function_plan_update_paper(7, "Letter", 90, "Landscape")) is True
     kwargs = client.update_function_plan.await_args.kwargs
     assert (kwargs["paper_format"], kwargs["orientation"]) == ("A4", "landscape")
     assert comexio_api.fub_data["7"]["Paper"] == "3"
