@@ -146,6 +146,15 @@ def _post_result_notification(hass: HomeAssistant, notif_id: str, msg: str, titl
     persistent_notification.async_create(hass, msg, title=title, notification_id=result_id)
 
 
+def _sync_notification_title(server_id: str, *, is_error: bool, partial: bool) -> str:
+    """Title of a sync notification: an aborted run, a partial one, or a normal/progress one."""
+    if is_error:
+        return "Comexio Sync Failed"
+    if partial:
+        return f"Comexio Sync Finished with errors ({server_id})"
+    return f"Comexio Sync ({server_id})"
+
+
 def _skipped_check_line(check: str) -> str:
     """Function Plan block line for a mid-sync re-check that could not run.
 
@@ -427,6 +436,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             return
         self.coordinator.in_sync = True
         self.coordinator.sync_error = False
+        self.coordinator.sync_failed_writes = []
 
         update_status = partial(self._update_sync_status, notify_enabled, notif_id)
 
@@ -435,6 +445,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         api = self.coordinator.api
         webio_name = self.coordinator.config_entry.data.get("webio_name", "HomeAssistant")
         class_names = {cls: webio_class_name(webio_name, cls) for cls in WEBIO_CLASSES}
+        ctx: _SyncContext | None = None
 
         try:
             update_status("Analyzing Comexio configuration...", pct=5, step_info=_STEP_ANALYZING_CONFIG)
@@ -587,13 +598,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 msg = f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
 
             self.coordinator.last_audit_failed = False
+            self.coordinator.sync_failed_writes = list(ctx.failed_writes)
             update_status(msg, pct=100, step_info="Done", final=True)
 
         except Exception as e:
             self.coordinator.in_sync = False
             self.coordinator.sync_error = True
             _LOGGER.exception("[%s] Sync failed", self.server_id)
-            update_status(f"Error: {e}", is_error=True, final=True)
+            # Writes that already failed before the abort would otherwise vanish behind "Error: ...".
+            if ctx is not None:
+                self.coordinator.sync_failed_writes = list(ctx.failed_writes)
+            failed_note = _failed_writes_note(self.coordinator.sync_failed_writes)
+            update_status(f"Error: {e}\n\n{failed_note}".rstrip(), is_error=True, final=True)
 
         finally:
             await self._finalize_sync()
@@ -625,7 +641,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             self.coordinator.sync_current_step = step_info
         self.coordinator.async_set_updated_data(self.coordinator.data)
         if notify_enabled:
-            title = "Comexio Sync Failed" if is_error else f"Comexio Sync ({self.server_id})"
+            partial = final and bool(self.coordinator.sync_failed_writes)
+            title = _sync_notification_title(self.server_id, is_error=is_error, partial=partial)
             if final:
                 _post_result_notification(self.hass, notif_id, msg, title)
             else:
@@ -1104,7 +1121,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 # 1. Flag reset
                 self.coordinator.in_sync = False
                 self.coordinator.cancel_sync = False
-                if not getattr(self.coordinator, "sync_error", False):
+                # An aborted or partial run keeps its report as the sensor's progress_details.
+                if not (self.coordinator.sync_error or self.coordinator.sync_failed_writes):
                     self.coordinator.sync_progress_text = "Idle"
                 self.coordinator.sync_progress_pct = None
                 self.coordinator.sync_current_step = None
