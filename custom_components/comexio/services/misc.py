@@ -13,7 +13,6 @@ import time
 from typing import Any
 
 from aiocomexio.function_plan import element_search_id, resolve_element_label
-import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -191,7 +190,7 @@ async def _upload_webio_class(api: Any, server_id: str, class_name: str, web_io_
     """
     try:
         base_info = await api.get_webio_base_info(class_name)
-    except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+    except RuntimeError as err:
         # A failed lookup must not fall through to upload_web_io below — that would create a
         # duplicate class next to one that may well still exist.
         _LOGGER.warning("Web-IO class lookup for '%s' failed, skipping upload: %s", class_name, err)

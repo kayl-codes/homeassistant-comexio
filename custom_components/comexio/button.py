@@ -94,11 +94,26 @@ _NOTE_NOT_ACTIVATED = f", {ICON_WARNING} plan NOT activated"
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
 _STEP_CHECKING_PLAN = "Checking function plan wiring"
+_DELTA_RESULT_KEYS = {"rename": "renamed", "delete": "removed", "type": "updated", "create": "added"}
+_FAILED_WRITES_SHOWN = 10  # failed Web-IO writes named in the result message; the rest are counted
 
 
 def _format_counts(added: int, updated: int, renamed: int, removed: int) -> str:
     """Sync result counts in words — "+0 … -0" read like signed numbers."""
     return f"{added} added, {updated} updated, {renamed} renamed, {removed} removed"
+
+
+def _failed_writes_note(failed_writes: list[str]) -> str:
+    """Result-message block naming the Web-IO writes that failed, or "" when none did."""
+    if not failed_writes:
+        return ""
+    shown = ", ".join(failed_writes[:_FAILED_WRITES_SHOWN])
+    hidden = len(failed_writes) - _FAILED_WRITES_SHOWN
+    more = f" (+{hidden} more)" if hidden > 0 else ""
+    return (
+        f"{ICON_WARNING} {len(failed_writes)} Web-IO write(s) failed: {shown}{more}. "
+        "See the log for the reason, then run the sync again.\n\n"
+    )
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -260,6 +275,9 @@ class _SyncContext:
     # Parsed config of the KNX step's fresh audit, kept only when that step wrote nothing to
     # Comexio — the trigger step then reuses it instead of fetching config + plans again.
     unchanged_config_snapshot: dict[str, Any] | None = None
+    # Web-IO writes Comexio rejected or never answered (the API adapter logged why) — named
+    # in the result message so a failed write never reads as a finished sync.
+    failed_writes: list[str] = field(default_factory=list)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -556,6 +574,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     skipped_creates,
                     per_class,
                     debris_removed,
+                    ctx.failed_writes,
                 )
                 if plan_summary:
                     msg += "\n\n**Function Plan:**\n" + "\n".join(plan_summary)
@@ -1011,8 +1030,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         skipped_creates: int = 0,
         per_class: dict[str, dict[str, int]] | None = None,
         debris_removed: int = 0,
+        failed_writes: list[str] | None = None,
     ) -> str:
         """Compose the final sync-result notification text."""
+        failed_note = _failed_writes_note(failed_writes or [])
         recreate_note = ""
         if recreated_classes:
             recreated_str = ", ".join(webio_class_label(c) for c in recreated_classes)
@@ -1030,20 +1051,27 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             debris_note = f"{ICON_CHECK} {debris_removed} Function Plan debris element(s) removed\n\n"
 
         changed = added + updated + renamed + removed
-        if changed == 0 and not recreated_classes and updated_ip and not skipped_creates:
+        if changed == 0 and not recreated_classes and updated_ip and not skipped_creates and not failed_note:
             return (
                 f"{ICON_SUCCESS} **Comexio Server Address updated**\n\n{debris_note}"
                 f"The IP address has been successfully updated in the Web-IO device(s).\n"
                 f"{ICON_DURATION} Duration: {duration_str}"
             )
-        if changed == 0 and recreated_classes and not updated_ip and not skipped_creates:
+        if changed == 0 and recreated_classes and not updated_ip and not skipped_creates and not failed_note:
             return (
                 f"{ICON_SUCCESS} **Comexio Recreation Finished**\n\n{recreate_note}{debris_note}"
                 f"{ICON_DURATION} Duration: {duration_str}"
             )
+        # With a failed write something WAS needed — it just did not get applied.
+        nothing_done = "no changes applied" if failed_note else "no changes needed"
+        headline = (
+            f"{ICON_WARNING} **Comexio Sync Finished with errors**"
+            if failed_note
+            else f"{ICON_SUCCESS} **Comexio Sync Finished**"
+        )
         return (
-            f"{ICON_SUCCESS} **Comexio Sync Finished**\n\n{recreate_note}{skip_note}{debris_note}"
-            f"Results: {_format_counts(added, updated, renamed, removed) if changed else 'no changes needed'}"
+            f"{headline}\n\n{failed_note}{recreate_note}{skip_note}{debris_note}"
+            f"Results: {_format_counts(added, updated, renamed, removed) if changed else nothing_done}"
             + (", IP-Address updated" if updated_ip else "")
             + f".\n{self._build_per_class_note(per_class)}{ICON_DURATION} Duration: {duration_str}"
         )
@@ -1158,7 +1186,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             if await ctx.api.delete_webio_device(class_dev_id):
                 _LOGGER.info("[%s] %s Fast-Track enabled: device has been deleted.", self.server_id, label)
                 return "recreate"
-            _LOGGER.info("[%s] %s device is in use. Falling back to Delta-Sync.", self.server_id, label)
+            # False is "in use" or a failed request — the API adapter already warned about the latter.
+            _LOGGER.info("[%s] %s device could not be deleted. Falling back to Delta-Sync.", self.server_id, label)
             return action
         _LOGGER.info(
             "[%s] %s ETA (%ds) is faster than Fast-Track. Proceeding exactly as requested.",
@@ -1261,7 +1290,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if not base_id or str(base_id) in {"0", "None"}:
             try:
                 b_info = await api.get_webio_base_info(class_name)
-            except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+            except RuntimeError as err:
                 # Only a fallback lookup: without a base_id, new-command creates are skipped
                 # (and reported) below while renames/type-fixes still run — no reason to abort
                 # the whole Delta Sync over it.
@@ -1319,6 +1348,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 step_info="Updating HA IP address",
             )
             result["updated_ip"] = await api.update_webio_device_ip(class_dev_id, ctx.ha_address, class_name)
+            if not result["updated_ip"]:
+                ctx.failed_writes.append(f"{label}: server address update")
 
         return result
 
@@ -1430,26 +1461,29 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         class_dev_id: str | None,
         task: dict,
         result: dict[str, Any],
+        failed_writes: list[str],
     ) -> None:
-        """Execute one delta-sync task (rename/delete/type-fix/create), updating `result` in place."""
+        """Execute one delta-sync task (rename/delete/type-fix/create), updating `result` in place.
+
+        A write the API reports as failed is recorded in `failed_writes` instead of counted,
+        and a failed create is not handed on to the function plan wiring pass."""
         item, t_type = task["item"], task["type"]
-        if t_type == "rename":
-            await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
-            result["renamed"] += 1
-        elif t_type == "delete":
-            await api.delete_single_command(item["id"], class_dev_id)
-            result["removed"] += 1
-        elif t_type == "type":
+        if t_type == "delete":
+            ok = await api.delete_single_command(item["id"], class_dev_id)
+        else:
+            # rename, type and create all save the full command; only create has no id yet.
             # A digital<->analog type change may move the entity to a different HA domain
             # (e.g. switch -> number). No registry cleanup is needed here: the forced
             # integration reload after every sync (_finalize_sync) re-runs __init__.py's
             # expected_platform check, which already removes stale-domain entities based on
             # the actual HA entity domain rather than this Comexio-side type signal alone.
-            await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=item["id"])
-            result["updated"] += 1
-        elif t_type == "create":
-            await api.save_single_command(base_id, class_dev_id, item["payload"])
-            result["added"] += 1
+            existing_cmd_id = None if t_type == "create" else item["id"]
+            ok = await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=existing_cmd_id)
+        if not ok:
+            failed_writes.append(f"{t_type} {item['name']}")
+            return
+        result[_DELTA_RESULT_KEYS[t_type]] += 1
+        if t_type == "create":
             result["created_names"].append(item["name"])
 
     async def _execute_delta_tasks(
@@ -1512,6 +1546,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 class_dev_id,
                 task,
                 result,
+                ctx.failed_writes,
             )
         return result
 
