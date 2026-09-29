@@ -91,11 +91,13 @@ def test_webio_still_present(found: Any, expected: str | None) -> None:
 def test_recreate_does_not_take_the_old_device_for_the_new_one() -> None:
     # Review: the lookup by name also finds the old device if Comexio refused the create.
     api = SimpleNamespace(get_webio_device_info=AsyncMock(return_value="12"))
+    confirm = _confirm_webio_device_created(api, "HomeAssistant [M]", "12", "Marker")
     with pytest.raises(RuntimeError, match="not confirmed"):
-        asyncio.run(_confirm_webio_device_created(api, "HomeAssistant [M]", "12", "Marker"))
+        asyncio.run(confirm)
     api.get_webio_device_info = AsyncMock(return_value=None)
+    confirm = _confirm_webio_device_created(api, "HomeAssistant [M]", None, "Marker")
     with pytest.raises(RuntimeError, match="not confirmed"):
-        asyncio.run(_confirm_webio_device_created(api, "HomeAssistant [M]", None, "Marker"))
+        asyncio.run(confirm)
     api.get_webio_device_info = AsyncMock(return_value="13")
     asyncio.run(_confirm_webio_device_created(api, "HomeAssistant [M]", "12", "Marker"))
 
@@ -105,5 +107,6 @@ def test_recreate_aborts_unless_the_old_class_is_gone(deleted: bool, left: Any, 
     api = SimpleNamespace(
         delete_webio_base=AsyncMock(return_value=deleted), get_webio_base_info=AsyncMock(return_value=left)
     )
+    delete = _delete_old_webio_class(api, "7", "HomeAssistant [M]", "Marker")
     with patch("custom_components.comexio.button.asyncio.sleep", AsyncMock()), pytest.raises(RuntimeError, match=match):
-        asyncio.run(_delete_old_webio_class(api, "7", "HomeAssistant [M]", "Marker"))
+        asyncio.run(delete)

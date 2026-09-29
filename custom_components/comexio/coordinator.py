@@ -173,6 +173,8 @@ _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 # e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache).
 _SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
 
+_UNINSTALL_CLEANUP_LOG = "[%s] Uninstall cleanup: %s"
+
 # Debounce for live plan-preview refreshes: webhook bursts (e.g. a dimmer ramp) collapse
 # into one re-render at most every ~0.5 s; single value pushes still show up promptly.
 _PREVIEW_LIVE_REFRESH_DELAY = 0.5
@@ -1573,7 +1575,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         await self.async_refresh()
         if not (self.last_update_success and self._last_poll_scraped):
             reason = f"refresh from Comexio failed ({self.last_exception or 'no data'}) — Web-IO not deleted"
-            _LOGGER.warning("[%s] Uninstall cleanup: %s", self.server_id, reason)
+            _LOGGER.warning(_UNINSTALL_CLEANUP_LOG, self.server_id, reason)
             for cls in webio_classes:
                 skipped[cls] = reason
             return devices, classes, failed_classes, skipped
@@ -1616,7 +1618,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             if error:
                 skipped[key] = f"Web-IO device {device_id} not deleted: {error}"
-                _LOGGER.warning("[%s] Uninstall cleanup: %s", self.server_id, skipped[key])
+                _LOGGER.warning(_UNINSTALL_CLEANUP_LOG, self.server_id, skipped[key])
                 return
             devices[key] = str(device_id)
         if not base_id:
@@ -1626,7 +1628,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         if error:
             failed_classes[key] = f"Web-IO class {base_id} not deleted: {error}"
-            _LOGGER.warning("[%s] Uninstall cleanup: %s", self.server_id, failed_classes[key])
+            _LOGGER.warning(_UNINSTALL_CLEANUP_LOG, self.server_id, failed_classes[key])
         else:
             classes[key] = str(base_id)
 
