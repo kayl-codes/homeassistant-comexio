@@ -8,21 +8,26 @@ import io
 import json
 import logging
 import re
-import secrets
 import time
-from typing import Any
+from typing import Any, NoReturn
 
-from aiocomexio import config as comexio_config, webio as comexio_webio
+from aiocomexio import (
+    ComexioAuthenticationError,
+    ComexioClient,
+    ComexioConnectionError,
+    ComexioDataError,
+    ComexioError,
+    ComexioResponseError,
+    config as comexio_config,
+    webio as comexio_webio,
+)
 from aiocomexio.config import ParseOptions, iter_group
 from aiocomexio.const import WebioClass
-from aiocomexio.scrape import parse_comexio_version, parse_io_input_types, parse_io_types, scrape_js_vars
-from aiocomexio.session import is_local_address, session_kwargs
+from aiocomexio.session import session_kwargs
 import aiohttp
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
-from multidict import MultiDict
 
 # Mandatory DOMAIN import for Audit logic
 from .const import (
@@ -90,9 +95,17 @@ def _webhook_path(server_id: str) -> str:
     return f"/api/webhook/comexio_{server_id}"
 
 
-# get_live_states' dashboard/refresh request/response key prefix for KNX objects ($FubModules
-# type "11") — distinguishes them from markers, which share the same plain numeric id space.
-_KNX_LIVE_KEY_PREFIX = "knxIo_11_"
+def _raise_transport_error(err: ComexioConnectionError) -> NoReturn:
+    """Re-raise the aiohttp.ClientError / TimeoutError behind err, else err itself.
+
+    For the adapters whose callers have always handled transport failures as those two
+    exception types (DataUpdateCoordinator reports them as a plain "Error requesting data"
+    instead of an unexpected error with a traceback).
+    """
+    cause = err.__cause__
+    if isinstance(cause, (aiohttp.ClientError, TimeoutError)):
+        raise cause from None
+    raise err
 
 
 def _balanced_rows_per_col(n_items: int, max_rows_per_col: int) -> int:
@@ -145,15 +158,6 @@ def _placed_marker_ids(all_plans: dict[int, dict], ref_type: int) -> set[int]:
             with suppress(TypeError, ValueError):
                 placed_ids.add(int(ref.get("ref_id")))
     return placed_ids
-
-
-def _plan_payload_has_elements(data: Any) -> bool:
-    """True if a loadelements/loadallelements plan payload carries a real elements collection.
-
-    An error object or truncated payload (no "elements", or "elements": null) must not pass as
-    a loaded, empty plan wherever placement gates an irreversible action (marker_delete force).
-    """
-    return isinstance(data, dict) and isinstance(data.get("elements"), (dict, list))
 
 
 def _reference_type(ref: Any) -> int | None:
@@ -423,6 +427,22 @@ class ComexioAPI:
         # [[project-logikplan-preview]] on why a stuck live-poll starved the whole coordinator.
         # Created lazily on first use, not here — most setups never open the preview.
         self._preview_session: aiohttp.ClientSession | None = None
+        self._preview_client: ComexioClient | None = None
+        # The host / credentials the preview session logged in with.
+        self._preview_credentials: tuple[str, ...] = ()
+        # aiocomexio client on the main session; see the client property.
+        self._client: ComexioClient | None = None
+        self._client_credentials: tuple[str, ...] = ()
+        # The client whose last full login succeeded — login() skips the full login while its
+        # session is still logged in (see there).
+        self._logged_in_client: ComexioClient | None = None
+        # Serializes full logins: two at once clear each other's cookie jar mid-login.
+        self._login_lock = asyncio.Lock()
+        # Bumped by every successful full login, so a caller that waited for the lock sees
+        # that another one already logged the session in again.
+        self._login_generation: int = 0
+        # Plans whose connection values last came back in an unexpected shape (warned once).
+        self._connection_values_shape_warned: set[int] = set()
         # Guards ensure_preview_session()'s check-then-act window: HA's interval scheduler
         # fires poll ticks without awaiting the previous one, so at the 0.5s fast-poll
         # cadence (debug box active) multiple ticks can see _preview_session is None before
@@ -449,8 +469,6 @@ class ComexioAPI:
         # Function plan + paper metadata (populated by parse_config)
         self._fub_data: dict[str, Any] = {}  # fub_id_str → {Id, Name, Paper, ...}
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
-        self._auth_warned: bool = False
-        self._login_warned: bool = False
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
         self.last_login_error: str | None = None
@@ -467,31 +485,73 @@ class ComexioAPI:
         the dedicated session again from scratch (a fresh session, since a stale/rejected
         cookie jar wouldn't fix itself).
         """
+        self._drop_outdated_preview_session()
         if self._preview_session is not None:
             return self._preview_session
         async with self._preview_session_lock:
             # Re-check: another tick may have finished creating the session while this
-            # one was waiting for the lock.
+            # one was waiting for the lock — and the settings may have changed since.
+            self._drop_outdated_preview_session()
             if self._preview_session is not None:
                 return self._preview_session
             if self._closed:
                 return None
             session = async_create_clientsession(self.hass, **self._build_session_kwargs())
+            credentials = self._credentials()
+            client = self._new_client(session)
             login_ok = False
             try:
-                login_ok = await self.login(session=session)
+                login_ok = await self._login(client)
             finally:
-                # Any non-success path (failed login, close() during the await above, or
-                # login() raising) must not leave an authenticated session orphaned.
-                if not login_ok or self._closed:
+                # Any non-success path (failed login, close() or new connection settings during
+                # the await above, or _login() raising) must not leave an authenticated session
+                # orphaned.
+                settings_changed = credentials != self._credentials()
+                if not login_ok or self._closed or settings_changed:
                     session.detach()
             if not login_ok:
                 _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
                 return None
+            if settings_changed:
+                _LOGGER.info("Connection settings changed during the preview login — opening a new session next poll")
+                return None
             if self._closed:
                 return None
             self._preview_session = session
+            self._preview_client = client
+            self._preview_credentials = credentials
             return session
+
+    def _credentials(self) -> tuple[str, ...]:
+        return (self.host, self.username, self.password, self.api_user or "", self.api_pass or "")
+
+    def _new_client(self, session: aiohttp.ClientSession) -> ComexioClient:
+        host, username, password, api_user, api_pass = self._credentials()
+        return ComexioClient(host, username, password, session=session, api_username=api_user, api_password=api_pass)
+
+    @property
+    def client(self) -> ComexioClient:
+        """The aiocomexio client on the main session.
+
+        Rebuilt whenever host or credentials change — the coordinator's reconfigure path
+        assigns new values to host / username / password / api_user / api_pass and logs in again.
+        A preview session that logged in with other settings is dropped as well — its client and
+        cookie belong to the old ones — so ensure_preview_session opens a new one on the next poll.
+        """
+        self._drop_outdated_preview_session()
+        if self._client is None or self._client_credentials != self._credentials():
+            self._client = self._new_client(self.session)
+            self._client_credentials = self._credentials()
+        return self._client
+
+    def _drop_outdated_preview_session(self) -> None:
+        """Detach a preview session that logged in with other host / credentials than the current ones."""
+        if self._preview_session is None or self._preview_credentials == self._credentials():
+            return
+        _LOGGER.info("Comexio connection settings changed — reopening the preview session")
+        self._preview_session.detach()
+        self._preview_session = None
+        self._preview_client = None
 
     @property
     def _base_url(self) -> str:
@@ -507,103 +567,99 @@ class ComexioAPI:
         """Refresh a single plan's cached metadata (e.g. after an out-of-band get_raw_config() lookup)."""
         self._fub_data[str(fub_id)] = fub_info
 
-    def _encrypt_block(self, data_str: str, mod: int, exp: int) -> str:
-        """RSA encryption logic matching Comexio v11 (PKCS1v15)."""
-        try:
-            pub_key = rsa.RSAPublicNumbers(exp, mod).public_key()
-            encrypted = pub_key.encrypt(data_str.encode("iso-8859-1"), padding.PKCS1v15())
-            required_len = ((pub_key.key_size + 7) // 8) * 2
-            return encrypted.hex().zfill(required_len)
-        except Exception:
-            _LOGGER.exception("RSA Block encryption failed")
-            raise
+    async def login(self) -> bool:
+        """Make sure the main session is logged in; a full RSA login only if it is not.
 
-    async def login(self, session: aiohttp.ClientSession | None = None) -> bool:
-        """Performs the RSA login procedure for admin access.
+        Services call this before every run, while the coordinator poll or a sync may be using
+        the same session. aiocomexio's login clears the session's cookie jar first, so an
+        unconditional login would log a working session out for its duration — and for good if
+        that login then fails on a transient error. A still logged-in session (probed with the
+        cheap bus workload request) is therefore kept as it is.
 
-        session: defaults to the main session; pass the dedicated preview session
-        (see ensure_preview_session) to log that one in independently instead.
+        Returns False on failure and sets last_login_error to "rejected" (credentials refused
+        — setup asks for reauth) or "connection" (server unreachable or answering garbage —
+        setup retries).
         """
-        sess = session if session is not None else self.session
-        if not is_local_address(self.host) and not self._login_warned:
-            _LOGGER.warning(
-                "Logging into Comexio over plain HTTP on a non-local address (%s). "
-                "Credentials may be transmitted in clear text.",
-                self.host,
-            )
-            self._login_warned = True
+        client = self.client
+        if client is self._logged_in_client:
+            try:
+                await client.get_bus_workload()
+            except (ComexioConnectionError, ComexioResponseError) as err:
+                # Unreachable or busy, not logged out: a full login would clear the still valid
+                # session and most likely fail the same way.
+                _LOGGER.warning("Comexio admin session probe failed: %s", err)
+                self.last_login_error = "connection"
+                return False
+            except ComexioError as err:
+                _LOGGER.debug("Comexio admin session probe failed, logging in again: %s", err)
+            else:
+                self.last_login_error = None
+                return True
+        return await self._full_login()
 
-        _LOGGER.debug("Starting v11 RSA login procedure for host: %s", self.host)
-        url = f"{self._base_url}/board/home/login/"
+    async def _full_login(self) -> bool:
+        """Full RSA login of the main session's client, one at a time.
 
-        sess.cookie_jar.update_cookies({"comexio-client-time": str(int(time.time()))})
+        A caller that had to wait for a concurrent full login takes over its success instead of
+        logging in again (which would clear the jar of the session just logged in).
+        """
+        generation = self._login_generation
+        async with self._login_lock:
+            client = self.client
+            if self._login_generation != generation and client is self._logged_in_client:
+                return True
+            if not await self._login(client):
+                self._logged_in_client = None
+                return False
+            self._logged_in_client = client
+            self._login_generation += 1
+            return True
+
+    async def _login(self, client: ComexioClient) -> bool:
+        """client.login() mapped onto login()'s bool / last_login_error contract."""
         try:
-            async with sess.post(url, data={"login_keys": "true"}) as resp:
-                keys = await resp.json(content_type=None)
-
-            salt_str = base64.b64decode(keys["salt"]).decode("iso-8859-1")
-            mod, exp = int(keys["modulus"], 16), int(keys["exponent"], 16)
-            nonce = "".join(secrets.choice("0123456789ABCDEF") for _ in range(20))
-
-            pw_part1 = self._encrypt_block(salt_str + nonce + self.password, mod, exp)
-            pw_part2 = self._encrypt_block(salt_str + nonce + "", mod, exp)
-            pw = f"{pw_part1} {pw_part2}"
-            payload = MultiDict(
-                [
-                    ("target", "/board/home/login"),
-                    ("username", self.username),
-                    ("password", pw),
-                    ("loginsubmit", "Anmelden"),
-                    ("encryption", "rsa"),
-                ]
-            )
-
-            async with (
-                sess.post(url, data=payload, headers={"Referer": url}) as resp,
-                sess.get(f"{self._base_url}/admin/") as v_resp,
-            ):
-                html = await v_resp.text()
-                if "Anmeldung" not in html and html != "":
-                    _LOGGER.info("Successfully logged into Comexio Admin interface")
-                    self.last_login_error = None
-                    return True
+            await client.login()
+        except ComexioAuthenticationError as err:
+            _LOGGER.debug("Comexio login rejected: %s", err)
             self.last_login_error = "rejected"
             return False
-        except (aiohttp.ClientError, TimeoutError, ValueError, KeyError) as e:
-            _LOGGER.exception("Critical error during Comexio login: %s", e)
+        except ComexioError as err:
+            _LOGGER.warning("Comexio login failed: %s", err)
             self.last_login_error = "connection"
             return False
+        _LOGGER.info("Successfully logged into Comexio Admin interface")
+        self.last_login_error = None
+        return True
 
     async def get_raw_config(self) -> dict[str, Any]:
+        """The function module page's config objects ($FubModules, $Fubs, ...), keyed without "$".
+
+        Also refreshes io_types / io_input_types (from the main admin page) and comexio_version.
+        A lapsed admin session (e.g. after a Comexio reboot) is logged in again once — this runs
+        on every coordinator poll, so the main session heals itself here. Returns {} if the
+        server answered but the scrape failed (HTTP error status, failed re-login, no parseable
+        $FubModules) — callers check for FubModules. A transport failure raises
+        aiohttp.ClientError / TimeoutError.
         """
-        Downloads JS config objects and global IO types from the admin interface.
-        This provides the source of truth for all device properties and units.
-        """
-        # 1. Fetch the main admin page to get global variables like $ioTypes
-        url_main = f"{self._base_url}/admin/"
-        async with self.session.get(url_main) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to fetch admin page for IO types (HTTP %s)", resp.status)
-                return {}
-
-            main_html = await resp.text()
-
-        # $ioTypes (legacy) or $IOTypesBinary (Comexio v11+), plus $IOInputTypes (input=True means read-only sensor)
-        self.io_types = parse_io_types(main_html)
-        self.io_input_types = parse_io_input_types(main_html)
-
-        # 2. Fetch the function module page for the technical device configuration
-        url_conf = f"{self._base_url}/admin/function_function_module/home"
-        async with self.session.get(url_conf) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to fetch function module page (HTTP %s)", resp.status)
-                return {}
-            html = await resp.text()
-
-        if version := parse_comexio_version(html):
-            self.comexio_version = version
-
-        return scrape_js_vars(html, page_label="function module")
+        try:
+            try:
+                raw = await self.client.get_raw_config()
+            except ComexioAuthenticationError:
+                _LOGGER.warning("Comexio admin session is no longer logged in — logging in again")
+                if not await self._full_login():
+                    _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
+                    return {}
+                raw = await self.client.get_raw_config()
+        except ComexioConnectionError as err:
+            _raise_transport_error(err)
+        except ComexioError as err:
+            _LOGGER.error("Failed to fetch the Comexio configuration: %s", err)
+            return {}
+        self.io_types = raw.io_types
+        self.io_input_types = raw.io_input_types
+        if raw.comexio_version:
+            self.comexio_version = raw.comexio_version
+        return raw.variables
 
     async def get_knx_dpt_catalog(self) -> dict[str, Any]:
         """Fetch $KnxPoints/$KnxDevices/$KnxDpt from the KNX admin page.
@@ -611,19 +667,18 @@ class ComexioAPI:
         Resolves each existing K-element's real KNX DPT (KnxBaseTypeId.KnxSubId) via the
         Point -> Device -> Dpt chain (see aiocomexio.knx.resolve_knx_dpt) — neither $FubModules["11"] nor
         $IOTypesBinary carry a usable analog value range for KNX objects (both report a
-        min=max=0 placeholder, see KNX_DPT_ANALOG_RANGES in const.py). Returns the last
-        known-good catalog (or {} if none exists yet) on HTTP failure or connection error;
-        callers then fall back to the generic WEBIO_MARKER_ANALOG_MIN/MAX range, same as for
-        an unresolved DPT — a transient network hiccup on this opt-in sub-page must not fail
-        the whole coordinator poll (found in review 2026-09-20: the bare aiohttp call
-        previously let a connection error propagate uncaught into _async_update_data's
-        poll-wide try/except). Falling back to the stale cache instead of {} matters
-        specifically for DPT3.x composite pairing (aiocomexio parse_config): an empty
-        catalog means no item gets tagged knx_composite this poll, which drops the
-        composite's unique_id from __init__.py's active_unique_ids whitelist and gets its
-        cover/light entity permanently deleted from the registry — a single transient
-        failure (e.g. right at HA startup) must not have that effect (found in review
-        2026-09-20).
+        min=max=0 placeholder, see KNX_DPT_ANALOG_RANGES in const.py). Never raises: on any
+        failure (transport, HTTP status, a page without parseable data) it returns the last
+        known-good catalog (or {} if none exists yet); callers then fall back to the generic
+        WEBIO_MARKER_ANALOG_MIN/MAX range, same as for an unresolved DPT — a transient network
+        hiccup on this opt-in sub-page must not fail the whole coordinator poll (found in review
+        2026-09-20). Falling back to the stale cache instead of {} matters specifically for
+        DPT3.x composite pairing (aiocomexio parse_config): an empty catalog means no item gets
+        tagged knx_composite this poll, which drops the composite's unique_id from __init__.py's
+        active_unique_ids whitelist and gets its cover/light entity permanently deleted from the
+        registry — a single transient failure (e.g. right at HA startup) must not have that
+        effect (found in review 2026-09-20). A failed fetch is never cached, so the next poll
+        retries.
 
         Cached on the instance and only re-fetched when comexio_version changes (see
         _knx_dpt_catalog docstring) — this method's only caller is once per poll in
@@ -632,30 +687,11 @@ class ComexioAPI:
         if self._knx_dpt_catalog is not None and self._knx_dpt_catalog_version == self.comexio_version:
             return self._knx_dpt_catalog
 
-        url = f"{self._base_url}/admin/knx_one_wire/knx/"
         try:
-            async with self.session.get(url) as resp:
-                if resp.status != 200:
-                    _LOGGER.warning("Failed to fetch KNX DPT catalog (HTTP %s)", resp.status)
-                    return self._knx_dpt_catalog or {}
-                html = await resp.text()
-        except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.warning("Failed to fetch KNX DPT catalog: %s", err)
+            result = await self.client.get_knx_dpt_catalog()
+        except ComexioError as err:
+            _LOGGER.warning("Failed to fetch KNX DPT catalog, keeping the last known-good one: %s", err)
             return self._knx_dpt_catalog or {}
-        result = scrape_js_vars(html, page_label="KNX DPT catalog")
-        if not result:
-            # HTTP 200 with no parseable `var $Name = {...}` block (changed/malformed page) —
-            # same "couldn't get a real catalog this time" outcome as the HTTP-failure branches
-            # above. Caching {} here would overwrite the last known-good catalog and, worse,
-            # tag it as current for this comexio_version so a later poll never retries.
-            _LOGGER.warning("KNX DPT catalog: HTTP 200 but no parseable data — keeping last known-good catalog")
-            return self._knx_dpt_catalog or {}
-        _LOGGER.debug(
-            "KNX DPT catalog: %d points, %d devices, %d dpt entries",
-            len(result.get("KnxPoints", {})),
-            len(result.get("KnxDevices", {})),
-            len(result.get("KnxDpt", {})),
-        )
         self._knx_dpt_catalog = result
         self._knx_dpt_catalog_version = self.comexio_version
         return result
@@ -682,23 +718,11 @@ class ComexioAPI:
     async def get_live_states(
         self, marker_count: int, knx_max_id: int = 0
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Fetches current live values for markers AND KNX objects, in a single dashboard
-        refresh request.
+        """Live values of markers 1..marker_count and KNX objects 1..knx_max_id, in one request.
 
         Markers and KNX objects share the same plain numeric id space (a marker and a KNX
-        object can both be "5"), so their live values are kept in two separate returned dicts
-        even though this is one HTTP round-trip — merging them into one id-keyed dict would
-        silently let e.g. KNX object 5 pick up marker 5's value. Marker entries keep the
-        long-standing bare-numeric-id request key ("5": {...}); KNX entries use a
-        f"{_KNX_LIVE_KEY_PREFIX}<id>" request key instead specifically so the response can be
-        split back apart by prefix afterwards. "11" is $FubModules' own KNX module type id
-        (see aiocomexio parse_config) — a Comexio-wide constant, not per-installation.
-
-        Live-tested against a real KNX-equipped Comexio instance (2026-09-20, see
-        project_knx_write_path_design memory): a bare "KnxIo": "K<id>" key returns that
-        object's own value, confirmed distinct from the same numeric marker id — the "no known
-        bulk live-value endpoint for KNX" assumption the KNX-objects feature originally
-        shipped with (aiocomexio parse_config) was simply never tested against real hardware.
+        object can both be "5"), so their values come back as two separate id-keyed dicts —
+        merging them would silently let e.g. KNX object 5 pick up marker 5's value.
 
         Returns (None, None) on any fetch/parse failure — never ({}, {}) — so callers can tell
         "endpoint failed this cycle" apart from "nothing to report" and keep last-known values
@@ -706,146 +730,68 @@ class ComexioAPI:
         here made every marker/KNX value silently collapse to 0/off on a single transient
         HTTP hiccup, indistinguishable from a real reading).
         """
-        url = f"{self._base_url}/board/dashboard/refresh/"
-        refresh_dict: dict[str, Any] = {
-            str(i): {"action": "get", "MarkerName": f"M{i}"} for i in range(1, marker_count + 1)
-        }
-        refresh_dict.update(
-            {
-                f"{_KNX_LIVE_KEY_PREFIX}{i}": {"action": "get", "KnxIo": f"K{i}", "Unit": "any"}
-                for i in range(1, knx_max_id + 1)
-            }
-        )
-        refresh_dict["messages"] = {"action": "messages"}
-
-        form_data = aiohttp.FormData()
-        form_data.add_field("json", json.dumps(refresh_dict))
-
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/",
-            "User-Agent": "Mozilla/5.0",
-        }
-
         try:
-            async with self.session.post(url, data=form_data, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("Live states fetch failed with HTTP status: %s", resp.status)
-                    return None, None
-                try:
-                    data = await resp.json(content_type=None)
-                    result = data.get("result", {})
-                except Exception:
-                    raw_text = await resp.text()
-                    _LOGGER.exception(
-                        "Failed to parse live states response as JSON; raw response: %s",
-                        raw_text,
-                    )
-                    return None, None
-        except aiohttp.ClientError as err:
-            _LOGGER.exception("HTTP request error fetching live states: %s", err)
+            states = await self.client.get_live_states(marker_count, knx_max_id)
+        except ComexioError as err:
+            _LOGGER.error("Live states fetch failed: %s", err)
             return None, None
-        except Exception as e:
-            _LOGGER.exception("Unexpected error fetching live states: %s", e)
-            return None, None
-
-        if not isinstance(result, dict):
-            _LOGGER.error("Live states response had an unexpected shape: %r", type(result))
-            return None, None
-
-        knx_states = {
-            key.removeprefix(_KNX_LIVE_KEY_PREFIX): value
-            for key, value in result.items()
-            if key.startswith(_KNX_LIVE_KEY_PREFIX)
-        }
-        marker_states = {
-            key: value
-            for key, value in result.items()
-            if key != "messages" and not key.startswith(_KNX_LIVE_KEY_PREFIX)
-        }
-        return marker_states, knx_states
+        return states.markers, states.knx
 
     async def get_function_plan_connection_values(
         self, fub_id: int, session: aiohttp.ClientSession | None = None
     ) -> dict[str, list[Any]]:
         """Fetch live per-SOURCE-ELEMENT output values for one Function Plan — Studio's own
-        "fupValueData" refresh action, the same /board/dashboard/refresh/ endpoint
-        get_live_states uses. Unlike markers/IOs/WebIOs (get_live_states, resolved to
+        "fupValueData" refresh action. Unlike markers/IOs/WebIOs (get_live_states, resolved to
         pill elements), this reports values for every block-internal output (an "Oder"
         gate, a Zeitglied, ...) that carries no marker/IO of its own — the ground truth
         behind the Function Plan preview's Stufe-2 wire coloring (see
-        [[project-logikplan-preview]]). Returns {source_element_id: [value_per_output_row]}
-        — the dict key is the SOURCE FubElementId (not a connection/wire id: a block with
-        several outputs reports one array for all of them, indexed by output IOPos, and
-        several wires from the same output row share that one value).
+        [[project-logikplan-preview]]). Returns {source_element_id: [value_per_output_row]},
+        or {} while the plan is not running.
 
-        session: defaults to the main session; the Stufe-2 poll passes its own dedicated,
-        independently logged-in session (see ensure_preview_session) so this high-frequency
-        call can never queue behind — or block — the main coordinator poll on a shared
-        connection.
+        session: None for the main session, or the dedicated, independently logged-in preview
+        session from ensure_preview_session, so this high-frequency call can never queue
+        behind — or block — the main coordinator poll on a shared connection.
+
+        Transport failures, HTTP error statuses and a lapsed session raise (ComexioError): the
+        caller (_async_poll_connection_values) counts consecutive failures and disarms the
+        preview after _CONNECTION_POLL_MAX_FAILURES — returning {} for them would be
+        indistinguishable from "plan not running" and bypass that circuit breaker (#75). A
+        lapsed preview session is dropped first, so the next tick logs in a fresh one. Only an
+        answer that is not in the expected shape returns {}: a body-shape surprise, not a
+        connection failure.
         """
-        sess = session if session is not None else self.session
-        url = f"{self._base_url}/board/dashboard/refresh/"
-        payload = {"connection": {"action": "fupValueData", "fupId": fub_id}}
-        form_data = aiohttp.FormData()
-        form_data.add_field("json", json.dumps(payload))
+        client = self.client
+        if session is not None:
+            if session is not self._preview_session or self._preview_client is None:
+                # A concurrent tick dropped it (_drop_preview_session) since this one got it.
+                raise ComexioAuthenticationError("The preview session was dropped, its login lapsed")
+            client = self._preview_client
+        try:
+            values = await client.get_function_plan_connection_values(fub_id)
+        except ComexioDataError as err:
+            # Polled every 0.5-2 s: warn once per plan, until it answers in shape again.
+            level = logging.DEBUG if fub_id in self._connection_values_shape_warned else logging.WARNING
+            self._connection_values_shape_warned.add(fub_id)
+            _LOGGER.log(level, "Unexpected connection values response (fub=%s): %s", fub_id, err)
+            return {}
+        except ComexioAuthenticationError:
+            if session is not None:
+                self._drop_preview_session(session)
+            raise
+        self._connection_values_shape_warned.discard(fub_id)
+        return values
 
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/",
-            "User-Agent": "Mozilla/5.0",
-        }
+    def _drop_preview_session(self, session: aiohttp.ClientSession) -> None:
+        """Forget a preview session whose login lapsed; ensure_preview_session opens a new one.
 
-        _LOGGER.debug("Connection values request: POST %s payload=%s", url, payload)
-        # No try/except around the request itself: a transient network failure (e.g.
-        # ServerDisconnectedError) must propagate to the caller's own exception handler —
-        # _async_poll_connection_values counts consecutive failures and disarms the preview
-        # after _CONNECTION_POLL_MAX_FAILURES. Swallowing it here as a plain {} return made it
-        # indistinguishable from the legitimate "plan not running" sentinel below, silently
-        # bypassing that circuit breaker (#75).
-        async with sess.post(url, data=form_data, headers=headers) as resp:
-            # An HTTP error status is as much a poll failure as a network exception — e.g. a
-            # 502 from a server that's mid-reconnect — and must propagate the same way instead
-            # of returning the "plan not running" sentinel shape (#75).
-            resp.raise_for_status()
-            # resp.json() still performs the response body read — a connection drop mid-stream
-            # (ClientPayloadError/ServerDisconnectedError/TimeoutError) must keep propagating to
-            # the caller's circuit breaker, same reasoning as the removed outer try/except above.
-            # json.JSONDecodeError is a genuine parse failure; AttributeError/TypeError cover a
-            # response that parses fine but isn't the expected dict shape (e.g. top-level `null`
-            # or a list) — a body-shape surprise, not a connection failure, so it must not
-            # propagate to the circuit breaker either (#75).
-            try:
-                data = await resp.json(content_type=None)
-                raw = (data.get("result") or {}).get("connection")
-            except (json.JSONDecodeError, AttributeError, TypeError):
-                _LOGGER.exception("Failed to parse connection values response (fub=%s)", fub_id)
-                return {}
-            _LOGGER.debug("Connection values raw response (fub=%s): %s", fub_id, raw)
-            # Comexio returns the plain-text sentinel "0:not_found" (not JSON) instead
-            # of a value dict when the plan isn't currently running — confirmed live
-            # 2026-08-22: an active plan (fub=1) returns a real JSON dict every poll,
-            # an inactive one (freshly restored/stopped plans included) always returns
-            # this sentinel. Expected/frequent, not a parse failure — the old code
-            # logged a full ERROR-level exception for it on every 2s poll tick.
-            if isinstance(raw, str) and raw and not raw.lstrip().startswith(("{", "[")):
-                _LOGGER.debug("Connection values: no live data for fub=%s (plan not active: %s)", fub_id, raw)
-                return {}
-            try:
-                parsed = json.loads(raw) if raw else {}
-                # Same PHP array/object ambiguity as function_plan_load_elements: an
-                # associative array is serialized as a JSON list whenever its keys are
-                # exactly 0..N-1 in order — meaning the list position IS the real source
-                # FubElementId, not a guess (a small/quiet plan's element ids can easily
-                # land on that sequential shape, e.g. fub=19 with 0 connections -> "[]").
-                if isinstance(parsed, list):
-                    parsed = {str(i): vals for i, vals in enumerate(parsed)}
-                result = {elem_id: vals if isinstance(vals, list) else [vals] for elem_id, vals in parsed.items()}
-                _LOGGER.debug("Connection values parsed (fub=%s): %s", fub_id, result)
-                return result
-            except (json.JSONDecodeError, AttributeError, TypeError):
-                _LOGGER.exception("Failed to parse connection values response (fub=%s): %r", fub_id, raw)
-                return {}
+        Only if it is still the current one — a concurrent tick may already have replaced it.
+        """
+        if self._preview_session is not session:
+            return
+        _LOGGER.info("Preview session is no longer logged in — opening a new one on the next poll")
+        self._preview_session = None
+        self._preview_client = None
+        session.detach()
 
     def parse_config(
         self,
@@ -1979,73 +1925,30 @@ class ComexioAPI:
         except (ValueError, OverflowError):
             return None
 
-    @staticmethod
-    def _keyed_by_list_position(items: list[dict[str, Any]]) -> dict[str, Any]:
-        """Re-key a list-shaped loadelements collection back into an {id: item} dict.
-
-        For connections (no "id" field of their own, see the caller below), the resulting key
-        IS the real connection id — PHP only serializes an associative array as a JSON list when
-        its keys are exactly 0..n-1, so enumerate() here reproduces the server's original ids
-        1:1. This used to matter only for display; since Bug #2's fix (2026-09-18) that key is
-        also fed straight back into function_plan_save_connection's existing_conn_id (see
-        _function_plan_find_connection_by_source) — a future change here that broke this
-        invariant would silently start corrupting connections instead of just mislabeling them
-        (code-reviewer finding, 2026-09-18).
-        """
-        return {str(item.get("id", i)): item for i, item in enumerate(items)}
-
     async def function_plan_load_elements(self, fub_id: int, strict: bool = False) -> dict | None:
         """Load elements and connections for a function plan (GET loadelements).
 
-        Returns dict with 'elements' and 'connections' keys, or None on failure. strict=True
-        also treats a payload without a real elements collection as a failure instead of an
-        empty plan (see _plan_payload_has_elements).
-        """
-        url = f"{self._base_url}/admin/function_function_module/loadelements/"
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
-        try:
-            async with self.session.get(url, params={"fubid": fub_id}, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("function_plan_load_elements failed (HTTP %s, fub=%s)", resp.status, fub_id)
-                    return None
-                data = await resp.json(content_type=None)
-                if strict and not _plan_payload_has_elements(data):
-                    _LOGGER.error("function_plan_load_elements fub=%s: payload without elements", fub_id)
-                    return None
-                # Comexio's PHP backend serializes an associative array as a JSON array
-                # (not object) whenever its keys happen to be sequential integers from 0 —
-                # a shape coincidence, not a signal that the collection is empty. A small,
-                # rarely-edited plan's connection ids can easily stay sequential, so treating
-                # "is a list" as "is empty" (the old assumption here) silently discarded real
-                # elements/connections. Re-key by each item's own "id" when present (elements
-                # carry one); connections don't, so fall back to the list position.
-                elements = data.get("elements")
-                data["elements"] = (
-                    self._keyed_by_list_position(elements) if isinstance(elements, list) else (elements or {})
-                )
-                connections = data.get("connections")
-                data["connections"] = (
-                    self._keyed_by_list_position(connections) if isinstance(connections, list) else (connections or {})
-                )
-                elem_count = len(data.get("elements", {}))
-                conn_count = len(data.get("connections", {}))
-                _LOGGER.info(
-                    "function_plan_load_elements fub=%s: %d Elemente, %d Verbindungen", fub_id, elem_count, conn_count
-                )
-                return data
-        except Exception:
-            _LOGGER.exception("function_plan_load_elements fub_id=%s failed", fub_id)
-            return None
+        Returns dict with 'elements' and 'connections' keys, each an id-keyed dict, or None on
+        failure. strict=True also treats a payload without real elements and connections
+        collections as a failure instead of an empty plan.
 
-    @classmethod
-    def _normalize_plan_payload(cls, data: dict) -> dict:
-        """Normalize a plan's elements/connections in place to position-keyed dicts ({} if missing)."""
-        for key in ("elements", "connections"):
-            value = data.get(key)
-            data[key] = cls._keyed_by_list_position(value) if isinstance(value, list) else (value or {})
+        List-shaped collections are re-keyed by aiocomexio (normalize_plan_payload): for
+        connections the list position IS the server's real connection id, and that key is fed
+        straight back into function_plan_save_connection's existing_conn_id (see
+        _function_plan_find_connection_by_source) — so the re-keying must stay 1:1 with the
+        server's ids, or connections get corrupted instead of just mislabeled.
+        """
+        try:
+            data = await self.client.load_function_plan(fub_id, strict=strict)
+        except ComexioError as err:
+            _LOGGER.error("function_plan_load_elements fub=%s failed: %s", fub_id, err)
+            return None
+        _LOGGER.info(
+            "function_plan_load_elements fub=%s: %d Elemente, %d Verbindungen",
+            fub_id,
+            len(data["elements"]),
+            len(data["connections"]),
+        )
         return data
 
     async def function_plan_load_all_plans(self, strict: bool = False) -> dict[int, dict]:
@@ -2055,54 +1958,27 @@ class ComexioAPI:
         request per plan — Comexio serializes requests server-side anyway, so N sequential
         per-plan calls gain nothing over a single bulk call. Result is filtered down to the
         fub list cached by parse_config (self._fub_data). strict=True drops entries without a
-        real elements collection instead of treating them as empty plans.
-        Returns {fub_id: {"elements": {...}, "connections": {...}}}.
+        real elements collection instead of treating them as empty plans. Unlike
+        function_plan_load_elements(strict=True) it does not check connections, so a result here
+        is no source for run_fup (a restore or rewrite).
+        Returns {fub_id: {"elements": {...}, "connections": {...}}}, {} on failure.
         """
         fub_ids = {int(fid) for fid in self._fub_data}
         if not fub_ids:
             _LOGGER.warning("function_plan_load_all_plans: self._fub_data is empty — nothing to load")
             return {}
 
-        url = f"{self._base_url}/admin/function_function_module/loadallelements"
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self._base_url}/admin/function_function_module/home",
-        }
         t_start = time.monotonic()
         try:
-            async with self.session.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("function_plan_load_all_plans failed (HTTP %s)", resp.status)
-                    return {}
-                raw = await resp.json(content_type=None)
-        except Exception:
-            _LOGGER.exception("function_plan_load_all_plans failed")
+            plans = await self.client.load_all_function_plans(fub_ids, strict=strict)
+        except ComexioError as err:
+            _LOGGER.error("function_plan_load_all_plans failed: %s", err)
             return {}
-
-        if not isinstance(raw, dict):
-            _LOGGER.error("function_plan_load_all_plans: unexpected response shape (%s)", type(raw).__name__)
-            return {}
-
-        plans: dict[int, dict] = {}
-        for fid_str, data in raw.items():
-            try:
-                fid = int(fid_str)
-                if fid not in fub_ids:
-                    continue
-                if strict and not _plan_payload_has_elements(data):
-                    _LOGGER.warning("function_plan_load_all_plans: entry fid=%s without elements — dropped", fid)
-                    continue
-                plans[fid] = self._normalize_plan_payload(data)
-            except (ValueError, TypeError, AttributeError):
-                _LOGGER.exception("function_plan_load_all_plans: skipping malformed entry fid=%r", fid_str)
-                continue
-
-        duration = time.monotonic() - t_start
         _LOGGER.info(
             "function_plan_load_all_plans: %d/%d plans loaded in %.2fs (bulk request)",
             len(plans),
             len(fub_ids),
-            duration,
+            time.monotonic() - t_start,
         )
         return plans
 
@@ -5089,78 +4965,34 @@ class ComexioAPI:
         ext: str | None = None,
         identifier: str | None = None,
     ) -> bool:
-        """API write via Basic Auth."""
-        auth = aiohttp.BasicAuth(self.api_user, self.api_pass or "") if self.api_user else None
-
-        if auth is not None and not self._auth_warned and not is_local_address(self.host):
-            _LOGGER.warning(
-                "Using Basic Auth over plain HTTP on a non-local address. Credentials may be transmitted in clear text."
-            )
-            self._auth_warned = True
-
-        url = f"{self._base_url}/api/"
-        params: dict[str, Any] = {"action": "set", "value": value}
-
-        if target_type == "marker":
-            params["marker"] = f"M{target_id}"
-        elif target_type == "knx":
-            # BLIND GUESS pending real KNX hardware: mirrors the marker path with a "K" prefix.
-            # Verify the actual /api/ query-param name against a live Comexio server once available.
-            params["knx"] = f"K{target_id}"
-        else:
-            if ext is None or identifier is None:
+        """API write via Basic Auth; False if Comexio refused it or could not be reached."""
+        try:
+            if target_type == "marker":
+                await self.client.set_marker_value(int(target_id), value)
+            elif target_type == "knx":
+                await self.client.set_knx_value(int(target_id), value)
+            elif ext is None or identifier is None:
                 _LOGGER.error("Missing 'ext' or 'identifier' for non-marker API write. Type: %s", target_type)
                 return False
-            params["ext"] = ext
-            params["io"] = identifier
-
-        try:
-            async with self.session.get(url, params=params, auth=auth) as resp:
-                if resp.status != 200:
-                    _LOGGER.error(
-                        "Comexio API write failed: HTTP %s for %s with params=%s",
-                        resp.status,
-                        url,
-                        {k: v for k, v in params.items() if k != "value"},
-                    )
-                    return False
-                return True
-        except aiohttp.ClientError as err:
-            _LOGGER.exception(
-                "Comexio API write request error for %s with params=%s: %s",
-                url,
-                {k: v for k, v in params.items() if k != "value"},
-                err,
-            )
+            else:
+                await self.client.set_io_value(ext, identifier, value)
+        except (ComexioError, ValueError) as err:
+            # ValueError: a target id that is no number, rejected before anything is sent.
+            _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, err)
             return False
-        except Exception:
-            _LOGGER.exception(
-                "Unexpected error during Comexio API write for %s with params=%s",
-                url,
-                {k: v for k, v in params.items() if k != "value"},
-            )
-            return False
+        return True
 
     async def get_bus_workload(self) -> dict[str, Any]:
         """Fetch the internal bus workload (%) and SD-card presence from the admin interface.
 
         Called on a fast, independent poll cadence (see coordinator's bus-load loop) —
         much more frequent than the main config audit, so failures are logged at debug
-        level only to avoid log spam.
+        level only to avoid log spam. Returns {} on failure.
         """
-        url = f"{self._base_url}/admin/in_output/inoutputinfo"
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/in_output/home"}
         try:
-            async with self.session.post(url, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.debug("Bus workload fetch failed with HTTP status: %s", resp.status)
-                    return {}
-                return await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            _LOGGER.debug("HTTP request error fetching bus workload: %s", err)
-            return {}
-        except Exception as err:
-            _LOGGER.debug("Unexpected error fetching bus workload: %s", err)
+            return await self.client.get_bus_workload()
+        except ComexioError as err:
+            _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
 
     async def system_emergency_reboot(self) -> bool:
@@ -5168,20 +5000,15 @@ class ComexioAPI:
 
         Comexio has no confirmation dialog for this and returns no structured result — the
         request itself is the action. Only called by the Bus-Load-Watchdog's emergency path,
-        gated behind CONF_BUS_WATCHDOG_AUTO_REBOOT (default off). HTTP 200 only means the
-        request was accepted, not that the reboot completed cleanly.
+        gated behind CONF_BUS_WATCHDOG_AUTO_REBOOT (default off). True only means the request
+        was accepted, not that the reboot completed cleanly.
         """
-        url = f"{self._base_url}/admin/admin_dashboard/home/"
         try:
-            async with self.session.get(url, params={"id": "system", "restart": "1"}) as resp:
-                _LOGGER.warning("system_emergency_reboot: request sent, HTTP status %s", resp.status)
-                return resp.status == 200
-        except aiohttp.ClientError as err:
-            _LOGGER.exception("system_emergency_reboot: HTTP request error: %s", err)
+            await self.client.system_emergency_reboot()
+        except ComexioError as err:
+            _LOGGER.error("system_emergency_reboot failed: %s", err)
             return False
-        except Exception:
-            _LOGGER.exception("system_emergency_reboot: unexpected error")
-            return False
+        return True
 
     async def check_extension_firmware(self) -> list[dict[str, Any]]:
         """Query the local extension bus for available firmware updates (BASE + all extensions).
@@ -5189,26 +5016,13 @@ class ComexioAPI:
         Comexio documents that this can briefly interrupt extension outputs while it runs, so
         it must only be called rarely — see the coordinator's version-gated nightly check, not
         a regular poll. Logged at warning level (not debug) since failures here are infrequent
-        enough to matter, unlike the fast bus-workload poll.
+        enough to matter, unlike the fast bus-workload poll. Returns [] on failure.
         """
-        url = f"{self._base_url}/admin/extension/checkextension_fwupdate/"
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/"}
         try:
-            async with self.session.post(url, data={"pos": "local"}, headers=headers) as resp:
-                if resp.status != 200:
-                    _LOGGER.warning("Extension firmware check failed with HTTP status: %s", resp.status)
-                    return []
-                payload = await resp.json(content_type=None)
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("HTTP request error checking extension firmware: %s", err)
+            return await self.client.check_extension_firmware()
+        except ComexioError as err:
+            _LOGGER.warning("Extension firmware check failed: %s", err)
             return []
-        except Exception as e:
-            _LOGGER.exception("Unexpected error checking extension firmware: %s", e)
-            return []
-        if payload.get("ok") != "ok":
-            _LOGGER.warning("Extension firmware check returned an error payload: %s", payload)
-            return []
-        return payload.get("data", [])
 
     def close(self) -> None:
         """Detach the main session and the dedicated preview session, if one was ever opened.
@@ -5226,7 +5040,7 @@ class ComexioAPI:
         HA's own cleanup does and actually unlinks the session from the pooled, hass-scoped
         connector (keyed by verify_ssl/family/ssl_cipher) shared with every other session.
 
-        Also flags the instance as closed so a login() already in flight inside
+        Also flags the instance as closed so a login already in flight inside
         ensure_preview_session()'s lock detaches its freshly-authenticated session instead of
         assigning it to self._preview_session after this point — that session would otherwise
         never be detached (it was never visible here to begin with).
@@ -5236,3 +5050,4 @@ class ComexioAPI:
         if self._preview_session is not None:
             self._preview_session.detach()
             self._preview_session = None
+            self._preview_client = None

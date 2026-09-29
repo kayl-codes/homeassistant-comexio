@@ -10,7 +10,6 @@ from custom_components.comexio.api import (
     _classify_marker_delete_ids,
     _placed_marker_ids,
     _placed_marker_ids_strict,
-    _plan_payload_has_elements,
 )
 
 
@@ -149,17 +148,3 @@ def test_placed_marker_ids_strict_fails_closed(plan: dict) -> None:
     # Regression (review 2026-09-25): with force, any unreadable plan must make placement
     # unknown (None) instead of letting a placed marker pass as unplaced.
     assert _placed_marker_ids_strict({1: _plan(_ref(2, 4)), 2: plan}) is None
-
-
-@pytest.mark.parametrize(
-    ("payload", "expected"),
-    [
-        ({"elements": {}, "connections": {}}, True),
-        ({"elements": [], "connections": []}, True),
-        ({"elements": None}, False),
-        ({"result": "0"}, False),
-        ([], False),
-    ],
-)
-def test_plan_payload_has_elements(payload: Any, expected: bool) -> None:
-    assert _plan_payload_has_elements(payload) is expected
