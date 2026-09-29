@@ -403,8 +403,9 @@ def test_webio_lookup_failure_raises_instead_of_reporting_absent(
     # None means "absent" to every caller, which then uploads or recreates the class — a failed
     # check (a lapsed session included) must not read as that.
     _fail(client, method, err)
+    lookup = call(comexio_api)
     with pytest.raises(RuntimeError):
-        asyncio.run(call(comexio_api))
+        asyncio.run(lookup)
 
 
 def test_webio_base_info_keeps_the_tuple_contract(comexio_api: ComexioAPI, client: MagicMock) -> None:
