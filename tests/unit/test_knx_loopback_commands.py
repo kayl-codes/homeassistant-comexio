@@ -154,7 +154,8 @@ def test_prestage_keeps_names_when_device_lookup_fails(
         return "3", True
 
     async def _device(_name: str) -> None:
-        raise TimeoutError
+        # get_webio_device_info's contract: any failed check (transport included) is a RuntimeError.
+        raise RuntimeError("Web-IO device lookup failed")
 
     monkeypatch.setattr(comexio_api, "ensure_knx_loopback_webio", _ensure)
     monkeypatch.setattr(comexio_api, "get_webio_device_info", _device)

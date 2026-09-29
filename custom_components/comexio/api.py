@@ -4,10 +4,8 @@ import base64
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
-import io
 import json
 import logging
-import re
 import time
 from typing import Any, NoReturn
 
@@ -71,15 +69,7 @@ from .const import (
 FUNCTION_PLAN_COMMENT_TYPE = 14
 FUNCTION_PLAN_CONSTANT_TYPE = 16
 
-_CONTENT_TYPE_JSON = "Content-Type: application/json"
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
-
-# get_webio_command_range: the min/max <input> tags on a Web-IO command's edit form, e.g.
-# <input type="text" id="max_cmd_io_0" name="max_cmd_io_0" value="4294967296" .../>.
-# Attribute order isn't guaranteed, so this captures the whole tag by its id and pulls the
-# value out separately rather than assuming id comes before value.
-_WEBIO_CMD_INPUT_RE = re.compile(r'<input\b[^>]*\bid="(min|max)_cmd_io_0"[^>]*>', re.IGNORECASE)
-_WEBIO_CMD_VALUE_RE = re.compile(r'\bvalue="([^"]*)"')
 
 
 def _js_timestamp() -> str:
@@ -934,79 +924,52 @@ class ComexioAPI:
 
     # --- WEB-IO MANAGEMENT ---
     async def get_webio_base_info(self, webio_name: str) -> tuple[str, bool] | None:
-        """Scans classes via add-page.
+        """(base_id, deletable) of the Web-IO class named webio_name, or None if there is none.
 
-        Returns (base_id, deletable), or `None` if `webio_name` genuinely has no class in a
-        successfully-fetched page. A failed fetch raises RuntimeError instead of returning
-        `None`, mirroring get_webio_device_info — callers treat `None` as "class absent" and
-        upload a fresh class on that basis, so silently reporting "absent" on a transient HTTP
-        error would create a duplicate class next to the one that is actually still present.
+        None only for a fetched page that really lists no such class. Any failure — transport,
+        HTTP status, a lapsed session — raises RuntimeError instead: callers treat None as "class
+        absent" and upload a fresh class on that basis, so reporting "absent" on a failed check
+        would create a duplicate class next to the one that is actually still present.
         """
-        url_add = f"{self._base_url}/admin/web_io/add"
-        async with self.session.get(url_add) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to fetch Web-IO add page (HTTP %s)", resp.status)
-                raise RuntimeError(f"Failed to fetch Web-IO add page (HTTP {resp.status})")
-            html = await resp.text()
-            pattern = rf'<option value="(\d+)"[^>]*>{re.escape(webio_name)}</option>'
-            if match := re.search(pattern, html, re.IGNORECASE):
-                b_id = match[1]
-                url_win = f"{self._base_url}/admin/web_io/baseDeviceWindow/"
-                async with self.session.get(url_win) as win_resp:
-                    if win_resp.status != 200:
-                        _LOGGER.error("Failed to fetch Web-IO base window (HTTP %s)", win_resp.status)
-                        raise RuntimeError(f"Failed to fetch Web-IO base window (HTTP {win_resp.status})")
-                    win_html = await win_resp.text()
-
-                    return (b_id, f"delete_web_device_base/?id={b_id}" in win_html)
-        return None
+        try:
+            info = await self.client.get_webio_base_info(webio_name)
+        except ComexioError as err:
+            raise RuntimeError(f"Web-IO class lookup for {webio_name!r} failed: {err}") from err
+        return None if info is None else (info.base_id, info.deletable)
 
     async def get_webio_device_info(self, device_name: str) -> str | None:
-        """Checks instance existence via HTML tabs.
+        """Id of the Web-IO device named device_name, or None if there is none.
 
-        Returns the tab's device id, or `None` if `device_name` genuinely has no tab in a
-        successfully-fetched page. A failed fetch raises instead of returning `None` — callers
-        use `None` to mean "device absent" and force a destructive recreate on that basis
-        (see button.py's `_decide_effective_action`), so silently reporting "absent" here on a
-        transient HTTP error would delete-and-reupload a class that is actually still present.
+        Same contract as get_webio_base_info: any failure raises RuntimeError instead of
+        returning None — callers use None to mean "device absent" and force a destructive
+        recreate on that basis (see button.py's `_decide_effective_action`), so reporting
+        "absent" on a failed check would delete-and-reupload a class that is still present.
         """
-        url_home = f"{self._base_url}/admin/web_io/home"
-        async with self.session.get(url_home) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to fetch Web-IO home page (HTTP %s)", resp.status)
-                raise RuntimeError(f"Failed to fetch Web-IO home page (HTTP {resp.status})")
-            html = await resp.text()
-            pattern = rf'<a id="tab-link-(\d+)"[^>]*>{re.escape(device_name)}</a>'
-            return m[1] if (m := re.search(pattern, html, re.IGNORECASE)) else None
+        try:
+            return await self.client.get_webio_device_id(device_name)
+        except ComexioError as err:
+            raise RuntimeError(f"Web-IO device lookup for {device_name!r} failed: {err}") from err
 
     async def delete_webio_device(self, device_id: str | int) -> bool:
-        """
-        Tries to delete the device instance.
-        Returns True if successful, False if blocked by Comexio logic.
-        """
-        url = f"{self._base_url}/admin/web_io/delete_device/?id={device_id}"
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
-        _LOGGER.debug("Deleting Web-IO device %s via GET: %s", device_id, url)
-        async with self.session.get(url, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to delete Web-IO device %s (HTTP %s)", device_id, resp.status)
-                return False
-            html = await resp.text()
-
-            # Check for jQuery UI error state which indicates the device is in use
-            if 'class="ui-state-error' in html or "ui-state-error" in html:
-                _LOGGER.warning("Device %s is in use within Comexio logic and cannot be deleted.", device_id)
-                return False
-            return True
+        """Delete a Web-IO device; False if Comexio logic still uses it or the request failed."""
+        try:
+            return await self.client.delete_webio_device(device_id)
+        except ComexioError as err:
+            _LOGGER.warning("Deleting Web-IO device %s failed: %s", device_id, err)
+            return False
 
     async def delete_webio_base(self, base_id: str | int) -> bool:
-        """Sends DELETE command for device class template."""
-        url = f"{self._base_url}/admin/web_io/delete_web_device_base/?id={base_id}"
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
-        async with self.session.get(url, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to delete Web-IO base %s (HTTP %s)", base_id, resp.status)
-            return resp.status == 200
+        """Delete a Web-IO class; False if the request failed.
+
+        True only means Comexio accepted the request — it refuses silently while a device of
+        the class still exists (see get_webio_base_info's deletable flag).
+        """
+        try:
+            await self.client.delete_webio_base(base_id)
+        except ComexioError as err:
+            _LOGGER.warning("Deleting Web-IO class %s failed: %s", base_id, err)
+            return False
+        return True
 
     async def delete_fup(self, fub_id: int) -> bool:
         """Delete an entire Function Plan (not just elements within it).
@@ -1052,48 +1015,22 @@ class ComexioAPI:
         now maps to two Web-IO devices (marker/io).
         """
         _LOGGER.info("Updating Web-IO device %s address to %s", device_id, ha_address)
-        url = f"{self._base_url}/admin/web_io/save"
-
-        # Construct the payload based on user observations.
-        device_data = {
-            "web_device_id": str(device_id),
-            f"name_{device_id}": webio_name,
-            f"ip_{device_id}": ha_address,
-            f"username_{device_id}": "",
-            f"password_{device_id}": "",  # nosec B105
-            f"checkca_{device_id}": "0",
-            f"pinnedpubkey_{device_id}": "",
-            f"form_login_{device_id}": "2",
-        }
-
-        payload = {"no_reload": "true", "JSON": json.dumps(device_data)}
-
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
-
-        async with self.session.post(url, data=payload, headers=headers) as resp:
-            if resp.status == 200:
-                try:
-                    result = await resp.json(content_type=None)
-                except Exception:
-                    raw_text = await resp.text()
-                    _LOGGER.exception(
-                        "Failed to parse Web-IO device IP update response as JSON; raw response: %s",
-                        raw_text,
-                    )
-                    return False
-                return result.get("save") == 1
-
-            _LOGGER.error("Failed to update Web-IO device IP, HTTP status: %s", resp.status)
+        try:
+            await self.client.update_webio_device_address(device_id, ha_address, webio_name)
+        except ComexioError as err:
+            _LOGGER.warning("Updating the address of Web-IO device %s failed: %s", device_id, err)
             return False
+        return True
 
     async def delete_single_command(self, cmd_id: str | int, device_id: str | int) -> bool:
-        """Removes an individual command instance (Delta Sync)."""
+        """Removes an individual command instance (Delta Sync); False if the request failed."""
         _LOGGER.info("Deleting individual Web-IO command ID: %s", cmd_id)
-        url = f"{self._base_url}/admin/web_io/delete_web_command/?id={cmd_id}&dev={device_id}"
-        async with self.session.get(url) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to delete Web-IO command %s (HTTP %s)", cmd_id, resp.status)
-            return resp.status == 200
+        try:
+            await self.client.delete_webio_command(cmd_id, device_id)
+        except ComexioError as err:
+            _LOGGER.warning("Deleting Web-IO command %s failed: %s", cmd_id, err)
+            return False
+        return True
 
     async def save_single_command(
         self,
@@ -1114,69 +1051,19 @@ class ComexioAPI:
         reproducing the exact 401 Unauthorized bug the Phase 7 field combination fixes.
         """
         _LOGGER.info("Applying command: %s (Update: %s)", cmd_payload.get("Name"), existing_cmd_id is not None)
-        url = f"{self._base_url}/admin/web_io/save_command"
-
-        # Base64 identifier for Comexio
-        if existing_cmd_id:
-            # Update format exactly like original Comexio trace: {"src":"command","id":1324}
-            cmd_ref = json.dumps({"src": "command", "id": int(existing_cmd_id)}, separators=(",", ":"))
-            cmd_id_b64 = base64.b64encode(cmd_ref.encode()).decode()
-        else:
-            # New format: {"src":"command","id":null}
-            cmd_id_b64 = "eyJzcmMiOiJjb21tYW5kIiwiaWQiOm51bGx9"
-
-        payload = {
-            "dlg_web_device_id": str(device_id),
-            "protocol": 0,
-            "parameter": cmd_payload["Parameter"],
-            "header_modifier": cmd_payload.get("HeaderModifier", _CONTENT_TYPE_JSON),
-            "data": cmd_payload["Data"],
-            "port": "",
-            "post_get": cmd_payload.get("PostGet", 1),
-            "authentication": cmd_payload.get("Authentication", 0),
-            "req_freq": "",
-            "reply_interpreter": "",
-            "id_cmd_io_0": cmd_id_b64,
-            "name_cmd_io_0": cmd_payload["Name"],
-            "function_cmd_io_0": "1_1_0",
-            "input_cmd_io_0": 1,
-            "type_cmd_io_0": cmd_payload["TypeId"],
-            "send_on_one_cmd_io_0": 0,
-            "min_cmd_io_0": cmd_payload["Min"],
-            "max_cmd_io_0": cmd_payload["Max"],
-            "default_value_cmd_io_0": "",
-            "id_cmd_io_sample": "",
-            "name_cmd_io_sample": "",
-            "function_cmd_io_sample": "0_1_0",
-            "input_cmd_io_sample": 1,
-            "type_cmd_io_sample": 2,
-            "send_on_one_cmd_io_sample": 0,
-            "min_cmd_io_sample": 0,
-            "max_cmd_io_sample": 1,
-            "default_value_cmd_io_sample": "",
-            "DefaultActive": 1,
-        }
-
-        if existing_cmd_id:
-            payload["id"] = str(existing_cmd_id)
-        else:
-            payload["deviceBaseId"] = str(base_id) if base_id is not None else "0"
-
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
-
-        # _LOGGER.debug("Sending save_single_command payload: %s", payload)
-
         try:
-            async with self.session.post(url, data=payload, headers=headers) as resp:
-                await resp.text()
-                # _LOGGER.debug("save_single_command response [%s]: %s", resp.status, resp_text)
-                return resp.status == 200
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("HTTP request error saving Web-IO command %s: %s", cmd_payload.get("Name"), err)
+            await self.client.save_webio_command(
+                device_id,
+                cmd_payload,
+                base_id=base_id,
+                # Falsy ids ("" from a scrape without one) have always meant "new command".
+                command_id=existing_cmd_id or None,
+            )
+        except (ComexioError, ValueError) as err:
+            # ValueError: a command id that is no number, rejected before anything is sent.
+            _LOGGER.warning("Saving Web-IO command %s failed: %s", cmd_payload.get("Name"), err)
             return False
-        except Exception:
-            _LOGGER.exception("Unexpected error saving Web-IO command %s", cmd_payload.get("Name"))
-            return False
+        return True
 
     async def get_webio_command_range(
         self, cmd_id: str | int, device_id: str | int
@@ -1187,41 +1074,14 @@ class ComexioAPI:
         Min/Max for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
         edit form is the only reliable source. Used by the nightly range check (see
         WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against
-        WEBIO_MARKER_ANALOG_MIN/MAX. Returns (None, None) on a fetch failure or if a field is
-        missing from the form.
+        WEBIO_MARKER_ANALOG_MIN/MAX. Returns (None, None) on a fetch failure or a form without
+        min/max fields; a single missing or non-numeric field comes back as None.
         """
-        url = f"{self._base_url}/admin/web_io/edit_command/?Id={cmd_id}&TestDevice={device_id}"
         try:
-            async with self.session.get(url) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("Failed to fetch Web-IO command %s edit form (HTTP %s)", cmd_id, resp.status)
-                    return None, None
-                html = await resp.text()
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("HTTP request error fetching Web-IO command %s edit form: %s", cmd_id, err)
+            return await self.client.get_webio_command_range(cmd_id, device_id)
+        except ComexioError as err:
+            _LOGGER.warning("Reading the range of Web-IO command %s failed: %s", cmd_id, err)
             return None, None
-        except Exception:
-            _LOGGER.exception("Unexpected error fetching Web-IO command %s edit form", cmd_id)
-            return None, None
-
-        values: dict[str, float | None] = {"min": None, "max": None}
-        matched = False
-        for tag_match in _WEBIO_CMD_INPUT_RE.finditer(html):
-            matched = True
-            field = tag_match[1].lower()
-            if value_match := _WEBIO_CMD_VALUE_RE.search(tag_match[0]):
-                try:
-                    values[field] = float(value_match[1])
-                except ValueError:
-                    _LOGGER.warning(
-                        "Web-IO command %s edit form has a non-numeric %s value: %r",
-                        cmd_id,
-                        field,
-                        value_match[1],
-                    )
-        if not matched:
-            _LOGGER.warning("Web-IO command %s edit form has no min/max input tags (page layout changed?)", cmd_id)
-        return values["min"], values["max"]
 
     def build_webio_commands(
         self,
@@ -1279,29 +1139,18 @@ class ComexioAPI:
         )
 
     async def upload_web_io(self, server_id: str, webio_name: str, web_io_json: str) -> tuple[bool, str]:
-        """Uploads JSON class template."""
-        url = f"{self._base_url}/admin/web_io/upload_device_settings"
-        file_data = io.BytesIO(web_io_json.encode("utf-8"))
-        form = aiohttp.FormData()
-        form.add_field("file", file_data, filename=f"ha_{server_id}.json", content_type="application/json")
-        form.add_field("set_name", webio_name)
-        headers = {"X-Requested-With": "XMLHttpRequest", "Referer": f"{self._base_url}/admin/web_io/home"}
-        async with self.session.post(url, data=form, headers=headers) as resp:
-            raw_text = await resp.text()
-            # TEMPORARY diagnostic (18.09.2026): a KNX class upload was reported successful here
-            # (ok=True/base_id returned) yet neither the class nor its device ever showed up on the
-            # live server afterward — logged unconditionally (not just on the failure branch below)
-            # to see the exact body Comexio sent back on the "successful" call too. Remove once the
-            # KNX Web-IO class creation gap (see create_webio_device below) is understood.
-            _LOGGER.debug("upload_web_io('%s'): HTTP %s, body=%r", webio_name, resp.status, raw_text)
-            if resp.status == 200:
-                try:
-                    result = json.loads(raw_text)
-                except (json.JSONDecodeError, TypeError):
-                    return False, raw_text
-                if result.get("ok"):
-                    return True, result.get("base_id")
-            return False, raw_text
+        """Uploads a JSON class template: (True, base_id), or (False, why it failed).
+
+        Comexio's answer body is logged at debug level by aiocomexio, success or not.
+        """
+        try:
+            base_id = await self.client.upload_webio_class(
+                web_io_json, class_name=webio_name, filename=f"ha_{server_id}.json"
+            )
+        except ComexioError as err:
+            _LOGGER.warning("Uploading Web-IO class %r failed: %s", webio_name, err)
+            return False, str(err)
+        return True, base_id
 
     async def create_webio_device(
         self,
@@ -1317,31 +1166,17 @@ class ComexioAPI:
         needs no Basic-Auth on its own commands). The Phase 7 API-Loopback device is the first
         caller to pass real credentials — gated on the Web-IO class' own Login=3 ("vom Geraet
         abhaengig") setting, see ensure_knx_loopback_webio.
+
+        Returns False if the request failed. True only means Comexio accepted it — its answer
+        carries no verdict (aiocomexio logs it at debug level), so a refusal answered as HTTP
+        200 still reads as success; get_webio_device_info shows whether the device exists.
         """
-        url = f"{self._base_url}/admin/web_io/saveDeviceWindow"
-
-        payload = {
-            "name": name,
-            "ip": ha_address,
-            "web_device_base": base_id,
-            "username": username,
-            "password": password,
-            "web_device_base_sample": "none",
-            "identifier": "",
-            "form_login": "2",
-        }
-
-        async with self.session.post(url, data=payload, headers={"X-Requested-With": "XMLHttpRequest"}) as resp:
-            # TEMPORARY diagnostic (18.09.2026): see upload_web_io's comment above — this call only
-            # ever checked resp.status, never the body, so a server-side rejection returned as HTTP
-            # 200 (e.g. validation error, name/slot conflict) would silently read as success. Logging
-            # the raw body unconditionally to find out what a real failure here actually looks like
-            # before deciding how to validate it properly. Remove once that's known.
-            raw_text = await resp.text()
-            _LOGGER.debug(
-                "create_webio_device('%s', base_id=%s): HTTP %s, body=%r", name, base_id, resp.status, raw_text
-            )
-            return resp.status == 200
+        try:
+            await self.client.create_webio_device(name, base_id, ha_address, username=username, password=password)
+        except ComexioError as err:
+            _LOGGER.warning("Creating Web-IO device %r failed: %s", name, err)
+            return False
+        return True
 
     async def ensure_knx_loopback_webio(
         self,
@@ -1399,18 +1234,16 @@ class ComexioAPI:
 
         try:
             device_id = await self.get_webio_device_info(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
-        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
-            # get_webio_device_info raises RuntimeError on a non-200 response, precisely so
+        except RuntimeError as err:
+            # get_webio_device_info raises RuntimeError on any failed check, precisely so
             # callers don't mistake "couldn't check" for "genuinely absent" — see its own
-            # docstring. Its own session.get() call is unwrapped though, so a connection
-            # failure/timeout propagates as aiohttp.ClientError/TimeoutError instead — must not
-            # let either escape uncaught out of a tuple[str, bool] | None-returning helper.
+            # docstring. Must not escape uncaught out of a tuple[str, bool] | None-returning helper.
             _LOGGER.warning("ensure_knx_loopback_webio: device check failed: %s", err)
             return None
 
         try:
             base_info = await self.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
-        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+        except RuntimeError as err:
             # Same raise contract as get_webio_device_info above: a failed check must not be
             # read as "class absent", which would bulk-upload only *this* call's bridges as a
             # brand-new class and orphan any others the existing class already carries.
@@ -3195,7 +3028,7 @@ class ComexioAPI:
         names = {knx_loopback_command_name(k_id, marker_id) for k_id, marker_id, _ in bridges}
         try:
             device_id = await self.get_webio_device_info(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
-        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+        except RuntimeError as err:
             _LOGGER.warning("prestage_knx_loopback_class: device check failed after upload: %s", err)
             return names
         if device_id is None:
@@ -3512,12 +3345,10 @@ class ComexioAPI:
         base_id, freshly_created = bootstrap
         try:
             device_id = await self.get_webio_device_info(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
-        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
-            # get_webio_device_info raises RuntimeError on a non-200 response — see its own
-            # docstring — but its session.get() call is unwrapped, so a connection failure/
-            # timeout propagates as aiohttp.ClientError/TimeoutError instead. Must not let
-            # either escape this (added, skipped, errors)-returning batch as an unhandled
-            # exception.
+        except RuntimeError as err:
+            # get_webio_device_info raises RuntimeError on any failed check — see its own
+            # docstring. Must not escape this (added, skipped, errors)-returning batch as an
+            # unhandled exception.
             return [], [], [f"ComexioAPI Loopback Web-IO device check failed: {err}"]
         if device_id is None:
             return [], [], ["ComexioAPI Loopback Web-IO device not found after bootstrap — aborting, see log"]

@@ -1615,16 +1615,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         try:
             device_id = await self.api.get_webio_device_info(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
-        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
-            # get_webio_device_info raises RuntimeError on a non-200 response, but its own
-            # session.get() call is unwrapped — a connection failure/timeout propagates as
-            # aiohttp.ClientError/TimeoutError instead. Both are routine "couldn't delete it
-            # this time" outcomes here, not a crash.
+        except RuntimeError as err:
+            # get_webio_device_info raises RuntimeError on any failed check — a routine
+            # "couldn't delete it this time" outcome here, not a crash.
             skipped["knx_loopback"] = f"get_webio_device_info failed: {err}"
             return
         try:
             base_info = await self.api.get_webio_base_info(WEBIO_CLASS_NAME_KNX_LOOPBACK)
-        except (RuntimeError, aiohttp.ClientError, TimeoutError) as err:
+        except RuntimeError as err:
             # Same raise contract as get_webio_device_info above. Checked BEFORE deleting the
             # device: deleting it first and then failing the class lookup would leave the
             # class behind with no retry path. Skip everything instead.

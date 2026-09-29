@@ -9,9 +9,11 @@ from aiocomexio import (
     ComexioAuthenticationError,
     ComexioConnectionError,
     ComexioDataError,
+    ComexioRequestRejectedError,
     ComexioResponseError,
     LiveStates,
     RawConfig,
+    WebioBaseInfo,
 )
 import aiohttp
 import pytest
@@ -382,3 +384,98 @@ def test_misc_reads_fall_back_on_failure(
 ) -> None:
     _fail(client, method, _connection_error())
     assert asyncio.run(call(comexio_api)) == expected
+
+
+# --- Web-IO ---
+
+
+@pytest.mark.parametrize("err", [ComexioAuthenticationError("login form"), _connection_error(), HTTP_ERROR])
+@pytest.mark.parametrize(
+    ("call", "method"),
+    [
+        (lambda api: api.get_webio_base_info("HA [M]"), "get_webio_base_info"),
+        (lambda api: api.get_webio_device_info("HA [M]"), "get_webio_device_id"),
+    ],
+)
+def test_webio_lookup_failure_raises_instead_of_reporting_absent(
+    comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str, err: Exception
+) -> None:
+    # None means "absent" to every caller, which then uploads or recreates the class — a failed
+    # check (a lapsed session included) must not read as that.
+    _fail(client, method, err)
+    with pytest.raises(RuntimeError):
+        asyncio.run(call(comexio_api))
+
+
+def test_webio_base_info_keeps_the_tuple_contract(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_webio_base_info = AsyncMock(side_effect=[WebioBaseInfo(base_id="7", deletable=False), None])
+    assert asyncio.run(comexio_api.get_webio_base_info("HA [M]")) == ("7", False)
+    assert asyncio.run(comexio_api.get_webio_base_info("HA [M]")) is None
+
+
+def test_webio_device_info_passes_the_id_through(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_webio_device_id = AsyncMock(return_value="12")
+    assert asyncio.run(comexio_api.get_webio_device_info("HA [M]")) == "12"
+
+
+_WEBIO_WRITES = [
+    (lambda api: api.delete_webio_device(3), "delete_webio_device"),
+    (lambda api: api.delete_webio_base(3), "delete_webio_base"),
+    (lambda api: api.update_webio_device_ip(3, "10.0.0.2:8123", "HA [M]"), "update_webio_device_address"),
+    (lambda api: api.delete_single_command(5, 3), "delete_webio_command"),
+    (lambda api: api.create_webio_device("HA [M]", 7, "10.0.0.2:8123"), "create_webio_device"),
+]
+
+
+@pytest.mark.parametrize(("call", "method"), _WEBIO_WRITES)
+def test_webio_write_failure_is_false(comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str) -> None:
+    _fail(client, method, ComexioRequestRejectedError("not confirmed"))
+    assert asyncio.run(call(comexio_api)) is False
+
+
+@pytest.mark.parametrize(("call", "method"), _WEBIO_WRITES)
+def test_webio_write_success_is_true(comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str) -> None:
+    setattr(client, method, AsyncMock(return_value=True if method == "delete_webio_device" else None))
+    assert asyncio.run(call(comexio_api)) is True
+
+
+def test_webio_device_in_use_is_false(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.delete_webio_device = AsyncMock(return_value=False)
+    assert asyncio.run(comexio_api.delete_webio_device(3)) is False
+
+
+def test_upload_web_io_returns_the_base_id(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.upload_webio_class = AsyncMock(return_value="42")
+    assert asyncio.run(comexio_api.upload_web_io("iosrv1", "HA [M]", "{}")) == (True, "42")
+    client.upload_webio_class.assert_awaited_once_with("{}", class_name="HA [M]", filename="ha_iosrv1.json")
+
+
+def test_upload_web_io_failure_carries_the_reason(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    _fail(client, "upload_webio_class", ComexioRequestRejectedError("refused: no ok"))
+    ok, reason = asyncio.run(comexio_api.upload_web_io("iosrv1", "HA [M]", "{}"))
+    assert ok is False
+    assert "refused" in reason
+
+
+_COMMAND = {"Name": "M1 Test", "Parameter": "/api/webhook/x", "Data": "{}", "TypeId": 1, "Min": 0, "Max": 1}
+
+
+@pytest.mark.parametrize(("existing", "expected"), [(None, None), ("", None), ("17", "17")])
+def test_save_single_command_treats_a_falsy_id_as_new(
+    comexio_api: ComexioAPI, client: MagicMock, existing: Any, expected: Any
+) -> None:
+    client.save_webio_command = AsyncMock()
+    assert asyncio.run(comexio_api.save_single_command(9, 3, _COMMAND, existing_cmd_id=existing)) is True
+    client.save_webio_command.assert_awaited_once_with(3, _COMMAND, base_id=9, command_id=expected)
+
+
+@pytest.mark.parametrize("err", [ComexioConnectionError("gone"), ValueError("id is no number")])
+def test_save_single_command_failure_is_false(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
+    _fail(client, "save_webio_command", err)
+    assert asyncio.run(comexio_api.save_single_command(9, 3, _COMMAND, existing_cmd_id="x")) is False
+
+
+@pytest.mark.parametrize("err", [ComexioDataError("no min/max fields"), _connection_error()])
+def test_webio_command_range_failure_is_none(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
+    _fail(client, "get_webio_command_range", err)
+    assert asyncio.run(comexio_api.get_webio_command_range(5, 3)) == (None, None)
