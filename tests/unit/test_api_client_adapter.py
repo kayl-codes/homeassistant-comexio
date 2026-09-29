@@ -488,3 +488,209 @@ def test_save_single_command_failure_is_false(comexio_api: ComexioAPI, client: M
 def test_webio_command_range_failure_is_none(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
     _fail(client, "get_webio_command_range", err)
     assert asyncio.run(comexio_api.get_webio_command_range(5, 3)) == (None, None)
+
+
+_PLAN_WRITES_BOOL = [
+    (lambda api: api.delete_fup(7), "delete_function_plan"),
+    (lambda api: api.function_plan_stop_fup(7), "stop_function_plan"),
+    (lambda api: api.function_plan_run_fup(7), "run_function_plan"),
+    (lambda api: api.function_plan_delete_elements([1, 2]), "delete_function_plan_elements"),
+    (lambda api: api._function_plan_set_comment_width(4, "Note"), "save_function_plan_comment"),
+    (lambda api: api.rename_marker(12, "M12 Test", True), "rename_marker"),
+    (lambda api: api.rename_knx_object(3, "K3 Test [RO]"), "rename_knx_object"),
+]
+
+
+@pytest.mark.parametrize(("call", "method"), _PLAN_WRITES_BOOL)
+@pytest.mark.parametrize(
+    "err", [ComexioRequestRejectedError("not confirmed"), _connection_error(), TypeError("Expected integers")]
+)
+def test_plan_write_failure_is_false(
+    comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str, err: Exception
+) -> None:
+    _fail(client, method, err)
+    assert asyncio.run(call(comexio_api)) is False
+
+
+@pytest.mark.parametrize(("call", "method"), _PLAN_WRITES_BOOL)
+def test_plan_write_success_is_true(comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str) -> None:
+    setattr(client, method, AsyncMock(return_value=None))
+    assert asyncio.run(call(comexio_api)) is True
+
+
+_PLAN_WRITES_ID = [
+    (lambda api: api.function_plan_add_element(7, 5, 2, x=15, y=30), "add_function_plan_element"),
+    (lambda api: api.function_plan_save_connection(7, 1, [(2, 0, False)]), "save_function_plan_connection"),
+    (lambda api: api.function_plan_add_constant_element(7, "1"), "add_function_plan_constant"),
+    (lambda api: api.create_marker(True), "create_marker"),
+]
+
+
+@pytest.mark.parametrize(("call", "method"), _PLAN_WRITES_ID)
+def test_plan_write_failure_is_none(comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str) -> None:
+    _fail(client, method, ComexioDataError("answer carries no id"))
+    assert asyncio.run(call(comexio_api)) is None
+
+
+@pytest.mark.parametrize(("call", "method"), _PLAN_WRITES_ID)
+def test_plan_write_returns_the_id(comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str) -> None:
+    setattr(client, method, AsyncMock(return_value=42))
+    assert asyncio.run(call(comexio_api)) == 42
+
+
+def test_plan_ids_from_payloads_are_passed_as_ints(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Element ids read from plan payloads can be strings; the old requests sent them as text,
+    # aiocomexio insists on ints — the adapter casts instead of failing the wiring.
+    client.save_function_plan_connection = AsyncMock(return_value=9)
+    client.delete_function_plan_elements = AsyncMock()
+    asyncio.run(comexio_api.function_plan_save_connection(7, "1", [("2", "0", False)], "analog", existing_conn_id="5"))
+    asyncio.run(comexio_api.function_plan_delete_elements(["3", 4]))
+    client.save_function_plan_connection.assert_awaited_once_with(
+        7, 1, [(2, 0, False)], value_type="analog", source_pos=0, source_inverted=False, connection_id=5
+    )
+    client.delete_function_plan_elements.assert_awaited_once_with([3, 4])
+
+
+@pytest.mark.parametrize(
+    ("call", "method"),
+    [
+        (lambda api: api.function_plan_delete_elements([]), "delete_function_plan_elements"),
+        (lambda api: api.function_plan_save_elements_pos([]), "move_function_plan_elements"),
+    ],
+)
+def test_empty_plan_batch_sends_nothing(comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str) -> None:
+    setattr(client, method, AsyncMock())
+    assert asyncio.run(call(comexio_api)) is True
+    getattr(client, method).assert_not_awaited()
+
+
+@pytest.mark.parametrize("result", [True, False])
+def test_delete_marker_passes_the_verdict_through(comexio_api: ComexioAPI, client: MagicMock, result: bool) -> None:
+    client.delete_marker = AsyncMock(return_value=result)
+    assert asyncio.run(comexio_api.delete_marker(12)) is result
+
+
+@pytest.mark.parametrize("err", [ComexioDataError("not an object"), _connection_error(), HTTP_ERROR])
+def test_delete_marker_request_failure_is_none_not_false(
+    comexio_api: ComexioAPI, client: MagicMock, err: Exception
+) -> None:
+    # None ("request failed") must stay apart from False ("not deleted") for an irreversible action.
+    _fail(client, "delete_marker", err)
+    assert asyncio.run(comexio_api.delete_marker(12)) is None
+
+
+def test_run_fup_unconfirmed_is_no_warning(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Comexio routinely answers result=false after a restore that did apply (services/backup.py).
+    _fail(client, "run_function_plan", ComexioRequestRejectedError("refused: result false"))
+    with caplog.at_level(logging.INFO, logger=api_module.__name__):
+        assert asyncio.run(comexio_api.function_plan_run_fup(7, {"elements": {}, "connections": {}})) is False
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_comment_gets_its_width_after_placing(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.add_function_plan_comment = AsyncMock(return_value=11)
+    client.save_function_plan_comment = AsyncMock(side_effect=ComexioRequestRejectedError("not confirmed"))
+    # A failed width update keeps the placed comment.
+    assert asyncio.run(comexio_api.function_plan_add_comment_element(7, "Note", x=15, y=7.5)) == 11
+    client.save_function_plan_comment.assert_awaited_once_with(11, "Note", width=5)
+
+
+def test_failed_comment_placing_skips_the_width(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    _fail(client, "add_function_plan_comment", _connection_error())
+    client.save_function_plan_comment = AsyncMock()
+    assert asyncio.run(comexio_api.function_plan_add_comment_element(7, "Note")) is None
+    client.save_function_plan_comment.assert_not_awaited()
+
+
+def test_create_fup_caches_the_new_plan(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    new_plan = {"Id": 8, "Name": "HA - IO", "Paper": 2, "Resolution": 90, "Orientation": 0, "Active": 0}
+    client.create_function_plan = AsyncMock(return_value=8)
+    client.get_raw_config = AsyncMock(return_value=RawConfig({"Fubs": {"8": new_plan}}, {}, {}, None))
+    assert asyncio.run(comexio_api.create_fup("HA - IO", paper_format="A3")) == 8
+    assert comexio_api.fub_data["8"] == new_plan
+
+
+def test_create_fup_keeps_the_id_when_the_read_back_fails(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # The plan exists once Comexio confirmed it — reporting None would make the caller create it again.
+    client.create_function_plan = AsyncMock(return_value=8)
+    _fail(client, "get_raw_config", _connection_error())
+    assert asyncio.run(comexio_api.create_fup("HA - IO")) == 8
+    assert "8" not in comexio_api.fub_data
+
+
+def test_create_fup_failure_is_none(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    _fail(client, "create_function_plan", ComexioRequestRejectedError("name already in use"))
+    assert asyncio.run(comexio_api.create_fup("HA - IO")) is None
+
+
+def test_update_paper_passes_the_live_settings_and_updates_the_cache(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    comexio_api.update_fub_cache_entry(7, {"Name": "Old", "Comment": None, "Position": 3, "Active": 1, "Paper": 3})
+    client.update_function_plan = AsyncMock()
+    assert asyncio.run(comexio_api.function_plan_update_paper(7, "A3", 120, "portrait", name="New")) is True
+    client.update_function_plan.assert_awaited_once_with(
+        7, name="New", comment="", position=3, active=True, paper_format="A3", orientation="portrait", dpi=120
+    )
+    assert comexio_api.fub_data["7"] == {
+        "Name": "New",
+        "Comment": None,
+        "Position": 3,
+        "Active": 1,
+        "Paper": "2",
+        "Resolution": 120,
+        "Orientation": 1,
+    }
+
+
+def test_update_paper_failure_leaves_the_cache(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    comexio_api.update_fub_cache_entry(7, {"Name": "Old", "Paper": 3})
+    _fail(client, "update_function_plan", ValueError("dpi must be 45-120, not 300"))
+    assert asyncio.run(comexio_api.function_plan_update_paper(7, "A3", 300, "landscape")) is False
+    assert comexio_api.fub_data["7"] == {"Name": "Old", "Paper": 3}
+
+
+_TRANSPORT_RAISING = [
+    (lambda api: api.function_plan_add_element(7, 5, 2), "add_function_plan_element"),
+    (lambda api: api.function_plan_save_connection(7, 1, [(2, 0, False)]), "save_function_plan_connection"),
+    (lambda api: api.function_plan_save_elements_pos([(1, 15, 30.0)]), "move_function_plan_elements"),
+    (lambda api: api.function_plan_add_constant_element(7, "1"), "add_function_plan_constant"),
+]
+
+
+@pytest.mark.parametrize(("call", "method"), _TRANSPORT_RAISING)
+def test_plan_build_transport_failure_raises(
+    comexio_api: ComexioAPI, client: MagicMock, call: Any, method: str
+) -> None:
+    # Regression (review 8b-2c): the restore paths in services/backup.py abort on these instead
+    # of trying every further element of the snapshot against an unreachable server.
+    _fail(client, method, _connection_error())
+    with pytest.raises(aiohttp.ServerDisconnectedError):
+        asyncio.run(call(comexio_api))
+
+
+def test_save_elements_pos_rejection_is_false(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    _fail(client, "move_function_plan_elements", ComexioRequestRejectedError("not confirmed"))
+    assert asyncio.run(comexio_api.function_plan_save_elements_pos([(1, 15, 30.0)])) is False
+
+
+def test_run_fup_reactivation_refused_is_a_warning(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Without a restore payload an unconfirmed run leaves the plan stopped — that must show.
+    _fail(client, "run_function_plan", ComexioRequestRejectedError("refused: output used twice"))
+    assert asyncio.run(comexio_api.function_plan_run_fup(7)) is False
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+
+
+def test_unsupported_paper_falls_back_to_a4(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Regression (review 8b-2c): a backup of an A2 plan used to restore on A4; aiocomexio only
+    # takes A3/A4/A5, so without the fallback the whole restore would fail.
+    comexio_api.update_fub_cache_entry(7, {"Name": "Old", "Paper": 1})
+    client.update_function_plan = AsyncMock()
+    assert asyncio.run(comexio_api.function_plan_update_paper(7, "A2", 90, "Landscape")) is True
+    kwargs = client.update_function_plan.await_args.kwargs
+    assert (kwargs["paper_format"], kwargs["orientation"]) == ("A4", "landscape")
+    assert comexio_api.fub_data["7"]["Paper"] == "3"
