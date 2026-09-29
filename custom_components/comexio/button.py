@@ -602,17 +602,23 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             update_status(msg, pct=100, step_info="Done", final=True)
 
         except Exception as e:
-            self.coordinator.in_sync = False
-            self.coordinator.sync_error = True
             _LOGGER.exception("[%s] Sync failed", self.server_id)
-            # Writes that already failed before the abort would otherwise vanish behind "Error: ...".
-            if ctx is not None:
-                self.coordinator.sync_failed_writes = list(ctx.failed_writes)
-            failed_note = _failed_writes_note(self.coordinator.sync_failed_writes)
-            update_status(f"Error: {e}\n\n{failed_note}".rstrip(), is_error=True, final=True)
+            self._report_sync_failure(e, ctx, update_status)
 
         finally:
             await self._finalize_sync()
+
+    def _report_sync_failure(
+        self, error: Exception, ctx: _SyncContext | None, update_status: Callable[..., None]
+    ) -> None:
+        """Mark the sync as aborted and report the error with the writes that failed before it."""
+        self.coordinator.in_sync = False
+        self.coordinator.sync_error = True
+        # Writes that already failed before the abort would otherwise vanish behind "Error: ...".
+        if ctx is not None:
+            self.coordinator.sync_failed_writes = list(ctx.failed_writes)
+        failed_note = _failed_writes_note(self.coordinator.sync_failed_writes)
+        update_status(f"Error: {error}\n\n{failed_note}".rstrip(), is_error=True, final=True)
 
     def _update_sync_status(
         self,
