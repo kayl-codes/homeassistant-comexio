@@ -26,6 +26,10 @@ from ..coordinator import ComexioCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 _MULTI_INSTANCE_MSG = "Multiple Comexio instances — please specify `config_entry`."
+_NO_INSTANCE_MSG = (
+    "No Comexio instance is loaded right now — e.g. the integration is reloading after a sync. "
+    "Please try again in a moment."
+)
 _LOGIN_FAILED_MSG = "Comexio admin login failed."
 _INSTANCE_NOT_FOUND_LOG = "Comexio instance %s not found in hass.data"
 _INSTANCE_NOT_FOUND_MSG = "Comexio instance `{}` not found (not loaded, or wrong `config_entry`)."
@@ -69,6 +73,34 @@ def _available_plans_str(fub_data: dict) -> str:
     )
 
 
+def _resolve_coordinator(hass: HomeAssistant, call: ServiceCall, error_title: str) -> ComexioCoordinator | None:
+    """The coordinator a service call targets; None after an English error notification.
+
+    Without `config_entry` the only loaded instance is used. No loaded instance at all (a call
+    during the reload that ends every sync) is reported as such, not as "multiple instances".
+    """
+    domain_data = hass.data.get(DOMAIN, {})
+    entry_id = call.data.get("config_entry")
+    if not entry_id:
+        entries = [k for k, v in domain_data.items() if isinstance(v, ComexioCoordinator)]
+        if len(entries) != 1:
+            if entries:
+                _LOGGER.error("config_entry required when multiple Comexio instances exist: %s", entries)
+                message = _MULTI_INSTANCE_MSG
+            else:
+                _LOGGER.error("No Comexio instance loaded for the service call")
+                message = _NO_INSTANCE_MSG
+            persistent_notification.async_create(hass, message, title=error_title)
+            return None
+        entry_id = entries[0]
+    coordinator = domain_data.get(entry_id)
+    if not isinstance(coordinator, ComexioCoordinator):
+        _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
+        persistent_notification.async_create(hass, _INSTANCE_NOT_FOUND_MSG.format(entry_id), title=error_title)
+        return None
+    return coordinator
+
+
 async def _async_get_service_context(
     hass: HomeAssistant,
     call: ServiceCall,
@@ -85,18 +117,8 @@ async def _async_get_service_context(
     plan's stored backups are still listable/restorable, and pure local-storage operations
     (delete/purge) never need a Comexio session at all.
     """
-    domain_data = hass.data.get(DOMAIN, {})
-    entry_id = call.data.get("config_entry")
-    if not entry_id:
-        entries = [k for k, v in domain_data.items() if isinstance(v, ComexioCoordinator)]
-        if len(entries) != 1:
-            persistent_notification.async_create(hass, _MULTI_INSTANCE_MSG, title=error_title)
-            return None
-        entry_id = entries[0]
-    coordinator = domain_data.get(entry_id)
-    if not isinstance(coordinator, ComexioCoordinator):
-        _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
-        persistent_notification.async_create(hass, _INSTANCE_NOT_FOUND_MSG.format(entry_id), title=error_title)
+    coordinator = _resolve_coordinator(hass, call, error_title)
+    if coordinator is None:
         return None
     api = coordinator.api
 
@@ -186,21 +208,8 @@ def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: 
     Handles config_entry auto-resolution (when only one Comexio instance exists) and fub_id
     resolution via `_resolve_fub_id`, notifying the user and returning None on any failure.
     """
-    domain_data = hass.data.get(DOMAIN, {})
-    entry_id = call.data.get("config_entry")
-    if not entry_id:
-        entries = [k for k, v in domain_data.items() if isinstance(v, ComexioCoordinator)]
-        if len(entries) != 1:
-            _LOGGER.error("config_entry required when multiple Comexio instances exist: %s", entries)
-            persistent_notification.async_create(
-                hass, "Mehrere Comexio-Instanzen — bitte `config_entry` angeben.", title=error_title
-            )
-            return None
-        entry_id = entries[0]
-    coordinator = domain_data.get(entry_id)
-    if not isinstance(coordinator, ComexioCoordinator):
-        _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
-        persistent_notification.async_create(hass, _INSTANCE_NOT_FOUND_MSG.format(entry_id), title=error_title)
+    coordinator = _resolve_coordinator(hass, call, error_title)
+    if coordinator is None:
         return None
 
     api = coordinator.api

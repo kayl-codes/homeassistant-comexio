@@ -702,7 +702,8 @@ async def _restore_plan_as_new(
     if new_fub_id is None:
         persistent_notification.async_create(
             hass,
-            f"Could not create a replacement plan named '{plan_name}' (the name may already be in use live). "
+            f"Could not create a replacement plan named '{plan_name}' (the name may already be in use live, "
+            "or the plan was created but its ID could not be read back — see the log). "
             f"Restore of {kind}[{slot}] for the former plan {old_fub_id} was aborted.",
             title=_TITLE_RESTORE_ERR,
             notification_id=notif_id,
@@ -826,7 +827,8 @@ async def _restore_plan_as_copy(
         if new_fub_id is None:
             persistent_notification.async_create(
                 hass,
-                f"Could not create plan '{new_plan_name}' (the name may already be in use live). "
+                f"Could not create plan '{new_plan_name}' (the name may already be in use live, "
+                "or the plan was created but its ID could not be read back — see the log). "
                 f"Copy-restore of {kind}[{slot}] for '{source_name}' was aborted.",
                 title=_TITLE_RESTORE_ERR,
                 notification_id=notif_id,

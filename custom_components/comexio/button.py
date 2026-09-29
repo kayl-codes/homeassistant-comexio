@@ -74,7 +74,7 @@ from .const import (
     webio_class_name,
     webio_range_check_entity_id,
 )
-from .coordinator import ComexioCoordinator
+from .coordinator import ComexioCoordinator, webio_still_present
 from .entity import ComexioKnxEntity, ComexioMarkerEntity
 from .function_plan_backup import format_backup_label
 from .repairs import count_referencing_automations_and_scripts
@@ -258,6 +258,55 @@ class _KnxPrestage:
 
     allocated: dict[int, int] = field(default_factory=dict)
     preembedded: set[str] = field(default_factory=set)
+
+
+async def _delete_old_webio_class(api: Any, base_id: str, class_name: str, label: str) -> None:
+    """Delete the class a recreate replaces; raises unless a lookup confirms it is gone.
+
+    Uploading on top of a class that is still there would leave two classes of the same name
+    behind — the sync aborts instead (reported by async_handle_press). Comexio's answer to the
+    delete carries no verdict, so only the lookup shows the class is gone.
+    """
+    if not await api.delete_webio_base(base_id):
+        raise RuntimeError(f"Deleting old Web-IO class failed ({label})")
+    await asyncio.sleep(0.5)
+    if await api.get_webio_base_info(class_name):
+        raise RuntimeError(f"Old Web-IO class still present after deleting it ({label})")
+
+
+async def _confirm_webio_device_created(api: Any, class_name: str, old_device_id: str | None, label: str) -> None:
+    """Raise unless a lookup finds the device a recreate just created.
+
+    create_webio_device's True only means Comexio accepted the request (a refusal answered as
+    HTTP 200 reads the same). The old device of the same name must not pass for the new one.
+    """
+    found = await api.get_webio_device_info(class_name)
+    if found is None or (old_device_id and str(found) == str(old_device_id)):
+        raise RuntimeError(f"Device creation not confirmed ({label}, class created, device instance not found)")
+
+
+class _SyncLoginError(HomeAssistantError):
+    """The sync could not log in to Comexio — reported without a traceback."""
+
+
+async def _ensure_sync_login(api: Any) -> None:
+    """Log in again if the session lapsed since the last poll (e.g. after a Comexio reboot).
+
+    Without this every request of the sync would hit the login form and fail.
+    """
+    if not await api.login():
+        raise _sync_login_error(api.last_login_error)
+
+
+def _sync_login_error(reason: str | None) -> _SyncLoginError:
+    """Why a sync could not start, from ComexioAPI.last_login_error."""
+    if reason == "rejected":
+        return _SyncLoginError(
+            "Comexio rejected the admin login — please check the credentials (reconfigure the integration)."
+        )
+    return _SyncLoginError(
+        "Comexio admin login failed — the server is not reachable or not answering. Please try again later."
+    )
 
 
 @dataclass
@@ -450,6 +499,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         try:
             update_status("Analyzing Comexio configuration...", pct=5, step_info=_STEP_ANALYZING_CONFIG)
 
+            await _ensure_sync_login(api)
+
             # Check if the Web-IO device instances are already present (one per class). Reported
             # per class (not just once before the loop) because this duration varies a lot with
             # Comexio server responsiveness, and the notification otherwise sits on the same
@@ -602,7 +653,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             update_status(msg, pct=100, step_info="Done", final=True)
 
         except Exception as e:
-            _LOGGER.exception("[%s] Sync failed", self.server_id)
             self._report_sync_failure(e, ctx, update_status)
 
         finally:
@@ -611,7 +661,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     def _report_sync_failure(
         self, error: Exception, ctx: _SyncContext | None, update_status: Callable[..., None]
     ) -> None:
-        """Mark the sync as aborted and report the error with the writes that failed before it."""
+        """Log and report the error that aborted the sync, with the writes that failed before it.
+
+        Called from the except block of async_handle_press, so the traceback is still available.
+        """
+        if isinstance(error, _SyncLoginError):
+            _LOGGER.error("[%s] Sync not started: %s", self.server_id, error)
+        else:
+            _LOGGER.exception("[%s] Sync failed", self.server_id)
         self.coordinator.in_sync = False
         self.coordinator.sync_error = True
         # Writes that already failed before the abort would otherwise vanish behind "Error: ...".
@@ -1164,7 +1221,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     async def _decide_effective_action(
         self,
         ctx: _SyncContext,
-        label: str,
+        cls: str,
         class_dev_id: str | None,
         cls_missing: list[dict],
         cls_renamed: list[dict],
@@ -1173,6 +1230,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         dev_ip_mismatch: bool,
     ) -> str:
         """Pick recreate vs. delta-sync for one class, based on ETA vs. the Fast-Track threshold."""
+        label = webio_class_label(cls)
         action = ctx.action
         cls_action_eta = 0
         cls_task_count = 0
@@ -1207,11 +1265,15 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 cls_action_eta,
                 SYNC_DURATION_RECREATE,
             )
-            if await ctx.api.delete_webio_device(class_dev_id):
+            # Comexio's answer carries no verdict — only the lookup shows the device is gone. A
+            # device left behind would make the recreate upload a second class next to it.
+            error = await ctx.api.webio_device_delete_error(class_dev_id) or await webio_still_present(
+                ctx.api.get_webio_device_info, ctx.class_names[cls]
+            )
+            if not error:
                 _LOGGER.info("[%s] %s Fast-Track enabled: device has been deleted.", self.server_id, label)
                 return "recreate"
-            # False is "in use" or a failed request — the API adapter already warned about the latter.
-            _LOGGER.info("[%s] %s device could not be deleted. Falling back to Delta-Sync.", self.server_id, label)
+            _LOGGER.info("[%s] %s device not deleted (%s). Falling back to Delta-Sync.", self.server_id, label, error)
             return action
         _LOGGER.info(
             "[%s] %s ETA (%ds) is faster than Fast-Track. Proceeding exactly as requested.",
@@ -1263,9 +1325,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 )
                 # Uploading on top of a class that failed to delete would leave two classes
                 # of the same name behind — abort instead (reported by async_handle_press).
-                if not await api.delete_webio_base(base_id):
-                    raise RuntimeError(f"Deleting old Web-IO class failed ({label})")
-                await asyncio.sleep(0.5)
+                await _delete_old_webio_class(api, base_id, class_name, label)
             else:
                 _LOGGER.warning(
                     "[%s] %s base %s still blocked by other logic. Reusing base structure.",
@@ -1284,6 +1344,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             raise RuntimeError(f"Upload failed ({label}): {res_id}")
         if not await api.create_webio_device(class_name, res_id, ctx.ha_address):
             raise RuntimeError(f"Device creation failed ({label}, class created, device instance not)")
+        await _confirm_webio_device_created(api, class_name, class_dev_id, label)
 
     async def _delta_sync_class(
         self,
@@ -1597,7 +1658,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         label = webio_class_label(cls)
 
         cls_effective_action = await self._decide_effective_action(
-            ctx, label, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch
+            ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch
         )
 
         if cls_effective_action == "recreate":
