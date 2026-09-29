@@ -46,6 +46,12 @@ def _fail(client: MagicMock, method: str, err: Exception) -> None:
     setattr(client, method, AsyncMock(side_effect=err))
 
 
+def _install_preview(comexio_api: ComexioAPI, session: MagicMock, preview: MagicMock) -> None:
+    """A preview session logged in with the current connection settings."""
+    comexio_api._preview_session, comexio_api._preview_client = session, preview
+    comexio_api._preview_credentials = comexio_api._credentials()
+
+
 @pytest.mark.parametrize(
     ("err", "reason"),
     [(ComexioAuthenticationError("no"), "rejected"), (_connection_error(), "connection"), (HTTP_ERROR, "connection")],
@@ -123,15 +129,57 @@ def test_client_is_rebuilt_on_new_credentials(comexio_api: ComexioAPI) -> None:
     assert comexio_api.client is not first
 
 
-def test_new_connection_settings_drop_the_preview_session(comexio_api: ComexioAPI) -> None:
-    # The preview client and its cookie belong to the old host / credentials.
-    comexio_api.client  # noqa: B018 - build the client for the current settings
+@pytest.mark.parametrize("main_client_built", [True, False])
+def test_new_connection_settings_drop_the_preview_session(comexio_api: ComexioAPI, main_client_built: bool) -> None:
+    # The preview client and its cookie belong to the old host / credentials — also when the
+    # main client was never built before the settings changed.
+    if main_client_built:
+        comexio_api.client  # noqa: B018 - build the client for the current settings
     session = MagicMock()
-    comexio_api._preview_session, comexio_api._preview_client = session, MagicMock()
+    _install_preview(comexio_api, session, MagicMock())
     comexio_api.host = "10.0.0.2"
-    comexio_api.client  # noqa: B018 - the rebuild is what drops the preview session
+    comexio_api.client  # noqa: B018 - reading the client is what drops the preview session
     assert comexio_api._preview_session is None
     assert comexio_api._preview_client is None
+    session.detach.assert_called_once()
+
+
+def test_preview_session_is_kept_while_the_settings_are_unchanged(comexio_api: ComexioAPI) -> None:
+    session = MagicMock()
+    _install_preview(comexio_api, session, MagicMock())
+    comexio_api.client  # noqa: B018 - first build of the main client
+    assert asyncio.run(comexio_api.ensure_preview_session()) is session
+    session.detach.assert_not_called()
+
+
+def test_logged_in_preview_session_is_kept(comexio_api: ComexioAPI) -> None:
+    # A preview session that logged in under the current settings survives later client reads.
+    async def login_ok(_client: object) -> bool:
+        return True
+
+    comexio_api._login = login_ok  # type: ignore[method-assign]
+    session = asyncio.run(comexio_api.ensure_preview_session())
+    assert session is not None
+    comexio_api.client  # noqa: B018 - must not drop the fresh preview session
+    assert asyncio.run(comexio_api.ensure_preview_session()) is session
+    session.detach.assert_not_called()
+
+
+def test_waiting_preview_tick_does_not_reuse_an_outdated_session(comexio_api: ComexioAPI) -> None:
+    # A tick that waited for the lock while another one logged in must not return that session
+    # when the settings changed in between.
+    session = MagicMock()
+
+    async def scenario() -> aiohttp.ClientSession | None:
+        comexio_api._login = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        async with comexio_api._preview_session_lock:
+            waiter = asyncio.ensure_future(comexio_api.ensure_preview_session())
+            await asyncio.sleep(0)
+            _install_preview(comexio_api, session, MagicMock())
+            comexio_api.host = "10.0.0.2"
+        return await waiter
+
+    assert asyncio.run(scenario()) is None
     session.detach.assert_called_once()
 
 
@@ -252,20 +300,23 @@ def test_connection_values_failure_reaches_the_circuit_breaker(
 def test_lapsed_preview_session_is_dropped(comexio_api: ComexioAPI) -> None:
     session, preview = MagicMock(), MagicMock()
     _fail(preview, "get_function_plan_connection_values", ComexioAuthenticationError("lapsed"))
-    comexio_api._preview_session, comexio_api._preview_client = session, preview
+    _install_preview(comexio_api, session, preview)
     call = comexio_api.get_function_plan_connection_values(3, session=session)
     with pytest.raises(ComexioAuthenticationError):
         asyncio.run(call)
+    preview.get_function_plan_connection_values.assert_awaited_once_with(3)
     assert comexio_api._preview_session is None
     assert comexio_api._preview_client is None
     session.detach.assert_called_once()
 
 
 def test_replaced_preview_session_is_not_used(comexio_api: ComexioAPI) -> None:
-    comexio_api._preview_session, comexio_api._preview_client = MagicMock(), MagicMock()
+    preview = MagicMock()
+    _install_preview(comexio_api, MagicMock(), preview)
     call = comexio_api.get_function_plan_connection_values(3, session=MagicMock())
     with pytest.raises(ComexioAuthenticationError):
         asyncio.run(call)
+    preview.get_function_plan_connection_values.assert_not_called()
 
 
 def test_load_elements_failure_is_none(comexio_api: ComexioAPI, client: MagicMock) -> None:

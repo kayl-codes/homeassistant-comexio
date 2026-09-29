@@ -428,6 +428,8 @@ class ComexioAPI:
         # Created lazily on first use, not here — most setups never open the preview.
         self._preview_session: aiohttp.ClientSession | None = None
         self._preview_client: ComexioClient | None = None
+        # The host / credentials the preview session logged in with.
+        self._preview_credentials: tuple[str, ...] = ()
         # aiocomexio client on the main session; see the client property.
         self._client: ComexioClient | None = None
         self._client_credentials: tuple[str, ...] = ()
@@ -483,11 +485,13 @@ class ComexioAPI:
         the dedicated session again from scratch (a fresh session, since a stale/rejected
         cookie jar wouldn't fix itself).
         """
+        self._drop_outdated_preview_session()
         if self._preview_session is not None:
             return self._preview_session
         async with self._preview_session_lock:
             # Re-check: another tick may have finished creating the session while this
-            # one was waiting for the lock.
+            # one was waiting for the lock — and the settings may have changed since.
+            self._drop_outdated_preview_session()
             if self._preview_session is not None:
                 return self._preview_session
             if self._closed:
@@ -515,6 +519,7 @@ class ComexioAPI:
                 return None
             self._preview_session = session
             self._preview_client = client
+            self._preview_credentials = credentials
             return session
 
     def _credentials(self) -> tuple[str, ...]:
@@ -530,18 +535,23 @@ class ComexioAPI:
 
         Rebuilt whenever host or credentials change — the coordinator's reconfigure path
         assigns new values to host / username / password / api_user / api_pass and logs in again.
-        The preview session is dropped with it: its client and cookie belong to the old settings,
-        so ensure_preview_session opens a new one on the next poll.
+        A preview session that logged in with other settings is dropped as well — its client and
+        cookie belong to the old ones — so ensure_preview_session opens a new one on the next poll.
         """
+        self._drop_outdated_preview_session()
         if self._client is None or self._client_credentials != self._credentials():
-            if self._client is not None and self._preview_session is not None:
-                _LOGGER.info("Comexio connection settings changed — reopening the preview session")
-                self._preview_session.detach()
-                self._preview_session = None
-                self._preview_client = None
             self._client = self._new_client(self.session)
             self._client_credentials = self._credentials()
         return self._client
+
+    def _drop_outdated_preview_session(self) -> None:
+        """Detach a preview session that logged in with other host / credentials than the current ones."""
+        if self._preview_session is None or self._preview_credentials == self._credentials():
+            return
+        _LOGGER.info("Comexio connection settings changed — reopening the preview session")
+        self._preview_session.detach()
+        self._preview_session = None
+        self._preview_client = None
 
     @property
     def _base_url(self) -> str:
