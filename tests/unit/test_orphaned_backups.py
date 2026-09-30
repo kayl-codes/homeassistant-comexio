@@ -172,6 +172,16 @@ def test_invalid_kept_entry_does_not_block_backups(manager: FunctionPlanBackupMa
     assert asyncio.run(manager.async_expired_orphans(LIVE_FUBS, CUTOFF)) == []
 
 
+@pytest.mark.parametrize("stored", [["not", "a", "dict"], {"identities": 5}, {"identities": "Pumps"}])
+def test_invalid_kept_store_shape_does_not_block_backups(manager: FunctionPlanBackupManager, stored: Any) -> None:
+    FakeStore.saved[f"{DOMAIN}_function_plan_backup_kept_{SERVER_ID}"] = stored
+
+    # Nothing counts as kept, so the orphan is asked about again instead of the load raising.
+    assert asyncio.run(manager.async_expired_orphans(LIVE_FUBS, CUTOFF)) == [
+        {"fub_id": 2, "plan_name": "Pumps", "count": 3, "captured_at": OLD}
+    ]
+
+
 def _registry(monkeypatch: pytest.MonkeyPatch, issue_ids: list[tuple[str, str]]) -> MagicMock:
     ir = MagicMock()
     ir.async_get.return_value.issues = dict.fromkeys(issue_ids)

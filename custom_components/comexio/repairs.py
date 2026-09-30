@@ -1243,6 +1243,9 @@ class ComexioRepairFlow(RepairsFlow):
         is_de = self.hass.config.language == "de"
         if user_input["action"] == ACTION_DELETE:
             removed = await manager.async_delete_plan_backups(fub_id, plan_name)
+            if not removed:
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                return self.async_abort(reason="already_deleted")
             title = f"{removed} Backups gelöscht" if is_de else f"{removed} backups deleted"
         else:
             await manager.async_keep_orphaned(fub_id, plan_name)

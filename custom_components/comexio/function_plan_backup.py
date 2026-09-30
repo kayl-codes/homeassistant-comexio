@@ -257,8 +257,13 @@ class FunctionPlanBackupManager:
                 self._server_id,
             )
         kept = await self._kept_store.async_load() or {}
+        items = kept.get("identities") if isinstance(kept, dict) else None
+        if not isinstance(items, list):
+            if kept:
+                _LOGGER.warning("[%s] Function Plan backup: ignoring invalid kept store %r", self._server_id, kept)
+            items = []
         self._kept = set()
-        for item in kept.get("identities", []):
+        for item in items:
             try:
                 self._kept.add((int(item["fub_id"]), str(item["plan_name"])))
             except (KeyError, TypeError, ValueError):

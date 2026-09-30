@@ -1127,8 +1127,8 @@ async def _delete_one_snapshot(hass: HomeAssistant, coordinator: ComexioCoordina
         return None
     fub_id, kind, slot, plan_name_hint = parsed
     plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-    if identity_err:
-        persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
+    if plan_name is None:  # exactly when identity_err is set
+        persistent_notification.async_create(hass, str(identity_err), title=_TITLE_DELETE_BACKUPS_ERR)
         return None
     manager = coordinator.function_plan_backup
     deleted = await manager.async_delete_snapshot(kind, fub_id, plan_name, slot)
@@ -1154,8 +1154,8 @@ async def _delete_plan_backups_by_fub_id(
         return None
     fub_id, plan_name_hint = split
     plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-    if identity_err:
-        persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
+    if plan_name is None:  # exactly when identity_err is set
+        persistent_notification.async_create(hass, str(identity_err), title=_TITLE_DELETE_BACKUPS_ERR)
         return None
     count = await coordinator.function_plan_backup.async_delete_plan_backups(fub_id, plan_name)
     delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
