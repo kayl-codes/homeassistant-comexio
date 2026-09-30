@@ -120,10 +120,53 @@ def test_kept_identity_is_forgotten_once_the_plan_is_live_again(manager: Functio
 
 
 def test_kept_identity_is_forgotten_once_its_snapshots_are_deleted(manager: FunctionPlanBackupManager) -> None:
+    """Forgotten at deletion, not only by the next audit: a plan recreated under the same
+    identity and deleted again before that audit must still be asked about."""
+
     async def run() -> None:
         await manager.async_keep_orphaned(2, "Pumps")
         await manager.async_delete_plan_backups(2, "Pumps")
-        await manager.async_expired_orphans(LIVE_FUBS, CUTOFF)
+
+    asyncio.run(run())
+
+    assert _kept_saved() == []
+
+
+def test_kept_identity_is_forgotten_when_its_last_snapshot_is_deleted(manager: FunctionPlanBackupManager) -> None:
+    async def run() -> list[list[dict[str, Any]]]:
+        await manager.async_keep_orphaned(2, "Pumps")
+        await manager.async_delete_snapshot("auto", 2, "Pumps", 0)
+        after_first = list(_kept_saved())
+        await manager.async_delete_snapshot("auto", 2, "Pumps", 0)
+        await manager.async_delete_snapshot("change", 2, "Pumps", 0)
+        return [after_first, _kept_saved()]
+
+    after_first, after_last = asyncio.run(run())
+
+    assert after_first == [{"fub_id": 2, "plan_name": "Pumps"}]  # snapshots left: still kept
+    assert after_last == []
+
+
+@pytest.mark.parametrize("remove", ["rekey", "purge_identity"])
+def test_kept_identity_is_forgotten_when_restore_as_new_moves_or_purges_it(
+    manager: FunctionPlanBackupManager, remove: str
+) -> None:
+    async def run() -> None:
+        await manager.async_keep_orphaned(2, "Pumps")
+        if remove == "rekey":
+            await manager.async_rekey_fub_id(2, 7, "Pumps")
+        else:
+            await manager.async_purge_identity(2, "Pumps")
+
+    asyncio.run(run())
+
+    assert _kept_saved() == []
+
+
+def test_delete_all_backups_forgets_every_kept_identity(manager: FunctionPlanBackupManager) -> None:
+    async def run() -> None:
+        await manager.async_keep_orphaned(2, "Pumps")
+        await manager.async_delete_all_backups()
 
     asyncio.run(run())
 

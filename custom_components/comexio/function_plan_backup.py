@@ -275,6 +275,16 @@ class FunctionPlanBackupManager:
         identities = [{"fub_id": fub_id, "plan_name": name} for fub_id, name in sorted(self._kept)]
         await self._kept_store.async_save({"identities": identities})
 
+    async def _async_forget_kept_if_gone(self, fub_id: int, plan_name: str) -> None:
+        """Drop a keep decision once its identity has no snapshots left.
+
+        Done right at deletion, not only in the next audit: a plan recreated under the same
+        identity and deleted again before that audit would otherwise stay silenced for good.
+        """
+        if (fub_id, plan_name) in self._kept and not self._snapshot_total(fub_id, plan_name):
+            self._kept.discard((fub_id, plan_name))
+            await self._async_save_kept()
+
     @staticmethod
     def _build_snapshot(
         plan_data: dict[str, Any],
@@ -471,6 +481,8 @@ class FunctionPlanBackupManager:
             new_identities[plan_name] = combined[:limit]
             moved += len(old_history)
             await store.async_save(data)
+        # The restored plan is live again under new_fub_id, so the keep decision is not carried over.
+        await self._async_forget_kept_if_gone(old_fub_id, plan_name)
         if moved:
             _LOGGER.info(
                 "[%s] Function Plan backup: rekeyed %d snapshot(s) of '%s' from fub=%s to fub=%s",
@@ -503,6 +515,7 @@ class FunctionPlanBackupManager:
             if not identities:
                 data.pop(key, None)
             await store.async_save(data)
+        await self._async_forget_kept_if_gone(fub_id, plan_name)
         if removed:
             _LOGGER.info(
                 "[%s] Function Plan backup: purged %d superseded snapshot(s) of '%s' at old fub=%s",
@@ -559,6 +572,8 @@ class FunctionPlanBackupManager:
             if not data[key]:
                 del data[key]
         await store.async_save(data)
+        if history_emptied:
+            await self._async_forget_kept_if_gone(fub_id, plan_name)
         _LOGGER.info(
             "[%s] Function Plan backup: deleted %s[%d] snapshot for fub=%s ('%s')",
             self._server_id,
@@ -582,6 +597,7 @@ class FunctionPlanBackupManager:
             if history:
                 removed += len(history)
                 await store.async_save(data)
+        await self._async_forget_kept_if_gone(fub_id, plan_name)
         if removed:
             _LOGGER.info(
                 "[%s] Function Plan backup: deleted all %d snapshot(s) for fub=%s ('%s')",
@@ -604,6 +620,9 @@ class FunctionPlanBackupManager:
         self._change_data = {}
         await self._auto_store.async_save(self._auto_data)
         await self._change_store.async_save(self._change_data)
+        if self._kept:
+            self._kept.clear()
+            await self._async_save_kept()
         if removed:
             _LOGGER.info(
                 "[%s] Function Plan backup: deleted ALL %d snapshot(s) across all plans", self._server_id, removed
