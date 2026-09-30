@@ -1,3 +1,2 @@
 aiocomexio==0.2.0
-cryptography>=42.0.0
 idna>=3.15
