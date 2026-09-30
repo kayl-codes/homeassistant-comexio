@@ -383,7 +383,8 @@ function_plan_visualize:
     notification or as an SVG diagram (Plan Preview sensor). Two ways to pick the
     source — use only ONE: (1) "Snapshot" — render a stored backup exactly as
     captured, entirely offline; (2) "Plan" (live) — render the plan's current
-    state in Comexio.
+    state in Comexio. With a response requested, the text diagram is also
+    returned as `text`, the SVG as its `url`.
   fields:
     config_entry:
       name: Comexio instance

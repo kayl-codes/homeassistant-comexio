@@ -4407,6 +4407,7 @@ class ComexioAPI:
                 "fub_id": fub_id,
                 "plan_stopped": not restart_after_failure_ok,
                 "plan_name": plan_name,
+                "delete_failed": True,
             }
 
         restart_ok = await self.function_plan_run_fup(fub_id)

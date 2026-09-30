@@ -12,6 +12,7 @@ import time
 from aiocomexio.function_plan import resolve_element_label, snapshot_label_maps
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 
 from ..const import FUNCTION_PLAN_KNX_LAYOUT_Y_STEP, FUNCTION_PLAN_LAYOUT_Y_STEP, FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
 from ..coordinator import ComexioCoordinator
@@ -159,8 +160,8 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
 
 async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall) -> dict | None:
     """Service to visualize a function plan (live or a stored backup snapshot) as a text
-    diagram, or — format='svg' — render it to the Function Plan preview SVG and return its
-    /local/ URL (used by coordinator.async_generate_plan_preview / the comexio-plan-card
+    diagram (also returned as 'text'), or — format='svg' — render it to the Function Plan
+    preview SVG and return its /local/ URL (used by coordinator.async_generate_plan_preview / the comexio-plan-card
     frontend, see [[project-logikplan-preview]]).
 
     Snapshot resolution mirrors _handle_function_plan_restore: a 'snapshot' field (composite
@@ -179,6 +180,9 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
         else await _resolve_visualize_live_source(hass, call, error_title)
     )
     if source_result is None:
+        if call.return_response:
+            # HA rejects a None response with a bare "expected a dictionary" (HTTP 500).
+            raise HomeAssistantError(f"{error_title}: see the notification for the reason.")
         return None
     coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata = source_result
 
@@ -219,10 +223,17 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
         lines += ["", f"**Unconnected elements ({len(orphan_lines)}):**"]
         lines += orphan_lines
 
-    persistent_notification.async_create(
-        hass, "\n".join(lines), title=f"Function Plan {fub_id} — {len(connections)} connections"
-    )
-    return None
+    text = "\n".join(lines)
+    persistent_notification.async_create(hass, text, title=f"Function Plan {fub_id} — {len(connections)} connections")
+    # Returned as well: with return_response HA requires a dict, and None made the call fail (HTTP 500).
+    return {
+        "plan_name": plan_name,
+        "fub_id": fub_id,
+        "source": source,
+        "elements": len(elements),
+        "connections": len(connections),
+        "text": text,
+    }
 
 
 async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> None:
