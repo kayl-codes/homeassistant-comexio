@@ -31,10 +31,11 @@ from ..const import (
     TIMESTAMP_DISPLAY_FORMAT,
 )
 from ..coordinator import ComexioCoordinator
-from ..function_plan_backup import retention_cutoff
+from ..function_plan_backup import is_orphaned_identity, retention_cutoff
 from ..orphaned_backups import delete_all_orphaned_backup_issues, delete_orphaned_backup_issue
 from ._context import (
     _LOGIN_FAILED_MSG,
+    NO_PLAN_SELECTED_MSG,
     _async_get_service_context,
     _parse_snapshot_field,
     _resolve_backup_identity,
@@ -49,6 +50,7 @@ _TITLE_RESTORE_PROGRESS = "Function Plan Restore — IN PROGRESS"
 _TITLE_LIST_BACKUPS_ERR = "Function Plan Backups — Error"
 _TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
 _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
+_TITLE_KEEP_BACKUPS_ERR = "Function Plan Keep Backups — Error"
 
 _AGE_KEYS = ("days", "hours", "minutes", "seconds")
 
@@ -260,7 +262,7 @@ async def _resolve_restore_target(
         return (
             None,
             None,
-            "No plan selected — the 'Function Plans' selector is empty. Please specify the plan (fub_id) explicitly.",
+            NO_PLAN_SELECTED_MSG,
         )
 
     raw = str(raw)
@@ -1249,6 +1251,74 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     coordinator.async_update_listeners()  # refresh the backup-summary diagnostic sensor
     await _refresh_service_descriptions(hass)
     persistent_notification.async_create(hass, msg, title="Function Plan Purge Orphaned Backups")
+
+
+async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceCall):
+    """Keep (or stop keeping) the backups of a deleted function plan.
+
+    Same decision as the "Keep backups" choice of the orphaned_plan_backups repair: a kept
+    plan is never asked about again and never purged. keep=false takes that decision back
+    (plan card's orphaned-plans view), so the repair returns once the retention has passed.
+    Local storage only, no Comexio API call needed.
+    """
+    ctx = await _async_get_service_context(hass, call, _TITLE_KEEP_BACKUPS_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return
+    coordinator, api, _unused_fub_id = ctx
+
+    fub_id_raw = call.data.get("fub_id")
+    split = _split_plan_field(str(fub_id_raw)) if fub_id_raw not in (None, "") else None
+    if split is None:
+        persistent_notification.async_create(
+            hass, f"Invalid 'fub_id' value: '{fub_id_raw}'.", title=_TITLE_KEEP_BACKUPS_ERR
+        )
+        return
+    fub_id, plan_name_hint = split
+    plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+    if plan_name is None:  # exactly when identity_err is set
+        persistent_notification.async_create(hass, str(identity_err), title=_TITLE_KEEP_BACKUPS_ERR)
+        return
+    if not api.fub_data:
+        persistent_notification.async_create(
+            hass,
+            "The plan list could not be read from Comexio right now — nothing changed, try again in a few minutes.",
+            title=_TITLE_KEEP_BACKUPS_ERR,
+        )
+        return
+    manager = coordinator.function_plan_backup
+    await manager.async_load()
+    if not manager.plan_backups_for_identity_sync(fub_id, plan_name):
+        persistent_notification.async_create(
+            hass, f"No stored backups for plan '{plan_name}' (fub {fub_id}).", title=_TITLE_KEEP_BACKUPS_ERR
+        )
+        return
+    if not is_orphaned_identity(api.fub_data, fub_id, plan_name):
+        persistent_notification.async_create(
+            hass,
+            f"Plan '{plan_name}' (fub {fub_id}) still exists in Comexio — only a deleted plan's backups can be kept.",
+            title=_TITLE_KEEP_BACKUPS_ERR,
+        )
+        return
+
+    if bool(call.data.get("keep", True)):
+        newly_kept = await manager.async_keep_orphaned(fub_id, plan_name)
+        delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
+        msg = (
+            f"Keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — they are no longer purged."
+            if newly_kept
+            else f"The backups of deleted plan '{plan_name}' (fub {fub_id}) are kept already — nothing changed."
+        )
+    elif await manager.async_unkeep_orphaned(fub_id, plan_name):
+        msg = (
+            f"No longer keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — you are asked "
+            "about them again once the retention period has passed."
+        )
+    else:
+        msg = f"The backups of deleted plan '{plan_name}' (fub {fub_id}) were not kept — nothing changed."
+
+    _LOGGER.info("Function Plan Keep Backups: %s", msg)
+    coordinator.async_update_listeners()  # refresh the backup selector's orphaned-plans view
+    persistent_notification.async_create(hass, msg, title="Function Plan Keep Backups")
 
 
 async def _handle_function_plan_list_backups(hass: HomeAssistant, call: ServiceCall) -> dict:

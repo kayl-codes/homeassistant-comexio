@@ -297,6 +297,36 @@ function_plan_purge_orphaned_backups:
       selector:
         boolean:
 
+function_plan_keep_backups:
+  name: Function Plan Keep Backups
+  description: >
+    Keeps the backups of a plan that no longer exists live in Comexio (deleted directly in
+    Comexio Studio): they are never purged and the "Backups of deleted plan" repair is not
+    raised for them again — same as its "Keep backups" choice. Disable "Keep" to take that
+    decision back. Used by the plan card's orphaned-plans view.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+    fub_id:
+      name: Deleted plan
+      description: 'The deleted plan as "<fub_id>:<plan name>", e.g. "12:Lights" — the name is required, since a deleted plan''s ID may have been reused.'
+      required: true
+      example: "12:Lights"
+      selector:
+        text:
+    keep:
+      name: Keep
+      description: "Enabled: keep the backups. Disabled: stop keeping them."
+      required: false
+      default: true
+      selector:
+        boolean:
+
 function_plan_list_backups:
   name: Function Plan List Backups
   description: Returns stored function plan backup snapshots (plan, type, slot, timestamp, operation) as a service response. All filters are optional and can be combined.

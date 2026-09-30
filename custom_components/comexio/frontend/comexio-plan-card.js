@@ -29,11 +29,11 @@
 // changes: the card file itself is deployed under a new versioned name each release, but this
 // sibling keeps its name, so a browser would otherwise pair the new card with a cached old
 // utils module (v0.9.32: "does not provide an export named 'isTextQuery'").
-import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-plan-card-utils.js?v=0.9.33";
+import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-plan-card-utils.js?v=0.9.34";
 
 // Version banner: lets the user verify in the browser console WHICH build actually
 // executes — ?v= query bumps proved unreliable against the service-worker cache.
-console.info("comexio-plan-card v0.9.33 (ID-Suche + \"Textsuche\", versionierter utils-Import) loaded");
+console.info("comexio-plan-card v0.9.34 (Ansicht \"Orphaned plans\": Restore als neuer Plan, Löschen, Behalten) loaded");
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
 // function_plan_backup.py) so the card can parse kind+slot back out of the select's state
@@ -546,7 +546,7 @@ class ComexioPlanCard extends HTMLElement {
         :host(.minimal-mode) ha-card { padding: 0; background: transparent; border: none; box-shadow: none; }
         :host(.minimal-mode) .backup-row { padding: 0; }
 
-        .backup-row { display: flex; padding: 0 4px 8px 4px; font-size: 0.9em; }
+        .backup-row { display: flex; gap: 6px; padding: 0 4px 8px 4px; font-size: 0.9em; }
         .backup-row[hidden] { display: none; }
         .backup-row .restore-btn {
           display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -557,6 +557,16 @@ class ComexioPlanCard extends HTMLElement {
         .backup-row .restore-btn:hover:not(:disabled) { border-color: var(--primary-color, #03a9f4); color: var(--primary-color, #03a9f4); }
         .backup-row .restore-btn ha-icon { --mdc-icon-size: 18px; }
         .backup-row .restore-btn:disabled { opacity: 0.4; cursor: default; }
+        /* Orphaned-plans view only (backups of deleted plans): delete one / delete all / keep. */
+        .backup-row .orphan-btn {
+          display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
+          padding: 6px 8px; border-radius: 6px; border: 1px solid var(--divider-color, #888);
+          background: none; cursor: pointer; color: var(--primary-text-color, inherit);
+        }
+        .backup-row .orphan-btn[hidden] { display: none; }
+        .backup-row .orphan-btn:hover:not(:disabled) { border-color: var(--primary-color, #03a9f4); color: var(--primary-color, #03a9f4); }
+        .backup-row .orphan-btn ha-icon { --mdc-icon-size: 18px; }
+        .backup-row .orphan-btn:disabled { opacity: 0.4; cursor: default; }
 
         .restore-dialog {
           border: 1px solid var(--divider-color, #888); border-radius: 8px; padding: 16px;
@@ -592,6 +602,9 @@ class ComexioPlanCard extends HTMLElement {
           <button class="restore-btn" title="Ausgewähltes Backup wiederherstellen" aria-label="Ausgewähltes Backup wiederherstellen" disabled>
             <ha-icon icon="mdi:backup-restore"></ha-icon>Restore
           </button>
+          <button class="orphan-btn orphan-delete" hidden><ha-icon icon="mdi:delete"></ha-icon></button>
+          <button class="orphan-btn orphan-delete-all" hidden><ha-icon icon="mdi:delete-sweep"></ha-icon></button>
+          <button class="orphan-btn orphan-keep" hidden><ha-icon icon="mdi:pin"></ha-icon></button>
         </div>
         <div class="toolbar">
           <button class="help-toggle" title="Hilfe: Bedienung der Karte" aria-label="Hilfe anzeigen"><ha-icon icon="mdi:help-circle-outline"></ha-icon></button>
@@ -671,6 +684,14 @@ class ComexioPlanCard extends HTMLElement {
           <button class="restore-cancel">Abbrechen</button>
           <button class="restore-confirm">Wiederherstellen</button>
         </div>
+      </dialog>
+      <dialog class="restore-dialog orphan-dialog">
+        <h3 class="orphan-dialog-title"></h3>
+        <p class="orphan-dialog-text"></p>
+        <div class="restore-actions">
+          <button class="orphan-dialog-cancel">Abbrechen</button>
+          <button class="restore-confirm orphan-dialog-confirm"></button>
+        </div>
       </dialog>`;
     this._helpDialog = root.querySelector(".help-dialog");
     root.querySelector(".help-toggle").addEventListener("click", () => this._helpDialog.showModal());
@@ -696,10 +717,27 @@ class ComexioPlanCard extends HTMLElement {
       }
     });
     root.querySelector(".restore-cancel").addEventListener("click", () => this._restoreDialog.close());
-    root.querySelector(".restore-confirm").addEventListener("click", () => this._confirmRestore());
+    this._restoreDialog.querySelector(".restore-confirm").addEventListener("click", () => this._confirmRestore());
     this._restoreDialog.addEventListener("click", (ev) => {
       if (ev.target === this._restoreDialog) {
         this._restoreDialog.close();
+      }
+    });
+    this._orphanDeleteBtn = root.querySelector(".orphan-delete");
+    this._orphanDeleteAllBtn = root.querySelector(".orphan-delete-all");
+    this._orphanKeepBtn = root.querySelector(".orphan-keep");
+    this._orphanDeleteBtn.addEventListener("click", () => this._openOrphanDialog("delete"));
+    this._orphanDeleteAllBtn.addEventListener("click", () => this._openOrphanDialog("delete_all"));
+    this._orphanKeepBtn.addEventListener("click", () => this._openOrphanDialog("keep"));
+    this._orphanDialog = root.querySelector(".orphan-dialog");
+    this._orphanDialogTitleEl = root.querySelector(".orphan-dialog-title");
+    this._orphanDialogTextEl = root.querySelector(".orphan-dialog-text");
+    this._orphanDialogConfirmEl = root.querySelector(".orphan-dialog-confirm");
+    root.querySelector(".orphan-dialog-cancel").addEventListener("click", () => this._orphanDialog.close());
+    this._orphanDialogConfirmEl.addEventListener("click", () => this._confirmOrphanAction());
+    this._orphanDialog.addEventListener("click", (ev) => {
+      if (ev.target === this._orphanDialog) {
+        this._orphanDialog.close();
       }
     });
     // The dialog itself is a page-wide singleton (_ensureSharedAnalysisDialog), created and
@@ -1255,30 +1293,154 @@ class ComexioPlanCard extends HTMLElement {
     const st = this._hass.states[this._config.backup_entity];
     const label = st?.state && !["unknown", "unavailable"].includes(st.state) ? st.state : null;
     const restoreRunning = !!st?.attributes?.restore_in_progress;
+    // Orphaned-plans view: the selector lists backups of deleted plans; the chosen row's
+    // identity (fub_id, plan_name, kind, slot, kept, plan_row) comes as an attribute.
+    const orphanView = !!st?.attributes?.orphan_view;
+    this._orphan = orphanView ? st.attributes.orphan || null : null;
     this._backupRow.hidden = false;
     this._restoreLabel = label;
-    this._restoreBtn.disabled = restoreRunning || !label || label === LIVE_BACKUP_OPTION;
+    this._restoreBtn.disabled =
+      restoreRunning || !label || label === LIVE_BACKUP_OPTION || (orphanView && !this._orphan);
     let restoreTitle;
     if (restoreRunning) {
       restoreTitle = "Ein Restore läuft bereits — bitte warten";
-    } else if (label && label !== LIVE_BACKUP_OPTION) {
+    } else if (this._orphan) {
+      restoreTitle = `Backup von „${this._orphan.plan_name}“ als neuen Plan wiederherstellen`;
+    } else if (label && label !== LIVE_BACKUP_OPTION && !orphanView) {
       restoreTitle = `Backup "${label}" wiederherstellen`;
     } else {
       restoreTitle = "Erst ein gespeichertes Backup auswählen (nicht „Live“)";
     }
     this._restoreBtn.title = restoreTitle;
+    this._updateOrphanButtons(orphanView);
+  }
+
+  _updateOrphanButtons(orphanView) {
+    const orphan = this._orphan;
+    for (const btn of [this._orphanDeleteBtn, this._orphanDeleteAllBtn, this._orphanKeepBtn]) {
+      btn.hidden = !orphanView;
+      // Locked while a delete/keep call runs, so a second click cannot act on a stale row.
+      btn.disabled = !orphan || !!this._orphanBusy;
+    }
+    if (!orphan) {
+      return;
+    }
+    // A plan row stands for all of the plan's backups — deleting "this one" would be ambiguous.
+    this._orphanDeleteBtn.disabled = orphan.plan_row || !!this._orphanBusy;
+    this._orphanDeleteBtn.title = orphan.plan_row
+      ? "Erst ein einzelnes Backup (eingerückte Zeile) auswählen"
+      : `Dieses Backup von „${orphan.plan_name}“ löschen`;
+    this._orphanDeleteAllBtn.title = `Alle Backups von „${orphan.plan_name}“ löschen`;
+    this._orphanKeepBtn.title = orphan.kept
+      ? `Backups von „${orphan.plan_name}“ nicht mehr dauerhaft behalten`
+      : `Backups von „${orphan.plan_name}“ dauerhaft behalten (keine Nachfrage, kein Aufräumen)`;
+    this._orphanKeepBtn.querySelector("ha-icon").setAttribute("icon", orphan.kept ? "mdi:pin-off" : "mdi:pin");
+  }
+
+  // Texts of the delete / delete-all / keep confirmation dialog of the orphaned-plans view.
+  _orphanDialogTexts(action, orphan) {
+    const plan = `„${orphan.plan_name}“ (ID ${orphan.fub_id})`;
+    if (action === "delete") {
+      return [
+        "Backup löschen?",
+        `Soll das Backup „${this._restoreLabel.trim()}“ des gelöschten Plans ${plan} endgültig gelöscht werden?`,
+        "Löschen",
+      ];
+    }
+    if (action === "delete_all") {
+      return [
+        "Alle Backups löschen?",
+        `Sollen alle Backups des gelöschten Plans ${plan} endgültig gelöscht werden?`,
+        "Alle löschen",
+      ];
+    }
+    if (orphan.kept) {
+      return [
+        "Nicht mehr behalten?",
+        `Die Backups von ${plan} werden dann nicht mehr dauerhaft behalten: Nach Ablauf der ` +
+          "Aufbewahrungsfrist fragt eine Reparatur wieder nach, und das Aufräumen kann sie löschen.",
+        "Nicht mehr behalten",
+      ];
+    }
+    return [
+      "Backups behalten?",
+      `Die Backups von ${plan} werden dauerhaft behalten: keine Reparatur-Nachfrage mehr und kein ` +
+        "Aufräumen. Löschen kannst du sie weiterhin hier, und die Entscheidung lässt sich hier zurücknehmen.",
+      "Behalten",
+    ];
+  }
+
+  _openOrphanDialog(action) {
+    const orphan = this._orphan;
+    if (!orphan) {
+      return;
+    }
+    const [title, text, confirm] = this._orphanDialogTexts(action, orphan);
+    this._orphanAction = { action, orphan };
+    this._orphanDialogTitleEl.textContent = title;
+    this._orphanDialogTextEl.textContent = text;
+    this._orphanDialogConfirmEl.textContent = confirm;
+    this._orphanDialog.showModal();
+  }
+
+  async _confirmOrphanAction() {
+    const pending = this._orphanAction;
+    this._orphanDialog.close();
+    this._orphanAction = null;
+    if (!this._hass || !pending) {
+      return;
+    }
+    const { action, orphan } = pending;
+    const identity = `${orphan.fub_id}:${orphan.plan_name}`;
+    let service;
+    let data;
+    if (action === "delete") {
+      service = "function_plan_delete_backups";
+      data = { snapshot: `${orphan.fub_id}:${orphan.kind}:${orphan.slot}:${orphan.plan_name}`, confirm: true };
+    } else if (action === "delete_all") {
+      service = "function_plan_delete_backups";
+      data = { fub_id: identity, confirm: true };
+    } else {
+      service = "function_plan_keep_backups";
+      data = { fub_id: identity, keep: !orphan.kept };
+    }
+    const configEntryId = this._hass.entities?.[this._config.backup_entity]?.config_entry_id;
+    if (configEntryId) {
+      data.config_entry = configEntryId;
+    }
+    this._orphanBusy = true;
+    this._updateBackupRow();
+    try {
+      await this._hass.callService("comexio", service, data);
+    } catch (err) {
+      console.warn(`comexio-plan-card: ${service} failed`, err);
+    } finally {
+      this._orphanBusy = false;
+      this._updateBackupRow();
+    }
   }
 
   _openRestoreDialog() {
-    const match = this._restoreLabel?.match(_BACKUP_LABEL_RE);
-    if (!match) {
-      return;
+    if (this._orphan) {
+      // A deleted plan is always rebuilt as a new plan — nothing live is overwritten.
+      this._restoreKind = this._orphan.kind;
+      this._restoreSlot = this._orphan.slot;
+      this._restoreOrphan = this._orphan;
+      this._restoreTextEl.textContent =
+        `Soll das Backup „${this._restoreLabel.trim()}“ des gelöschten Plans „${this._orphan.plan_name}“ ` +
+        "als neuer Plan wiederhergestellt werden? Bestehende Pläne bleiben unverändert.";
+    } else {
+      const match = this._restoreLabel?.match(_BACKUP_LABEL_RE);
+      if (!match) {
+        return;
+      }
+      this._restoreKind = match[1];
+      this._restoreSlot = Number(match[2]);
+      this._restoreOrphan = null;
+      this._restoreTextEl.textContent =
+        `Soll das Backup "${this._restoreLabel}" auf den aktuell aktiven Plan wiederhergestellt werden? ` +
+        "Der bisherige Stand wird vorher automatisch als Sicherheits-Backup gespeichert.";
     }
-    this._restoreKind = match[1];
-    this._restoreSlot = Number(match[2]);
-    this._restoreTextEl.textContent =
-      `Soll das Backup "${this._restoreLabel}" auf den aktuell aktiven Plan wiederhergestellt werden? ` +
-      "Der bisherige Stand wird vorher automatisch als Sicherheits-Backup gespeichert.";
     this._restoreAsCopyEl.checked = false;
     this._restoreCopyNameEl.hidden = true;
     this._restoreCopyNameEl.value = "";
@@ -1298,11 +1460,21 @@ class ComexioPlanCard extends HTMLElement {
     }
     this._restoreDialog.close();
     this._restoreBtn.disabled = true;
-    const data = {
-      kind: this._restoreKind,
-      slot: this._restoreSlot,
-      auto_start: this._restoreAutoStartEl.checked,
-    };
+    const orphan = this._restoreOrphan;
+    // A deleted plan's snapshot is named explicitly (its fub_id may be reused by a live plan);
+    // on_conflict new_id rebuilds it as a new plan instead of overwriting that one.
+    const data = orphan
+      ? {
+          snapshot: `${orphan.fub_id}:${orphan.kind}:${orphan.slot}:${orphan.plan_name}`,
+          confirm: true,
+          on_conflict: "new_id",
+          auto_start: this._restoreAutoStartEl.checked,
+        }
+      : {
+          kind: this._restoreKind,
+          slot: this._restoreSlot,
+          auto_start: this._restoreAutoStartEl.checked,
+        };
     // Multiple Comexio config entries make config_entry required by the service — resolve it
     // from the backup selector's own entity registry entry so this card keeps working without
     // extra card-config options even when more than one Comexio instance is set up.

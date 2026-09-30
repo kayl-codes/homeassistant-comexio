@@ -95,6 +95,7 @@
     },
     "orphaned_backups_action": {
       "options": {
+        "preview": "🔍 Charger dans l'aperçu du plan",
         "keep": "📦 Conserver ces sauvegardes",
         "delete": "🗑️ Supprimer ces sauvegardes"
       }
@@ -329,14 +330,16 @@
         "step": {
           "orphaned_backups": {
             "title": "Sauvegardes d'un plan de fonctions supprimé",
-            "description": "Comexio n'a plus de plan de fonctions **{plan_name}** sous l'ID {fub_id} — il a été supprimé ou renommé. Plan utilisant maintenant l'ID {fub_id} : **{current_plan}**. S'il s'agit de ce plan sous un nouveau nom, ses sauvegardes plus récentes sont enregistrées sous ce nom ; il s'agit ici des précédentes.\n\nSes {count} sauvegarde(s) sont conservées {months} mois après la plus récente ({newest}) — ce délai est écoulé.\n\n**Conserver** garde ces sauvegardes et ne pose plus la question pour ce plan. Vous pouvez toujours les supprimer plus tard avec l'action **Function Plan Delete Backups**.\n**Supprimer** les efface définitivement.\n\nPour voir d'abord le contenu du plan : Outils de développement → Actions → **Function Plan Visualize**, champ **Snapshot** → choisir une entrée commençant par **{plan_name} — fub {fub_id}**. Plus d'informations dans le [guide des sauvegardes]({docs_url})."
+            "description": "Comexio n'a plus de plan de fonctions **{plan_name}** sous l'ID {fub_id} — il a été supprimé ou renommé. Plan utilisant maintenant l'ID {fub_id} : **{current_plan}**. S'il s'agit de ce plan sous un nouveau nom, ses sauvegardes plus récentes sont enregistrées sous ce nom ; il s'agit ici des précédentes.\n\nSes {count} sauvegarde(s) sont conservées {months} mois après la plus récente ({newest}) — ce délai est écoulé.\n\n**Conserver** garde ces sauvegardes et ne pose plus la question pour ce plan. Vous pouvez toujours les supprimer plus tard avec l'action **Function Plan Delete Backups**.\n**Supprimer** les efface définitivement.\n\n**Charger dans l'aperçu du plan** affiche la sauvegarde la plus récente dans la carte du plan (le sélecteur **Function Plans** passe sur **Orphaned plans**) sans rien décider — cette réparation reste ouverte. Vous pouvez aussi y parcourir, restaurer (comme nouveau plan), supprimer ou conserver les sauvegardes. Pour voir d'abord le contenu du plan : Outils de développement → Actions → **Function Plan Visualize**, champ **Snapshot** → choisir une entrée commençant par **{plan_name} — fub {fub_id}**. Plus d'informations dans le [guide des sauvegardes]({docs_url})."
           }
         },
         "abort": {
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
           "plans_unavailable": "La liste des plans n'a pas pu être lue depuis Comexio pour le moment. Rien n'a été modifié — réessayez dans quelques minutes.",
           "plan_exists_again": "Ce plan existe de nouveau dans Comexio, ses sauvegardes ne sont donc plus orphelines. Rien n'a été modifié.",
-          "already_deleted": "Ces sauvegardes ont déjà été supprimées. Rien n'a été modifié."
+          "already_deleted": "Ces sauvegardes ont déjà été supprimées. Rien n'a été modifié.",
+          "loaded_in_preview": "La sauvegarde la plus récente du plan est maintenant affichée dans la carte du plan (Function Plans → Orphaned plans). Cette réparation reste ouverte jusqu'à ce que vous conserviez ou supprimiez les sauvegardes.",
+          "preview_failed": "Les sauvegardes n'ont pas pu être chargées dans l'aperçu du plan — elles ont peut-être été supprimées entre-temps, ou les sélecteurs de plan sont désactivés. Les sauvegardes n'ont pas été modifiées."
         }
       }
     }

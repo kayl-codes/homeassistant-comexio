@@ -12,7 +12,8 @@ multi-purpose") into thematic submodules:
 - `plan_actions` — function_plan_visualize / function_plan_sort / function_plan_stop /
   function_plan_activate handlers (act on a single live/snapshot plan).
 - `backup`    — function_plan_restore / function_plan_delete_backups /
-  function_plan_purge_orphaned_backups / function_plan_list_backups handlers.
+  function_plan_purge_orphaned_backups / function_plan_keep_backups /
+  function_plan_list_backups handlers.
 - `marker_actions` — marker_delete handler (permanently deletes Markers on Comexio).
 - `misc`      — generate_web_io, set_value, function_plan_debug_session,
   function_plan_preview_extend, function_plan_preview_stop, function_plan_search — handlers
@@ -47,6 +48,7 @@ from ._yaml_sync import _refresh_service_descriptions, _update_services_yaml_pla
 from .analyze import _handle_function_plan_analyze
 from .backup import (
     _handle_function_plan_delete_backups,
+    _handle_function_plan_keep_backups,
     _handle_function_plan_list_backups,
     _handle_function_plan_purge_orphaned_backups,
     _handle_function_plan_restore,
@@ -97,6 +99,7 @@ _SIMPLE_SERVICES: tuple[tuple[str, Any, SupportsResponse | None], ...] = (
     ("function_plan_restore", _handle_function_plan_restore, None),
     ("function_plan_delete_backups", _handle_function_plan_delete_backups, None),
     ("function_plan_purge_orphaned_backups", _handle_function_plan_purge_orphaned_backups, None),
+    ("function_plan_keep_backups", _handle_function_plan_keep_backups, None),
     ("function_plan_list_backups", _handle_function_plan_list_backups, SupportsResponse.ONLY),
     ("function_plan_debug_session", _handle_function_plan_debug_session, None),
     ("function_plan_preview_extend", _handle_function_plan_preview_extend, SupportsResponse.OPTIONAL),

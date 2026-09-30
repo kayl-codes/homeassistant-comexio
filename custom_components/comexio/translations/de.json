@@ -95,6 +95,7 @@
     },
     "orphaned_backups_action": {
       "options": {
+        "preview": "🔍 In Vorschau laden",
         "keep": "📦 Backups behalten",
         "delete": "🗑️ Backups löschen"
       }
@@ -329,14 +330,16 @@
         "step": {
           "orphaned_backups": {
             "title": "Backups eines gelöschten Logikplans",
-            "description": "In Comexio gibt es unter ID {fub_id} keinen Logikplan **{plan_name}** mehr — er wurde gelöscht oder umbenannt. Plan, der ID {fub_id} jetzt belegt: **{current_plan}**. Ist das dieser Plan unter neuem Namen, liegen seine neueren Backups unter diesem Namen; hier geht es um die von vorher.\n\nSeine {count} Backup(s) werden nach dem neuesten ({newest}) noch {months} Monat(e) aufbewahrt — diese Frist ist abgelaufen.\n\n**Behalten** bewahrt die Backups auf und fragt für diesen Plan nicht mehr nach. Löschen kannst du sie später weiterhin mit der Aktion **Function Plan Delete Backups**.\n**Löschen** entfernt sie endgültig.\n\nSo siehst du vorher, was der Plan enthielt: Entwicklerwerkzeuge → Aktionen → **Function Plan Visualize**, Feld **Snapshot** → einen Eintrag wählen, der mit **{plan_name} — fub {fub_id}** beginnt. Mehr in der [Backup-Anleitung]({docs_url})."
+            "description": "In Comexio gibt es unter ID {fub_id} keinen Logikplan **{plan_name}** mehr — er wurde gelöscht oder umbenannt. Plan, der ID {fub_id} jetzt belegt: **{current_plan}**. Ist das dieser Plan unter neuem Namen, liegen seine neueren Backups unter diesem Namen; hier geht es um die von vorher.\n\nSeine {count} Backup(s) werden nach dem neuesten ({newest}) noch {months} Monat(e) aufbewahrt — diese Frist ist abgelaufen.\n\n**Behalten** bewahrt die Backups auf und fragt für diesen Plan nicht mehr nach. Löschen kannst du sie später weiterhin mit der Aktion **Function Plan Delete Backups**.\n**Löschen** entfernt sie endgültig.\n\n**In Vorschau laden** zeigt das neueste Backup in der Plan-Karte (die Auswahl **Function Plans** wechselt auf **Orphaned plans**), ohne etwas zu entscheiden — diese Reparatur bleibt offen. Dort kannst du die Backups auch durchblättern, (als neuen Plan) wiederherstellen, löschen oder behalten. So siehst du vorher, was der Plan enthielt: Entwicklerwerkzeuge → Aktionen → **Function Plan Visualize**, Feld **Snapshot** → einen Eintrag wählen, der mit **{plan_name} — fub {fub_id}** beginnt. Mehr in der [Backup-Anleitung]({docs_url})."
           }
         },
         "abort": {
           "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt.",
           "plans_unavailable": "Die Planliste konnte gerade nicht aus Comexio gelesen werden. Es wurde nichts geändert — versuche es in ein paar Minuten erneut.",
           "plan_exists_again": "Diesen Plan gibt es in Comexio wieder, seine Backups sind also nicht mehr verwaist. Es wurde nichts geändert.",
-          "already_deleted": "Diese Backups wurden bereits gelöscht. Es wurde nichts geändert."
+          "already_deleted": "Diese Backups wurden bereits gelöscht. Es wurde nichts geändert.",
+          "loaded_in_preview": "Das neueste Backup des Plans wird jetzt in der Plan-Karte angezeigt (Function Plans → Orphaned plans). Diese Reparatur bleibt offen, bis du die Backups behältst oder löschst.",
+          "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert."
         }
       }
     }

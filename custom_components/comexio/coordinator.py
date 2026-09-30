@@ -15,6 +15,7 @@ import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
@@ -91,6 +92,7 @@ from .const import (
     FUNCTION_PLAN_LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
+    FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
     ICON_ADD,
     ICON_DELETE,
@@ -141,7 +143,7 @@ from .const import (
     webio_class_label,
     webio_class_name,
 )
-from .function_plan_backup import FunctionPlanBackupManager, retention_cutoff
+from .function_plan_backup import FunctionPlanBackupManager, build_orphaned_backup_options, retention_cutoff
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .ha_address import HaAddressResolver, webio_device_hint
 from .orphaned_backups import async_audit_orphaned_backups
@@ -223,6 +225,10 @@ def _build_sun_times(hass: HomeAssistant) -> dict[str, str]:
         if parsed is not None:
             sun_times[freq] = dt_util.as_local(parsed).strftime("%d.%m. %H:%M")
     return sun_times
+
+
+# Title suffix of a preview rendered from a deleted plan's backup (German, like "[aktiv]").
+_ORPHANED_PREVIEW_TITLE_SUFFIX = "[verwaist]"
 
 
 def _write_preview_svg(path: pathlib.Path, svg_content: str) -> None:
@@ -1470,17 +1476,35 @@ class ComexioCoordinator(DataUpdateCoordinator):
         At startup the select entity is not in the state machine yet (the coordinator's
         first refresh runs before the platforms are set up), so the choice persisted in
         entry.options by the selector is used as the fallback.
-        """
-        from homeassistant.helpers import entity_registry as er
 
-        uid = f"comexio_{self.server_id}_logikplan_plan_selector"
-        select_eid = er.async_get(self.hass).async_get_entity_id("select", DOMAIN, uid) or ""
-        lp_state = self.hass.states.get(select_eid)
+        None while the selector shows the orphaned-plans view: that view names no plan, so
+        the preview, the plan buttons and services without a fub_id have nothing to act on.
+        Audit and sync use get_managed_function_plan_fub_id instead.
+        """
+        lp_state = self._active_plan_selector_state()
         if not lp_state or lp_state.state in ("unavailable", "unknown"):
             return self.persisted_function_plan_fub_id()
+        if lp_state.state == FUNCTION_PLAN_ORPHANED_VIEW_OPTION:
+            return None
         if match := _PLAN_LABEL_ID_SUFFIX_RE.search(lp_state.state):
             return int(match.group(1))
         return next((int(fid) for fid, fi in self.api.fub_data.items() if fi.get("Name") == lp_state.state), None)
+
+    def orphaned_plans_view_active(self) -> bool:
+        """Whether the 'Function Plans' selector shows the orphaned-plans view."""
+        lp_state = self._active_plan_selector_state()
+        return lp_state is not None and lp_state.state == FUNCTION_PLAN_ORPHANED_VIEW_OPTION
+
+    def get_managed_function_plan_fub_id(self) -> int | None:
+        """fub_id of the managed plan that audit and sync work on.
+
+        Same as get_active_function_plan_fub_id, except while the selector shows the
+        orphaned-plans view: that is only a look at deleted plans' backups, so the plan picked
+        before it (persisted in entry.options) stays managed.
+        """
+        if self.orphaned_plans_view_active():
+            return self.persisted_function_plan_fub_id()
+        return self.get_active_function_plan_fub_id()
 
     def persisted_function_plan_fub_id(self) -> int | None:
         """fub_id the 'Function Plans' selector last persisted, or None if unset/legacy 'auto'."""
@@ -2025,17 +2049,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             plan_id=str(fub_id),
         )
 
-        filename = f"comexio_{self.server_id}_plan_preview.svg"
-        file_path = pathlib.Path(self.hass.config.path("www", filename))
-        await self.hass.async_add_executor_job(_write_preview_svg, file_path, svg_content)
-
-        self.last_plan_preview_svg = svg_content
-        self.last_plan_preview = {
-            "fub_id": fub_id,
-            "plan_name": plan_name,
-            "source": source,
-            "generated_at": dt_util.utcnow().isoformat(),
-        }
+        if cache_generation_before != self._preview_cache_generation and self.orphaned_plans_view_active():
+            # The plan card switched to a deleted plan's backup while this render was in flight —
+            # publishing now would replace that frozen preview with this plan.
+            _LOGGER.debug("[%s] Plan preview skipped: the orphaned-plans view took over meanwhile", self.server_id)
+            return f"/local/comexio_{self.server_id}_plan_preview.svg"
+        url = await self._async_publish_plan_preview(fub_id, plan_name, source, svg_content)
         # The preview may have been stopped (or auto-stopped, disarmed after repeated poll
         # failures, shut down, or re-armed by a concurrent render for a different plan) while
         # the awaits above were in flight — committing the cache now would resurrect a preview
@@ -2056,7 +2075,131 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
             )
         self.async_set_updated_data(self.data)
+        return url
+
+    async def _async_publish_plan_preview(self, fub_id: int, plan_name: str, source: str, svg_content: str) -> str:
+        """Write a rendered preview to config/www and record it as the last preview; returns its /local/ URL."""
+        filename = f"comexio_{self.server_id}_plan_preview.svg"
+        file_path = pathlib.Path(self.hass.config.path("www", filename))
+        await self.hass.async_add_executor_job(_write_preview_svg, file_path, svg_content)
+
+        self.last_plan_preview_svg = svg_content
+        self.last_plan_preview = {
+            "fub_id": fub_id,
+            "plan_name": plan_name,
+            "source": source,
+            "generated_at": dt_util.utcnow().isoformat(),
+        }
         return f"/local/{filename}"
+
+    def orphaned_backup_options(self) -> list[tuple[str, dict[str, Any]]]:
+        """(label, choice) rows of the backup selector's orphaned-plans view (cache-only)."""
+        return build_orphaned_backup_options(self.function_plan_backup.orphaned_plans_sync(self.api.fub_data))
+
+    def orphaned_backup_choice(self, label: str) -> dict[str, Any] | None:
+        """The orphaned-plans view row behind a backup selector label, or None."""
+        return next((choice for row_label, choice in self.orphaned_backup_options() if row_label == label), None)
+
+    async def async_load_orphaned_plan_into_preview(self, fub_id: int, plan_name: str) -> bool:
+        """Switch the plan card to a deleted plan's backups and render its newest one.
+
+        Used by the orphaned_plan_backups repair: sets the 'Function Plans' selector to the
+        orphaned-plans view and the backup selector to this plan's row, then renders it
+        directly, since re-rendering on selector changes is left to a user automation. False
+        when the plan has no backups left or the selectors are not set up.
+        """
+        label = next(
+            (
+                row_label
+                for row_label, choice in self.orphaned_backup_options()
+                if choice["plan_row"] and (choice["fub_id"], choice["plan_name"]) == (fub_id, plan_name)
+            ),
+            None,
+        )
+        if label is None:
+            _LOGGER.warning(
+                "[%s] Orphaned plan preview: no backups left for '%s' (fub=%s)", self.server_id, plan_name, fub_id
+            )
+            return False
+        registry = er.async_get(self.hass)
+        plan_eid = registry.async_get_entity_id("select", DOMAIN, f"comexio_{self.server_id}_logikplan_plan_selector")
+        backup_eid = registry.async_get_entity_id("select", DOMAIN, f"comexio_{self.server_id}_plan_backup_selector")
+        if not plan_eid or not backup_eid:
+            _LOGGER.warning("[%s] Orphaned plan preview: plan selectors are not set up", self.server_id)
+            return False
+        # Order matters: a 'Function Plans' change resets the backup selector (select.py).
+        try:
+            for entity_id, option in ((plan_eid, FUNCTION_PLAN_ORPHANED_VIEW_OPTION), (backup_eid, label)):
+                await self.hass.services.async_call(
+                    "select", "select_option", {"entity_id": entity_id, "option": option}, blocking=True
+                )
+        except HomeAssistantError as err:
+            _LOGGER.warning("[%s] Orphaned plan preview: could not switch the plan selectors: %s", self.server_id, err)
+            return False
+        # A disabled or unavailable select is skipped by the service call without an error.
+        backup_state = self.hass.states.get(backup_eid)
+        if not self.orphaned_plans_view_active() or backup_state is None or backup_state.state != label:
+            _LOGGER.warning(
+                "[%s] Orphaned plan preview: the plan selectors did not switch (disabled or unavailable?)",
+                self.server_id,
+            )
+            return False
+        choice = self.orphaned_backup_choice(label)
+        if choice is None:
+            _LOGGER.warning("[%s] Orphaned plan preview: '%s' was deleted meanwhile", self.server_id, plan_name)
+            return False
+        url = await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
+        return url is not None
+
+    async def async_generate_orphaned_plan_preview(
+        self, fub_id: int, plan_name: str, kind: str, slot: int
+    ) -> str | None:
+        """Render a backup of a deleted function plan as a frozen preview.
+
+        Returns the preview's /local/ URL, or None when the snapshot is gone (deleted
+        meanwhile). Unlike a snapshot render of an existing plan, no live values are
+        overlaid: the live plan under this fub_id (if any) is an unrelated plan that reused
+        the id, so translating its connection values would color the wires with foreign
+        data. Stops the preview poll for the same reason, and keeps the snapshot's stored
+        labels (its markers/IOs may be gone or renamed by now).
+        """
+        self.stop_preview()
+        cache_generation_before = self._preview_cache_generation
+        snapshot = await self.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
+        if snapshot is None:
+            _LOGGER.warning(
+                "[%s] Plan preview: backup %s[%d] of deleted plan '%s' (fub=%s) not found",
+                self.server_id,
+                kind,
+                slot,
+                plan_name,
+                fub_id,
+            )
+            return None
+        markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(snapshot.get("labels"))
+        catalog = await self.function_plan_catalog.async_get_catalog()
+        svg_content = render_plan_svg(
+            snapshot.get("elements") or {},
+            snapshot.get("connections") or {},
+            catalog,
+            markers_by_id,
+            webio_by_id,
+            ios_by_id,
+            plan_name,
+            _ORPHANED_PREVIEW_TITLE_SUFFIX,
+            _build_sun_times(self.hass),
+            canvas=None,
+            connection_values=None,
+            knx_by_id=self.function_plan_knx_label_map(),
+            plan_id=str(fub_id),
+        )
+        if cache_generation_before != self._preview_cache_generation:
+            # A newer render (another plan picked meanwhile) owns the preview now.
+            _LOGGER.debug("[%s] Orphaned plan preview skipped: a newer preview was armed meanwhile", self.server_id)
+            return None
+        url = await self._async_publish_plan_preview(fub_id, plan_name, f"orphan:{kind}:{slot}", svg_content)
+        self.async_set_updated_data(self.data)
+        return url
 
     def _armed_snapshot_live_id_map(self, fub_id: int, source: str) -> dict[str, str] | None:
         """The already-armed snapshot's live-id translation table, if this render refreshes it.
@@ -4131,12 +4274,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         startup fallback) and every cluster plan from CONF_FUNCTION_PLAN_PLAN_MAP.
         """
         fub_ids: set[int] = set()
-        # Resolved via get_active_function_plan_fub_id() (parses the "(ID n)" suffix) rather
+        # Resolved via get_managed_function_plan_fub_id() (parses the "(ID n)" suffix) rather
         # than matching the selector state against the bare Name here: the selector label can
         # carry the "⏸ " inactive-plan prefix (see select.py's _plan_option_label), which a
         # direct Name comparison would never match — silently dropping the selected plan from
         # every audit below.
-        if (active_fub_id := self.get_active_function_plan_fub_id()) is not None:
+        if (active_fub_id := self.get_managed_function_plan_fub_id()) is not None:
             fub_ids.add(active_fub_id)
 
         plan_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})

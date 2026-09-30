@@ -31,6 +31,10 @@ _NO_INSTANCE_MSG = (
     "Please try again in a moment."
 )
 _LOGIN_FAILED_MSG = "Comexio admin login failed."
+NO_PLAN_SELECTED_MSG = (
+    "No plan selected — the 'Function Plans' selector is empty or shows 'Orphaned plans'. "
+    "Please specify the plan (fub_id) explicitly."
+)
 _INSTANCE_NOT_FOUND_LOG = "Comexio instance %s not found in hass.data"
 _INSTANCE_NOT_FOUND_MSG = "Comexio instance `{}` not found (not loaded, or wrong `config_entry`)."
 
@@ -131,12 +135,7 @@ async def _async_get_service_context(
             else coordinator.get_active_function_plan_fub_id()
         )
         if fub_id is None:
-            reason = (
-                f"Plan '{explicit_fub_id}' not found."
-                if explicit_fub_id
-                else "No plan selected — the 'Function Plans' selector is empty. "
-                "Please specify the plan (fub_id) explicitly."
-            )
+            reason = f"Plan '{explicit_fub_id}' not found." if explicit_fub_id else NO_PLAN_SELECTED_MSG
             persistent_notification.async_create(
                 hass,
                 f"{reason}\nAvailable: {_available_plans_str(api.fub_data)}",
@@ -219,12 +218,7 @@ def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: 
     else:
         fub_id = coordinator.get_active_function_plan_fub_id()
     if fub_id is None:
-        reason = (
-            f"Plan '{fub_id_raw}' not found."
-            if fub_id_raw
-            else "No plan selected — the 'Function Plans' selector is empty. "
-            "Please specify the plan (fub_id) explicitly."
-        )
+        reason = f"Plan '{fub_id_raw}' not found." if fub_id_raw else NO_PLAN_SELECTED_MSG
         persistent_notification.async_create(
             hass,
             f"{reason}\nAvailable: {_available_plans_str(api.fub_data)}",

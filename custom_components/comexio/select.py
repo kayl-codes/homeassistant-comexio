@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN
+from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN, FUNCTION_PLAN_ORPHANED_VIEW_OPTION
 from .coordinator import ComexioCoordinator
 from .function_plan_backup import format_backup_label
 from .services import format_plan_label
@@ -88,8 +88,12 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
     def options(self) -> list[str]:
         # Plan names aren't unique in Comexio (only fub_id is) — the ID suffix keeps
         # options unambiguous and lets _resolve_fub_id() parse it back out directly.
+        # The orphaned-plans view comes last and only while there is something to show.
         fub_data = self.coordinator.api.fub_data
-        return sorted((_plan_option_label(fid, fub) for fid, fub in fub_data.items()), key=str.lower)
+        options = sorted((_plan_option_label(fid, fub) for fid, fub in fub_data.items()), key=str.lower)
+        if self.coordinator.function_plan_backup.orphaned_plans_sync(fub_data):
+            options.append(FUNCTION_PLAN_ORPHANED_VIEW_OPTION)
+        return options
 
     @property
     def current_option(self) -> str | None:
@@ -107,9 +111,27 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         label = self._label_for_persisted_fub_id()
         return label if label in options else None
 
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # Leave the orphaned-plans view once its last plan's backups are gone, so the persisted
+        # plan shows again and the view does not silently come back with the next deleted plan.
+        # Not on a failed plan fetch (empty fub_data): the view only looks empty then.
+        if (
+            self._selected == FUNCTION_PLAN_ORPHANED_VIEW_OPTION
+            and self.coordinator.api.fub_data
+            and self._selected not in self.options
+        ):
+            _LOGGER.debug("No backups of deleted plans left — leaving the orphaned-plans view")
+            self._selected = None
+        super()._handle_coordinator_update()
+
     async def async_select_option(self, option: str) -> None:
         self._selected = option
         self.async_write_ha_state()
+        if option == FUNCTION_PLAN_ORPHANED_VIEW_OPTION:
+            # A view choice only: the managed plan stays the persisted one (see
+            # coordinator.get_managed_function_plan_fub_id).
+            return
         fub_id = _fub_id_from_label(option)
         if fub_id is None:
             _LOGGER.warning("Could not resolve a fub_id from plan option %r — selection not persisted", option)
@@ -144,6 +166,9 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
     and coordinator.prime_snapshot_preview_cache) — it does NOT silently drift back to the live
     plan's wiring on the next webhook push. LIVE_BACKUP_OPTION is the only way back to the fully
     live view.
+    While the 'Function Plans' selector shows the orphaned-plans view, the selector instead
+    lists the backups of every deleted plan (coordinator.orphaned_backup_options): one plan row
+    per deleted plan (showing its newest snapshot) followed by its snapshot rows.
     """
 
     _attr_has_entity_name = True
@@ -158,6 +183,10 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
         # (newest auto backup, if present). Computed lazily because the backup cache is
         # empty until the manager's first async_load after startup.
         self._selected: str | None = None
+        # Orphaned-plans view: (fub_id, plan_name) of the last shown row, so a vanished label
+        # (a deleted snapshot, a plan row whose backup count changed) falls back to that plan's
+        # row — and to no row once that plan is gone, never silently to another deleted plan.
+        self._last_orphan: tuple[int, str] | None = None
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -185,10 +214,27 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
     @callback
     def _handle_plan_change(self, event: Event[EventStateChangedData]) -> None:
         self._selected = None
+        self._last_orphan = None
         self.async_write_ha_state()
+        self._remember_shown_orphan()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        super()._handle_coordinator_update()
+        self._remember_shown_orphan()
+
+    def _remember_shown_orphan(self) -> None:
+        """Track the deleted plan the orphaned-plans view shows (see _current_orphan_option)."""
+        if not self.coordinator.orphaned_plans_view_active():
+            return
+        label = self.current_option
+        if label is not None and (choice := self.coordinator.orphaned_backup_choice(label)):
+            self._last_orphan = (choice["fub_id"], choice["plan_name"])
 
     @property
     def options(self) -> list[str]:
+        if self.coordinator.orphaned_plans_view_active():
+            return [label for label, _choice in self.coordinator.orphaned_backup_options()]
         fub_id = self.coordinator.get_active_function_plan_fub_id()
         fub_data = self.coordinator.api.fub_data
         plan_name = fub_data.get(str(fub_id), {}).get("Name") if fub_id is not None else None
@@ -203,10 +249,18 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
         # restore starts — a card only disables the button in the instance that was
         # clicked, but this select is shared by every card instance on the dashboard, so
         # it's the one place that can reach all of them at once.
-        return {"restore_in_progress": self.coordinator._restore_lock.locked()}
+        attrs: dict[str, Any] = {"restore_in_progress": self.coordinator._restore_lock.locked()}
+        # The card switches its restore dialog and its delete/keep buttons on these.
+        if self.coordinator.orphaned_plans_view_active():
+            attrs["orphan_view"] = True
+            label = self.current_option
+            attrs["orphan"] = self.coordinator.orphaned_backup_choice(label) if label is not None else None
+        return attrs
 
     @property
     def current_option(self) -> str | None:
+        if self.coordinator.orphaned_plans_view_active():
+            return self._current_orphan_option()
         options = self.options
         if self._selected in options:
             return self._selected
@@ -214,6 +268,27 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
         # an explicit user choice.
         return LIVE_BACKUP_OPTION if LIVE_BACKUP_OPTION in options else None
 
+    def _current_orphan_option(self) -> str | None:
+        """Chosen row of the orphaned-plans view, else the last shown plan's row.
+
+        The first row only while no plan was shown yet: once the shown plan's backups are all
+        gone there is no row, so the card's buttons cannot silently act on another plan.
+        """
+        rows = self.coordinator.orphaned_backup_options()
+        if any(label == self._selected for label, _choice in rows):
+            return self._selected
+        last = self._last_orphan
+        if last is None:
+            return rows[0][0] if rows else None
+        return next(
+            (label for label, choice in rows if choice["plan_row"] and (choice["fub_id"], choice["plan_name"]) == last),
+            None,
+        )
+
     async def async_select_option(self, option: str) -> None:
         self._selected = option
+        if self.coordinator.orphaned_plans_view_active() and (
+            choice := self.coordinator.orphaned_backup_choice(option)
+        ):
+            self._last_orphan = (choice["fub_id"], choice["plan_name"])
         self.async_write_ha_state()
