@@ -200,10 +200,22 @@ def test_visualize_text_returns_a_response() -> None:
     assert response["text"] == notify.call_args.args[1]
 
 
+def test_visualize_svg_returns_the_preview_url() -> None:
+    coordinator = SimpleNamespace(async_generate_plan_preview=AsyncMock(return_value="/local/comexio/plan_5.svg"))
+    source = (coordinator, MagicMock(), 5, PLAN, {}, {}, "live", None)
+    call = SimpleNamespace(data={"format": "svg"}, return_response=True)
+    with (
+        patch.object(plan_actions, "_resolve_visualize_live_source", AsyncMock(return_value=source)),
+        patch.object(plan_actions.persistent_notification, "async_create"),
+    ):
+        response = asyncio.run(plan_actions.handle_function_plan_visualize(MagicMock(), call))
+    assert response == {"plan_name": PLAN, "url": "/local/comexio/plan_5.svg"}
+
+
 def test_visualize_failure_raises_when_a_response_is_requested() -> None:
     call = SimpleNamespace(data={"format": "text"}, return_response=True)
-    with (
-        patch.object(plan_actions, "_resolve_visualize_live_source", AsyncMock(return_value=None)),
-        pytest.raises(HomeAssistantError),
-    ):
-        asyncio.run(plan_actions.handle_function_plan_visualize(MagicMock(), call))
+    hass = MagicMock()
+    with patch.object(plan_actions, "_resolve_visualize_live_source", AsyncMock(return_value=None)):
+        visualize = plan_actions.handle_function_plan_visualize(hass, call)
+        with pytest.raises(HomeAssistantError):
+            asyncio.run(visualize)
