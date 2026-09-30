@@ -169,7 +169,7 @@ The integration can manage Comexio **function plans** directly from Home Assista
 | `comexio.function_plan_stop` / `..._activate` | Manual plan lifecycle control (stop / save + activate). |
 | `comexio.function_plan_restore` | Rolls a plan back to a stored backup snapshot — optionally as an independent copy instead of overwriting the source. |
 | `comexio.function_plan_list_backups` | Returns all stored snapshots as a structured service response — filterable by plan, name, backup type, slot, and age; sortable by timestamp, plan, or slot. |
-| `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Deletes one snapshot, all snapshots of a plan, or every stored backup — or, for purge, only the snapshots of plans that no longer exist. |
+| `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Deletes one snapshot, all snapshots of a plan, or every stored backup — or, for purge, the snapshots of deleted plans past the retention period (kept ones excepted). |
 | `comexio.function_plan_search` | Finds which plans contain elements matching a text query (same wildcard syntax as the preview card's search bar). |
 | `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimental:* flags likely wiring mistakes, and lays a plan out by signal-flow topology instead of its physical position. |
 | `comexio.marker_delete` | Permanently deletes Markers this integration created itself (e.g. leftover KNX bridge markers). Factory-provisioned and Studio-created Markers are protected regardless of ID — they are skipped and listed as `protected`, the rest is still deleted. With `force: true`, protected Markers are deleted too if they have no name and are not placed in any function plan. Accepts a single ID, a comma-separated list, or a `from-to` range; requires `confirm: true`. |
@@ -180,12 +180,12 @@ The integration can manage Comexio **function plans** directly from Home Assista
 
 Function plans are backed up automatically — no configuration needed:
 
-- **Auto backups:** On every coordinator poll, each plan is snapshotted *only if its content changed* (hash delta). The **3 newest versions per plan** are kept.
-- **Change backups:** Right before the integration modifies a plan (connect, sort, restore, …), a safety snapshot is stored — the **10 newest per plan**.
-- Snapshots live in HA's `.storage` folder and are therefore included in regular Home Assistant backups. Snapshots of deleted plans are kept.
-- Restore (`function_plan_restore`) brings back **structure, element positions, and canvas paper/DPI settings**, takes a pre-restore safety snapshot first, and verifies success via content hash. Pick the **Snapshot** field for a one-click, unambiguous target (plan + type + slot + timestamp in one option); the advanced `fub_id`/`kind`/`slot` fields are a manual alternative for scripting and are ignored whenever `snapshot` is set.
-- If the original plan was **deleted**, or its ID was **reused by an unrelated plan**, restore rebuilds it as a **new plan** by default (`on_conflict: new_id`) — or, with `confirm: true` and `on_conflict: force_override`, deliberately overwrites whatever now occupies that ID.
-- The diagnostic sensor **Function Plan Backups** shows the total snapshot count with per-plan details as attributes.
+- **Auto backups:** on every poll, but only when a plan's content changed — the **3 newest per plan**. **Change backups:** right before the integration modifies a plan — the **10 newest per plan**.
+- Snapshots live in HA's `.storage` folder, so regular Home Assistant backups include them.
+- **Restore** (`function_plan_restore`) brings back structure, positions and canvas settings, or rebuilds a deleted plan as a new one.
+- **Deleted plans:** their backups are never deleted automatically. Once the **Orphaned backup retention** has passed, a repair asks whether to **keep** or **delete** them.
+
+📖 **[Backup guide →](BACKUPS.md)** — backup types, viewing and restoring a snapshot, backups of deleted plans.
 
 ### 🧱 Managed Cluster Plans
 
@@ -387,7 +387,7 @@ Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwa
 | `comexio.function_plan_stop` / `..._activate` | Manuelle Lifecycle-Steuerung (Stoppen / Speichern + Aktivieren). |
 | `comexio.function_plan_restore` | Setzt einen Plan auf einen gespeicherten Backup-Snapshot zurück — optional als unabhängige Kopie statt Überschreiben des Original-Plans. |
 | `comexio.function_plan_list_backups` | Liefert alle Snapshots als strukturierte Service-Response — filterbar nach Plan, Name, Backup-Typ, Slot und Alter; sortierbar nach Zeitstempel, Plan oder Slot. |
-| `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Löscht einen Snapshot, alle Snapshots eines Plans oder sämtliche Backups — bzw. beim Purge nur die Snapshots nicht mehr existierender Pläne. |
+| `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Löscht einen Snapshot, alle Snapshots eines Plans oder sämtliche Backups — bzw. beim Purge die Snapshots gelöschter Pläne nach Ablauf der Aufbewahrung (außer behaltenen). |
 | `comexio.function_plan_search` | Findet Pläne mit Elementen, die zu einem Suchtext passen (gleiche Platzhalter-Syntax wie die Suchleiste der Vorschau-Karte). |
 | `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimentell:* markiert wahrscheinliche Verdrahtungsfehler bzw. ordnet einen Plan nach Signalfluss statt nach physischer Position an. |
 | `comexio.marker_delete` | Löscht dauerhaft Merker, die die Integration selbst angelegt hat (z. B. übrig gebliebene KNX-Brücken-Merker). Werksseitige und in Comexio Studio angelegte Merker sind unabhängig von der ID geschützt — sie werden übersprungen und als `protected` gemeldet, der Rest wird trotzdem gelöscht. Mit `force: true` werden auch geschützte Merker gelöscht, sofern sie keinen Namen haben und in keinem Logikplan platziert sind. Akzeptiert eine einzelne ID, eine Komma-Liste oder einen Bereich `von-bis`; erfordert `confirm: true`. |
@@ -398,12 +398,12 @@ Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwa
 
 Funktionspläne werden automatisch gesichert — ganz ohne Konfiguration:
 
-- **Auto-Backups:** Bei jedem Coordinator-Poll wird jeder Plan *nur bei geändertem Inhalt* (Hash-Delta) gesichert. Es bleiben die **3 neuesten Versionen je Plan** erhalten.
-- **Change-Backups:** Unmittelbar bevor die Integration einen Plan verändert (Connect, Sort, Restore, …), wird ein Sicherheits-Snapshot angelegt — die **10 neuesten je Plan**.
-- Die Snapshots liegen im `.storage`-Ordner von HA und sind damit Teil der regulären Home-Assistant-Backups. Snapshots gelöschter Pläne bleiben erhalten.
-- Der Restore (`function_plan_restore`) stellt **Struktur, Element-Positionen und die Papier-/DPI-Einstellung der Zeichenfläche** wieder her, legt vorher einen Pre-Restore-Snapshot an und verifiziert den Erfolg per Inhalts-Hash. Das Feld **Snapshot** wählt das genaue Ziel mit einem Klick (Plan + Typ + Slot + Zeitstempel in einer Option); die erweiterten Felder `fub_id`/`kind`/`slot` sind eine manuelle Alternative für Skripte und werden ignoriert, sobald `snapshot` gesetzt ist.
-- Wurde der ursprüngliche Plan **gelöscht** oder seine ID **von einem anderen Plan wiederverwendet**, legt der Restore standardmäßig einen **neuen Plan** an (`on_conflict: new_id`) — oder überschreibt mit `confirm: true` und `on_conflict: force_override` bewusst den Plan, der die ID aktuell belegt.
-- Der Diagnose-Sensor **Function Plan Backups** zeigt die Gesamtzahl der Snapshots mit Details je Plan als Attribute.
+- **Auto-Backups:** bei jedem Poll, aber nur wenn sich der Inhalt eines Plans geändert hat — die **3 neuesten je Plan**. **Change-Backups:** unmittelbar bevor die Integration einen Plan ändert — die **10 neuesten je Plan**.
+- Die Snapshots liegen im `.storage`-Ordner von HA und sind damit in regulären Home-Assistant-Backups enthalten.
+- Der **Restore** (`function_plan_restore`) stellt Struktur, Positionen und Zeichenflächen-Einstellungen wieder her oder baut einen gelöschten Plan als neuen Plan auf.
+- **Gelöschte Pläne:** Ihre Backups werden nie automatisch gelöscht. Nach Ablauf der **Aufbewahrung verwaister Backups** fragt eine Reparaturmeldung, ob sie **behalten** oder **gelöscht** werden.
+
+📖 **[Backup-Anleitung →](BACKUPS.md#-deutsch)** — Backup-Typen, Snapshot ansehen und wiederherstellen, Backups gelöschter Pläne.
 
 ### 🧱 Verwaltete Cluster-Pläne
 

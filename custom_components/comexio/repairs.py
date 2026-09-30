@@ -57,6 +57,8 @@ from .const import (
     uninstall_cleanup_notification_id,
     uninstall_cleanup_pending_notification_id,
 )
+from .function_plan_backup import is_orphaned_identity
+from .orphaned_backups import ISSUE_ORPHANED_PLAN_BACKUPS, repair_placeholders
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +66,8 @@ ACTION_FIX = "fix"
 ACTION_IGNORE = "ignore"
 ACTION_KNX_RO = "ro"
 ACTION_KNX_TRIG = "trig"
+ACTION_KEEP = "keep"
+ACTION_DELETE = "delete"
 
 
 def _is_knx_cluster_plan(plan_name: str) -> bool:
@@ -325,6 +329,8 @@ class ComexioRepairFlow(RepairsFlow):
         if self.issue_id.startswith("knx_dpt_ambiguous_"):
             _LOGGER.debug("Routing to async_step_knx_dpt_suffix")
             return await self.async_step_knx_dpt_suffix()
+        if self.issue_id.startswith(f"{ISSUE_ORPHANED_PLAN_BACKUPS}_"):
+            return await self.async_step_orphaned_backups()
 
         _LOGGER.debug("Routing to fallback async_step_select_action")
         return await self.async_step_select_action()
@@ -1193,3 +1199,58 @@ class ComexioRepairFlow(RepairsFlow):
             names = ", ".join(failed)
             title += f" ({len(failed)} fehlgeschlagen: {names})" if is_de else f" ({len(failed)} failed: {names})"
         return title
+
+    async def async_step_orphaned_backups(self, user_input=None):
+        """Delete or keep the backups of a deleted plan whose retention has passed."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="orphaned_backups",
+                description_placeholders=repair_placeholders(self.issue_data),
+                data_schema=vol.Schema(
+                    {
+                        # Defaults to keep: deleting is the one choice that cannot be undone.
+                        vol.Required("action", default=ACTION_KEEP): SelectSelector(
+                            SelectSelectorConfig(
+                                options=[ACTION_KEEP, ACTION_DELETE],
+                                mode=SelectSelectorMode.LIST,
+                                translation_key="orphaned_backups_action",
+                            )
+                        )
+                    }
+                ),
+            )
+
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
+        if coordinator is None:
+            return self.async_abort(reason="entry_not_found")
+        fub_id = int(self.issue_data["fub_id"])
+        plan_name = str(self.issue_data["plan_name"])
+        fub_data = coordinator.api.fub_data
+        if not fub_data:
+            # Without the live plan list a plan that exists again can't be told apart.
+            return self.async_abort(reason="plans_unavailable")
+        if not is_orphaned_identity(fub_data, fub_id, plan_name):
+            # Restored or recreated meanwhile: its backups belong to a live plan again.
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason="plan_exists_again")
+
+        manager = coordinator.function_plan_backup
+        await manager.async_load()
+        if not manager.plan_backups_for_identity_sync(fub_id, plan_name):
+            # Deleted meanwhile by an action — reporting "deleted"/"kept" would claim a change.
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason="already_deleted")
+        is_de = self.hass.config.language == "de"
+        if user_input["action"] == ACTION_DELETE:
+            removed = await manager.async_delete_plan_backups(fub_id, plan_name)
+            if not removed:
+                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+                return self.async_abort(reason="already_deleted")
+            title = f"{removed} Backups gelöscht" if is_de else f"{removed} backups deleted"
+        else:
+            await manager.async_keep_orphaned(fub_id, plan_name)
+            title = "Backups werden behalten" if is_de else "Backups kept"
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        coordinator.async_update_listeners()  # backup-summary diagnostic sensor
+        await coordinator._async_refresh_service_descriptions()
+        return self.async_create_entry(title=title, data={})

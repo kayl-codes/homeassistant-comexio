@@ -92,6 +92,12 @@
         "6": "6 meses",
         "12": "12 meses"
       }
+    },
+    "orphaned_backups_action": {
+      "options": {
+        "keep": "📦 Conservar estas copias",
+        "delete": "🗑️ Eliminar estas copias"
+      }
     }
   },
   "options": {
@@ -126,7 +132,7 @@
           "ignored_markers": "IDs de marcadores y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'M' (p. ej. '123, 456; 789' o 'M123, M456' o '8-12'). Solo se pueden excluir marcadores con descripción.",
           "ignored_knx": "IDs de objetos KNX y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'K' (p. ej. '123, 456; 789' o 'K123, K456' o '8-12'). Solo se pueden excluir objetos KNX con descripción.",
           "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)",
-          "function_plan_backup_retention_months": "Las copias de seguridad de un plan eliminado directamente en Comexio se purgan automáticamente en cuanto son más antiguas que este período. Las copias de un plan aún activo nunca se ven afectadas. También disponible como la acción 'Function Plan Purge Orphaned Backups' para una limpieza manual.",
+          "function_plan_backup_retention_months": "Cuando la copia más reciente de un plan eliminado directamente en Comexio supera este plazo, una reparación pregunta si eliminar o conservar sus copias — no se elimina nada sin tu confirmación. Las copias de un plan que sigue existiendo nunca se ven afectadas. La acción 'Function Plan Purge Orphaned Backups' elimina de una vez todas las vencidas.",
           "bus_watchdog_enabled": "Ante una subida sostenida de la carga del bus, reinicia automáticamente los planes de función de clúster gestionados por HA (de atrás hacia adelante) para intentar aliviarla. No es destructivo para el propio sistema Comexio.",
           "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo."
         }
@@ -314,6 +320,23 @@
         },
         "abort": {
           "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado."
+        }
+      }
+    },
+    "orphaned_plan_backups": {
+      "title": "Copias de seguridad del plan eliminado {plan_name}",
+      "fix_flow": {
+        "step": {
+          "orphaned_backups": {
+            "title": "Copias de seguridad de un plan de funciones eliminado",
+            "description": "Comexio ya no tiene ningún plan de funciones **{plan_name}** con el ID {fub_id}: se eliminó o se renombró. Plan que usa ahora el ID {fub_id}: **{current_plan}**. Si es este plan con otro nombre, sus copias más recientes se guardan con ese nombre; aquí se trata de las anteriores.\n\nSus {count} copia(s) se conservan {months} mes(es) después de la más reciente ({newest}); ese plazo ya ha pasado.\n\n**Conservar** guarda estas copias y no vuelve a preguntar por este plan. Aún puedes eliminarlas más tarde con la acción **Function Plan Delete Backups**.\n**Eliminar** las borra definitivamente.\n\nPara ver antes qué contenía el plan: Herramientas para desarrolladores → Acciones → **Function Plan Visualize**, campo **Snapshot** → elige una entrada que empiece por **{plan_name} — fub {fub_id}**. Más información en la [guía de copias de seguridad]({docs_url})."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada — es posible que se haya eliminado.",
+          "plans_unavailable": "No se pudo leer la lista de planes de Comexio en este momento. No se ha cambiado nada — inténtalo de nuevo en unos minutos.",
+          "plan_exists_again": "Este plan vuelve a existir en Comexio, así que sus copias ya no están huérfanas. No se ha cambiado nada.",
+          "already_deleted": "Estas copias ya se eliminaron. No se ha cambiado nada."
         }
       }
     }

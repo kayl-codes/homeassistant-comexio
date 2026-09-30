@@ -32,6 +32,7 @@ from ..const import (
 )
 from ..coordinator import ComexioCoordinator
 from ..function_plan_backup import retention_cutoff
+from ..orphaned_backups import delete_all_orphaned_backup_issues, delete_orphaned_backup_issue
 from ._context import (
     _LOGIN_FAILED_MSG,
     _async_get_service_context,
@@ -1126,10 +1127,13 @@ async def _delete_one_snapshot(hass: HomeAssistant, coordinator: ComexioCoordina
         return None
     fub_id, kind, slot, plan_name_hint = parsed
     plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-    if identity_err:
-        persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
+    if plan_name is None:  # exactly when identity_err is set
+        persistent_notification.async_create(hass, str(identity_err), title=_TITLE_DELETE_BACKUPS_ERR)
         return None
-    deleted = await coordinator.function_plan_backup.async_delete_snapshot(kind, fub_id, plan_name, slot)
+    manager = coordinator.function_plan_backup
+    deleted = await manager.async_delete_snapshot(kind, fub_id, plan_name, slot)
+    if deleted and not manager.plan_backups_for_identity_sync(fub_id, plan_name):
+        delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
     if deleted:
         return f"Deleted snapshot {kind}[{slot}] for plan '{plan_name}' (fub {fub_id})."
     return f"No snapshot found at {kind}[{slot}] for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
@@ -1150,10 +1154,11 @@ async def _delete_plan_backups_by_fub_id(
         return None
     fub_id, plan_name_hint = split
     plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-    if identity_err:
-        persistent_notification.async_create(hass, identity_err, title=_TITLE_DELETE_BACKUPS_ERR)
+    if plan_name is None:  # exactly when identity_err is set
+        persistent_notification.async_create(hass, str(identity_err), title=_TITLE_DELETE_BACKUPS_ERR)
         return None
     count = await coordinator.function_plan_backup.async_delete_plan_backups(fub_id, plan_name)
+    delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
     if count:
         return f"Deleted all {count} snapshot(s) for plan '{plan_name}' (fub {fub_id})."
     return f"No stored snapshots for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
@@ -1187,6 +1192,7 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
         msg = await _delete_plan_backups_by_fub_id(hass, coordinator, fub_id_raw)
     else:
         count = await coordinator.function_plan_backup.async_delete_all_backups()
+        delete_all_orphaned_backup_issues(hass, coordinator.server_id)
         msg = (
             f"Deleted ALL {count} stored snapshot(s) across ALL plans on this instance.\n"
             "Fresh backups will be created automatically starting with the next backup cycle / next change."
@@ -1206,9 +1212,10 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     Only orphaned identities (fub_id/plan_name pairs whose plan was deleted directly in
     Comexio Studio) are ever touched, and only once their newest snapshot is older than
     the configured retention (Options → Function Plan, default 6 months) — a live plan's
-    backups are never purged, no matter how old. Runs automatically on the periodic
-    backup cycle too; this service is normally only needed to force an out-of-schedule
-    cleanup. Local storage only, no Comexio API call needed.
+    backups are never purged, no matter how old, and neither are kept ones. The periodic
+    backup cycle never deletes; it raises an orphaned_plan_backups repair per expired plan
+    instead, so this service is the bulk "delete them all" shortcut. Local storage only, no
+    Comexio API call needed.
     """
     ctx = await _async_get_service_context(
         hass, call, _TITLE_PURGE_ORPHANED_BACKUPS_ERR, resolve_plan=False, do_login=False
@@ -1229,6 +1236,8 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     purged = await coordinator.function_plan_backup.async_purge_orphaned(
         api.fub_data, cutoff=retention_cutoff(int(retention_months))
     )
+    for plan in purged:
+        delete_orphaned_backup_issue(hass, coordinator.server_id, plan["fub_id"], plan["plan_name"])
     total = sum(p["removed"] for p in purged)
     msg = (
         f"Purged {total} snapshot(s) across {len(purged)} orphaned plan(s) (older than {retention_months} month(s))."

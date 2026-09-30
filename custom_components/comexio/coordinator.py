@@ -144,6 +144,7 @@ from .const import (
 from .function_plan_backup import FunctionPlanBackupManager, retention_cutoff
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .ha_address import HaAddressResolver, webio_device_hint
+from .orphaned_backups import async_audit_orphaned_backups
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
     legacy_statistic_prefixes,
@@ -1382,21 +1383,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
             except Exception:
                 _LOGGER.exception("[%s] Function Plan paper/DPI backfill failed", self.server_id)
             try:
-                retention_months = self.config_entry.options.get(
-                    CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
-                )
-                purged = await self.function_plan_backup.async_purge_orphaned(
-                    fub_data, cutoff=retention_cutoff(int(retention_months))
-                )
-                if purged:
-                    _LOGGER.info(
-                        "[%s] Function Plan backup: purged %d orphaned identity(ies) older than %s month(s)",
-                        self.server_id,
-                        len(purged),
-                        retention_months,
+                # Backups of deleted plans are never purged silently: past retention, each
+                # one gets a repair where the user deletes or keeps them.
+                retention_months = int(
+                    self.config_entry.options.get(
+                        CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
                     )
+                )
+                await async_audit_orphaned_backups(
+                    self.hass,
+                    entry_id=self.config_entry.entry_id,
+                    server_id=self.server_id,
+                    manager=self.function_plan_backup,
+                    fub_data=fub_data,
+                    cutoff=retention_cutoff(retention_months),
+                    retention_months=retention_months,
+                )
             except Exception:
-                _LOGGER.exception("[%s] Function Plan orphaned-backup purge failed", self.server_id)
+                _LOGGER.exception("[%s] Function Plan orphaned-backup audit failed", self.server_id)
             # Refresh diagnostic entities (backup summary sensor) without a full data update
             self.async_update_listeners()
 

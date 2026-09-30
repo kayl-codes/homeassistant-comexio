@@ -92,6 +92,12 @@
         "6": "6 Monate",
         "12": "12 Monate"
       }
+    },
+    "orphaned_backups_action": {
+      "options": {
+        "keep": "📦 Backups behalten",
+        "delete": "🗑️ Backups löschen"
+      }
     }
   },
   "options": {
@@ -126,7 +132,7 @@
           "logikplan_io_extensions": "Für jede ausgewählte Erweiterung werden deren IOs in einen verwalteten IO-Cluster-Plan verdrahtet (z. B. HA - IO [Ext]), eine Spalte je Erweiterung. Zum Testen mit einer einzelnen Erweiterung beginnen und die übrigen danach ergänzen.",
           "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden.",
           "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden.",
-          "function_plan_backup_retention_months": "Backup-Schnappschüsse eines Plans, der direkt in Comexio gelöscht wurde, werden automatisch geräumt, sobald sie älter als diese Frist sind. Backups eines noch existierenden Plans sind davon nie betroffen. Steht auch als Action 'Function Plan Purge Orphaned Backups' für eine manuelle Bereinigung zur Verfügung.",
+          "function_plan_backup_retention_months": "Ist das neueste Backup eines direkt in Comexio gelöschten Plans älter als diese Frist, fragt eine Reparaturmeldung, ob seine Backups gelöscht oder behalten werden — ohne deine Bestätigung wird nichts gelöscht. Backups eines noch existierenden Plans sind davon nie betroffen. Die Action 'Function Plan Purge Orphaned Backups' löscht alle abgelaufenen auf einmal.",
           "bus_watchdog_enabled": "Bei anhaltendem Anstieg der Busauslastung werden die von HA verwalteten Cluster-Logikpläne automatisch (von hinten nach vorne) neu gestartet, um die Auslastung zu entlasten. Greift nicht destruktiv in die Comexio-Anlage selbst ein.",
           "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust."
         }
@@ -314,6 +320,23 @@
         },
         "abort": {
           "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist."
+        }
+      }
+    },
+    "orphaned_plan_backups": {
+      "title": "Backups des gelöschten Plans {plan_name}",
+      "fix_flow": {
+        "step": {
+          "orphaned_backups": {
+            "title": "Backups eines gelöschten Logikplans",
+            "description": "In Comexio gibt es unter ID {fub_id} keinen Logikplan **{plan_name}** mehr — er wurde gelöscht oder umbenannt. Plan, der ID {fub_id} jetzt belegt: **{current_plan}**. Ist das dieser Plan unter neuem Namen, liegen seine neueren Backups unter diesem Namen; hier geht es um die von vorher.\n\nSeine {count} Backup(s) werden nach dem neuesten ({newest}) noch {months} Monat(e) aufbewahrt — diese Frist ist abgelaufen.\n\n**Behalten** bewahrt die Backups auf und fragt für diesen Plan nicht mehr nach. Löschen kannst du sie später weiterhin mit der Aktion **Function Plan Delete Backups**.\n**Löschen** entfernt sie endgültig.\n\nSo siehst du vorher, was der Plan enthielt: Entwicklerwerkzeuge → Aktionen → **Function Plan Visualize**, Feld **Snapshot** → einen Eintrag wählen, der mit **{plan_name} — fub {fub_id}** beginnt. Mehr in der [Backup-Anleitung]({docs_url})."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt.",
+          "plans_unavailable": "Die Planliste konnte gerade nicht aus Comexio gelesen werden. Es wurde nichts geändert — versuche es in ein paar Minuten erneut.",
+          "plan_exists_again": "Diesen Plan gibt es in Comexio wieder, seine Backups sind also nicht mehr verwaist. Es wurde nichts geändert.",
+          "already_deleted": "Diese Backups wurden bereits gelöscht. Es wurde nichts geändert."
         }
       }
     }
