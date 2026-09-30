@@ -600,7 +600,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
             gap_items = audit_data.get("function_plan_missing", [])
             cleanup_entity_ids: list[tuple[str, int]] = audit_data.get("cleanup_entities", [])
-            lp_fub_id = self.coordinator.get_active_function_plan_fub_id()
+            lp_fub_id = self.coordinator.get_managed_function_plan_fub_id()
 
             if action == "cleanup_entities":
                 # Standalone action: remove HA entities + Function Plan wiring + WebIO commands
@@ -3259,8 +3259,21 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
 
     @property
     def available(self) -> bool:
-        """Only available while the 'Function Plans' selector points at one concrete plan."""
-        return self.coordinator.get_active_function_plan_fub_id() is not None
+        """Available while the 'Function Plans' selector points at one concrete plan or the orphaned-plans view."""
+        return (
+            self.coordinator.get_active_function_plan_fub_id() is not None
+            or self.coordinator.orphaned_plans_view_active()
+        )
+
+    def _backup_selector_state(self) -> str | None:
+        """The backup selector's current option, or None while it has none."""
+        select_eid = er.async_get(self.hass).async_get_entity_id(
+            "select", DOMAIN, f"comexio_{self.server_id}_plan_backup_selector"
+        )
+        state = self.hass.states.get(select_eid) if select_eid else None
+        if not state or state.state in ("unavailable", "unknown"):
+            return None
+        return state.state
 
     def _active_backup_choice(self, fub_id: int, plan_name: str) -> tuple[str, int] | None:
         """Return (kind, slot) if the backup selector points at a stored snapshot, else None.
@@ -3269,17 +3282,31 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         itself only ever shows entries for the currently active plan (see select.py), so no
         extra identity check against fub_id/plan_name is needed here beyond looking them up.
         """
-        select_eid = er.async_get(self.hass).async_get_entity_id(
-            "select", DOMAIN, f"comexio_{self.server_id}_plan_backup_selector"
-        )
-        state = self.hass.states.get(select_eid) if select_eid else None
-        if not state or state.state in ("unavailable", "unknown"):
+        if (label := self._backup_selector_state()) is None:
             return None
         entries = self.coordinator.function_plan_backup.plan_backups_for_identity_sync(fub_id, plan_name)
-        return next(((e["kind"], e["slot"]) for e in entries if format_backup_label(e) == state.state), None)
+        return next(((e["kind"], e["slot"]) for e in entries if format_backup_label(e) == label), None)
+
+    async def _async_press_orphaned(self) -> None:
+        """Render the backup of a deleted plan chosen in the backup selector's orphaned-plans view."""
+        label = self._backup_selector_state()
+        choice = self.coordinator.orphaned_backup_choice(label) if label is not None else None
+        if choice is None:
+            raise HomeAssistantError("No backup of a deleted plan is selected in 'Function Plan Backup'.")
+        url = await self.coordinator.async_generate_orphaned_plan_preview(
+            choice["fub_id"], choice["plan_name"], choice["kind"], choice["slot"]
+        )
+        if url is None:
+            raise HomeAssistantError(
+                f"The backup {choice['kind']}[{choice['slot']}] of deleted plan '{choice['plan_name']}' "
+                "could not be shown — it was deleted meanwhile or another preview took over."
+            )
 
     async def async_press(self) -> None:
         """Render the active plan into the Plan Preview sensor — live, or a chosen backup snapshot."""
+        if self.coordinator.orphaned_plans_view_active():
+            await self._async_press_orphaned()
+            return
         api = self.coordinator.api
         fub_id = self.coordinator.get_active_function_plan_fub_id()
         if fub_id is None:

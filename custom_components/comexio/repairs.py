@@ -68,6 +68,7 @@ ACTION_KNX_RO = "ro"
 ACTION_KNX_TRIG = "trig"
 ACTION_KEEP = "keep"
 ACTION_DELETE = "delete"
+ACTION_PREVIEW = "preview"
 
 
 def _is_knx_cluster_plan(plan_name: str) -> bool:
@@ -1201,7 +1202,7 @@ class ComexioRepairFlow(RepairsFlow):
         return title
 
     async def async_step_orphaned_backups(self, user_input=None):
-        """Delete or keep the backups of a deleted plan whose retention has passed."""
+        """Delete or keep the backups of a deleted plan whose retention has passed, or look at them first."""
         if user_input is None:
             return self.async_show_form(
                 step_id="orphaned_backups",
@@ -1211,7 +1212,7 @@ class ComexioRepairFlow(RepairsFlow):
                         # Defaults to keep: deleting is the one choice that cannot be undone.
                         vol.Required("action", default=ACTION_KEEP): SelectSelector(
                             SelectSelectorConfig(
-                                options=[ACTION_KEEP, ACTION_DELETE],
+                                options=[ACTION_PREVIEW, ACTION_KEEP, ACTION_DELETE],
                                 mode=SelectSelectorMode.LIST,
                                 translation_key="orphaned_backups_action",
                             )
@@ -1240,17 +1241,28 @@ class ComexioRepairFlow(RepairsFlow):
             # Deleted meanwhile by an action — reporting "deleted"/"kept" would claim a change.
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             return self.async_abort(reason="already_deleted")
-        is_de = self.hass.config.language == "de"
-        if user_input["action"] == ACTION_DELETE:
-            removed = await manager.async_delete_plan_backups(fub_id, plan_name)
-            if not removed:
-                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-                return self.async_abort(reason="already_deleted")
-            title = f"{removed} Backups gelöscht" if is_de else f"{removed} backups deleted"
-        else:
-            await manager.async_keep_orphaned(fub_id, plan_name)
-            title = "Backups werden behalten" if is_de else "Backups kept"
+        if user_input["action"] == ACTION_PREVIEW:
+            # Only a look: the issue stays open for the actual decision (a created entry
+            # would delete it).
+            loaded = await coordinator.async_load_orphaned_plan_into_preview(fub_id, plan_name)
+            return self.async_abort(reason="loaded_in_preview" if loaded else "preview_failed")
+        title = await self._async_apply_orphaned_backups_action(manager, user_input["action"], fub_id, plan_name)
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        if title is None:
+            return self.async_abort(reason="already_deleted")
         coordinator.async_update_listeners()  # backup-summary diagnostic sensor
         await coordinator._async_refresh_service_descriptions()
         return self.async_create_entry(title=title, data={})
+
+    async def _async_apply_orphaned_backups_action(
+        self, manager, action: str, fub_id: int, plan_name: str
+    ) -> str | None:
+        """Delete or keep an orphaned plan's backups; the entry title, or None if nothing was left to delete."""
+        is_de = self.hass.config.language == "de"
+        if action == ACTION_DELETE:
+            removed = await manager.async_delete_plan_backups(fub_id, plan_name)
+            if not removed:
+                return None
+            return f"{removed} Backups gelöscht" if is_de else f"{removed} backups deleted"
+        await manager.async_keep_orphaned(fub_id, plan_name)
+        return "Backups werden behalten" if is_de else "Backups kept"

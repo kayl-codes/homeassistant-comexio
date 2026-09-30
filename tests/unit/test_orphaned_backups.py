@@ -317,3 +317,100 @@ def test_audit_without_live_plans_leaves_repairs_alone(
 
     ir.async_create_issue.assert_not_called()
     ir.async_delete_issue.assert_not_called()
+
+
+def test_orphaned_plans_lists_orphans_with_backups_sorted_by_name(manager: FunctionPlanBackupManager) -> None:
+    async def run() -> list[dict[str, Any]]:
+        await manager.async_load()
+        await manager.async_keep_orphaned(3, "Garage")
+        return manager.orphaned_plans_sync(LIVE_FUBS)
+
+    orphans = asyncio.run(run())
+
+    # "Lights" is live; the reused ID 2 and the gone ID 3 are orphaned, kept or not.
+    assert [(o["fub_id"], o["plan_name"], o["kept"], len(o["backups"])) for o in orphans] == [
+        (3, "Garage", True, 1),
+        (2, "Pumps", False, 3),
+    ]
+
+
+def test_orphaned_plans_without_live_plans_is_empty(manager: FunctionPlanBackupManager) -> None:
+    """A failed $Fubs fetch must not show every plan as deleted."""
+    asyncio.run(manager.async_load())
+
+    assert manager.orphaned_plans_sync({}) == []
+
+
+def test_keep_reports_whether_a_decision_was_stored(manager: FunctionPlanBackupManager) -> None:
+    """The keep service tells "kept" from "was kept already" by this result."""
+
+    async def run() -> tuple[bool, bool]:
+        return await manager.async_keep_orphaned(2, "Pumps"), await manager.async_keep_orphaned(2, "Pumps")
+
+    assert asyncio.run(run()) == (True, False)
+    assert _kept_saved() == [{"fub_id": 2, "plan_name": "Pumps"}]
+
+
+def test_unkeep_takes_back_a_keep_decision(manager: FunctionPlanBackupManager) -> None:
+    async def run() -> tuple[bool, bool, list[dict[str, Any]] | None]:
+        await manager.async_keep_orphaned(2, "Pumps")
+        first = await manager.async_unkeep_orphaned(2, "Pumps")
+        second = await manager.async_unkeep_orphaned(2, "Pumps")
+        return first, second, await manager.async_expired_orphans(LIVE_FUBS, CUTOFF)
+
+    first, second, expired = asyncio.run(run())
+
+    assert (first, second) == (True, False)
+    assert _kept_saved() == []
+    assert expired == [{"fub_id": 2, "plan_name": "Pumps", "count": 3, "captured_at": OLD}]
+
+
+def _orphan(fub_id: int, plan_name: str, backups: list[dict[str, Any]], kept: bool = False) -> dict[str, Any]:
+    return {"fub_id": fub_id, "plan_name": plan_name, "kept": kept, "backups": backups}
+
+
+def test_orphaned_backup_options_plan_row_then_indented_snapshots() -> None:
+    backups = [
+        {"kind": "auto", "slot": 0, "captured_at": OLD},
+        {"kind": "change", "slot": 0, "captured_at": RECENT, "operation": "sort"},
+    ]
+
+    rows = backup_module.build_orphaned_backup_options([_orphan(3, "Garage", backups, kept=True)])
+
+    indent = "\u00a0" * 4
+    assert [label for label, _choice in rows] == [
+        "Garage (ID 3) — 2 backups",
+        indent + backup_module.format_backup_label(backups[0]),
+        indent + backup_module.format_backup_label(backups[1]),
+    ]
+    identity = {"fub_id": 3, "plan_name": "Garage", "kept": True}
+    # The plan row shows the newest snapshot, whatever its kind.
+    assert [choice for _label, choice in rows] == [
+        {**identity, "kind": "change", "slot": 0, "plan_row": True},
+        {**identity, "kind": "auto", "slot": 0, "plan_row": False},
+        {**identity, "kind": "change", "slot": 0, "plan_row": False},
+    ]
+
+
+def test_orphaned_backup_options_keep_labels_unique_across_plans() -> None:
+    """Two plans backed up in the same minute share a snapshot label — the select needs unique options."""
+    same = [{"kind": "auto", "slot": 0, "captured_at": OLD}]
+
+    rows = backup_module.build_orphaned_backup_options(
+        [_orphan(3, "Garage", same), _orphan(2, "Pumps", same), _orphan(5, "Pumps", same)]
+    )
+
+    labels = [label for label, _choice in rows]
+    assert len(set(labels)) == len(labels)
+    snapshot = "\u00a0" * 4 + backup_module.format_backup_label(same[0])
+    # Each repeat gets its own plan appended; the identity is unique per plan, so a third
+    # plan's row cannot collide with the second's.
+    assert labels == [
+        "Garage (ID 3) — 1 backup",
+        snapshot,
+        "Pumps (ID 2) — 1 backup",
+        snapshot + " · Pumps (ID 2)",
+        "Pumps (ID 5) — 1 backup",
+        snapshot + " · Pumps (ID 5)",
+    ]
+    assert [rows[3][1]["fub_id"], rows[5][1]["fub_id"]] == [2, 5]

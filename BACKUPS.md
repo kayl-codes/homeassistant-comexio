@@ -38,6 +38,12 @@ integration manages. There is nothing to configure.
 - **Plan card:** pick the plan, then pick a backup in the **Function Plan Backup** selector.
   The card shows that snapshot instead of the live plan; **Live** switches back. See the
   [Function Plan Preview guide](FUNCTION_PLAN_PREVIEW.md).
+- **Backups of deleted plans in the plan card:** pick **Orphaned plans** (last entry of the
+  **Function Plans** selector, shown while such backups exist). The **Function Plan Backup**
+  selector then lists every deleted plan as `<name> (ID <n>) — <count> backups`, followed by
+  its indented snapshots; the plan row shows the newest one. The preview is marked
+  `[verwaist]` and shows no live values, since the ID may belong to another plan by now.
+  Audit and sync keep working on the plan picked before.
 - **Any backup, including those of deleted plans:** Developer tools → Actions →
   **Function Plan Visualize**, field **Snapshot**, format `svg` or `text`. Each entry reads
   `<plan name> — fub <id> — <type>[<slot>] — <date>`. This works without a connection to
@@ -57,6 +63,7 @@ back to Comexio: structure, element positions and the paper/DPI setting of the c
 - If the original plan was **deleted**, or its ID now belongs to **another plan**, the
   restore creates a **new plan** (`on_conflict: new_id`). With `confirm: true` and
   `on_conflict: force_override` it overwrites the plan that holds the ID now.
+- In the plan card's **Orphaned plans** view, **Restore** always creates a new plan.
 
 ## 4. Backups of deleted plans
 
@@ -74,11 +81,16 @@ bring the plan back, so the integration never deletes them on its own:
    keep the old name, the new ones are stored under the new name. If the plan now holding
    the ID is your renamed plan, the repair is about its older history.
 3. **Your decision:**
+   - **Load into the plan preview** switches the plan card to **Orphaned plans** and shows
+     the plan's newest backup. It decides nothing — the repair stays open.
    - **Keep** keeps the backups for good and never asks again for this plan.
    - **Delete** removes all backups of this plan.
    - **Ignore** (Home Assistant's own button) hides the repair and deletes nothing.
-4. **Look first:** to see what the plan contained, open it via **Function Plan Visualize**
-   as described in [section 2](#2-looking-at-a-backup).
+4. **Look first:** besides the plan card, **Function Plan Visualize** shows any backup, as
+   described in [section 2](#2-looking-at-a-backup).
+5. **In the plan card**, the **Orphaned plans** view has buttons next to **Restore**:
+   delete the selected backup, delete all backups of the plan, and keep them (the pin) —
+   pressed again on a kept plan, it takes that decision back. Each asks for confirmation.
 
 The repair closes by itself when the plan exists again under the same ID and name, or when
 its backups are deleted with one of the actions below. If the plan list cannot be read
@@ -100,8 +112,9 @@ To delete backups without waiting for a repair:
 | `comexio.function_plan_visualize` | Render a live plan or a snapshot as SVG or text. |
 | `comexio.function_plan_delete_backups` | Delete one snapshot, one plan's snapshots, or all. |
 | `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans. |
+| `comexio.function_plan_keep_backups` | Keep a deleted plan's backups for good, or take that back (`keep: false`). |
 | `sensor` **Function Plan Backups** (diagnostic) | Number of stored snapshots, details per plan as attributes. |
-| `select` **Function Plan Backup** | Picks the snapshot the plan preview shows. |
+| `select` **Function Plan Backup** | Picks the snapshot the plan preview shows; in the **Orphaned plans** view, a deleted plan's backup. |
 
 ---
 
@@ -144,6 +157,13 @@ verwalteten. Einzustellen gibt es nichts.
 - **Plan-Karte:** Plan wählen, dann in der Auswahl **Function Plan Backup** ein Backup
   wählen. Die Karte zeigt diesen Snapshot statt des Live-Plans; **Live** schaltet zurück.
   Siehe die [Anleitung zur Logikplan-Vorschau](FUNCTION_PLAN_PREVIEW.md).
+- **Backups gelöschter Pläne in der Plan-Karte:** **Orphaned plans** wählen (letzter
+  Eintrag der Auswahl **Function Plans**, sichtbar, solange es solche Backups gibt). Die
+  Auswahl **Function Plan Backup** listet dann jeden gelöschten Plan als
+  `<Name> (ID <n>) — <Anzahl> backups`, darunter eingerückt seine Snapshots; die Planzeile
+  zeigt den neuesten. Die Vorschau ist mit `[verwaist]` markiert und zeigt keine
+  Live-Werte, weil die ID inzwischen einem anderen Plan gehören kann. Audit und Sync
+  arbeiten weiter mit dem vorher gewählten Plan.
 - **Jedes Backup, auch das gelöschter Pläne:** Entwicklerwerkzeuge → Aktionen →
   **Function Plan Visualize**, Feld **Snapshot**, Format `svg` oder `text`. Jeder Eintrag
   lautet `<Planname> — fub <ID> — <Typ>[<Slot>] — <Datum>`. Das funktioniert ohne
@@ -166,6 +186,8 @@ der Zeichenfläche.
   **anderen Plan**, legt der Restore einen **neuen Plan** an (`on_conflict: new_id`). Mit
   `confirm: true` und `on_conflict: force_override` überschreibt er den Plan, der die ID
   jetzt belegt.
+- In der Ansicht **Orphaned plans** der Plan-Karte legt **Restore** immer einen neuen Plan
+  an.
 
 ## 4. Backups gelöschter Pläne
 
@@ -185,12 +207,18 @@ sich der Plan zurückholen, deshalb löscht die Integration sie nie von selbst:
    Plan, der die ID jetzt belegt, dein umbenannter Plan, geht es in der Meldung um seine
    ältere Historie.
 3. **Deine Entscheidung:**
+   - **In Vorschau laden** schaltet die Plan-Karte auf **Orphaned plans** und zeigt das
+     neueste Backup des Plans. Es entscheidet nichts — die Meldung bleibt offen.
    - **Behalten** bewahrt die Backups dauerhaft auf und fragt für diesen Plan nicht mehr.
    - **Löschen** entfernt alle Backups dieses Plans.
    - **Ignorieren** (Home Assistants eigener Knopf) blendet die Meldung aus und löscht
      nichts.
-4. **Vorher ansehen:** Was der Plan enthielt, zeigt **Function Plan Visualize** wie in
-   [Abschnitt 2](#2-ein-backup-ansehen) beschrieben.
+4. **Vorher ansehen:** Außer der Plan-Karte zeigt **Function Plan Visualize** jedes
+   Backup, wie in [Abschnitt 2](#2-ein-backup-ansehen) beschrieben.
+5. **In der Plan-Karte** hat die Ansicht **Orphaned plans** Knöpfe neben **Restore**: das
+   gewählte Backup löschen, alle Backups des Plans löschen und sie behalten (die
+   Stecknadel) — bei einem behaltenen Plan nimmt sie die Entscheidung zurück. Jeder Knopf
+   fragt vorher nach.
 
 Die Meldung schließt sich von selbst, wenn es den Plan unter derselben ID und demselben
 Namen wieder gibt oder wenn seine Backups mit einer der Aktionen unten gelöscht werden.
@@ -213,5 +241,6 @@ Backups löschen, ohne auf eine Meldung zu warten:
 | `comexio.function_plan_visualize` | Live-Plan oder Snapshot als SVG oder Text darstellen. |
 | `comexio.function_plan_delete_backups` | Einen Snapshot, die Snapshots eines Plans oder alle löschen. |
 | `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen. |
+| `comexio.function_plan_keep_backups` | Die Backups eines gelöschten Plans dauerhaft behalten oder das zurücknehmen (`keep: false`). |
 | `sensor` **Function Plan Backups** (Diagnose) | Anzahl gespeicherter Snapshots, Details je Plan als Attribute. |
-| `select` **Function Plan Backup** | Wählt den Snapshot, den die Plan-Vorschau zeigt. |
+| `select` **Function Plan Backup** | Wählt den Snapshot, den die Plan-Vorschau zeigt; in der Ansicht **Orphaned plans** ein Backup eines gelöschten Plans. |

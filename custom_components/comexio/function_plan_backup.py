@@ -200,6 +200,43 @@ def format_backup_label(entry: dict[str, Any]) -> str:
     return f"{kind}[{entry.get('slot')}] — {ts_label}{op_suffix}"
 
 
+# Indents a snapshot row under its plan row in the backup selector's orphaned-plans view.
+# Non-breaking spaces: the frontend collapses leading regular whitespace.
+_ORPHAN_SNAPSHOT_INDENT = "\u00a0" * 4
+
+
+def _orphan_plan_label(orphan: dict[str, Any]) -> str:
+    count = len(orphan["backups"])
+    return f"{orphan['plan_name']} (ID {orphan['fub_id']}) — {count} backup{'' if count == 1 else 's'}"
+
+
+def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    """(label, choice) per row of the backup selector's orphaned-plans view.
+
+    One plan row per orphaned identity (see FunctionPlanBackupManager.orphaned_plans_sync),
+    followed by its indented snapshot rows. choice carries the identity plus the kind/slot to
+    show; a plan row shows the plan's newest snapshot. Shared by select.py (options) and
+    button.py (resolving the chosen label back), like format_backup_label. Labels must be
+    unique select options, but two plans changed in the same minute share a snapshot row
+    label — a repeat gets its plan appended.
+    """
+    rows: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for orphan in orphans:
+        identity = {"fub_id": orphan["fub_id"], "plan_name": orphan["plan_name"], "kept": orphan["kept"]}
+        backups = orphan["backups"]
+        newest = max(backups, key=lambda entry: entry.get("captured_at") or "")
+        plan_choice = {**identity, "kind": newest["kind"], "slot": newest["slot"], "plan_row": True}
+        rows.append((_orphan_plan_label(orphan), plan_choice))
+        for entry in backups:
+            label = f"{_ORPHAN_SNAPSHOT_INDENT}{format_backup_label(entry)}"
+            if label in seen:
+                label += f" · {orphan['plan_name']} (ID {orphan['fub_id']})"
+            seen.add(label)
+            rows.append((label, {**identity, "kind": entry["kind"], "slot": entry["slot"], "plan_row": False}))
+    return rows
+
+
 class FunctionPlanBackupManager:
     """Manage rotating auto and pre-change snapshots of function plans."""
 
@@ -209,8 +246,9 @@ class FunctionPlanBackupManager:
         # every snapshot already persisted under .storage/.
         self._auto_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_logikplan_auto_{server_id}")
         self._change_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_logikplan_changes_{server_id}")
-        # Orphaned plan identities the user chose to keep via the orphaned_plan_backups repair:
-        # never raised again and never purged, only deleted by hand.
+        # Orphaned plan identities the user chose to keep via the orphaned_plan_backups repair or
+        # the plan card's orphaned-plans view: never raised again and never purged, only deleted
+        # by hand (or un-kept in the plan card).
         self._kept_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_function_plan_backup_kept_{server_id}")
         self._kept: set[tuple[int, str]] = set()
         # Lazy-loaded caches: {fub_id_str: {plan_name: [snapshot, ...]}} — newest first per identity.
@@ -715,9 +753,14 @@ class FunctionPlanBackupManager:
             for fub_id, name, newest in self._expired_orphans(fub_data, cutoff)
         ]
 
-    async def async_keep_orphaned(self, fub_id: int, plan_name: str) -> None:
-        """Keep an orphaned identity's snapshots for good: no repair, no purge, only manual deletion."""
+    async def async_keep_orphaned(self, fub_id: int, plan_name: str) -> bool:
+        """Keep an orphaned identity's snapshots for good: no repair, no purge, only manual deletion.
+
+        False if it was kept already.
+        """
         await self._async_ensure_loaded()
+        if (fub_id, plan_name) in self._kept:
+            return False
         self._kept.add((fub_id, plan_name))
         await self._async_save_kept()
         _LOGGER.info(
@@ -726,6 +769,42 @@ class FunctionPlanBackupManager:
             fub_id,
             plan_name,
         )
+        return True
+
+    async def async_unkeep_orphaned(self, fub_id: int, plan_name: str) -> bool:
+        """Take back a keep decision (plan card's orphaned-plans view). True if one was stored.
+
+        The identity is then asked about again, and purged by the purge action, once its
+        retention has passed.
+        """
+        await self._async_ensure_loaded()
+        if (fub_id, plan_name) not in self._kept:
+            return False
+        self._kept.discard((fub_id, plan_name))
+        await self._async_save_kept()
+        _LOGGER.info(
+            "[%s] Function Plan backup: no longer keeping the backups of deleted plan fub=%s ('%s')",
+            self._server_id,
+            fub_id,
+            plan_name,
+        )
+        return True
+
+    def orphaned_plans_sync(self, fub_data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Every orphaned identity that still has snapshots, sorted by plan name, then fub_id.
+
+        One {fub_id, plan_name, kept, backups} entry each, backups as in
+        plan_backups_for_identity_sync. Cache-only like that method, so it can back the
+        selectors' synchronous options. Empty without a live $Fubs snapshot (see
+        is_orphaned_identity), so a failed plan fetch never shows every plan as deleted.
+        """
+        orphans: list[dict[str, Any]] = []
+        for fub_id, plan_name, _newest in self._orphaned_identities(fub_data):
+            if backups := self.plan_backups_for_identity_sync(fub_id, plan_name):
+                kept = (fub_id, plan_name) in self._kept
+                orphans.append({"fub_id": fub_id, "plan_name": plan_name, "kept": kept, "backups": backups})
+        orphans.sort(key=lambda orphan: (orphan["plan_name"].lower(), orphan["fub_id"]))
+        return orphans
 
     async def async_purge_orphaned(self, fub_data: dict[str, Any], cutoff: datetime) -> list[dict[str, Any]]:
         """Delete all snapshots (auto + change) of every orphaned identity older than cutoff.

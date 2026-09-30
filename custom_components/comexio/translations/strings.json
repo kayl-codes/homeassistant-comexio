@@ -95,6 +95,7 @@
     },
     "orphaned_backups_action": {
       "options": {
+        "preview": "🔍 Load into the plan preview",
         "keep": "📦 Keep these backups",
         "delete": "🗑️ Delete these backups"
       }
@@ -329,14 +330,16 @@
         "step": {
           "orphaned_backups": {
             "title": "Backups of a deleted function plan",
-            "description": "Comexio has no function plan **{plan_name}** under ID {fub_id} any more — it was deleted or renamed. Plan now using ID {fub_id}: **{current_plan}**. If that is this plan under a new name, its newer backups are stored under that name; these are the ones from before.\n\nIts {count} backup(s) are kept for {months} month(s) after the newest one ({newest}) — that period has passed.\n\n**Keep** keeps these backups and never asks again for this plan. You can still delete them later with the **Function Plan Delete Backups** action.\n**Delete** removes them for good.\n\nTo see what the plan contained first: Developer tools → Actions → **Function Plan Visualize**, field **Snapshot** → pick an entry starting with **{plan_name} — fub {fub_id}**. More in the [backup guide]({docs_url})."
+            "description": "Comexio has no function plan **{plan_name}** under ID {fub_id} any more — it was deleted or renamed. Plan now using ID {fub_id}: **{current_plan}**. If that is this plan under a new name, its newer backups are stored under that name; these are the ones from before.\n\nIts {count} backup(s) are kept for {months} month(s) after the newest one ({newest}) — that period has passed.\n\n**Keep** keeps these backups and never asks again for this plan. You can still delete them later with the **Function Plan Delete Backups** action.\n**Delete** removes them for good.\n\n**Load into the plan preview** shows the newest backup in the plan card (the **Function Plans** selector switches to **Orphaned plans**) without deciding anything — this repair stays open. There you can also browse, restore (as a new plan), delete or keep them. To see what the plan contained first: Developer tools → Actions → **Function Plan Visualize**, field **Snapshot** → pick an entry starting with **{plan_name} — fub {fub_id}**. More in the [backup guide]({docs_url})."
           }
         },
         "abort": {
           "entry_not_found": "The associated config entry could not be found — it may have been removed.",
           "plans_unavailable": "The plan list could not be read from Comexio right now. Nothing was changed — try again in a few minutes.",
           "plan_exists_again": "This plan exists in Comexio again, so its backups are no longer orphaned. Nothing was changed.",
-          "already_deleted": "These backups were already deleted. Nothing was changed."
+          "already_deleted": "These backups were already deleted. Nothing was changed.",
+          "loaded_in_preview": "The plan's newest backup is now shown in the plan card (Function Plans → Orphaned plans). This repair stays open until you keep or delete the backups.",
+          "preview_failed": "The backups could not be loaded into the plan preview — they may have been deleted meanwhile, or the plan selectors are disabled. The backups were not changed."
         }
       }
     }
