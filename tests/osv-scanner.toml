@@ -52,6 +52,11 @@ ignoreUntil = 2027-03-31
 reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102265); fixed by HA's own bump"
 
 [[IgnoredVulns]]
+id = "GHSA-9j54-fg26-wv3r"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102266); fixed by HA's own bump"
+
+[[IgnoredVulns]]
 id = "GHSA-9v7f-9g4p-ffgj"
 ignoreUntil = 2027-03-31
 reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102267); fixed by HA's own bump"
