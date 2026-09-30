@@ -766,7 +766,7 @@ class ComexioPlanCard extends HTMLElement {
     this._input.addEventListener("keydown", (ev) => {
       console.debug("comexio-plan-card: keydown", ev.key, "pattern=", this._pattern);
       if (ev.key === "Enter" && this._pattern) {
-        this._searchAllPlans();
+        void this._searchAllPlans();
       }
     });
   }
@@ -959,7 +959,7 @@ class ComexioPlanCard extends HTMLElement {
   // for. Lazy: fetches once per _runAnalysis() run, not on every tab re-visit.
   _onAnalysisTabSwitch(tabName) {
     if (tabName === "flow" && !this._flowLoaded) {
-      this._loadFlowDiagram();
+      void this._loadFlowDiagram();
     }
   }
 
@@ -1069,7 +1069,7 @@ class ComexioPlanCard extends HTMLElement {
       return; // trigger-only card: no plan/debug state to drive
     }
     if (this._debugOn) {
-      this._ensureDebugSubscription(); // deferred until hass exists (also re-arms after reconnect)
+      void this._ensureDebugSubscription(); // deferred until hass exists (also re-arms after reconnect)
     }
     const st = hass.states[this._config.entity];
     if (!st || st.state === "unavailable" || st.state === "unknown") {
@@ -1093,7 +1093,7 @@ class ComexioPlanCard extends HTMLElement {
     if (this._inFlight || this._failures > 0 || this._refetchOnConnect) {
       return; // fetched when the current fetch completes, by the pending retry, or on reattach
     }
-    this._loadSvg(st.attributes.entity_picture, st.state);
+    void this._loadSvg(st.attributes.entity_picture, st.state);
   }
 
   async _loadSvg(url, stamp) {
@@ -1232,7 +1232,7 @@ class ComexioPlanCard extends HTMLElement {
   _reloadCurrentStamp() {
     const st = this._hass?.states[this._config.entity];
     if (st && st.state === this._stamp) {
-      this._loadSvg(st.attributes.entity_picture, st.state);
+      void this._loadSvg(st.attributes.entity_picture, st.state);
     }
   }
 
@@ -1451,7 +1451,7 @@ class ComexioPlanCard extends HTMLElement {
     this._planEl.classList.toggle("debug-live", this._debugOn); // pointer cursor on nodes
     this._hideSuggestions();
     if (this._debugOn) {
-      this._ensureDebugSubscription();
+      void this._ensureDebugSubscription();
     } else {
       this._dropDebugSubscription();
     }
@@ -1672,7 +1672,7 @@ class ComexioPlanCard extends HTMLElement {
     }
     const extendMatch = cmd.match(/^extend\s+(\d+)$/);
     if (extendMatch) {
-      this._runExtendCommand(Number(extendMatch[1]));
+      void this._runExtendCommand(Number(extendMatch[1]));
       return;
     }
     this._debugLine(`Unbekannter Befehl: ${raw} — verfügbar: /clear, /history, /extend <Minuten>`, "err");
@@ -1846,7 +1846,7 @@ class ComexioPlanCard extends HTMLElement {
       this._completeSuggestion(this._sugEl.children[this._sugIdx].dataset.target);
     } else {
       this._hideSuggestions();
-      this._sendCommand(this._cmdInput.value);
+      void this._sendCommand(this._cmdInput.value);
     }
   }
 
@@ -1985,7 +1985,7 @@ class ComexioPlanCard extends HTMLElement {
     const cur = Number(String(info.value ?? "").replace(",", "."));
     const inv = Math.abs(cur - 1) < 1e-9 ? 0 : 1;
     this._cmdInput.value = `${target}=${inv}`;
-    this._sendCommand(this._cmdInput.value);
+    void this._sendCommand(this._cmdInput.value);
   }
 
   _applySearch() {

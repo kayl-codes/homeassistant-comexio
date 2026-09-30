@@ -39,6 +39,53 @@ id = "GHSA-m2h6-j472-rp4c"
 ignoreUntil = 2027-03-31
 reason = "Alias of PYSEC-2026-3554 (cryptography==48.0.1 pinned by homeassistant, test-only)"
 
+# --- PyJWT 2.13.0: Home Assistant Core's own exact pin (homeassistant==2026.8.3 requires
+# PyJWT==2.13.0; still pinned in 2026.9.4), fixed in 2.14.0. The integration never imports jwt.
+[[IgnoredVulns]]
+id = "GHSA-2gx3-rcp4-g85q"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-101917); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-8wjv-2p76-3863"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102265); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-9v7f-9g4p-ffgj"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102267); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-ffc3-869f-jxw9"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102268); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-hxm8-2xgr-2p9m"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102269); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-p4g4-x82p-q773"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102271); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-r6x4-923q-g947"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102272); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-w2cx-738m-mc7w"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102273); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-w6j9-cwv2-h6wq"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102274); fixed by HA's own bump"
+
 # --- anyio / idna / pygments: false positives. OSV-Scanner reports the dependency *lower bounds*
 # from HA's metadata (anyio 4.9.0, idna 3.9.0, pygments 2.9.0) as if they were installed versions;
 # pip actually resolves anyio 4.15.1, idna 3.20, pygments 2.21.0 (CI job log, PR #90), all past
