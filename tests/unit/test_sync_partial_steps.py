@@ -88,7 +88,7 @@ def test_cleanup_failures_are_failed_steps() -> None:
     assert ctx.failed_writes == [
         f"cleanup {MARKER.label}: 1 Web-IO command deletion(s)",
         "function plan 'Plan A': left stopped after cleanup",
-        "function plan 'Plan B': not cleaned up (not stopped)",
+        "function plan 'Plan B': not cleaned up (could not be stopped)",
     ]
 
 

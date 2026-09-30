@@ -10,6 +10,7 @@ import logging
 import time
 
 from aiocomexio.function_plan import resolve_element_label, snapshot_label_maps
+import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
@@ -131,6 +132,30 @@ async def _resolve_visualize_snapshot_source(
     )
 
 
+async def _unknown_plan_reason(api, fub_id: int) -> str | None:
+    """Why fub_id cannot be rendered as a plan, or None if Comexio knows it.
+
+    Comexio answers an unknown fub_id with an empty plan, which would render as a valid one.
+    The cached plan list is only as fresh as the last poll, so a miss is checked live once
+    (a plan just created in Comexio Studio) and cached like the other live lookups do.
+    """
+    if str(fub_id) in api.fub_data:
+        return None
+    try:
+        fubs = (await api.get_raw_config()).get("Fubs")
+    except (aiohttp.ClientError, TimeoutError) as err:
+        return f"could not be checked ({err})"
+    if fubs == []:
+        return "does not exist"  # PHP encodes an empty plan list as []
+    if not isinstance(fubs, dict):
+        return "could not be checked (plan list not readable)"
+    live_fub = fubs.get(str(fub_id))
+    if live_fub is None:
+        return "does not exist"
+    api.update_fub_cache_entry(fub_id, live_fub)
+    return None
+
+
 async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall, error_title: str):
     """Resolve handle_function_plan_visualize's data source from the live plan — the 'snapshot'
     field was not given (extracted to stay under the complexity budget). Returns
@@ -141,6 +166,10 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
     if ctx is None:
         return None
     coordinator, api, fub_id = ctx
+    missing = await _unknown_plan_reason(api, fub_id)
+    if missing:
+        persistent_notification.async_create(hass, f"Plan {fub_id} {missing}.", title=error_title)
+        return None
     plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
         persistent_notification.async_create(hass, f"Plan {fub_id} could not be loaded.", title=error_title)
