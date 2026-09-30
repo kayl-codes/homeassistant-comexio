@@ -323,6 +323,41 @@ async def webio_still_present(lookup: Callable[[str], Awaitable[Any]], name: str
     return None if found is None else "still present after the delete request"
 
 
+# Details of a plan-cleanup step that did not complete, as (plan name, detail) in the
+# "failures" lists of unwire_webio_commands / delete_dangling_plan_elements.
+PLAN_LOAD_FAILED = "could not be loaded, cleanup skipped"
+PLAN_DELETE_FAILED = "element deletion failed"
+
+
+def plan_cleanup_outcome(
+    result: dict, fub_id: int
+) -> tuple[tuple[str, int] | None, tuple[str, int] | None, tuple[str, str] | None]:
+    """Classify one api._delete_plan_elements_and_restart result for the cleanup callers.
+
+    Returns (stopped_plan, stop_failure, failure): the first two as (name, fub_id), the
+    last as (name, PLAN_DELETE_FAILED) when the element deletion itself failed.
+    """
+    name = result.get("plan_name", "?")
+    if result.get("stop_failed"):
+        return None, (name, fub_id), None
+    stopped_plan = None
+    if result.get("plan_stopped") and result.get("fub_id") is not None:
+        stopped_plan = (name, result["fub_id"])
+    failure = (name, PLAN_DELETE_FAILED) if result.get("delete_failed") else None
+    return stopped_plan, None, failure
+
+
+def _append_cleanup_outcome(outcome: dict[str, Any], result: dict, fub_id: int) -> None:
+    """Add one plan's delete-and-restart result to an aggregated cleanup outcome dict."""
+    if result.get("deleted_elem_count", 0) > 0:
+        outcome["deleted_elem_count"] += result["deleted_elem_count"]
+        outcome["touched_fub_ids"].append(fub_id)
+    stopped_plan, stop_failure, failure = plan_cleanup_outcome(result, fub_id)
+    for key, value in (("stopped_plans", stopped_plan), ("stop_failures", stop_failure), ("failures", failure)):
+        if value:
+            outcome[key].append(value)
+
+
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
@@ -4102,12 +4137,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fub_ids.update(int(v) for v in plan_map.values())
         return fub_ids
 
-    async def _load_function_plan_check_data(self) -> dict[int, dict]:
+    async def _load_function_plan_check_data(self, load_failures: list[int] | None = None) -> dict[int, dict]:
         """Load wiring data of all managed function plans for batch marker checks.
 
         Prefers the bulk snapshot from the backup cycle; plans missing there are fetched
         directly. Returns {fub_id: {"elements": ..., "connections": ...}}; failed plans
-        are skipped.
+        are skipped, and their fub_ids appended to load_failures when the caller passes one.
 
         A _SEEDED_EMPTY_PLAN_MARKER entry (a plan _create_managed_plan created and verified
         empty earlier in this same run, not yet refreshed by a real bulk load) counts as a
@@ -4123,7 +4158,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     plan_data = await self.api.function_plan_load_elements(fub_id)
                 except Exception:
                     _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
-                    continue
+                    plan_data = None
+                if not plan_data and load_failures is not None:
+                    load_failures.append(fub_id)
             if plan_data:
                 plans[fub_id] = plan_data
         if not plans:
@@ -4131,7 +4168,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return plans
 
     async def resolve_source_cleanup_plans(
-        self, source_ids: list[int], preferred_fub_id: int | None = None, ref_type: int = 2
+        self,
+        source_ids: list[int],
+        preferred_fub_id: int | None = None,
+        ref_type: int = 2,
+        load_failures: list[int] | None = None,
     ) -> dict[int, list[int]]:
         """Group markers/KNX objects by the managed plan they are wired in, for per-plan cleanup.
 
@@ -4143,7 +4184,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         if preferred_fub_id is not None:
             return {preferred_fub_id: list(source_ids)}
-        plans = await self._load_function_plan_check_data()
+        plans = await self._load_function_plan_check_data(load_failures)
         plan_to_ids: dict[int, list[int]] = {}
         for source_id in source_ids:
             fub_id = self._check_source_function_plan_link(source_id, plans, ref_type)
@@ -4152,20 +4193,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return plan_to_ids
 
     async def _resolve_unwire_plan_targets(
-        self, webio_ids: list[int], preferred_fub_id: int | None
+        self, webio_ids: list[int], preferred_fub_id: int | None, load_failures: list[int]
     ) -> tuple[dict[int, dict], dict[int, list[int]]]:
         """Resolve which plan(s) each webio_id needs to be unwired from.
 
         Scoped to preferred_fub_id when given; otherwise scans every managed plan for a
-        wiring match. See unwire_webio_commands for the overall contract.
+        wiring match. Plans that could not be loaded go to load_failures — their wiring was
+        not checked. See unwire_webio_commands for the overall contract.
         """
         if preferred_fub_id is not None:
             plan_data = await self.api.function_plan_load_elements(preferred_fub_id)
             if not plan_data:
+                load_failures.append(preferred_fub_id)
                 return {}, {}
             return {preferred_fub_id: plan_data}, {preferred_fub_id: list(webio_ids)}
 
-        plans = await self._load_function_plan_check_data()
+        plans = await self._load_function_plan_check_data(load_failures)
         plan_to_ids: dict[int, list[int]] = {}
         for webio_id in webio_ids:
             for fub_id, plan_data in plans.items():
@@ -4187,8 +4230,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Unwire the given webio_ids from ONE plan and resolve their real cmdIds.
 
         Returns {"deleted_elem_count", "cmd_ids", "stopped_plan" (name, fub_id)|None,
-        "stop_failure" (name, fub_id)|None, "touched" bool} for this single plan — aggregated
-        by the caller across every plan (see unwire_webio_commands).
+        "stop_failure" (name, fub_id)|None, "failure" (name, detail)|None, "touched" bool}
+        for this single plan — aggregated by the caller across every plan (see
+        unwire_webio_commands).
         """
         elem_ids: list[int] = []
         found_webio_ids: list[int] = []
@@ -4203,6 +4247,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "cmd_ids": [],
                 "stopped_plan": None,
                 "stop_failure": None,
+                "failure": None,
                 "touched": False,
             }
 
@@ -4210,12 +4255,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         result = await self.api._delete_plan_elements_and_restart(
             fub_id, elem_ids, found_webio_ids, self.api.function_plan_name(fub_id)
         )
-        stopped_plan = None
-        stop_failure = None
-        if result.get("stop_failed"):
-            stop_failure = (result.get("plan_name", "?"), fub_id)
-        elif result.get("plan_stopped") and result.get("fub_id") is not None:
-            stopped_plan = (result.get("plan_name", "?"), result["fub_id"])
+        stopped_plan, stop_failure, failure = plan_cleanup_outcome(result, fub_id)
 
         # webio_cmd_ids echoes back only the ids actually unwired (empty on failure) —
         # resolving cmdIds only for those avoids deleting a command whose plan element
@@ -4236,6 +4276,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "cmd_ids": cmd_ids,
             "stopped_plan": stopped_plan,
             "stop_failure": stop_failure,
+            "failure": failure,
             "touched": result.get("deleted_elem_count", 0) > 0,
         }
 
@@ -4249,7 +4290,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         webIoId, not the WebCommandId (see project-logikplan-api memory).
 
         Returns {"deleted_elem_count": int, "cmd_ids": list[int], "stopped_plans": [...],
-        "stop_failures": [...], "touched_fub_ids": list[int]}. cmd_ids only includes commands
+        "stop_failures": [...], "failures": [(name, detail), ...], "touched_fub_ids": list[int]}.
+        failures lists plans that could not be loaded (wiring not checked) or whose element
+        deletion failed — both leave Function-Plan debris behind. cmd_ids only includes commands
         actually found wired and successfully unwired; the caller is responsible for deleting
         each via api.delete_single_command afterwards. touched_fub_ids lists plans that had at
         least one element successfully removed — useful for a caller that wants to re-sort the
@@ -4260,18 +4303,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for cmd in (self.data or {}).get("webio_commands", {}).values()
             if cmd.get("webIoId") is not None
         }
-        plans, plan_to_ids = await self._resolve_unwire_plan_targets(webio_ids, preferred_fub_id)
+        load_failures: list[int] = []
+        plans, plan_to_ids = await self._resolve_unwire_plan_targets(webio_ids, preferred_fub_id, load_failures)
 
         deleted_elem_count = 0
         cmd_ids: list[int] = []
         stopped_plans: list[tuple[str, int]] = []
         stop_failures: list[tuple[str, int]] = []
+        failures = self.plan_load_failures(load_failures)
         touched_fub_ids: list[int] = []
 
         for fub_id, ids in plan_to_ids.items():
-            plan_data = plans.get(fub_id)
-            if not plan_data:
-                continue
+            # plan_to_ids only ever holds fub_ids resolved from `plans`, so this is always set.
+            plan_data = plans[fub_id]
             plan_result = await self._unwire_plan(fub_id, ids, plan_data, webio_id_to_cmd_id)
             deleted_elem_count += plan_result["deleted_elem_count"]
             cmd_ids.extend(plan_result["cmd_ids"])
@@ -4281,14 +4325,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 stop_failures.append(plan_result["stop_failure"])
             if plan_result["stopped_plan"]:
                 stopped_plans.append(plan_result["stopped_plan"])
+            if plan_result["failure"]:
+                failures.append(plan_result["failure"])
 
         return {
             "deleted_elem_count": deleted_elem_count,
             "cmd_ids": list(dict.fromkeys(cmd_ids)),
             "stopped_plans": stopped_plans,
             "stop_failures": stop_failures,
+            "failures": failures,
             "touched_fub_ids": list(dict.fromkeys(touched_fub_ids)),
         }
+
+    def plan_load_failures(self, fub_ids: list[int]) -> list[tuple[str, str]]:
+        """(name, PLAN_LOAD_FAILED) for each managed plan that could not be loaded for a cleanup."""
+        return [
+            (self.api.function_plan_name(fub_id), PLAN_LOAD_FAILED)
+            for fub_id in dict.fromkeys(fub_ids)
+            if self._is_managed_function_plan(fub_id)
+        ]
 
     def _check_source_function_plan_link(self, source_id: int, plans: dict[int, dict], ref_type: int = 2) -> int | None:
         """Check if the source (marker=2/KNX=11) is wired in any of the pre-loaded managed plans.
@@ -5072,7 +5127,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Unlike unwire_webio_commands, there is no Web-IO command to resolve/delete here (it's
         already gone); this is a plain element delete + plan restart. Returns
-        {"deleted_elem_count": int, "touched_fub_ids": list[int]}.
+        {"deleted_elem_count": int, "touched_fub_ids": list[int], "stopped_plans": [...],
+        "stop_failures": [...], "failures": [...]} — the last three as in unwire_webio_commands.
 
         `ref_ids` reflects a snapshot potentially taken cycles ago and is a global judgement
         (dangling across all managed plans combined) — the same ref_id can also exist as a
@@ -5080,7 +5136,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         therefore re-verified against the freshly reloaded snapshot here, per plan, via
         _plan_connected_elem_ids, instead of trusting the ref_id match alone.
         """
-        plans = await self._load_function_plan_check_data()
+        load_failures: list[int] = []
+        plans = await self._load_function_plan_check_data(load_failures)
         plan_to_elem_ids: dict[int, list[int]] = {}
         for fub_id, plan_data in plans.items():
             if not self._is_managed_function_plan(fub_id):
@@ -5095,16 +5152,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 ):
                     plan_to_elem_ids.setdefault(fub_id, []).append(int(elem_id))
 
-        deleted_elem_count = 0
-        touched_fub_ids: list[int] = []
+        outcome: dict[str, Any] = {
+            "deleted_elem_count": 0,
+            "touched_fub_ids": [],
+            "stopped_plans": [],
+            "stop_failures": [],
+            "failures": self.plan_load_failures(load_failures),
+        }
         for fub_id, elem_ids in plan_to_elem_ids.items():
             result = await self.api._delete_plan_elements_and_restart(
                 fub_id, elem_ids, [], self.api.function_plan_name(fub_id)
             )
-            if result.get("deleted_elem_count", 0) > 0:
-                deleted_elem_count += result["deleted_elem_count"]
-                touched_fub_ids.append(fub_id)
-        return {"deleted_elem_count": deleted_elem_count, "touched_fub_ids": touched_fub_ids}
+            _append_cleanup_outcome(outcome, result, fub_id)
+        return outcome
 
     @staticmethod
     def _function_plan_gap_item(
