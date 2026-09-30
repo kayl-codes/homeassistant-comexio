@@ -91,6 +91,7 @@ _SYNC_PROGRESS_NOTIFY_EVERY = 5  # notify every Nth pair; the plan's final pair 
 
 _NOTE_ACTIVATED = ", plan activated"
 _NOTE_NOT_ACTIVATED = f", {ICON_WARNING} plan NOT activated"
+_FAILURE_NOT_RESOLVED = "not resolved/created"
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
 _STEP_CHECKING_PLAN = "Checking function plan wiring"
@@ -1956,7 +1957,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         api = ctx.api
         fub_id, is_fresh = await self.coordinator.resolve_trigger_plan()
         if fub_id is None:
-            ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "not resolved/created"))
+            ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, _FAILURE_NOT_RESOLVED))
             return (
                 f"{ICON_WARNING} Trigger plan '{FUNCTION_PLAN_TRIGGER_PLAN_NAME}': could not resolve/create — see log."
             )
@@ -2071,7 +2072,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             f"{ICON_WARNING} Cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
         ]
         errors = len(failed_plans)
-        ctx.failed_writes.extend(_plan_failure(name, "not resolved/created") for name in failed_plans)
+        ctx.failed_writes.extend(_plan_failure(name, _FAILURE_NOT_RESOLVED) for name in failed_plans)
         if not plan_to_ids:
             if not failed_plans:
                 _LOGGER.warning(
@@ -2181,7 +2182,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         summary: list[str] = skipped + [
             f"{ICON_WARNING} KNX cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
         ]
-        ctx.failed_writes.extend(_plan_failure(name, "not resolved/created") for name in failed_plans)
+        ctx.failed_writes.extend(_plan_failure(name, _FAILURE_NOT_RESOLVED) for name in failed_plans)
         if not plan_to_ids:
             if not failed_plans:
                 _LOGGER.warning("[%s] KNX combined wiring: no KNX cluster plan available", self.server_id)
@@ -2571,7 +2572,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             f"{ICON_WARNING} IO cluster plan for '{ext}' could not be resolved/created — see log" for ext in failed_exts
         ]
         errors = len(failed_exts)
-        ctx.failed_writes.extend(f"IO cluster plan for '{ext}': not resolved/created" for ext in failed_exts)
+        ctx.failed_writes.extend(f"IO cluster plan for '{ext}': {_FAILURE_NOT_RESOLVED}" for ext in failed_exts)
         if not ext_plans:
             if not failed_exts:
                 _LOGGER.warning("[%s] Cluster plan wiring: no IO cluster plan available", self.server_id)
