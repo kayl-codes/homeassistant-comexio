@@ -29,11 +29,13 @@
 // changes: the card file itself is deployed under a new versioned name each release, but this
 // sibling keeps its name, so a browser would otherwise pair the new card with a cached old
 // utils module (v0.9.32: "does not provide an export named 'isTextQuery'").
-import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-plan-card-utils.js?v=0.9.34";
+import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-plan-card-utils.js?v=0.9.42";
 
-// Version banner: lets the user verify in the browser console WHICH build actually
-// executes — ?v= query bumps proved unreliable against the service-worker cache.
-console.info("comexio-plan-card v0.9.34 (Ansicht \"Orphaned plans\": Restore als neuer Plan, Löschen, Behalten) loaded");
+// Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
+// actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
+// unreliable against the browser/service-worker cache.
+const CARD_VERSION = "0.9.42";
+console.info(`comexio-plan-card v${CARD_VERSION} (Orphaned plans: Restore-Dialog-Texte, Version in der Hilfe) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
 // function_plan_backup.py) so the card can parse kind+slot back out of the select's state
@@ -519,6 +521,7 @@ class ComexioPlanCard extends HTMLElement {
         .help-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
         .help-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
         .help-head h3 { margin: 0; font-size: 1.1em; }
+        .help-head .help-version { color: var(--secondary-text-color, #888); font-size: 0.75em; font-weight: normal; }
         .help-close {
           background: none; border: none; padding: 2px; margin: 0; cursor: pointer;
           color: var(--secondary-text-color, #888); line-height: 0;
@@ -637,7 +640,7 @@ class ComexioPlanCard extends HTMLElement {
       </ha-card>
       <dialog class="help-dialog">
         <div class="help-head">
-          <h3>Bedienung der Plan-Vorschau</h3>
+          <h3>Bedienung der Plan-Vorschau <span class="help-version">v${CARD_VERSION}</span></h3>
           <button class="help-close" title="Schließen" aria-label="Schließen"><ha-icon icon="mdi:close"></ha-icon></button>
         </div>
         <table>
@@ -673,7 +676,7 @@ class ComexioPlanCard extends HTMLElement {
         <p class="restore-text"></p>
         <label class="restore-option">
           <input type="checkbox" class="restore-as-copy">
-          Als neue Kopie wiederherstellen (Original bleibt unverändert)
+          <span class="restore-as-copy-text"></span>
         </label>
         <input type="text" class="restore-copy-name" placeholder="Name der Kopie" hidden>
         <label class="restore-option">
@@ -708,6 +711,7 @@ class ComexioPlanCard extends HTMLElement {
     this._restoreDialog = root.querySelector(".restore-dialog");
     this._restoreTextEl = root.querySelector(".restore-text");
     this._restoreAsCopyEl = root.querySelector(".restore-as-copy");
+    this._restoreAsCopyTextEl = root.querySelector(".restore-as-copy-text");
     this._restoreCopyNameEl = root.querySelector(".restore-copy-name");
     this._restoreAutoStartEl = root.querySelector(".restore-auto-start");
     this._restoreAsCopyEl.addEventListener("change", () => {
@@ -1420,6 +1424,29 @@ class ComexioPlanCard extends HTMLElement {
     }
   }
 
+  // Label of the snapshot the chosen orphaned-plans row stands for. A plan row
+  // ("Name (ID n) — k backups") points to its newest snapshot, which is listed indented right
+  // below it — the dialog names that snapshot, not the plan row.
+  _orphanSnapshotLabel() {
+    const label = this._restoreLabel ?? "";
+    if (!this._orphan?.plan_row) {
+      return label.trim();
+    }
+    const options = this._hass.states[this._config.backup_entity]?.attributes?.options ?? [];
+    const prefix = `${this._orphan.kind}[${this._orphan.slot}] `;
+    for (const row of options.slice(options.indexOf(label) + 1)) {
+      if (row.trim() === row) {
+        break; // next plan row: this plan's snapshots are done
+      }
+      if (row.trim().startsWith(prefix)) {
+        return row.trim();
+      }
+    }
+    // Only reachable if the label format of build_orphaned_backup_options changed.
+    console.warn(`comexio-plan-card: snapshot row ${prefix.trim()} not found below`, label);
+    return label.trim();
+  }
+
   _openRestoreDialog() {
     if (this._orphan) {
       // A deleted plan is always rebuilt as a new plan — nothing live is overwritten.
@@ -1427,8 +1454,13 @@ class ComexioPlanCard extends HTMLElement {
       this._restoreSlot = this._orphan.slot;
       this._restoreOrphan = this._orphan;
       this._restoreTextEl.textContent =
-        `Soll das Backup „${this._restoreLabel.trim()}“ des gelöschten Plans „${this._orphan.plan_name}“ ` +
+        `Soll das Backup „${this._orphanSnapshotLabel()}“ des gelöschten Plans „${this._orphan.plan_name}“ ` +
         "als neuer Plan wiederhergestellt werden? Bestehende Pläne bleiben unverändert.";
+      // Both ways build a new plan, but not the same one: without the option the deleted plan
+      // comes back (its backups move to the new ID); with it, an independent copy under another
+      // name starts without backups, and the deleted plan's backups stay orphaned.
+      this._restoreAsCopyTextEl.textContent =
+        `Als unabhängige Kopie unter anderem Namen wiederherstellen (die Backups bleiben bei „${this._orphan.plan_name}“)`;
     } else {
       const match = this._restoreLabel?.match(_BACKUP_LABEL_RE);
       if (!match) {
@@ -1440,11 +1472,14 @@ class ComexioPlanCard extends HTMLElement {
       this._restoreTextEl.textContent =
         `Soll das Backup "${this._restoreLabel}" auf den aktuell aktiven Plan wiederhergestellt werden? ` +
         "Der bisherige Stand wird vorher automatisch als Sicherheits-Backup gespeichert.";
+      this._restoreAsCopyTextEl.textContent = "Als neue Kopie wiederherstellen (Original bleibt unverändert)";
     }
     this._restoreAsCopyEl.checked = false;
     this._restoreCopyNameEl.hidden = true;
     this._restoreCopyNameEl.value = "";
-    this._restoreAutoStartEl.checked = true;
+    // A deleted plan comes back stopped unless the user ticks auto-start; a live plan's restore
+    // keeps starting it by default.
+    this._restoreAutoStartEl.checked = !this._restoreOrphan;
     this._restoreDialog.showModal();
   }
 

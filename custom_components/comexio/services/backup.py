@@ -668,6 +668,18 @@ def _restore_build_message(
     )
 
 
+def _new_plan_activation_line(run_ok: bool | None, auto_start: bool) -> str:
+    """Activation line of a restore that built a new plan (as new ID or as copy)."""
+    if not auto_start:
+        return f"Activation: {ICON_INACTIVE} not started (auto-start disabled for this restore)"
+    if run_ok:
+        return f"Activation: {ICON_SUCCESS} active"
+    return (
+        f"Activation: {ICON_INACTIVE} not active yet (Comexio always creates new plans inactive — "
+        "activate manually in Comexio Studio if needed)"
+    )
+
+
 async def _restore_plan_as_new(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -677,12 +689,15 @@ async def _restore_plan_as_new(
     kind: str,
     slot: int,
     old_id_still_live: bool = False,
+    auto_start: bool = True,
 ) -> None:
     """Recreate a deleted/reassigned plan as a brand-new plan and rebuild it from the snapshot.
 
     old_id_still_live: True for the identity-mismatch/on_conflict='new_id' case, where
     old_fub_id is occupied by an unrelated live plan rather than genuinely deleted — that
     plan's own backup lineage must stay under its own ID, so the rekey below is skipped.
+    auto_start: False leaves the new plan inactive (Comexio creates it that way) instead of
+    starting it via run_fup — same as the copy-restore path.
     """
     plan_name = snapshot.get("plan_name", str(old_fub_id))
     t_start = time.monotonic()
@@ -719,8 +734,9 @@ async def _restore_plan_as_new(
     # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
     # therefore routinely reports result=False even though the data payload IS applied — the
     # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
-    # criterion here; the recreated/expected element+connection counts are.
-    run_ok = await api.function_plan_run_fup(new_fub_id)
+    # criterion here; the recreated/expected element+connection counts are. The structure is
+    # already built by the calls above, so auto_start=False can skip run_fup altogether.
+    run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
     duration = time.monotonic() - t_start
 
     if old_id_still_live:
@@ -741,12 +757,7 @@ async def _restore_plan_as_new(
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    activation_line = (
-        f"Activation: {ICON_SUCCESS} active"
-        if run_ok
-        else f"Activation: {ICON_INACTIVE} not active yet (Comexio always creates new plans inactive — "
-        "activate manually in Comexio Studio if needed)"
-    )
+    activation_line = _new_plan_activation_line(run_ok, auto_start)
     consumer_line = (
         f"Updated references: {', '.join(updated_consumers)}"
         if updated_consumers
@@ -869,15 +880,7 @@ async def _restore_plan_as_copy(
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    if not auto_start:
-        activation_line = f"Activation: {ICON_INACTIVE} not started (auto-start disabled for this restore)"
-    elif run_ok:
-        activation_line = f"Activation: {ICON_SUCCESS} active"
-    else:
-        activation_line = (
-            f"Activation: {ICON_INACTIVE} not active yet (Comexio always creates new plans inactive — "
-            "activate manually in Comexio Studio if needed)"
-        )
+    activation_line = _new_plan_activation_line(run_ok, auto_start)
 
     msg = (
         f"Plan '{new_plan_name}' created as a COPY of '{source_name}' "
@@ -973,6 +976,7 @@ async def _resolve_restore_conflict(
     snapshot_name: str,
     on_conflict: str,
     confirm: bool,
+    auto_start: bool,
 ) -> bool:
     """Handle an identity-mismatch conflict. Returns True if the caller should stop here."""
     if not confirm:
@@ -984,7 +988,15 @@ async def _resolve_restore_conflict(
         return True
     if live_fub is None or on_conflict != "force_override":
         await _restore_plan_as_new(
-            hass, coordinator, api, fub_id, snapshot, kind, slot, old_id_still_live=live_fub is not None
+            hass,
+            coordinator,
+            api,
+            fub_id,
+            snapshot,
+            kind,
+            slot,
+            old_id_still_live=live_fub is not None,
+            auto_start=auto_start,
         )
         await _refresh_service_descriptions(hass)
         return True
@@ -1107,11 +1119,21 @@ async def _run_function_plan_restore(
         snapshot_name,
         on_conflict,
         confirm,
+        auto_start,
     ):
         return
 
     await _restore_plan_in_place(
-        hass, coordinator, api, fub_id, snapshot, kind, slot, plan_hash, identity_was_mismatched=conflict
+        hass,
+        coordinator,
+        api,
+        fub_id,
+        snapshot,
+        kind,
+        slot,
+        plan_hash,
+        identity_was_mismatched=conflict,
+        auto_start=auto_start,
     )
     await _refresh_service_descriptions(hass)
 
