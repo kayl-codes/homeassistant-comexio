@@ -107,7 +107,7 @@ def test_failed_writes_turn_the_result_into_an_error_report() -> None:
     msg = _message(removed=2, failed_writes=["delete M2 Old", "Marker: server address update"])
 
     assert "Sync Finished with errors" in msg
-    assert "2 Web-IO write(s) failed: delete M2 Old, Marker: server address update." in msg
+    assert "2 sync step(s) failed: delete M2 Old, Marker: server address update." in msg
 
 
 def test_failed_write_does_not_read_as_address_updated() -> None:
@@ -121,7 +121,7 @@ def test_failed_write_does_not_read_as_address_updated() -> None:
 def test_failed_writes_note_caps_the_named_list() -> None:
     msg = _message(failed_writes=[f"create M{i}" for i in range(13)])
 
-    assert "13 Web-IO write(s) failed" in msg
+    assert "13 sync step(s) failed" in msg
     assert "create M9" in msg
     assert "create M10" not in msg
     assert "(+3 more)" in msg
