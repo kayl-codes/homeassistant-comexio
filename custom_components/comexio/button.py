@@ -104,16 +104,40 @@ def _format_counts(added: int, updated: int, renamed: int, removed: int) -> str:
 
 
 def _failed_writes_note(failed_writes: list[str]) -> str:
-    """Result-message block naming the Web-IO writes that failed, or "" when none did."""
+    """Result-message block naming the sync steps that failed, or "" when none did."""
     if not failed_writes:
         return ""
     shown = ", ".join(failed_writes[:_FAILED_WRITES_SHOWN])
     hidden = len(failed_writes) - _FAILED_WRITES_SHOWN
     more = f" (+{hidden} more)" if hidden > 0 else ""
     return (
-        f"{ICON_WARNING} {len(failed_writes)} Web-IO write(s) failed: {shown}{more}. "
+        f"{ICON_WARNING} {len(failed_writes)} sync step(s) failed: {shown}{more}. "
         "See the log for the reason, then run the sync again.\n\n"
     )
+
+
+def _plan_failure(plan_name: str, detail: str) -> str:
+    """failed_writes entry for a function plan step that did not complete."""
+    return f"function plan '{plan_name}': {detail}"
+
+
+def _activation_note(ctx: "_SyncContext", plan_name: str, activated: bool) -> str:
+    """Summary-line note for a plan (re)activation; a plan left stopped counts as failed."""
+    if activated:
+        return _NOTE_ACTIVATED
+    ctx.failed_writes.append(_plan_failure(plan_name, "not activated"))
+    return _NOTE_NOT_ACTIVATED
+
+
+def _mark_cancelled(ctx: "_SyncContext", msg: str) -> str:
+    """Flag a user-cancelled run as partial and put the cancel banner above its result.
+
+    cancel_sync only stops further work (delta tasks / cluster-plan wiring loop) — whatever
+    already ran before the flag was set is real and reported below it as-is. The banner and
+    the "partial" sensor state tell the user the requested action did not run to its end.
+    """
+    ctx.failed_writes.append("cancelled by user")
+    return f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -151,7 +175,7 @@ def _sync_notification_title(server_id: str, *, is_error: bool, partial: bool) -
     if is_error:
         return "Comexio Sync Failed"
     if partial:
-        return f"Comexio Sync Finished with errors ({server_id})"
+        return f"Comexio Sync Incomplete ({server_id})"
     return f"Comexio Sync ({server_id})"
 
 
@@ -333,8 +357,9 @@ class _SyncContext:
     # Parsed config of the KNX step's fresh audit, kept only when that step wrote nothing to
     # Comexio — the trigger step then reuses it instead of fetching config + plans again.
     unchanged_config_snapshot: dict[str, Any] | None = None
-    # Web-IO writes Comexio rejected or never answered (the API adapter logged why) — named
-    # in the result message so a failed write never reads as a finished sync.
+    # Steps that did not complete: Web-IO writes Comexio rejected or never answered (the API
+    # adapter logged why), function plan wiring errors, cleanup deletions and a user cancel.
+    # Named in the result message and turn the status sensor to "partial".
     failed_writes: list[str] = field(default_factory=list)
 
 
@@ -545,7 +570,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 # Standalone action: remove HA entities + Function Plan wiring + WebIO commands
                 # for ignored markers/KNX objects that still have legacy remnants.
                 await self._handle_cleanup_entities(
-                    cleanup_entity_ids, api, dev_ids, notif_id, notify_enabled, lp_fub_id
+                    ctx, cleanup_entity_ids, dev_ids, notif_id, notify_enabled, lp_fub_id
                 )
                 return
 
@@ -554,7 +579,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 plan_summary = await self._wire_created_pairs(ctx, [], gap_items)
                 plan_summary += await self._wire_trigger_pairs(ctx)
                 duration = datetime.datetime.now() - start_time
-                msg = self._build_function_plan_add_missing_message(plan_summary, duration)
+                msg = self._build_function_plan_add_missing_message(plan_summary, duration, ctx.failed_writes)
             elif action == "knx_bridge_add_missing":
                 # Standalone action: complete every open KNX write-path leg for every KNX
                 # object that still lacks one — write-path bridge Marker, API-Loopback fan-out,
@@ -566,7 +591,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 # function_plan_missing gap_items, same as function_plan_add_missing above.
                 plan_summary = await self._wire_knx_full(ctx, [], gap_items, refresh_audit=True)
                 duration = datetime.datetime.now() - start_time
-                msg = self._build_function_plan_add_missing_message(plan_summary, duration)
+                msg = self._build_function_plan_add_missing_message(plan_summary, duration, ctx.failed_writes)
             else:
                 (
                     added,
@@ -642,11 +667,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     msg += "\n\n**Function Plan:**\n" + "\n".join(plan_summary)
 
             if self.coordinator.cancel_sync:
-                # cancel_sync only stops further work (delta tasks / cluster-plan wiring loop) —
-                # whatever already ran before the flag was set is real and reported above as-is.
-                # This banner is the only signal the user gets that the run is a partial result,
-                # not the full requested action.
-                msg = f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
+                msg = _mark_cancelled(ctx, msg)
 
             self.coordinator.last_audit_failed = False
             self.coordinator.sync_failed_writes = list(ctx.failed_writes)
@@ -803,32 +824,41 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
 
     @staticmethod
-    def _build_function_plan_add_missing_message(plan_summary: list[str], duration: datetime.timedelta) -> str:
+    def _build_function_plan_add_missing_message(
+        plan_summary: list[str], duration: datetime.timedelta, failed_writes: list[str] | None = None
+    ) -> str:
         """Compose the result notification for the standalone Function Plan wiring action."""
         body = "\n".join(plan_summary) if plan_summary else "Nothing to do — all pairs were already wired."
         duration_str = f"{_mmss(duration.total_seconds())} min"
-        return (
-            f"{ICON_SUCCESS} **Function Plan update finished**\n\n{body}\n\n"
-            f"{ICON_DURATION} Total duration: {duration_str}"
+        failed_note = _failed_writes_note(failed_writes or [])
+        headline = (
+            f"{ICON_WARNING} **Function Plan update finished with errors**"
+            if failed_note
+            else f"{ICON_SUCCESS} **Function Plan update finished**"
         )
+        return f"{headline}\n\n{failed_note}{body}\n\n{ICON_DURATION} Total duration: {duration_str}"
 
     async def _handle_cleanup_entities(
         self,
+        ctx: _SyncContext,
         entity_ids: list[tuple[str, int] | int],
-        api: Any,
         dev_ids: dict[str, str | None],
         notif_id: str,
         notify_enabled: bool,
         lp_fub_id: int | None = None,
     ) -> None:
-        """Remove HA entities, Function Plan elements and WebIO commands for ignored markers/KNX objects."""
+        """Remove HA entities, Function Plan elements and WebIO commands for ignored markers/KNX objects.
+
+        Deletions that failed land in ctx.failed_writes; the caller turns them into a partial sync.
+        """
 
         def _notify(msg: str) -> None:
             # Every call here is this action's terminal result (no separate progress phase of
             # its own) — reusing notif_id in place has the same not-surfaced-as-new problem
             # _update_sync_status's final=True path fixes, see _post_result_notification.
             if notify_enabled:
-                _post_result_notification(self.hass, notif_id, msg, f"Comexio Cleanup ({self.server_id})")
+                title = f"Comexio Cleanup{' Incomplete' if ctx.failed_writes else ''} ({self.server_id})"
+                _post_result_notification(self.hass, notif_id, msg, title)
 
         if not entity_ids:
             # Reachable via a direct press_action service call with no pending audit gap — the
@@ -858,7 +888,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             if not still_ignored:
                 continue
             all_lines.extend(
-                await self._cleanup_entities_for_category(category, still_ignored, api, dev_ids.get(cls), lp_fub_id)
+                await self._cleanup_entities_for_category(ctx, category, still_ignored, dev_ids.get(cls), lp_fub_id)
             )
 
         if not all_lines:
@@ -866,13 +896,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             _LOGGER.info("[%s] cleanup_entities: no entity_ids still ignored, skipping", self.server_id)
             return
 
+        # The sensor turns "partial" and its progress_details keep the report (see _finalize_sync).
+        self.coordinator.sync_failed_writes = list(ctx.failed_writes)
+        if ctx.failed_writes:
+            self.coordinator.sync_progress_text = "\n".join(all_lines)
         _notify("\n".join(all_lines))
         _LOGGER.info("[%s] cleanup_entities done: %s", self.server_id, ", ".join(all_lines))
 
     async def _cleanup_entities_for_category(
-        self, category: SourceCategory, ids: list[int], api: Any, dev_id: str | None, lp_fub_id: int | None
+        self, ctx: _SyncContext, category: SourceCategory, ids: list[int], dev_id: str | None, lp_fub_id: int | None
     ) -> list[str]:
         """Run the entity/Function-Plan/WebIO cleanup for one source category; return summary lines."""
+        api = ctx.api
         deleted_entities = self._delete_source_entities(ids, category)
         lp_count, webio_cmd_ids, stopped_plans, stop_failures = await self._cleanup_function_plan_plans(
             api, ids, lp_fub_id, category
@@ -890,6 +925,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
         lines.extend(self._notify_stopped_plans(stopped_plans))
         lines.extend(self._build_stop_failure_lines(stop_failures))
+        if webio_failed:
+            ctx.failed_writes.append(f"cleanup {category.label}: {webio_failed} Web-IO command deletion(s)")
+        ctx.failed_writes.extend(_plan_failure(name, "left stopped after cleanup") for name, _ in stopped_plans)
+        ctx.failed_writes.extend(_plan_failure(name, "not cleaned up (not stopped)") for name, _ in stop_failures)
         return lines
 
     def _delete_source_entities(self, ids: list[int], category: SourceCategory) -> int:
@@ -1917,6 +1956,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         api = ctx.api
         fub_id, is_fresh = await self.coordinator.resolve_trigger_plan()
         if fub_id is None:
+            ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "not resolved/created"))
             return (
                 f"{ICON_WARNING} Trigger plan '{FUNCTION_PLAN_TRIGGER_PLAN_NAME}': could not resolve/create — see log."
             )
@@ -1943,13 +1983,15 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         errors = bridge_errors + errors
         if errors:
             _LOGGER.warning("[%s] function_plan_add_trigger_pairs errors: %s", self.server_id, errors)
+            ctx.failed_writes.append(_plan_failure(plan_name, f"{len(errors)} error(s)"))
         if added and not is_fresh:
             await async_sort_function_plan(self.hass, self.coordinator, api, fub_id, notify=False, was_active=False)
+        note = ""
         if is_fresh or was_active:
             # create_fup always creates plans inactive (fub_active="0") — a fresh plan must be
             # activated unconditionally, was_active=False would otherwise leave it stopped forever.
-            await api.function_plan_run_fup(fub_id)
-        return _plan_summary_line(plan_name, is_fresh, len(added), len(missing_ids), "trigger pairs", t0, "", errors)
+            note = _activation_note(ctx, plan_name, await api.function_plan_run_fup(fub_id))
+        return _plan_summary_line(plan_name, is_fresh, len(added), len(missing_ids), "trigger pairs", t0, note, errors)
 
     async def _remove_trigger_pairs(self, ctx: _SyncContext, orphan_ids: list[int], ref_type: int = 2) -> str:
         """Remove orphaned source+Flanke pairs from the trigger plan (source lost its suffix).
@@ -1971,10 +2013,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             FUNCTION_PLAN_TRIGGER_PLAN_NAME
         )
         if raw_fub_id is None:
+            ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "missing, orphans not removed"))
             return f"{ICON_WARNING} {len(orphan_ids)} orphaned trigger construct(s) found, but no trigger plan exists."
 
         fub_id = int(raw_fub_id)
         if self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
+            ctx.failed_writes.append(
+                _plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "mapping stale, orphans not removed")
+            )
             return (
                 f"{ICON_WARNING} Trigger plan mapping (fub={fub_id}) no longer points to "
                 f"'{FUNCTION_PLAN_TRIGGER_PLAN_NAME}' — skipped orphan cleanup to avoid touching a user-owned plan."
@@ -1993,11 +2039,22 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             remove_ids, bridge_errors = self._resolve_knx_trigger_bridge_markers(ctx, orphan_ids)
             if bridge_errors:
                 _LOGGER.warning("[%s] remove_trigger_pairs bridge lookup errors: %s", self.server_id, bridge_errors)
+                ctx.failed_writes.append(
+                    _plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, f"{len(bridge_errors)} trigger pair(s) not removed")
+                )
             remove_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
         deleted, plan_stopped = await ctx.api.function_plan_remove_trigger_pairs(
             fub_id, remove_ids, ref_type=remove_ref_type
         )
         note = f", {ICON_WARNING} plan left stopped — please restart it in Comexio" if plan_stopped else ""
+        if plan_stopped:
+            ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "left stopped"))
+        if remove_ids and not deleted:
+            # Stop refused (or the plan was not running) or the delete failed — the orphans are still there.
+            ctx.failed_writes.append(
+                _plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "orphaned trigger pairs not removed")
+            )
+            note += f", {ICON_WARNING} orphans not removed — see log"
         return f"{ICON_DELETE} Removed {deleted} orphaned trigger element(s){note}"
 
     async def _wire_source_clusters(
@@ -2014,12 +2071,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             f"{ICON_WARNING} Cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
         ]
         errors = len(failed_plans)
+        ctx.failed_writes.extend(_plan_failure(name, "not resolved/created") for name in failed_plans)
         if not plan_to_ids:
             if not failed_plans:
                 _LOGGER.warning(
                     "[%s] Cluster plan wiring: no %s cluster plan available", self.server_id, category.label
                 )
                 summary.append(f"{ICON_WARNING} No {category.label} cluster plan available — see log.")
+                ctx.failed_writes.append(f"{category.label} cluster plan: none available")
                 errors = 1
             return summary, 0, errors
 
@@ -2031,6 +2090,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             line, lp_added, lp_errors = await self._add_pairs_to_plan(
                 ctx, fub_id, sorted(cluster_ids), fub_id in created_plans, progress_state, ref_type
             )
+            if lp_errors:
+                ctx.failed_writes.append(_plan_failure(self._plan_name(fub_id), f"{len(lp_errors)} error(s)"))
             summary.append(line)
             added += len(lp_added)
             errors += len(lp_errors)
@@ -2120,10 +2181,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         summary: list[str] = skipped + [
             f"{ICON_WARNING} KNX cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
         ]
+        ctx.failed_writes.extend(_plan_failure(name, "not resolved/created") for name in failed_plans)
         if not plan_to_ids:
             if not failed_plans:
                 _LOGGER.warning("[%s] KNX combined wiring: no KNX cluster plan available", self.server_id)
                 summary.append(f"{ICON_WARNING} No KNX cluster plan available — see log.")
+                ctx.failed_writes.append("KNX cluster plan: none available")
             return summary
 
         # NOT len(all_k_ids): a K-id needing e.g. both the read-path and bridge legs
@@ -2404,6 +2467,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             # such aggregate (it only ever returns summary lines) and mismatch[0] already carries the
             # same information into that summary — accepted as harmless today, but keep in mind if an
             # aggregate error count is ever added for the KNX path too.
+            ctx.failed_writes.append(_plan_failure(plan_name, "renamed during the sync"))
             return mismatch[0]
 
         cluster_set = set(cluster_ids)
@@ -2477,6 +2541,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         if all_errors:
             _LOGGER.warning("[%s] _wire_knx_cluster errors on fub=%s: %s", self.server_id, fub_id, all_errors)
+            ctx.failed_writes.append(_plan_failure(plan_name, f"{len(all_errors)} error(s)"))
 
         # is_fresh's only remaining effect is the "(new)" summary tag below and the was_active
         # override above — the finalize call itself always sorts (is_fresh=False) for the same
@@ -2506,10 +2571,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             f"{ICON_WARNING} IO cluster plan for '{ext}' could not be resolved/created — see log" for ext in failed_exts
         ]
         errors = len(failed_exts)
+        ctx.failed_writes.extend(f"IO cluster plan for '{ext}': not resolved/created" for ext in failed_exts)
         if not ext_plans:
             if not failed_exts:
                 _LOGGER.warning("[%s] Cluster plan wiring: no IO cluster plan available", self.server_id)
                 summary.append(f"{ICON_WARNING} No IO cluster plan available — see log.")
+                ctx.failed_writes.append("IO cluster plan: none available")
                 errors = 1
             return summary, 0, errors
 
@@ -2524,6 +2591,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             line, lp_added, lp_errors = await self._add_io_pairs_to_plan(
                 ctx, fub_id, sorted(ext_cols, key=lambda t: t[1]), by_ext, fub_id in created_plans, progress_state
             )
+            if lp_errors:
+                ctx.failed_writes.append(_plan_failure(self._plan_name(fub_id), f"{len(lp_errors)} error(s)"))
             summary.append(line)
             added += len(lp_added)
             errors += len(lp_errors)
@@ -2622,14 +2691,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if not lp_added:
             # Nothing changed (all pairs already wired) — only undo our own stop_fup.
             self._plan_finalize_status(ctx, plan_name, "restarting plan", "restarting")
-            if was_active:
-                await ctx.api.function_plan_run_fup(fub_id)
+            if was_active and not await ctx.api.function_plan_run_fup(fub_id):
+                return _activation_note(ctx, plan_name, False)
             return ""
 
         if is_fresh:
             # Fresh plan: pairs already sit at their final grid slots — skip the sort pass.
             self._plan_finalize_status(ctx, plan_name, "activating plan", "activating")
-            return _NOTE_ACTIVATED if await ctx.api.function_plan_run_fup(fub_id) else _NOTE_NOT_ACTIVATED
+            return _activation_note(ctx, plan_name, await ctx.api.function_plan_run_fup(fub_id))
 
         return await self._sort_and_reactivate(ctx, fub_id, plan_name, was_active)
 
@@ -2653,7 +2722,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if was_active and not (sort_res and sort_res.get("activated")):
             # Sort was skipped or lost the reactivation (e.g. save_elements_pos failed) —
             # don't leave a previously active plan stopped.
-            note += _NOTE_ACTIVATED if await ctx.api.function_plan_run_fup(fub_id) else _NOTE_NOT_ACTIVATED
+            note += _activation_note(ctx, plan_name, await ctx.api.function_plan_run_fup(fub_id))
         return note
 
     async def _add_io_pairs_to_plan(
@@ -2737,8 +2806,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 step_info="Function Plan: activating",
             )
             activated = await api.function_plan_run_fup(fub_id)
-            if added:
-                note = _NOTE_ACTIVATED if activated else _NOTE_NOT_ACTIVATED
+            if added or not activated:
+                note = _activation_note(ctx, plan_name, activated)
 
         return _plan_summary_line(plan_name, is_fresh, len(added), n_total, "IO pairs", t0, note, errors), added, errors
 

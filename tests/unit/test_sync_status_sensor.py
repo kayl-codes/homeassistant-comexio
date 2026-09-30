@@ -137,9 +137,7 @@ def test_single_string_failed_writes_is_kept_as_one_name() -> None:
 
 def test_notification_title() -> None:
     assert _sync_notification_title("iosrv1", is_error=True, partial=True) == "Comexio Sync Failed"
-    assert _sync_notification_title("iosrv1", is_error=False, partial=True) == (
-        "Comexio Sync Finished with errors (iosrv1)"
-    )
+    assert _sync_notification_title("iosrv1", is_error=False, partial=True) == "Comexio Sync Incomplete (iosrv1)"
     assert _sync_notification_title("iosrv1", is_error=False, partial=False) == "Comexio Sync (iosrv1)"
 
 

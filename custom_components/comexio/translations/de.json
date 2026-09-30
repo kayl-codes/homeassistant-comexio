@@ -176,7 +176,7 @@
           "idle": "Bereit",
           "syncing": "Synchronisiert...",
           "error": "Fehler",
-          "partial": "Mit Fehlern beendet"
+          "partial": "Unvollständig"
         }
       },
       "offline_extensions": {
