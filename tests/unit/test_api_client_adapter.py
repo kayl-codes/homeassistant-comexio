@@ -565,14 +565,47 @@ def test_stopping_a_plan_that_is_not_running_is_success(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
-def test_cleanup_leaves_a_plan_alone_that_is_not_running(comexio_api: ComexioAPI, client: MagicMock) -> None:
-    # Review: a restart after the cleanup would start a plan the user had stopped.
-    refusal = "Stopping function plan 33 was refused: {'error': 'stop_error', 'state': 0, 'return': '0:not_found'}"
-    _fail(client, "stop_function_plan", ComexioRequestRejectedError(refusal))
+_NOT_RUNNING = "Stopping function plan 33 was refused: {'error': 'stop_error', 'state': 0, 'return': '0:not_found'}"
+
+
+def test_cleanup_of_a_plan_that_is_not_running_leaves_it_stopped(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # (am): a stopped plan was skipped and reported as not cleaned up, although it needs no
+    # stop to be cleaned up; a restart would start a plan the user had stopped.
+    _fail(client, "stop_function_plan", ComexioRequestRejectedError(_NOT_RUNNING))
     client.delete_function_plan_elements = AsyncMock()
     client.run_function_plan = AsyncMock()
-    result = asyncio.run(comexio_api._delete_plan_elements_and_restart(33, [1, 2], [], "TestPlan"))
+    result = asyncio.run(comexio_api._delete_plan_elements_and_restart(33, [1, 2], [40], "TestPlan"))
+    assert result == {
+        "deleted_elem_count": 2,
+        "webio_cmd_ids": [40],
+        "fub_id": 33,
+        "plan_stopped": False,
+        "plan_name": "TestPlan",
+        "was_running": False,
+    }
+    client.delete_function_plan_elements.assert_awaited_once()
+    client.run_function_plan.assert_not_awaited()
+
+
+def test_failed_cleanup_of_a_plan_that_is_not_running_does_not_start_it(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    _fail(client, "stop_function_plan", ComexioRequestRejectedError(_NOT_RUNNING))
+    _fail(client, "delete_function_plan_elements", ComexioRequestRejectedError("not confirmed"))
+    client.run_function_plan = AsyncMock()
+    result = asyncio.run(comexio_api._delete_plan_elements_and_restart(33, [1, 2], [40], "TestPlan"))
+    assert result["delete_failed"] is True
+    assert result["plan_stopped"] is False
+    client.run_function_plan.assert_not_awaited()
+
+
+def test_cleanup_is_skipped_when_a_running_plan_refuses_to_stop(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    _fail(client, "stop_function_plan", ComexioRequestRejectedError("not confirmed"))
+    client.delete_function_plan_elements = AsyncMock()
+    client.run_function_plan = AsyncMock()
+    result = asyncio.run(comexio_api._delete_plan_elements_and_restart(33, [1, 2], [40], "TestPlan"))
     assert result["stop_failed"] is True
+    assert result["webio_cmd_ids"] == []
     client.delete_function_plan_elements.assert_not_awaited()
     client.run_function_plan.assert_not_awaited()
 

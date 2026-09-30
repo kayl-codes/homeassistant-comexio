@@ -141,9 +141,20 @@ def _record_plan_cleanup_failures(
         if fub_id not in resorted
     )
     ctx.failed_writes.extend(
-        _plan_failure(name, "not cleaned up (not stopped)") for name, _ in outcome["stop_failures"]
+        _plan_failure(name, "not cleaned up (could not be stopped)") for name, _ in outcome["stop_failures"]
     )
     ctx.failed_writes.extend(_plan_failure(name, detail) for name, detail in outcome["failures"])
+
+
+def _add_resort_plans(resort_fub_ids: dict[int, bool], outcome: dict[str, Any]) -> None:
+    """Add a plan cleanup's touched plans to resort_fub_ids, each mapped to whether it was running.
+
+    A plan touched by both cleanups keeps the first cleanup's answer: if that one stopped it and
+    could not restart it, the second finds it stopped — which is not the state before the sync.
+    """
+    inactive = set(outcome.get("inactive_fub_ids", []))
+    for fub_id in outcome["touched_fub_ids"]:
+        resort_fub_ids.setdefault(fub_id, fub_id not in inactive)
 
 
 def _activation_note(ctx: "_SyncContext", plan_name: str, activated: bool) -> str:
@@ -1581,16 +1592,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def _cleanup_delta_debris(
         self, ctx: _SyncContext, cls: str, tasks_to_do: list[dict], cls_dangling: list[dict]
-    ) -> tuple[set[int], int]:
+    ) -> tuple[dict[int, bool], int]:
         """Unwire orphaned Web-IO commands about to be deleted and remove leftover Function
         Plan debris, ahead of running the delta tasks themselves (see _execute_delta_tasks).
 
         Returns (fub_ids touched — for the caller to re-sort, since deleting an element opens
-        a gap in the plan's grid — and the total element count removed). Plans not stopped
-        for the cleanup, not loadable or not cleaned go to ctx.failed_writes, and so do plans
-        left stopped — except those the caller re-sorts, whose reactivation _sort_checked judges.
+        a gap in the plan's grid — each mapped to whether the plan was running before the
+        cleanup, and the total element count removed). Plans that could not be stopped, not
+        loadable or not cleaned go to ctx.failed_writes, and so do plans left stopped — except
+        those the caller re-sorts, whose reactivation _sort_checked judges.
         """
-        resort_fub_ids: set[int] = set()
+        resort_fub_ids: dict[int, bool] = {}
         debris_removed = 0
 
         # Unwire any Function-Plan element still connected to an orphan before deleting its
@@ -1604,7 +1616,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         ]
         if delete_webio_ids and not getattr(self.coordinator, "cancel_sync", False):
             unwired = await self.coordinator.unwire_webio_commands(delete_webio_ids)
-            resort_fub_ids.update(unwired["touched_fub_ids"])
+            _add_resort_plans(resort_fub_ids, unwired)
             debris_removed += unwired["deleted_elem_count"]
             _record_plan_cleanup_failures(ctx, unwired, set(unwired["touched_fub_ids"]))
 
@@ -1615,7 +1627,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         dangling_ref_ids = [i["ref_id"] for i in cls_dangling]
         if dangling_ref_ids and not getattr(self.coordinator, "cancel_sync", False):
             cleaned = await self.coordinator.delete_dangling_plan_elements(source_type, dangling_ref_ids)
-            resort_fub_ids.update(cleaned["touched_fub_ids"])
+            _add_resort_plans(resort_fub_ids, cleaned)
             debris_removed += cleaned["deleted_elem_count"]
             _record_plan_cleanup_failures(ctx, cleaned, set(cleaned["touched_fub_ids"]))
 
@@ -1684,8 +1696,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # ever return fub_ids that already passed coordinator._is_managed_function_plan() —
         # resort touching a non-"{prefix} - "-named plan (e.g. a user's own hand-laid-out
         # plan) would silently rewrite its layout, so that filter must stay enforced at the
-        # source rather than re-checked here. was_active=True: the plan ran before the cleanup
-        # (a stopped one is skipped by it), and a restart the cleanup lost is redone here.
+        # source rather than re-checked here. was_active: whether the plan ran before the
+        # cleanup — a restart the cleanup lost is redone here, a plan that was not running
+        # (cleaned up all the same) stays stopped.
         #
         # Each sort is a real multi-step Comexio round-trip (stop_fup/delete_elements/
         # save_elements_pos/run_fup) that can take several seconds per plan — without a status
@@ -1701,7 +1714,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     pct=pct_start,
                     step_info=f"{label}: re-sorting plan {idx}/{total_resorts} (fub {fub_id})",
                 )
-            await self._sort_checked(ctx, fub_id, api.function_plan_name(fub_id), was_active=True)
+            await self._sort_checked(ctx, fub_id, api.function_plan_name(fub_id), was_active=resort_fub_ids[fub_id])
 
         for idx, task in enumerate(tasks_to_do):
             if getattr(self.coordinator, "cancel_sync", False):
@@ -2094,7 +2107,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if plan_stopped:
             ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "left stopped"))
         if remove_ids and not deleted:
-            # Stop refused (or the plan was not running) or the delete failed — the orphans are still there.
+            # Stop refused or the delete failed — the orphans are still there.
             ctx.failed_writes.append(
                 _plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "orphaned trigger pairs not removed")
             )

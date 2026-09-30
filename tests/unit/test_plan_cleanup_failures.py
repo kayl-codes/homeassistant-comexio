@@ -11,6 +11,7 @@ import pytest
 from custom_components.comexio.button import ComexioSyncButton, _failed_writes_note
 from custom_components.comexio.const import SOURCE_CATEGORIES, WebioClass
 from custom_components.comexio.coordinator import (
+    PLAN_CMD_NOT_FOUND,
     PLAN_DELETE_FAILED,
     PLAN_LOAD_FAILED,
     ComexioCoordinator,
@@ -71,6 +72,23 @@ def test_unwire_reports_a_failed_element_deletion() -> None:
     assert result["failures"] == [(PLAN, PLAN_DELETE_FAILED)]
 
 
+def test_unwire_reports_a_web_io_command_it_cannot_resolve() -> None:
+    # (an): the command stays in Comexio after its wiring was removed — only logged before.
+    api = _api(
+        function_plan_load_elements=AsyncMock(return_value={"elements": {}, "connections": {}}),
+        _find_webio_wiring=MagicMock(return_value=[11, 12]),
+        _delete_plan_elements_and_restart=AsyncMock(
+            return_value=_delete_result(deleted_elem_count=4, webio_cmd_ids=[40, 41])
+        ),
+    )
+    coordinator = _coordinator(api)
+    coordinator.data = {"webio_commands": {"a": {"webIoId": 40, "cmdId": 900}}}
+    with patch.object(ComexioCoordinator, "_is_managed_function_plan", return_value=True):
+        result = asyncio.run(coordinator.unwire_webio_commands([40, 41], preferred_fub_id=5))
+    assert result["cmd_ids"] == [900]
+    assert result["failures"] == [(PLAN, f"{PLAN_CMD_NOT_FOUND} (webIoId 41)")]
+
+
 def test_dangling_cleanup_reports_load_delete_and_stop_outcomes() -> None:
     # (y): delete_dangling_plan_elements reported neither a plan it could not load, nor a
     # failed delete, nor a plan left stopped or not stoppable.
@@ -97,6 +115,7 @@ def test_dangling_cleanup_reports_load_delete_and_stop_outcomes() -> None:
     assert result["stop_failures"] == [(PLAN, 6)]
     assert result["deleted_elem_count"] == 0
     assert result["touched_fub_ids"] == []
+    assert result["inactive_fub_ids"] == []
 
 
 def _ctx(api: Any = None) -> SimpleNamespace:
@@ -126,12 +145,71 @@ def test_delta_debris_failures_are_failed_steps() -> None:
     ctx = _ctx()
     tasks = [{"type": "delete", "item": {"webIoId": 40}}]
     resort, removed = asyncio.run(button._cleanup_delta_debris(ctx, WebioClass.MARKER, tasks, [{"ref_id": "7"}]))
-    assert (resort, removed) == ({5}, 4)
+    assert (resort, removed) == ({5: True}, 4)
     assert ctx.failed_writes == [
         "function plan 'P8': left stopped after cleanup",
-        "function plan 'P6': not cleaned up (not stopped)",
+        "function plan 'P6': not cleaned up (could not be stopped)",
         "function plan 'P7': x",
     ]
+
+
+def test_plan_that_was_not_running_is_resorted_as_inactive() -> None:
+    # (am) review: a stopped plan is cleaned up now, so it reaches the re-sort — which must not start it.
+    # Plan 5 was running and the unwire could not restart it; the dangling cleanup then finds it
+    # stopped. That must not turn it into "was not running" — the re-sort has to restart it.
+    button = _button(
+        unwire_webio_commands=AsyncMock(
+            return_value={
+                "touched_fub_ids": [5, 6],
+                "inactive_fub_ids": [6],
+                "deleted_elem_count": 4,
+                "cmd_ids": [],
+                "stopped_plans": [(PLAN, 5)],
+                "stop_failures": [],
+                "failures": [],
+            }
+        ),
+        delete_dangling_plan_elements=AsyncMock(
+            return_value={
+                "touched_fub_ids": [5, 6],
+                "inactive_fub_ids": [5, 6],
+                "deleted_elem_count": 1,
+                "stopped_plans": [],
+                "stop_failures": [],
+                "failures": [],
+            }
+        ),
+    )
+    ctx = _ctx()
+    tasks = [{"type": "delete", "item": {"webIoId": 40}}]
+    resort, _ = asyncio.run(button._cleanup_delta_debris(ctx, WebioClass.MARKER, tasks, [{"ref_id": "7"}]))
+    assert resort == {5: True, 6: False}
+    assert not ctx.failed_writes
+
+
+def test_unwire_marks_a_plan_that_was_not_running() -> None:
+    api = _api(
+        function_plan_load_elements=AsyncMock(return_value={"elements": {}, "connections": {}}),
+        _find_webio_wiring=MagicMock(return_value=[11, 12]),
+        _delete_plan_elements_and_restart=AsyncMock(
+            return_value=_delete_result(deleted_elem_count=2, plan_stopped=False, was_running=False)
+        ),
+    )
+    coordinator = _coordinator(api)
+    with patch.object(ComexioCoordinator, "_is_managed_function_plan", return_value=True):
+        result = asyncio.run(coordinator.unwire_webio_commands([40], preferred_fub_id=5))
+    assert result["touched_fub_ids"] == [5]
+    assert result["inactive_fub_ids"] == [5]
+    assert result["stopped_plans"] == []
+    assert result["failures"] == []
+
+
+def test_sort_of_an_inactive_plan_does_not_start_it() -> None:
+    ctx = _ctx(SimpleNamespace(function_plan_run_fup=AsyncMock(return_value=True)))
+    note = _sort(_button(), ctx, {"success": True, "activated": False, "duration": 1.0}, was_active=False)
+    assert note == ", sorted in 1.0s"
+    assert not ctx.failed_writes
+    ctx.api.function_plan_run_fup.assert_not_awaited()
 
 
 def _sort(button: ComexioSyncButton, ctx: SimpleNamespace, sort_res: Any, **kwargs: Any) -> str:
@@ -210,6 +288,58 @@ def test_visualize_svg_returns_the_preview_url() -> None:
     ):
         response = asyncio.run(plan_actions.handle_function_plan_visualize(MagicMock(), call))
     assert response == {"plan_name": PLAN, "url": "/local/comexio/plan_5.svg"}
+
+
+def _visualize_api(live_fubs: dict[str, Any] | list | None) -> SimpleNamespace:
+    fub_data = {"5": {"Name": PLAN}}
+    raw = {} if live_fubs is None else {"Fubs": live_fubs}
+    return SimpleNamespace(
+        fub_data=fub_data,
+        get_raw_config=AsyncMock(return_value=raw),
+        update_fub_cache_entry=lambda fid, info: fub_data.__setitem__(str(fid), info),
+        function_plan_load_elements=AsyncMock(return_value={"elements": {}, "connections": {}}),
+    )
+
+
+def _resolve_live(api: SimpleNamespace, fub_id: int) -> tuple[Any, MagicMock]:
+    with (
+        patch.object(
+            plan_actions, "_resolve_function_plan_context", AsyncMock(return_value=(MagicMock(), api, fub_id))
+        ),
+        patch.object(plan_actions.persistent_notification, "async_create") as notify,
+    ):
+        source = asyncio.run(plan_actions._resolve_visualize_live_source(MagicMock(), MagicMock(), "Error"))
+    return source, notify
+
+
+def test_visualize_rejects_an_unknown_plan() -> None:
+    # (ao): Comexio answers an unknown fub_id with an empty plan, which was rendered as a valid one.
+    api = _visualize_api({"5": {"Name": PLAN}})
+    source, notify = _resolve_live(api, 99999)
+    assert source is None
+    assert notify.call_args.args[1] == "Plan 99999 does not exist."
+    api.function_plan_load_elements.assert_not_awaited()
+
+
+def test_visualize_looks_up_a_plan_newer_than_the_cached_list() -> None:
+    api = _visualize_api({"5": {"Name": PLAN}, "7": {"Name": "New plan"}})
+    source, notify = _resolve_live(api, 7)
+    assert source is not None
+    assert source[3] == "New plan"
+    notify.assert_not_called()
+
+
+def test_visualize_says_when_the_plan_list_could_not_be_read() -> None:
+    source, notify = _resolve_live(_visualize_api(None), 7)
+    assert source is None
+    assert notify.call_args.args[1] == "Plan 7 could not be checked (plan list not readable)."
+
+
+def test_visualize_rejects_a_plan_when_the_server_has_none() -> None:
+    # PHP encodes an empty plan list as [] — .get() on it used to crash the service.
+    source, notify = _resolve_live(_visualize_api([]), 7)
+    assert source is None
+    assert notify.call_args.args[1] == "Plan 7 does not exist."
 
 
 def test_visualize_failure_raises_when_a_response_is_requested() -> None:

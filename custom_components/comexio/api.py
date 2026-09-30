@@ -4377,16 +4377,16 @@ class ComexioAPI:
     ) -> dict:
         """Stop the plan, delete the given elements, restart it, and build the result dict.
 
-        A plan that is not running is left alone (reported as stop_failed, as before): the
-        restart would start a plan the user had stopped.
+        A plan that is not running is cleaned up all the same and left stopped: deleting
+        elements needs a stopped plan, which it already is, and a restart would start a plan
+        the user had stopped. Only a running plan that refuses to stop is a stop_failed.
         """
         stopped = await self._stop_plan(fub_id)
-        if not stopped:
+        if stopped is False:
             _LOGGER.warning(
-                "_delete_plan_elements_and_restart: plan '%s' (fub=%s) %s, cleanup skipped",
+                "_delete_plan_elements_and_restart: plan '%s' (fub=%s) could not be stopped, cleanup skipped",
                 plan_name,
                 fub_id,
-                "is not running — left untouched" if stopped is None else "could not be stopped",
             )
             return {
                 "deleted_elem_count": 0,
@@ -4397,10 +4397,11 @@ class ComexioAPI:
                 "stop_failed": True,
             }
 
+        was_running = stopped is True
         success = await self.function_plan_delete_elements(elem_ids_to_delete)
         if not success:
             _LOGGER.error("_delete_plan_elements_and_restart: element deletion failed")
-            restart_after_failure_ok = await self.function_plan_run_fup(fub_id)
+            restart_after_failure_ok = not was_running or await self.function_plan_run_fup(fub_id)
             return {
                 "deleted_elem_count": 0,
                 "webio_cmd_ids": [],
@@ -4408,15 +4409,20 @@ class ComexioAPI:
                 "plan_stopped": not restart_after_failure_ok,
                 "plan_name": plan_name,
                 "delete_failed": True,
+                "was_running": was_running,
             }
 
-        restart_ok = await self.function_plan_run_fup(fub_id)
+        restart_ok = not was_running or await self.function_plan_run_fup(fub_id)
+        if not was_running:
+            restart_note = "was not running — left stopped"
+        else:
+            restart_note = "restarted" if restart_ok else "restart failed — left stopped"
         _LOGGER.info(
             "_delete_plan_elements_and_restart: deleted %d elements, webio_cmd_ids=%s (plan '%s' %s)",
             len(elem_ids_to_delete),
             webio_cmd_ids,
             plan_name,
-            "restarted" if restart_ok else "restart failed — left stopped",
+            restart_note,
         )
         return {
             "deleted_elem_count": len(elem_ids_to_delete),
@@ -4424,6 +4430,7 @@ class ComexioAPI:
             "fub_id": fub_id,
             "plan_stopped": not restart_ok,
             "plan_name": plan_name,
+            "was_running": was_running,
         }
 
     async def set_value(

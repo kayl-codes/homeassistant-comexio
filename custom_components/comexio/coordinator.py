@@ -327,6 +327,7 @@ async def webio_still_present(lookup: Callable[[str], Awaitable[Any]], name: str
 # "failures" lists of unwire_webio_commands / delete_dangling_plan_elements.
 PLAN_LOAD_FAILED = "could not be loaded, cleanup skipped"
 PLAN_DELETE_FAILED = "element deletion failed"
+PLAN_CMD_NOT_FOUND = "Web-IO command not found, not deleted"
 
 
 def plan_cleanup_outcome(
@@ -352,6 +353,8 @@ def _append_cleanup_outcome(outcome: dict[str, Any], result: dict, fub_id: int) 
     if result.get("deleted_elem_count", 0) > 0:
         outcome["deleted_elem_count"] += result["deleted_elem_count"]
         outcome["touched_fub_ids"].append(fub_id)
+        if result.get("was_running") is False:
+            outcome["inactive_fub_ids"].append(fub_id)
     stopped_plan, stop_failure, failure = plan_cleanup_outcome(result, fub_id)
     for key, value in (("stopped_plans", stopped_plan), ("stop_failures", stop_failure), ("failures", failure)):
         if value:
@@ -4230,7 +4233,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Unwire the given webio_ids from ONE plan and resolve their real cmdIds.
 
         Returns {"deleted_elem_count", "cmd_ids", "stopped_plan" (name, fub_id)|None,
-        "stop_failure" (name, fub_id)|None, "failure" (name, detail)|None, "touched" bool}
+        "stop_failure" (name, fub_id)|None, "failures" [(name, detail), ...], "touched" bool,
+        "was_running" bool — False for a plan that was not running and stays stopped}
         for this single plan — aggregated by the caller across every plan (see
         unwire_webio_commands).
         """
@@ -4247,8 +4251,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "cmd_ids": [],
                 "stopped_plan": None,
                 "stop_failure": None,
-                "failure": None,
+                "failures": [],
                 "touched": False,
+                "was_running": True,
             }
 
         elem_ids = list(dict.fromkeys(elem_ids))
@@ -4256,6 +4261,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fub_id, elem_ids, found_webio_ids, self.api.function_plan_name(fub_id)
         )
         stopped_plan, stop_failure, failure = plan_cleanup_outcome(result, fub_id)
+        failures = [failure] if failure else []
 
         # webio_cmd_ids echoes back only the ids actually unwired (empty on failure) —
         # resolving cmdIds only for those avoids deleting a command whose plan element
@@ -4265,19 +4271,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             cmd_id = webio_id_to_cmd_id.get(str(webio_id))
             if cmd_id is not None:
                 cmd_ids.append(cmd_id)
-            else:
-                _LOGGER.warning(
-                    "[%s] unwire_webio_commands: no cmdId found for webIoId=%s, skipping command deletion",
-                    self.server_id,
-                    webio_id,
-                )
+                continue
+            _LOGGER.warning(
+                "[%s] unwire_webio_commands: no cmdId found for webIoId=%s, skipping command deletion",
+                self.server_id,
+                webio_id,
+            )
+            # Unwired from the plan, but the command itself stays in Comexio — a failed step.
+            failures.append((result.get("plan_name", "?"), f"{PLAN_CMD_NOT_FOUND} (webIoId {webio_id})"))
         return {
             "deleted_elem_count": result.get("deleted_elem_count", 0),
             "cmd_ids": cmd_ids,
             "stopped_plan": stopped_plan,
             "stop_failure": stop_failure,
-            "failure": failure,
+            "failures": failures,
             "touched": result.get("deleted_elem_count", 0) > 0,
+            "was_running": result.get("was_running") is not False,
         }
 
     async def unwire_webio_commands(self, webio_ids: list[int], preferred_fub_id: int | None = None) -> dict[str, Any]:
@@ -4285,18 +4294,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         For each webio_id: locates its WebIO element + connected source element (marker or
         IO) across managed plans (or just preferred_fub_id if given), deletes both, restarts
-        the plan. The real Web-IO command id is resolved from self.data["webio_commands"]
+        the plan if it was running. The real Web-IO command id is resolved from self.data["webio_commands"]
         (webIoId -> cmdId) — never guessed from a plan element's ref_id, which IS the
         webIoId, not the WebCommandId (see project-logikplan-api memory).
 
         Returns {"deleted_elem_count": int, "cmd_ids": list[int], "stopped_plans": [...],
-        "stop_failures": [...], "failures": [(name, detail), ...], "touched_fub_ids": list[int]}.
+        "stop_failures": [...], "failures": [(name, detail), ...], "touched_fub_ids": list[int],
+        "inactive_fub_ids": list[int]}.
         failures lists plans that could not be loaded (wiring not checked) or whose element
-        deletion failed — both leave Function-Plan debris behind. cmd_ids only includes commands
+        deletion failed — both leave Function-Plan debris behind — and unwired commands whose
+        cmdId could not be resolved, which stay in Comexio. cmd_ids only includes commands
         actually found wired and successfully unwired; the caller is responsible for deleting
         each via api.delete_single_command afterwards. touched_fub_ids lists plans that had at
         least one element successfully removed — useful for a caller that wants to re-sort the
-        plan afterwards (deletion opens a gap in the grid that a sort would close).
+        plan afterwards (deletion opens a gap in the grid that a sort would close);
+        inactive_fub_ids the subset that was not running, cleaned up and left stopped, which
+        such a re-sort must not start.
         """
         webio_id_to_cmd_id = {
             str(cmd["webIoId"]): cmd.get("cmdId")
@@ -4312,6 +4325,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         stop_failures: list[tuple[str, int]] = []
         failures = self.plan_load_failures(load_failures)
         touched_fub_ids: list[int] = []
+        inactive_fub_ids: list[int] = []
 
         for fub_id, ids in plan_to_ids.items():
             # plan_to_ids only ever holds fub_ids resolved from `plans`, so this is always set.
@@ -4321,12 +4335,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             cmd_ids.extend(plan_result["cmd_ids"])
             if plan_result["touched"]:
                 touched_fub_ids.append(fub_id)
+                if not plan_result["was_running"]:
+                    inactive_fub_ids.append(fub_id)
             if plan_result["stop_failure"]:
                 stop_failures.append(plan_result["stop_failure"])
             if plan_result["stopped_plan"]:
                 stopped_plans.append(plan_result["stopped_plan"])
-            if plan_result["failure"]:
-                failures.append(plan_result["failure"])
+            failures.extend(plan_result["failures"])
 
         return {
             "deleted_elem_count": deleted_elem_count,
@@ -4335,6 +4350,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "stop_failures": stop_failures,
             "failures": failures,
             "touched_fub_ids": list(dict.fromkeys(touched_fub_ids)),
+            "inactive_fub_ids": list(dict.fromkeys(inactive_fub_ids)),
         }
 
     def plan_load_failures(self, fub_ids: list[int]) -> list[tuple[str, str]]:
@@ -5127,8 +5143,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Unlike unwire_webio_commands, there is no Web-IO command to resolve/delete here (it's
         already gone); this is a plain element delete + plan restart. Returns
-        {"deleted_elem_count": int, "touched_fub_ids": list[int], "stopped_plans": [...],
-        "stop_failures": [...], "failures": [...]} — the last three as in unwire_webio_commands.
+        {"deleted_elem_count": int, "touched_fub_ids": list[int], "inactive_fub_ids": list[int],
+        "stopped_plans": [...], "stop_failures": [...], "failures": [...]} — the last four as in
+        unwire_webio_commands.
 
         `ref_ids` reflects a snapshot potentially taken cycles ago and is a global judgement
         (dangling across all managed plans combined) — the same ref_id can also exist as a
@@ -5155,6 +5172,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         outcome: dict[str, Any] = {
             "deleted_elem_count": 0,
             "touched_fub_ids": [],
+            "inactive_fub_ids": [],
             "stopped_plans": [],
             "stop_failures": [],
             "failures": self.plan_load_failures(load_failures),
