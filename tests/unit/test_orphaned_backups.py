@@ -1,0 +1,266 @@
+"""Repairs for the backups of deleted function plans (function_plan_backup.py, orphaned_backups.py)."""
+
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from custom_components.comexio import function_plan_backup as backup_module, orphaned_backups
+from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager, is_orphaned_identity
+from custom_components.comexio.orphaned_backups import (
+    BACKUPS_DOC_URL,
+    async_audit_orphaned_backups,
+    orphaned_backup_issue_id,
+    repair_placeholders,
+)
+
+SERVER_ID = "cx1"
+CUTOFF = datetime(2026, 6, 1, tzinfo=UTC)
+OLD = "2026-01-10T08:00:00+00:00"
+RECENT = "2026-09-01T08:00:00+00:00"
+# Live $Fubs: fub 1 "Lights" still exists, fub 2 was reused by a different plan, fub 3 is gone.
+LIVE_FUBS = {"1": {"Name": "Lights"}, "2": {"Name": "Heating"}}
+
+
+class FakeStore:
+    """In-memory stand-in for homeassistant.helpers.storage.Store, keyed by storage key."""
+
+    saved: dict[str, Any] = {}
+
+    def __init__(self, _hass: Any, _version: int, key: str) -> None:
+        self.key = key
+
+    async def async_load(self) -> Any:
+        return FakeStore.saved.get(self.key)
+
+    async def async_save(self, data: Any) -> None:
+        FakeStore.saved[self.key] = data
+
+
+def _snap(captured_at: str) -> dict[str, Any]:
+    return {"captured_at": captured_at, "elements": {}, "connections": {}}
+
+
+@pytest.fixture
+def manager(monkeypatch: pytest.MonkeyPatch) -> FunctionPlanBackupManager:
+    """Manager whose stores hold: a live plan, a reused ID, an old orphan and a recent orphan."""
+    FakeStore.saved = {
+        f"{DOMAIN}_logikplan_auto_{SERVER_ID}": {
+            "1": {"Lights": [_snap(OLD)]},
+            "2": {"Pumps": [_snap(OLD), _snap(OLD)]},
+            "3": {"Garage": [_snap(RECENT)]},
+        },
+        f"{DOMAIN}_logikplan_changes_{SERVER_ID}": {"2": {"Pumps": [_snap(OLD)]}},
+    }
+    monkeypatch.setattr(backup_module, "Store", FakeStore)
+    return FunctionPlanBackupManager(MagicMock(), SERVER_ID)
+
+
+def _kept_saved() -> list[dict[str, Any]]:
+    return FakeStore.saved[f"{DOMAIN}_function_plan_backup_kept_{SERVER_ID}"]["identities"]
+
+
+@pytest.mark.parametrize(
+    ("fub_id", "plan_name", "expected"),
+    [
+        (1, "Lights", False),  # live
+        (2, "Pumps", True),  # ID reused by another plan
+        (3, "Garage", True),  # ID gone
+    ],
+)
+def test_is_orphaned_identity(fub_id: int, plan_name: str, expected: bool) -> None:
+    assert is_orphaned_identity(LIVE_FUBS, fub_id, plan_name) is expected
+
+
+def test_is_orphaned_identity_without_live_plans_is_never_orphaned() -> None:
+    assert is_orphaned_identity({}, 3, "Garage") is False
+
+
+def test_expired_orphans_lists_only_orphans_past_the_cutoff(manager: FunctionPlanBackupManager) -> None:
+    expired = asyncio.run(manager.async_expired_orphans(LIVE_FUBS, CUTOFF))
+
+    # "Lights" is live despite its old snapshot, "Garage" is orphaned but recent.
+    assert expired == [{"fub_id": 2, "plan_name": "Pumps", "count": 3, "captured_at": OLD}]
+
+
+def test_expired_orphans_without_live_plans_is_none(manager: FunctionPlanBackupManager) -> None:
+    """A failed $Fubs fetch must neither raise nor clear a repair."""
+    assert asyncio.run(manager.async_expired_orphans({}, CUTOFF)) is None
+
+
+def test_kept_orphan_is_neither_listed_nor_purged(manager: FunctionPlanBackupManager) -> None:
+    async def run() -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]]]:
+        await manager.async_keep_orphaned(2, "Pumps")
+        return await manager.async_expired_orphans(LIVE_FUBS, CUTOFF), await manager.async_purge_orphaned(
+            LIVE_FUBS, CUTOFF
+        )
+
+    expired, purged = asyncio.run(run())
+
+    assert expired == []
+    assert purged == []
+    assert _kept_saved() == [{"fub_id": 2, "plan_name": "Pumps"}]
+    assert FakeStore.saved[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["2"]["Pumps"]
+
+
+def test_kept_identity_is_forgotten_once_the_plan_is_live_again(manager: FunctionPlanBackupManager) -> None:
+    """A plan that comes back and is deleted again must be asked about again."""
+    live_again = {**LIVE_FUBS, "2": {"Name": "Pumps"}}
+
+    async def run() -> list[dict[str, Any]] | None:
+        await manager.async_keep_orphaned(2, "Pumps")
+        await manager.async_expired_orphans(live_again, CUTOFF)
+        return await manager.async_expired_orphans(LIVE_FUBS, CUTOFF)
+
+    assert asyncio.run(run()) == [{"fub_id": 2, "plan_name": "Pumps", "count": 3, "captured_at": OLD}]
+    assert _kept_saved() == []
+
+
+def test_kept_identity_is_forgotten_once_its_snapshots_are_deleted(manager: FunctionPlanBackupManager) -> None:
+    async def run() -> None:
+        await manager.async_keep_orphaned(2, "Pumps")
+        await manager.async_delete_plan_backups(2, "Pumps")
+        await manager.async_expired_orphans(LIVE_FUBS, CUTOFF)
+
+    asyncio.run(run())
+
+    assert _kept_saved() == []
+
+
+def test_purge_deletes_only_expired_orphans(manager: FunctionPlanBackupManager) -> None:
+    purged = asyncio.run(manager.async_purge_orphaned(LIVE_FUBS, CUTOFF))
+
+    assert purged == [{"fub_id": 2, "plan_name": "Pumps", "removed": 3, "captured_at": OLD}]
+    assert FakeStore.saved[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"] == {
+        "1": {"Lights": [_snap(OLD)]},
+        "3": {"Garage": [_snap(RECENT)]},
+    }
+    assert FakeStore.saved[f"{DOMAIN}_logikplan_changes_{SERVER_ID}"] == {}
+
+
+def test_issue_id_is_stable_and_separates_plan_names() -> None:
+    issue_id = orphaned_backup_issue_id(SERVER_ID, 2, "Pumps")
+
+    assert issue_id == orphaned_backup_issue_id(SERVER_ID, 2, "Pumps")
+    assert issue_id.startswith(f"orphaned_plan_backups_{SERVER_ID}_2_")
+    assert issue_id != orphaned_backup_issue_id(SERVER_ID, 2, "Pumps 2")
+
+
+def test_repair_placeholders_fall_back_for_missing_data() -> None:
+    placeholders = repair_placeholders({"plan_name": "Pumps", "fub_id": "2", "count": "3"})
+
+    assert placeholders == {
+        "plan_name": "Pumps",
+        "fub_id": "2",
+        "count": "3",
+        "newest": "?",
+        "months": "?",
+        "current_plan": "?",
+        "docs_url": BACKUPS_DOC_URL,
+    }
+
+
+def test_invalid_kept_entry_does_not_block_backups(manager: FunctionPlanBackupManager) -> None:
+    FakeStore.saved[f"{DOMAIN}_function_plan_backup_kept_{SERVER_ID}"] = {
+        "identities": [{"fub_id": "x"}, {"plan_name": "Lights"}, {"fub_id": 2, "plan_name": "Pumps"}]
+    }
+
+    # The valid entry still counts: "Pumps" stays kept, the broken ones are skipped.
+    assert asyncio.run(manager.async_expired_orphans(LIVE_FUBS, CUTOFF)) == []
+
+
+def _registry(monkeypatch: pytest.MonkeyPatch, issue_ids: list[tuple[str, str]]) -> MagicMock:
+    ir = MagicMock()
+    ir.async_get.return_value.issues = dict.fromkeys(issue_ids)
+    monkeypatch.setattr(orphaned_backups, "ir", ir)
+    return ir
+
+
+def _deleted_ids(ir: MagicMock) -> list[tuple[str, str]]:
+    return [call.args[1:] for call in ir.async_delete_issue.call_args_list]
+
+
+def test_delete_all_issues_spares_a_server_whose_id_extends_this_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Server "cx1" must not touch the repairs of server "cx1_2"."""
+    own = orphaned_backup_issue_id(SERVER_ID, 2, "Pumps")
+    ir = _registry(
+        monkeypatch,
+        [
+            (DOMAIN, own),
+            (DOMAIN, orphaned_backup_issue_id(f"{SERVER_ID}_2", 5, "Pumps")),
+            (DOMAIN, "some_other_issue"),
+            ("other_domain", orphaned_backup_issue_id(SERVER_ID, 8, "Foreign")),
+        ],
+    )
+
+    orphaned_backups.delete_all_orphaned_backup_issues(MagicMock(), SERVER_ID)
+
+    assert _deleted_ids(ir) == [(DOMAIN, own)]
+
+
+def test_audit_raises_one_repair_per_expired_orphan_and_clears_stale_ones(
+    manager: FunctionPlanBackupManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wanted = orphaned_backup_issue_id(SERVER_ID, 2, "Pumps")
+    stale = orphaned_backup_issue_id(SERVER_ID, 9, "Gone")
+    ir = _registry(
+        monkeypatch,
+        [
+            (DOMAIN, wanted),
+            (DOMAIN, stale),
+            (DOMAIN, orphaned_backup_issue_id(f"{SERVER_ID}_2", 9, "Gone")),
+            (DOMAIN, "some_other_issue"),
+            ("other_domain", orphaned_backup_issue_id(SERVER_ID, 8, "Foreign")),
+        ],
+    )
+
+    asyncio.run(
+        async_audit_orphaned_backups(
+            MagicMock(),
+            entry_id="entry1",
+            server_id=SERVER_ID,
+            manager=manager,
+            fub_data=LIVE_FUBS,
+            cutoff=CUTOFF,
+            retention_months=6,
+        )
+    )
+
+    ir.async_create_issue.assert_called_once()
+    args, kwargs = ir.async_create_issue.call_args
+    assert args[1:] == (DOMAIN, wanted)
+    assert kwargs["translation_placeholders"] == {
+        "plan_name": "Pumps",
+        "fub_id": "2",
+        "count": "3",
+        "newest": "10.01.2026 08:00",
+        "months": "6",
+        "current_plan": "Heating",  # fub 2 now holds another plan
+    }
+    assert kwargs["data"] == {"entry_id": "entry1", **kwargs["translation_placeholders"]}
+    assert _deleted_ids(ir) == [(DOMAIN, stale)]
+
+
+def test_audit_without_live_plans_leaves_repairs_alone(
+    manager: FunctionPlanBackupManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ir = MagicMock()
+    monkeypatch.setattr(orphaned_backups, "ir", ir)
+
+    asyncio.run(
+        async_audit_orphaned_backups(
+            MagicMock(),
+            entry_id="entry1",
+            server_id=SERVER_ID,
+            manager=manager,
+            fub_data={},
+            cutoff=CUTOFF,
+            retention_months=6,
+        )
+    )
+
+    ir.async_create_issue.assert_not_called()
+    ir.async_delete_issue.assert_not_called()

@@ -278,9 +278,9 @@ function_plan_purge_orphaned_backups:
     Deletes backup snapshots (auto and change) of plans that no longer exist live in Comexio
     (deleted directly in Comexio Studio) and whose newest snapshot is older than the
     configured retention period (Options → Function Plan, default 6 months). A live plan's
-    backups are never touched, no matter how old. Runs automatically on the periodic backup
-    cycle too — this service is normally only needed to force an out-of-schedule cleanup.
-    Requires "confirm".
+    backups are never touched, no matter how old, and neither are backups you chose to keep in
+    the "Backups of deleted plan" repair. Without this action nothing is deleted automatically:
+    each expired plan raises that repair instead. Requires "confirm".
   fields:
     config_entry:
       name: Comexio instance

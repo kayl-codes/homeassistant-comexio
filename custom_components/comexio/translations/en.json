@@ -92,6 +92,12 @@
         "6": "6 months",
         "12": "12 months"
       }
+    },
+    "orphaned_backups_action": {
+      "options": {
+        "keep": "📦 Keep these backups",
+        "delete": "🗑️ Delete these backups"
+      }
     }
   },
   "options": {
@@ -126,7 +132,7 @@
           "ignored_markers": "Comma-, semicolon-, space- or dot-separated marker IDs and ranges, with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456' or '8-12'). Only markers with a description can be ignored.",
           "ignored_knx": "Comma-, semicolon-, space- or dot-separated KNX object IDs and ranges, with or without 'K' prefix (e.g. '123, 456; 789' or 'K123, K456' or '8-12'). Only KNX objects with a description can be ignored.",
           "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)",
-          "function_plan_backup_retention_months": "Backup snapshots of a plan that was deleted directly in Comexio are purged automatically once they are older than this. A live plan's backups are never affected. Also available as the 'Function Plan Purge Orphaned Backups' action for an on-demand cleanup.",
+          "function_plan_backup_retention_months": "Once the newest backup of a plan that was deleted directly in Comexio is older than this, a repair asks whether to delete or keep that plan's backups — nothing is deleted without your confirmation. A live plan's backups are never affected. The 'Function Plan Purge Orphaned Backups' action deletes all expired ones at once.",
           "bus_watchdog_enabled": "On a sustained bus-load rise, automatically restart the HA-managed cluster function plans (back to front) to try to relieve it. Non-destructive to the Comexio system itself.",
           "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog."
         }
@@ -314,6 +320,23 @@
         },
         "abort": {
           "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished."
+        }
+      }
+    },
+    "orphaned_plan_backups": {
+      "title": "Backups of deleted plan {plan_name}",
+      "fix_flow": {
+        "step": {
+          "orphaned_backups": {
+            "title": "Backups of a deleted function plan",
+            "description": "Comexio has no function plan **{plan_name}** under ID {fub_id} any more — it was deleted or renamed. Plan now using ID {fub_id}: **{current_plan}**. If that is this plan under a new name, its newer backups are stored under that name; these are the ones from before.\n\nIts {count} backup(s) are kept for {months} month(s) after the newest one ({newest}) — that period has passed.\n\n**Keep** keeps these backups and never asks again for this plan. You can still delete them later with the **Function Plan Delete Backups** action.\n**Delete** removes them for good.\n\nTo see what the plan contained first: Developer tools → Actions → **Function Plan Visualize**, field **Snapshot** → pick an entry starting with **{plan_name} — fub {fub_id}**. More in the [backup guide]({docs_url})."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "plans_unavailable": "The plan list could not be read from Comexio right now. Nothing was changed — try again in a few minutes.",
+          "plan_exists_again": "This plan exists in Comexio again, so its backups are no longer orphaned. Nothing was changed.",
+          "already_deleted": "These backups were already deleted. Nothing was changed."
         }
       }
     }

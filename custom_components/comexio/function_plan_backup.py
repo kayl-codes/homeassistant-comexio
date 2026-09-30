@@ -101,6 +101,15 @@ def _newer_timestamp(a: str | None, b: str | None) -> str | None:
     return a if a > b else b
 
 
+def is_orphaned_identity(fub_data: dict[str, Any], fub_id: int, plan_name: str) -> bool:
+    """Whether a backed-up (fub_id, plan_name) identity no longer exists live in Comexio.
+
+    False without a live $Fubs snapshot: a failed plan fetch must never make every plan look
+    deleted. A fub_id that now carries a different name counts as orphaned (ID reused).
+    """
+    return bool(fub_data) and fub_data.get(str(fub_id), {}).get("Name") != plan_name
+
+
 def _newest_orphaned_in_store(
     data: dict[str, dict[str, list[dict[str, Any]]]] | None, fub_data: dict[str, Any]
 ) -> dict[tuple[int, str], str | None]:
@@ -109,7 +118,7 @@ def _newest_orphaned_in_store(
     for key, identities in (data or {}).items():
         fub_id = int(key)
         for plan_name, history in identities.items():
-            if fub_data.get(key, {}).get("Name") == plan_name:
+            if not is_orphaned_identity(fub_data, fub_id, plan_name):
                 continue  # still live under this fub_id
             captured_at = history[0].get("captured_at") if history else None
             newest[(fub_id, plan_name)] = _newer_timestamp(newest.get((fub_id, plan_name)), captured_at)
@@ -200,6 +209,10 @@ class FunctionPlanBackupManager:
         # every snapshot already persisted under .storage/.
         self._auto_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_logikplan_auto_{server_id}")
         self._change_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_logikplan_changes_{server_id}")
+        # Orphaned plan identities the user chose to keep via the orphaned_plan_backups repair:
+        # never raised again and never purged, only deleted by hand.
+        self._kept_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_function_plan_backup_kept_{server_id}")
+        self._kept: set[tuple[int, str]] = set()
         # Lazy-loaded caches: {fub_id_str: {plan_name: [snapshot, ...]}} — newest first per identity.
         # fub_id alone is not a stable identity (Comexio reuses IDs after deletion), so rotation
         # and lookups are always scoped to the (fub_id, plan_name) pair, never to fub_id alone.
@@ -243,7 +256,19 @@ class FunctionPlanBackupManager:
                 "[%s] Function Plan backup: migrated change-backup storage to identity-scoped shape",
                 self._server_id,
             )
+        kept = await self._kept_store.async_load() or {}
+        self._kept = set()
+        for item in kept.get("identities", []):
+            try:
+                self._kept.add((int(item["fub_id"]), str(item["plan_name"])))
+            except (KeyError, TypeError, ValueError):
+                # A damaged side file must not block every backup; the plan is simply asked about again.
+                _LOGGER.warning("[%s] Function Plan backup: ignoring invalid kept entry %r", self._server_id, item)
         self._loaded = True
+
+    async def _async_save_kept(self) -> None:
+        identities = [{"fub_id": fub_id, "plan_name": name} for fub_id, name in sorted(self._kept)]
+        await self._kept_store.async_save({"identities": identities})
 
     @staticmethod
     def _build_snapshot(
@@ -625,16 +650,66 @@ class FunctionPlanBackupManager:
                 newest_by_identity[identity] = _newer_timestamp(newest_by_identity.get(identity), captured_at)
         return [(fid, name, ts) for (fid, name), ts in newest_by_identity.items()]
 
-    async def async_purge_orphaned(
-        self, fub_data: dict[str, Any], cutoff: datetime | None = None
-    ) -> list[dict[str, Any]]:
-        """Delete all snapshots (auto + change) of every orphaned identity, optionally age-gated.
+    def _snapshot_total(self, fub_id: int, plan_name: str) -> int:
+        """Number of stored snapshots (auto + change) of one identity."""
+        key = str(fub_id)
+        return sum(len(data.get(key, {}).get(plan_name, [])) for data in (self._auto_data, self._change_data))
 
-        cutoff: only purge an identity whose newest snapshot is older than this UTC timestamp
-        (None = purge every orphaned identity regardless of age — used by the manual service
-        override; the periodic backup cycle always passes the configured retention cutoff).
-        A live plan's backups are never touched, no matter how old. Returns one
-        {fub_id, plan_name, removed, captured_at} entry per identity actually purged.
+    def _expired_orphans(self, fub_data: dict[str, Any], cutoff: datetime) -> list[tuple[int, str, str | None]]:
+        """Orphaned identities whose newest snapshot is older than cutoff, kept ones excluded.
+
+        An identity without a readable timestamp is never treated as expired.
+        """
+        expired = []
+        for fub_id, plan_name, newest in self._orphaned_identities(fub_data):
+            ts = dt_util.parse_datetime(newest) if newest else None
+            if ts is not None and ts < cutoff and (fub_id, plan_name) not in self._kept:
+                expired.append((fub_id, plan_name, newest))
+        return expired
+
+    async def async_expired_orphans(self, fub_data: dict[str, Any], cutoff: datetime) -> list[dict[str, Any]] | None:
+        """Orphaned identities past the retention period that still need a decision.
+
+        One {fub_id, plan_name, count, captured_at} entry each; kept identities are left out.
+        None without a live $Fubs snapshot to compare against: a transient fetch hiccup must
+        neither raise nor clear a repair. Also forgets kept identities that are live again or
+        have no snapshots left, so a plan deleted a second time gets asked about again.
+        """
+        await self._async_ensure_loaded()
+        if not fub_data:
+            return None
+        stale = {
+            (fub_id, name)
+            for fub_id, name in self._kept
+            if not is_orphaned_identity(fub_data, fub_id, name) or not self._snapshot_total(fub_id, name)
+        }
+        if stale:
+            self._kept -= stale
+            await self._async_save_kept()
+        return [
+            {"fub_id": fub_id, "plan_name": name, "count": self._snapshot_total(fub_id, name), "captured_at": newest}
+            for fub_id, name, newest in self._expired_orphans(fub_data, cutoff)
+        ]
+
+    async def async_keep_orphaned(self, fub_id: int, plan_name: str) -> None:
+        """Keep an orphaned identity's snapshots for good: no repair, no purge, only manual deletion."""
+        await self._async_ensure_loaded()
+        self._kept.add((fub_id, plan_name))
+        await self._async_save_kept()
+        _LOGGER.info(
+            "[%s] Function Plan backup: keeping the backups of deleted plan fub=%s ('%s')",
+            self._server_id,
+            fub_id,
+            plan_name,
+        )
+
+    async def async_purge_orphaned(self, fub_data: dict[str, Any], cutoff: datetime) -> list[dict[str, Any]]:
+        """Delete all snapshots (auto + change) of every orphaned identity older than cutoff.
+
+        Only the manual function_plan_purge_orphaned_backups service calls this; the periodic
+        backup cycle raises a repair per identity instead (see orphaned_backups.py). A live
+        plan's backups are never touched, no matter how old, and neither are kept ones.
+        Returns one {fub_id, plan_name, removed, captured_at} entry per identity actually purged.
         """
         await self._async_ensure_loaded()
         if not fub_data:
@@ -642,13 +717,8 @@ class FunctionPlanBackupManager:
             # orphaned" would wipe every backup on a transient fetch hiccup.
             return []
         purged: list[dict[str, Any]] = []
-        for fub_id, plan_name, newest in self._orphaned_identities(fub_data):
-            if cutoff is not None:
-                ts = dt_util.parse_datetime(newest) if newest else None
-                if ts is None or ts >= cutoff:
-                    continue
-            removed = await self.async_delete_plan_backups(fub_id, plan_name)
-            if removed:
+        for fub_id, plan_name, newest in self._expired_orphans(fub_data, cutoff):
+            if removed := await self.async_delete_plan_backups(fub_id, plan_name):
                 purged.append({"fub_id": fub_id, "plan_name": plan_name, "removed": removed, "captured_at": newest})
         return purged
 
