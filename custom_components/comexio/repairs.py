@@ -1246,17 +1246,23 @@ class ComexioRepairFlow(RepairsFlow):
             # would delete it).
             loaded = await coordinator.async_load_orphaned_plan_into_preview(fub_id, plan_name)
             return self.async_abort(reason="loaded_in_preview" if loaded else "preview_failed")
-        is_de = self.hass.config.language == "de"
-        if user_input["action"] == ACTION_DELETE:
-            removed = await manager.async_delete_plan_backups(fub_id, plan_name)
-            if not removed:
-                ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
-                return self.async_abort(reason="already_deleted")
-            title = f"{removed} Backups gelöscht" if is_de else f"{removed} backups deleted"
-        else:
-            await manager.async_keep_orphaned(fub_id, plan_name)
-            title = "Backups werden behalten" if is_de else "Backups kept"
+        title = await self._async_apply_orphaned_backups_action(manager, user_input["action"], fub_id, plan_name)
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        if title is None:
+            return self.async_abort(reason="already_deleted")
         coordinator.async_update_listeners()  # backup-summary diagnostic sensor
         await coordinator._async_refresh_service_descriptions()
         return self.async_create_entry(title=title, data={})
+
+    async def _async_apply_orphaned_backups_action(
+        self, manager, action: str, fub_id: int, plan_name: str
+    ) -> str | None:
+        """Delete or keep an orphaned plan's backups; the entry title, or None if nothing was left to delete."""
+        is_de = self.hass.config.language == "de"
+        if action == ACTION_DELETE:
+            removed = await manager.async_delete_plan_backups(fub_id, plan_name)
+            if not removed:
+                return None
+            return f"{removed} Backups gelöscht" if is_de else f"{removed} backups deleted"
+        await manager.async_keep_orphaned(fub_id, plan_name)
+        return "Backups werden behalten" if is_de else "Backups kept"

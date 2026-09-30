@@ -769,6 +769,7 @@ class FunctionPlanBackupManager:
             fub_id,
             plan_name,
         )
+        return True
 
     async def async_unkeep_orphaned(self, fub_id: int, plan_name: str) -> bool:
         """Take back a keep decision (plan card's orphaned-plans view). True if one was stored.

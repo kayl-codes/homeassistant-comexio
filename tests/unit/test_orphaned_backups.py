@@ -341,6 +341,16 @@ def test_orphaned_plans_without_live_plans_is_empty(manager: FunctionPlanBackupM
     assert manager.orphaned_plans_sync({}) == []
 
 
+def test_keep_reports_whether_a_decision_was_stored(manager: FunctionPlanBackupManager) -> None:
+    """The keep service tells "kept" from "was kept already" by this result."""
+
+    async def run() -> tuple[bool, bool]:
+        return await manager.async_keep_orphaned(2, "Pumps"), await manager.async_keep_orphaned(2, "Pumps")
+
+    assert asyncio.run(run()) == (True, False)
+    assert _kept_saved() == [{"fub_id": 2, "plan_name": "Pumps"}]
+
+
 def test_unkeep_takes_back_a_keep_decision(manager: FunctionPlanBackupManager) -> None:
     async def run() -> tuple[bool, bool, list[dict[str, Any]] | None]:
         await manager.async_keep_orphaned(2, "Pumps")
@@ -386,14 +396,21 @@ def test_orphaned_backup_options_keep_labels_unique_across_plans() -> None:
     """Two plans backed up in the same minute share a snapshot label — the select needs unique options."""
     same = [{"kind": "auto", "slot": 0, "captured_at": OLD}]
 
-    rows = backup_module.build_orphaned_backup_options([_orphan(3, "Garage", same), _orphan(2, "Pumps", same)])
+    rows = backup_module.build_orphaned_backup_options(
+        [_orphan(3, "Garage", same), _orphan(2, "Pumps", same), _orphan(5, "Pumps", same)]
+    )
 
     labels = [label for label, _choice in rows]
     assert len(set(labels)) == len(labels)
+    snapshot = "\u00a0" * 4 + backup_module.format_backup_label(same[0])
+    # Each repeat gets its own plan appended; the identity is unique per plan, so a third
+    # plan's row cannot collide with the second's.
     assert labels == [
         "Garage (ID 3) — 1 backup",
-        "\u00a0" * 4 + backup_module.format_backup_label(same[0]),
+        snapshot,
         "Pumps (ID 2) — 1 backup",
-        "\u00a0" * 4 + backup_module.format_backup_label(same[0]) + " · Pumps (ID 2)",
+        snapshot + " · Pumps (ID 2)",
+        "Pumps (ID 5) — 1 backup",
+        snapshot + " · Pumps (ID 5)",
     ]
-    assert rows[3][1]["fub_id"] == 2
+    assert [rows[3][1]["fub_id"], rows[5][1]["fub_id"]] == [2, 5]
