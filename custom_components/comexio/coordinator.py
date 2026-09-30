@@ -4294,14 +4294,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         For each webio_id: locates its WebIO element + connected source element (marker or
         IO) across managed plans (or just preferred_fub_id if given), deletes both, restarts
-        the plan. The real Web-IO command id is resolved from self.data["webio_commands"]
+        the plan if it was running. The real Web-IO command id is resolved from self.data["webio_commands"]
         (webIoId -> cmdId) — never guessed from a plan element's ref_id, which IS the
         webIoId, not the WebCommandId (see project-logikplan-api memory).
 
         Returns {"deleted_elem_count": int, "cmd_ids": list[int], "stopped_plans": [...],
-        "stop_failures": [...], "failures": [(name, detail), ...], "touched_fub_ids": list[int]}.
+        "stop_failures": [...], "failures": [(name, detail), ...], "touched_fub_ids": list[int],
+        "inactive_fub_ids": list[int]}.
         failures lists plans that could not be loaded (wiring not checked) or whose element
-        deletion failed — both leave Function-Plan debris behind. cmd_ids only includes commands
+        deletion failed — both leave Function-Plan debris behind — and unwired commands whose
+        cmdId could not be resolved, which stay in Comexio. cmd_ids only includes commands
         actually found wired and successfully unwired; the caller is responsible for deleting
         each via api.delete_single_command afterwards. touched_fub_ids lists plans that had at
         least one element successfully removed — useful for a caller that wants to re-sort the
