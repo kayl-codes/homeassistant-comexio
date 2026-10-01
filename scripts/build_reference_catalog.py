@@ -29,7 +29,8 @@ def _load_module():
 
 def main(raw_path: Path, comexio_version: str) -> None:
     reference_catalog = _load_module()
-    raw_config = json.loads(raw_path.read_text(encoding="utf-8"))
+    # Developer tool: raw_path is the maintainer's own CLI argument, read-only, no untrusted input.
+    raw_config = json.loads(raw_path.read_text(encoding="utf-8"))  # NOSONAR
     reference_catalog.REFERENCE_DIR.mkdir(exist_ok=True)
     for kind in reference_catalog.LIVE_EXTRACTORS:
         content = reference_catalog.build_reference(kind, raw_config, comexio_version)

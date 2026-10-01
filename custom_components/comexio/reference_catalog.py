@@ -338,9 +338,13 @@ def find_unknown_fub_base_refs(
     known = {str(live_id) for live_id in live_fub_base_ids}
     found = []
     for fub_id, plan in plans.items():
-        elements = plan.get("elements") if isinstance(plan, dict) else None
-        for elem_id, element in (elements or {}).items():
-            reference = (element or {}).get("reference") or {}
+        elements = plan.get("elements") if isinstance(plan, Mapping) else None
+        if not isinstance(elements, Mapping):
+            continue
+        for elem_id, element in elements.items():
+            reference = element.get("reference") if isinstance(element, Mapping) else None
+            if not isinstance(reference, Mapping):
+                continue
             if str(reference.get("type")) == "5" and str(reference.get("ref_id")) not in known:
                 found.append((str(fub_id), str(elem_id), str(reference.get("ref_id"))))
     return found
@@ -508,11 +512,14 @@ def build_issue_report(
 
 
 def github_issue_url(issues_url: str, title: str, body: str, max_chars: int = ISSUE_URL_MAX_CHARS) -> str:
-    """New-issue URL with title/body pre-filled, the body cut line by line to fit max_chars."""
+    """New-issue URL with title/body pre-filled, the body cut line by line to fit max_chars.
+
+    Ends at a body of only the truncation marker, so even a single over-long line is dropped.
+    """
     lines = body.split("\n")
     while True:
         query = urlencode({"title": title, "body": "\n".join(lines), "labels": "bug"})
         url = f"{issues_url}/new?{query}"
-        if len(url) <= max_chars or len(lines) <= 1:
+        if len(url) <= max_chars or lines == [ISSUE_TRUNCATED_LINE]:
             return url
         lines = [*lines[: -2 if lines[-1] == ISSUE_TRUNCATED_LINE else -1], ISSUE_TRUNCATED_LINE]

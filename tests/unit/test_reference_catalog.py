@@ -216,6 +216,9 @@ def test_unknown_plan_refs_are_found(raw: dict[str, Any]) -> None:
             }
         },
         "20": {"elements": []},
+        "21": {"elements": [{"reference": {"type": "5", "ref_id": "113"}}]},
+        "22": {"elements": {"1": None, "2": [], "3": {"reference": "5"}}},
+        "23": None,
     }
     assert find_unknown_fub_base_refs(plans, [5, 6, 45]) == [("19", "593", "113")]
     assert find_unknown_fub_base_refs(plans, [5, 6, 45, 113]) == []
@@ -302,3 +305,9 @@ def test_issue_url_is_prefilled_and_cut_to_fit() -> None:
     assert body.startswith("line 0 ")
     assert body.endswith(ISSUE_TRUNCATED_LINE)
     assert body.count(ISSUE_TRUNCATED_LINE) == 1
+
+
+def test_issue_url_drops_a_single_line_that_is_too_long() -> None:
+    url = github_issue_url("https://github.com/owner/repo/issues", "Title", "x" * 5000, max_chars=2000)
+    assert len(url) <= 2000
+    assert parse_qs(urlsplit(url).query)["body"] == [ISSUE_TRUNCATED_LINE]
