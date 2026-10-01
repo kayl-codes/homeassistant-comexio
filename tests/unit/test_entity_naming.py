@@ -189,7 +189,8 @@ def test_function_plan_entities_keep_their_hub_era_entity_id(domain: str, class_
     cls = next(c for c in _function_plan_entity_classes() if c.__name__ == class_name)
 
     assert issubclass(cls, ComexioFunctionPlanEntityMixin)
-    assert f"{domain}.{hub_era_object_id('iosrv1', cls._hub_era_name)}" == expected
+    entity_id = f"{domain}.{hub_era_object_id('iosrv1', cls._hub_era_name)}"
+    assert entity_id == expected
 
 
 class _PlanEntity(ComexioFunctionPlanEntityMixin, _FakeEntity):
