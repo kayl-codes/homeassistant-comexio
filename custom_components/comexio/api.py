@@ -618,14 +618,16 @@ class ComexioAPI:
         A plan HA started or stopped after that fetch began keeps HA's run state.
         """
         key = str(fub_id)
-        self._fub_data[key] = fub_info
+        # Looked up before the write: the cache is often the last poll's own fetched $Fubs, and
+        # holding fub_info would make it match too — with that older poll's mark.
         since = self._fetch_mark(lambda fubs: fubs.get(key) is fub_info)
+        self._fub_data[key] = fub_info
         if since is not None and (running := self._ha_run_states_since(since).get(int(fub_id))) is not None:
             self.apply_fub_run_states({int(fub_id): running})
 
     def _fetch_mark(self, matches: Callable[[dict[str, Any]], bool]) -> int | None:
-        """run_state_mark taken before the remembered fetch whose $Fubs matches, None if unknown."""
-        return next((mark for fubs, mark in self._fetch_marks if matches(fubs)), None)
+        """run_state_mark taken before the newest remembered fetch whose $Fubs matches, None if unknown."""
+        return next((mark for fubs, mark in reversed(self._fetch_marks) if matches(fubs)), None)
 
     def _replace_fub_data(self, fubs: dict[str, Any], run_state_mark: int | None = None) -> None:
         """Make a fetched plan list the cache, keeping the run states HA caused since its fetch began.

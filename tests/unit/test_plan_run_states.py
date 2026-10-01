@@ -89,11 +89,11 @@ def test_config_fetched_before_ha_started_a_plan_keeps_that_state(api: ComexioAP
 
 def _fetch_while_ha_starts(api: ComexioAPI, start_during_fetch: bool) -> dict:
     """get_raw_config() answering a config from before HA started plan 19 (mid-fetch if asked)."""
-    stale = {key: dict(fub) for key, fub in FUBS.items()}
 
     async def fetch() -> SimpleNamespace:
         if start_during_fetch:
             api.set_fub_active(19, True)
+        stale = {key: dict(fub) for key, fub in FUBS.items()}  # a new $Fubs per fetch, like the real one
         return SimpleNamespace(variables={"Fubs": stale}, io_types={}, io_input_types={}, comexio_version=None)
 
     api.client.get_raw_config = fetch
@@ -127,6 +127,18 @@ def test_every_cache_write_keeps_a_start_made_during_its_fetch(
     write_cache(api, conf)
 
     assert api.get_fub_active(19) is running
+
+
+def test_out_of_band_lookup_after_a_poll_takes_the_fresh_state(api: ComexioAPI) -> None:
+    # Regression: with the last poll's $Fubs as the cache, update_fub_cache_entry matched that
+    # older fetch's mark and put back a start HA made before the fresh fetch, which says stopped.
+    api.parse_config(_fetch_while_ha_starts(api, start_during_fetch=False))  # the poll: cache = its $Fubs
+    api.set_fub_active(19, True)  # HA starts the plan, Comexio does not run it
+    fresh = asyncio.run(api.get_raw_config())  # the button's re-read: Active=0
+
+    api.update_fub_cache_entry(19, fresh["Fubs"]["19"])
+
+    assert api.get_fub_active(19) is False
 
 
 def test_plan_ids_and_unique_id() -> None:
