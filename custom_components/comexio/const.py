@@ -11,6 +11,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # Version: 0.8.1
 DOMAIN = "comexio"
+# Must match manifest.json "issue_tracker" — target of the pre-filled issue links in Repairs.
+ISSUE_TRACKER_URL = "https://github.com/kayl-codes/homeassistant-comexio/issues"
 
 CONF_HOST = "host"
 CONF_USERNAME = "username"
@@ -284,7 +286,7 @@ def category_by_fub_module_type(fub_module_type: int | str) -> SourceCategory:
     """Registry entry matching a $FubModules key / plan-element ref_type (2/11/...).
 
     The reverse of source_category(): trigger-pair and function-plan-link call sites
-    only carry a bare ref_type int (see FUB_BASE_REF_ID_FLANKE / ref_type params in
+    only carry a bare ref_type int (see FUB_BASE_KEY_FLANKE / ref_type params in
     coordinator.py), not a WebioClass — this lets them derive the source's audit
     prefix/label registry-style instead of hard-coding a second "2"->"M" mapping.
     Raises ValueError for any fub_module_type not present in SOURCE_CATEGORIES.
@@ -956,7 +958,10 @@ FUNCTION_PLAN_PAIR_RELOAD_INITIAL_DELAY = 1.0  # seconds, doubles every attempt
 # HA switch on made M6 fall back to off immediately, exactly as intended — the marker's plan
 # input behaves as a toggle, not a level-set, so each incoming edge (from any plan) flips it.
 FUNCTION_PLAN_TRIGGER_PLAN_NAME = "HA - TRIGGER"
-FUB_BASE_REF_ID_FLANKE = "113"  # $FubModules["5"]["113"], internal catalog name "flankenerkenner"
+# Stable reference catalog key of the Flanke block (reference/fub_base.json): internal Name plus
+# port types (In digital, two analog delays / outputs ~ + - digital). Its database id (113 on the
+# reference servers) is resolved per server at runtime — api.ComexioAPI.flanke_ref_id.
+FUB_BASE_KEY_FLANKE = "flankenerkenner/daa/ddd"
 FLANKE_PORT_IN = 0  # "In"
 FLANKE_PORT_OUT_RISING = 1  # "+", fires for one cycle on a rising edge only
 

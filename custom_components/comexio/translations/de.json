@@ -314,6 +314,10 @@
           "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist."
         }
       }
+    },
+    "reference_catalog_mismatch": {
+      "title": "Comexio-Funktionsbaustein nicht nutzbar ({server_id})",
+      "description": "Comexio {version} auf diesem Server stellt den/die Funktionsbaustein(e) **{blocks}** nicht in der Form bereit, für die diese Integration gebaut ist. Funktionen, die diese Bausteine in Logikpläne setzen (Trigger-Merker `[TRIG]`), sind deaktiviert, damit keine fehlerhaften Elemente angelegt werden.\n\n**[Auf GitHub melden]({issue_url})** — öffnet ein neues Issue, in dem die Diagnose bereits ausgefüllt ist (nur Versionen und der Comexio-Bausteinkatalog, keine persönlichen Daten). Bitte prüfen und absenden; ein GitHub-Konto ist nötig.\n\nSteht bei einem Eintrag „not checked“, fehlen die Referenzdateien der Integration selbst oder sind beschädigt — bitte die Integration neu installieren."
     }
   }
 }
