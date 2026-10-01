@@ -96,7 +96,7 @@ def _build_element_matcher(query: str):
 
 
 async def _async_set_plan_selector(hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int) -> bool:
-    """Point the 'Function Plans' select entity at the given plan (True when it was set).
+    """Point the 'Plan' select entity at the given plan (True when it was set).
 
     Used by the search service on an unambiguous hit, so a follow-up action without
     fub_id (visualize/sort/…) targets the plan just found. Goes through the regular
@@ -408,11 +408,9 @@ def _build_search_notification_lines(
     if failed:
         lines.append(f"\n**{len(failed)} plan(s) could not be loaded:** {', '.join(failed)}")
     if selector_set:
-        lines.append(f"\nSingle plan hit — the 'Function Plans' selector was set to **{results[0]['plan_name']}**.")
+        lines.append(f"\nSingle plan hit — the 'Plan' selector was set to **{results[0]['plan_name']}**.")
     elif len(results) == 1:
-        lines.append(
-            "\nSingle plan hit, but the 'Function Plans' selector could not be updated — pass fub_id explicitly."
-        )
+        lines.append("\nSingle plan hit, but the 'Plan' selector could not be updated — pass fub_id explicitly.")
     lines.append(f"\nDuration: {duration:.1f}s")
     return lines
 

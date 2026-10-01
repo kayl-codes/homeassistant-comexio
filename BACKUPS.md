@@ -35,11 +35,11 @@ integration manages. There is nothing to configure.
 
 ## 2. Looking at a backup
 
-- **Plan card:** pick the plan, then pick a backup in the **Function Plan Backup** selector.
+- **Plan card:** pick the plan, then pick a backup in the **Backup** selector.
   The card shows that snapshot instead of the live plan; **Live** switches back. See the
   [Function Plan Preview guide](FUNCTION_PLAN_PREVIEW.md).
 - **Backups of deleted plans in the plan card:** pick **Orphaned plans** (last entry of the
-  **Function Plans** selector, shown while such backups exist). The **Function Plan Backup**
+  **Plan** selector, shown while such backups exist). The **Backup**
   selector then lists every deleted plan as `<name> (ID <n>) — <count> backups`, followed by
   its indented snapshots; the plan row shows the newest one. The preview is marked
   `[verwaist]` and shows no live values, since the ID may belong to another plan by now.
@@ -113,8 +113,8 @@ To delete backups without waiting for a repair:
 | `comexio.function_plan_delete_backups` | Delete one snapshot, one plan's snapshots, or all. |
 | `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans. |
 | `comexio.function_plan_keep_backups` | Keep a deleted plan's backups for good, or take that back (`keep: false`). |
-| `sensor` **Function Plan Backups** (diagnostic) | Number of stored snapshots, details per plan as attributes. |
-| `select` **Function Plan Backup** | Picks the snapshot the plan preview shows; in the **Orphaned plans** view, a deleted plan's backup. |
+| `sensor` **Backups** (diagnostic) | Number of stored snapshots, details per plan as attributes. |
+| `select` **Backup** | Picks the snapshot the plan preview shows; in the **Orphaned plans** view, a deleted plan's backup. |
 
 ---
 
@@ -154,12 +154,12 @@ verwalteten. Einzustellen gibt es nichts.
 
 ## 2. Ein Backup ansehen
 
-- **Plan-Karte:** Plan wählen, dann in der Auswahl **Function Plan Backup** ein Backup
+- **Plan-Karte:** Plan wählen, dann in der Auswahl **Backup** ein Backup
   wählen. Die Karte zeigt diesen Snapshot statt des Live-Plans; **Live** schaltet zurück.
   Siehe die [Anleitung zur Logikplan-Vorschau](FUNCTION_PLAN_PREVIEW.md).
 - **Backups gelöschter Pläne in der Plan-Karte:** **Orphaned plans** wählen (letzter
-  Eintrag der Auswahl **Function Plans**, sichtbar, solange es solche Backups gibt). Die
-  Auswahl **Function Plan Backup** listet dann jeden gelöschten Plan als
+  Eintrag der Auswahl **Plan**, sichtbar, solange es solche Backups gibt). Die
+  Auswahl **Backup** listet dann jeden gelöschten Plan als
   `<Name> (ID <n>) — <Anzahl> backups`, darunter eingerückt seine Snapshots; die Planzeile
   zeigt den neuesten. Die Vorschau ist mit `[verwaist]` markiert und zeigt keine
   Live-Werte, weil die ID inzwischen einem anderen Plan gehören kann. Audit und Sync
@@ -242,5 +242,5 @@ Backups löschen, ohne auf eine Meldung zu warten:
 | `comexio.function_plan_delete_backups` | Einen Snapshot, die Snapshots eines Plans oder alle löschen. |
 | `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen. |
 | `comexio.function_plan_keep_backups` | Die Backups eines gelöschten Plans dauerhaft behalten oder das zurücknehmen (`keep: false`). |
-| `sensor` **Function Plan Backups** (Diagnose) | Anzahl gespeicherter Snapshots, Details je Plan als Attribute. |
-| `select` **Function Plan Backup** | Wählt den Snapshot, den die Plan-Vorschau zeigt; in der Ansicht **Orphaned plans** ein Backup eines gelöschten Plans. |
+| `sensor` **Backups** (Diagnose) | Anzahl gespeicherter Snapshots, Details je Plan als Attribute. |
+| `select` **Backup** | Wählt den Snapshot, den die Plan-Vorschau zeigt; in der Ansicht **Orphaned plans** ein Backup eines gelöschten Plans. |

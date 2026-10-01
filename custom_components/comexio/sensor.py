@@ -295,7 +295,7 @@ class ComexioFunctionPlanBackupSensor(ComexioFunctionPlanEntityMixin, Coordinato
     _attr_has_entity_name = True
     _hub_era_name = "Function Plan Backups"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_name = "Function Plan Backups"
+    _attr_name = "Backups"
     _attr_icon = "mdi:backup-restore"
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:

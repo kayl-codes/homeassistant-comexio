@@ -103,7 +103,7 @@ cards:
 
 ## 4. Selecting and Rendering a Plan
 
-- Pick a plan in the **Function Plans** select entity, then press the **Preview**
+- Pick a plan in the **Plan** select entity, then press the **Preview**
   button once to render it.
 - If no plan is selected, actions default to whatever the integration is currently
   tracking (the last plan used).
@@ -178,7 +178,7 @@ Available under **Developer Tools → Actions**:
 
 | Action | What it does |
 |---|---|
-| `comexio.function_plan_visualize` | Renders a plan (or a stored snapshot) as SVG into the Plan Preview image entity — or returns a text summary of connections and unconnected elements. |
+| `comexio.function_plan_visualize` | Renders a plan (or a stored snapshot) as SVG into the Preview image entity — or returns a text summary of connections and unconnected elements. |
 | `comexio.function_plan_search` | Finds which plans contain elements matching a search text — same syntax as the card's search bar. Auto-selects the plan when exactly one match is found. |
 | `comexio.function_plan_analyze` | *Experimental.* Read-only wiring health-check for a live plan or stored snapshot; backs the Plan Analysis popup's Findings tab. |
 | `comexio.function_plan_flow_diagram` | *Experimental.* Renders a live plan or stored snapshot as a signal-flow diagram (input → logic → output); backs the Plan Analysis popup's Flow Diagram tab. |
@@ -231,7 +231,7 @@ function_plan_connect:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Plan' selector."
       required: false
       selector:
         select:
@@ -276,7 +276,7 @@ function_plan_sort:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Plan' selector."
       required: false
       selector:
         select:
@@ -307,7 +307,7 @@ function_plan_stop:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Plan' selector."
       required: false
       selector:
         select:
@@ -327,7 +327,7 @@ function_plan_activate:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Plan' selector."
       required: false
       selector:
         select:
@@ -358,7 +358,7 @@ function_plan_restore:
           options: []
     fub_id:
       name: Plan
-      description: "Manual alternative to 'Snapshot' above (e.g. for scripting) — ignored whenever 'Snapshot' is set. Only plans with existing backup snapshots are listed. Leave both empty to use the plan selected in the 'Function Plans' entity."
+      description: "Manual alternative to 'Snapshot' above (e.g. for scripting) — ignored whenever 'Snapshot' is set. Only plans with existing backup snapshots are listed. Leave both empty to use the plan selected in the 'Plan' selector."
       required: false
       advanced: true
       selector:
@@ -578,7 +578,7 @@ function_plan_visualize:
   name: Function Plan Visualize
   description: >
     Shows the state of a function plan (connections + unwired elements) as a text
-    notification or as an SVG diagram (Plan Preview sensor). Two ways to pick the
+    notification or as an SVG diagram (Preview image). Two ways to pick the
     source — use only ONE: (1) "Snapshot" — render a stored backup exactly as
     captured, entirely offline; (2) "Plan" (live) — render the plan's current
     state in Comexio.
@@ -592,7 +592,7 @@ function_plan_visualize:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Plan' selector. Ignored when 'Snapshot' is set."
       required: false
       selector:
         select:
@@ -608,7 +608,7 @@ function_plan_visualize:
           options: []
     format:
       name: Output format (optional)
-      description: "text (default) = notification listing connections/unwired elements. svg = renders a diagram at Comexio's original layout positions into the Plan Preview sensor (entity_picture) and returns its URL."
+      description: "text (default) = notification listing connections/unwired elements. svg = renders a diagram at Comexio's original layout positions into the Preview image entity and returns its URL."
       required: false
       default: text
       selector:
@@ -638,7 +638,7 @@ function_plan_analyze:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Plan' selector. Ignored when 'Snapshot' is set."
       required: false
       selector:
         select:
@@ -674,7 +674,7 @@ function_plan_flow_diagram:
           integration: comexio
     fub_id:
       name: Plan (optional)
-      description: "Pick a plan, or leave empty to use the plan selected in the 'Function Plans' entity. Ignored when 'Snapshot' is set."
+      description: "Pick a plan, or leave empty to use the plan selected in the 'Plan' selector. Ignored when 'Snapshot' is set."
       required: false
       selector:
         select:
@@ -791,7 +791,7 @@ function_plan_search:
     quotes to search the full human-readable labels of every element instead (WebIOs,
     blocks, constants and comments are only found this way). Wildcards: ? (one non-space
     character) and * (anything). Results come as a notification and as a service response. When
-    exactly ONE plan matches, the 'Function Plans' selector is set to it automatically —
+    exactly ONE plan matches, the 'Plan' selector is set to it automatically —
     a follow-up action without a plan then targets the plan just found.
   fields:
     config_entry:
@@ -926,13 +926,13 @@ cards:
 ```
 
 > Die Auswahl-Entität heißt in der Home-Assistant-Oberfläche unabhängig von der
-> Sprache **"Function Plans"** (bewusst nicht übersetzt).
+> Sprache **"Plan"** (bewusst nicht übersetzt), am Gerät **"<server> # Function plans"**.
 
 ---
 
 ## 4. Plan auswählen und rendern
 
-- Plan in der **Function Plans**-Auswahl wählen, dann einmal den **Vorschau**-Taster
+- Plan in der **Plan**-Auswahl wählen, dann einmal den **Vorschau**-Taster
   drücken.
 - Ist nichts ausgewählt, verwenden Aktionen den zuletzt von der Integration
   verwendeten Plan.

@@ -75,7 +75,8 @@ class ComexioFunctionPlanEntityMixin:
     On the sub-device HA would derive "<server> # Function plans <name>" instead, so a new
     install requests the old id explicitly (same hook and registry semantics as
     ComexioStableEntityIdMixin: existing entities keep their entity_id either way).
-    Subclasses set _hub_era_name to the entity's English name.
+    Subclasses set _hub_era_name to the English name the entity had on the hub — frozen, since
+    the display names dropped their "Function Plan" prefix once the device itself carried it.
     """
 
     coordinator: ComexioCoordinator
