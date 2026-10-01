@@ -223,7 +223,7 @@
     },
     "switch": {
       "function_plan_auto_start": {
-        "name": "Plan Auto-Start"
+        "name": "Plan Auto-Start (HA plans)"
       }
     }
   },

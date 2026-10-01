@@ -123,7 +123,8 @@ class ManagedPlanWatchdog:
         self._start_plan = start_plan
         self._notify_targets = notify_targets
         # Set by the auto-start switch (restored from its last state).
-        self.auto_restart = False
+        # On by default; the Plan Auto-Start switch restores the user's last choice over it.
+        self.auto_restart = True
         # fub_id → name of the managed plans not running; None until the first check.
         self.stopped: dict[int, str] | None = None
         # fub_id → time.monotonic() of the last refused auto-start (retry back-off).

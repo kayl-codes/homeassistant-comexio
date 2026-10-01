@@ -73,7 +73,16 @@ def _watchdog(
     watchdog = ManagedPlanWatchdog(
         hass, entry_id="e1", server_id=SERVER_ID, start_plan=start, notify_targets=lambda: list(targets or [])
     )
+    # The alarm/repair tests run with Plan Auto-Start off; the auto-start tests switch it on themselves.
+    watchdog.auto_restart = False
     return watchdog, started
+
+
+def test_plan_auto_start_is_on_by_default() -> None:
+    watchdog = ManagedPlanWatchdog(
+        MagicMock(), entry_id="e1", server_id=SERVER_ID, start_plan=AsyncMock(), notify_targets=list
+    )
+    assert watchdog.auto_restart is True
 
 
 def test_stopped_plan_raises_and_clears_its_repair(ir: MagicMock) -> None:

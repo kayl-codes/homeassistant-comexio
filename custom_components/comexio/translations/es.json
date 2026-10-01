@@ -223,7 +223,7 @@
     },
     "switch": {
       "function_plan_auto_start": {
-        "name": "Inicio automático de planes"
+        "name": "Inicio automático de planes (planes HA)"
       }
     }
   },

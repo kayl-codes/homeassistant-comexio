@@ -67,7 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 class ComexioPlanAutoStartSwitch(SwitchEntity, RestoreEntity):
     """Plan Auto-Start: the plan watchdog starts a stopped HA-managed plan again on its own.
 
-    Off by default; only HA's own setting, nothing is written to Comexio. The state survives
+    On by default (HA's plans should run); only HA's own setting, nothing is written to Comexio. The state survives
     restarts through RestoreEntity.
     """
 

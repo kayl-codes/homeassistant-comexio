@@ -223,7 +223,7 @@
     },
     "switch": {
       "function_plan_auto_start": {
-        "name": "Démarrage auto des plans"
+        "name": "Démarrage auto des plans (plans HA)"
       }
     }
   },
