@@ -296,6 +296,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_function_plan_toggle_btn")
     active_unique_ids.add(f"comexio_{server_id}_managed_plans_problem")
     active_unique_ids.add(f"comexio_{server_id}_function_plan_auto_start")
+    active_unique_ids.add(f"comexio_{server_id}_function_plan_auto_start_user")
 
     # Function plan run-state sensors (binary_sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear

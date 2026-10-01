@@ -11,6 +11,7 @@ from custom_components.comexio import api as api_module, plan_watchdog
 from custom_components.comexio.const import DOMAIN
 from custom_components.comexio.plan_watchdog import (
     ISSUE_FUNCTION_PLAN_STOPPED,
+    ISSUE_FUNCTION_PLAN_STOPPED_USER,
     ManagedPlanWatchdog,
     next_stopped_plans,
     parse_start_action,
@@ -119,6 +120,32 @@ def test_auto_start_starts_the_plan_without_a_repair(ir: MagicMock) -> None:
     assert watchdog.stopped == {}
     ir.async_create_issue.assert_not_called()
     plan_watchdog.persistent_notification.async_create.assert_called_once()
+
+
+def test_user_plans_follow_their_own_auto_start_switch(ir: MagicMock) -> None:
+    """HA-plan auto-start on, user-plan auto-start off: only the HA plan is started."""
+    watchdog, started = _watchdog([True])
+    watchdog.auto_restart = True
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=False), user_plans={42}))
+    assert started == [34]
+    assert watchdog.stopped == {42: "HA - TRIGGER"}
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED_USER
+
+
+def test_user_plan_auto_start_starts_only_the_user_plan(ir: MagicMock) -> None:
+    watchdog, started = _watchdog([True])
+    watchdog.auto_restart_user = True
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=False), user_plans={42}))
+    assert started == [42]
+    assert watchdog.stopped == {34: "HA - Marker 1"}
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED
+
+
+def test_user_plan_auto_start_is_off_by_default() -> None:
+    watchdog = ManagedPlanWatchdog(
+        MagicMock(), entry_id="e1", server_id=SERVER_ID, start_plan=AsyncMock(), notify_targets=list
+    )
+    assert watchdog.auto_restart_user is False
 
 
 def test_refused_auto_start_keeps_the_repair_and_backs_off(ir: MagicMock) -> None:

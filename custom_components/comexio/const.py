@@ -629,6 +629,8 @@ FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC = 600
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
+# User plans (not managed by HA) the watchdog also keeps an eye on: list of fub ids as strings.
+CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
 MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 
 

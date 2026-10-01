@@ -234,7 +234,9 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
 
 
 class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
-    """On while an HA-managed function plan does not run in Comexio (see plan_watchdog).
+    """On while a watched function plan (HA-managed, or a user plan picked in the options) does not run.
+
+    See plan_watchdog.
 
     Unknown until the watchdog's first check after the first run-state poll.
     """
@@ -254,8 +256,14 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        stopped = self.coordinator.plan_watchdog.stopped or {}
-        return {"stopped_plans": [{"fub_id": fub_id, "name": name} for fub_id, name in sorted(stopped.items())]}
+        watchdog = self.coordinator.plan_watchdog
+        stopped = watchdog.stopped or {}
+        return {
+            "stopped_plans": [
+                {"fub_id": fub_id, "name": name, "user_plan": watchdog.is_user_plan(fub_id)}
+                for fub_id, name in sorted(stopped.items())
+            ]
+        }
 
     @property
     def device_info(self) -> DeviceInfo:

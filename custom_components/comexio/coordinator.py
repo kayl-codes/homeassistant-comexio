@@ -1,7 +1,7 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 import logging
 import pathlib
@@ -66,6 +66,7 @@ from .const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
+    CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_HOST,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_KNX_PRERELEASE_CLEANUP_PENDING,
@@ -3240,21 +3241,40 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if await self.async_watch_managed_plans() or changed:
             self.async_update_listeners()
 
-    def _managed_plan_names(self) -> dict[int, str]:
-        """fub_id → name of the HA-managed plans (plan_map, trigger plan included) Comexio still has."""
-        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-        if not isinstance(raw_map, dict):
-            return {}
-        managed: dict[int, str] = {}
-        for value in raw_map.values():
+    def _existing_plan_names(self, raw_ids: Iterable[Any]) -> dict[int, str]:
+        """fub_id → name of those of raw_ids (ints or digit strings) Comexio still has."""
+        plans: dict[int, str] = {}
+        for value in raw_ids:
             try:
                 fub_id = int(value)
             except (TypeError, ValueError):
                 continue
             fub = self.api.fub_data.get(str(fub_id))
             if isinstance(fub, dict):
-                managed[fub_id] = str(fub.get("Name") or fub_id)
-        return managed
+                plans[fub_id] = str(fub.get("Name") or fub_id)
+        return plans
+
+    def _managed_plan_names(self) -> dict[int, str]:
+        """fub_id → name of the HA-managed plans (plan_map, trigger plan included) Comexio still has."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        return self._existing_plan_names(raw_map.values()) if isinstance(raw_map, dict) else {}
+
+    def watchdog_user_plan_candidates(self) -> dict[int, str]:
+        """fub_id → name of the plans the options can add to the watchdog: every plan except HA's own."""
+        managed = self._managed_plan_names()
+        return {
+            fub_id: name
+            for fub_id, name in self._existing_plan_names(self.api.fub_data).items()
+            if fub_id not in managed
+        }
+
+    def _watched_user_plan_names(self) -> dict[int, str]:
+        """fub_id → name of the user plans picked for the watchdog in the options (HA-managed ones left out)."""
+        raw_ids = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        if not isinstance(raw_ids, list):
+            return {}
+        managed = self._managed_plan_names()
+        return {fub_id: name for fub_id, name in self._existing_plan_names(raw_ids).items() if fub_id not in managed}
 
     def _watchdog_run_state(self, fub_id: int) -> bool | None:
         """A managed plan's run state for the watchdog; None while unreadable or just stopped by HA itself."""
@@ -3270,10 +3290,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
 
     async def async_watch_managed_plans(self) -> bool:
-        """Judge the managed plans' run states (see plan_watchdog); True if the stopped set changed."""
+        """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
         if self.managed_plan_start_blocked:
             return False
-        return await self.plan_watchdog.async_check(self._managed_plan_names(), self._watchdog_run_state)
+        user_plans = self._watched_user_plan_names()
+        return await self.plan_watchdog.async_check(
+            {**user_plans, **self._managed_plan_names()}, self._watchdog_run_state, user_plans.keys()
+        )
 
     async def _async_watchdog_start_plan(self, fub_id: int) -> bool:
         """Start a stopped managed plan for the watchdog's auto-start; False if it was not started."""

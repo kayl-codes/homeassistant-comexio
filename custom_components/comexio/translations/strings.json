@@ -122,7 +122,8 @@
           "function_plan_backup_retention_months": "Orphaned backup retention",
           "bus_watchdog_enabled": "Enable Bus-Load Watchdog",
           "bus_watchdog_auto_reboot": "Allow automatic Comexio reboot on emergency bus load",
-          "function_plan_watchdog_notify": "Function plan watchdog: push to"
+          "function_plan_watchdog_notify": "Function plan watchdog: push to",
+          "function_plan_watchdog_user_plans": "Function plan watchdog: also watch user plans"
         },
         "data_description": {
           "schema_marker": "Available variables: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -137,7 +138,8 @@
           "function_plan_backup_retention_months": "Once the newest backup of a plan that was deleted directly in Comexio is older than this, a repair asks whether to delete or keep that plan's backups — nothing is deleted without your confirmation. A live plan's backups are never affected. The 'Function Plan Purge Orphaned Backups' action deletes all expired ones at once.",
           "bus_watchdog_enabled": "On a sustained bus-load rise, automatically restart the HA-managed cluster function plans (back to front) to try to relieve it. Non-destructive to the Comexio system itself.",
           "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog.",
-          "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when an HA-managed function plan stops. The push has a 'Start plan' button, and is removed again once the plan runs. Leave empty for no push; the repair is raised either way."
+          "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when an HA-managed function plan stops. The push has a 'Start plan' button, and is removed again once the plan runs. Leave empty for no push; the repair is raised either way.",
+          "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. Leave plans you stop on purpose (tests) out."
         }
       }
     },
@@ -224,6 +226,9 @@
     "switch": {
       "function_plan_auto_start": {
         "name": "Plan Auto-Start (HA plans)"
+      },
+      "function_plan_auto_start_user": {
+        "name": "Plan Auto-Start (user plans)"
       }
     }
   },
@@ -361,7 +366,24 @@
         "step": {
           "function_plan_stopped": {
             "title": "Managed function plan stopped",
-            "description": "The function plan **{plan_name}** (ID {fub_id}) is managed by Home Assistant, but it is not running in Comexio. The markers, IOs, KNX objects or triggers it connects do not reach Home Assistant until it runs again.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start** switch on the function plan device."
+            "description": "The function plan **{plan_name}** (ID {fub_id}) is managed by Home Assistant, but it is not running in Comexio. The markers, IOs, KNX objects or triggers it connects do not reach Home Assistant until it runs again.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (HA plans)** switch on the function plan device."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
+          "busy": "A sync, restore, poll or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
+          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+        }
+      }
+    },
+    "function_plan_stopped_user": {
+      "title": "Function plan {plan_name} is not running",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Watched user plan stopped",
+            "description": "The user plan **{plan_name}** (ID {fub_id}) is watched by the function plan watchdog, but it is not running in Comexio.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (user plans)** switch on the function plan device. To stop watching it, remove it from the integration options."
           }
         },
         "abort": {

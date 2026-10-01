@@ -122,7 +122,8 @@
           "function_plan_backup_retention_months": "Aufbewahrung verwaister Backups",
           "bus_watchdog_enabled": "Bus-Auslastungs-Watchdog aktivieren",
           "bus_watchdog_auto_reboot": "Automatischen Comexio-Neustart bei Notfall-Busauslastung erlauben",
-          "function_plan_watchdog_notify": "Logikplan-Watchdog: Push an"
+          "function_plan_watchdog_notify": "Logikplan-Watchdog: Push an",
+          "function_plan_watchdog_user_plans": "Logikplan-Watchdog: zusätzlich überwachte Pläne"
         },
         "data_description": {
           "schema_marker": "Verfügbare Variablen: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -137,7 +138,8 @@
           "function_plan_backup_retention_months": "Ist das neueste Backup eines direkt in Comexio gelöschten Plans älter als diese Frist, fragt eine Reparaturmeldung, ob seine Backups gelöscht oder behalten werden — ohne deine Bestätigung wird nichts gelöscht. Backups eines noch existierenden Plans sind davon nie betroffen. Die Action 'Function Plan Purge Orphaned Backups' löscht alle abgelaufenen auf einmal.",
           "bus_watchdog_enabled": "Bei anhaltendem Anstieg der Busauslastung werden die von HA verwalteten Cluster-Logikpläne automatisch (von hinten nach vorne) neu gestartet, um die Auslastung zu entlasten. Greift nicht destruktiv in die Comexio-Anlage selbst ein.",
           "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust.",
-          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein von HA verwalteter Logikplan stoppt. Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall."
+          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein von HA verwalteter Logikplan stoppt. Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
+          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Absichtlich gestoppte Pläne (Tests) hier nicht auswählen."
         }
       }
     },
@@ -224,6 +226,9 @@
     "switch": {
       "function_plan_auto_start": {
         "name": "Plan Auto-Start (HA-Pläne)"
+      },
+      "function_plan_auto_start_user": {
+        "name": "Plan Auto-Start (User-Pläne)"
       }
     }
   },
@@ -361,7 +366,24 @@
         "step": {
           "function_plan_stopped": {
             "title": "Verwalteter Logikplan gestoppt",
-            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start** am Logikplan-Gerät ein."
+            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (HA-Pläne)** am Logikplan-Gerät ein."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+        }
+      }
+    },
+    "function_plan_stopped_user": {
+      "title": "Logikplan {plan_name} läuft nicht",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Überwachter Anwender-Logikplan gestoppt",
+            "description": "Der Anwender-Logikplan **{plan_name}** (ID {fub_id}) wird vom Logikplan-Watchdog überwacht, läuft in Comexio aber nicht.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (User-Pläne)** am Logikplan-Gerät ein. Um ihn nicht mehr zu überwachen, entferne ihn in den Optionen der Integration."
           }
         },
         "abort": {

@@ -1,8 +1,14 @@
 # Version: 0.8.0
 import logging
+from typing import Any
 
 from homeassistant import config_entries
-from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 import voluptuous as vol
 
 from .const import (
@@ -15,6 +21,7 @@ from .const import (
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
+    CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
@@ -82,6 +89,24 @@ def _ignored_marker_sort_key(item: int | tuple[int, int]) -> int:
 
 def _format_ignored_marker_item(item: int | tuple[int, int]) -> str:
     return f"{item[0]}-{item[1]}" if isinstance(item, tuple) else str(item)
+
+
+def _watchdog_user_plan_field(coordinator: Any, conf: dict[str, Any]) -> tuple[list[str], SelectSelector]:
+    """Saved picks and selector of the user plans the watchdog also watches.
+
+    Offers every plan except HA's own, by name; saved picks Comexio no longer has stay
+    choosable so they can be deselected.
+    """
+    saved = [str(fub_id) for fub_id in conf.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []]
+    candidates = coordinator.watchdog_user_plan_candidates() if coordinator is not None else {}
+    options = [
+        SelectOptionDict(value=str(fub_id), label=f"{name} (ID {fub_id})")
+        for fub_id, name in sorted(candidates.items(), key=lambda item: (item[1].casefold(), item[0]))
+    ]
+    known = {option["value"] for option in options}
+    options.extend(SelectOptionDict(value=fub_id, label=f"ID {fub_id}") for fub_id in saved if fub_id not in known)
+    # No translation_key: the options are this server's plan names.
+    return saved, SelectSelector(SelectSelectorConfig(options=options, multiple=True, mode=SelectSelectorMode.DROPDOWN))
 
 
 class ComexioOptionsFlow(config_entries.OptionsFlow):
@@ -250,6 +275,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 mode=SelectSelectorMode.DROPDOWN,
             )
         )
+        saved_user_plans, user_plan_selector = _watchdog_user_plan_field(coordinator, conf)
+        schema_dict[vol.Optional(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS, default=saved_user_plans)] = user_plan_selector
 
         return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_dict), errors=errors)
 

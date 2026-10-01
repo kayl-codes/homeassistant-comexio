@@ -13,6 +13,7 @@ from custom_components.comexio import binary_sensor as binary_sensor_module, coo
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
+    CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
@@ -159,7 +160,10 @@ class _FakeCoordinator(SimpleNamespace):
     _async_refresh_run_states_in_preview = ComexioCoordinator._async_refresh_run_states_in_preview
     _async_plan_run_state_tick = ComexioCoordinator._async_plan_run_state_tick
     _async_plan_run_state_fetch_failed = ComexioCoordinator._async_plan_run_state_fetch_failed
+    _existing_plan_names = ComexioCoordinator._existing_plan_names
     _managed_plan_names = ComexioCoordinator._managed_plan_names
+    _watched_user_plan_names = ComexioCoordinator._watched_user_plan_names
+    watchdog_user_plan_candidates = ComexioCoordinator.watchdog_user_plan_candidates
     _watchdog_run_state = ComexioCoordinator._watchdog_run_state
     managed_plan_start_blocked = ComexioCoordinator.managed_plan_start_blocked
     async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
@@ -566,11 +570,33 @@ def test_poll_hands_the_managed_plans_to_the_watchdog(api: ComexioAPI) -> None:
     plan_map = {"HA - TRIGGER": 19, "HA - Marker 1": "43", "HA - Gone": 99, "broken": "x"}
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: plan_map}))
     asyncio.run(coordinator._async_refresh_plan_run_states())
-    managed, run_state = coordinator.plan_watchdog.async_check.call_args.args
+    managed, run_state, user_plans = coordinator.plan_watchdog.async_check.call_args.args
     assert managed == {19: "Test1", 43: "Licht"}
+    assert set(user_plans) == set()
     assert (run_state(19), run_state(43)) == (False, True)
     api.set_fub_active(43, False)  # HA itself stopped it, e.g. for a sort
     assert run_state(43) is None
+
+
+def test_poll_adds_the_watched_user_plans(api: ComexioAPI) -> None:
+    """Picked user plans are judged too; a pick that is HA-managed or gone from Comexio is left out."""
+    api._fub_data["50"] = {"Id": 50, "Name": "Rollo Logik", "Active": 0}
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: True, 43: True, 50: False})
+    options = {
+        CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19},
+        CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["50", "19", "99"],
+    }
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    managed, _, user_plans = coordinator.plan_watchdog.async_check.call_args.args
+    assert managed == {19: "Test1", 50: "Rollo Logik"}
+    assert set(user_plans) == {50}
+
+
+def test_user_plan_candidates_leave_out_the_ha_plans(api: ComexioAPI) -> None:
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    assert coordinator.watchdog_user_plan_candidates() == {43: "Licht"}
 
 
 def test_watchdog_waits_while_a_cascade_or_sync_runs(api: ComexioAPI) -> None:

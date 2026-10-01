@@ -1,10 +1,11 @@
 """Watchdog for the function plans HA manages (plan_map, the trigger plan included).
 
 HA's markers, IOs, KNX objects and triggers only work while their cluster plans run in
-Comexio. After every run-state fetch the coordinator checks them here: a stopped plan raises
-a fixable repair ("start now"), turns the problem sensor on, sends a push with a "Start plan"
-action to the configured notify services and, with the auto-start switch on, is started
-again right away.
+Comexio. After every run-state fetch the coordinator checks them here, together with the user
+plans picked in the options: a stopped plan raises a fixable repair ("start now"), turns the
+problem sensor on, sends a push with a "Start plan" action to the configured notify services
+and, with the auto-start switch of its kind (HA plans / user plans) on, is started again
+right away.
 """
 
 from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -24,6 +25,8 @@ from .const import DOMAIN, FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC
 _LOGGER = logging.getLogger(__name__)
 
 ISSUE_FUNCTION_PLAN_STOPPED = "function_plan_stopped"
+# Translation key of a stopped user plan's repair; same issue id scheme and fix flow.
+ISSUE_FUNCTION_PLAN_STOPPED_USER = "function_plan_stopped_user"
 START_ACTION_PREFIX = "COMEXIO_START_PLAN_"
 NOTIFY_DOMAIN = "notify"
 
@@ -31,7 +34,7 @@ NOTIFY_DOMAIN = "notify"
 PUSH_TEXTS: dict[str, dict[str, str]] = {
     "en": {
         "stopped_title": "Comexio: function plan stopped",
-        "stopped": "The managed function plan {name} (ID {fub_id}) is not running.",
+        "stopped": "The monitored function plan {name} (ID {fub_id}) is not running.",
         "start": "Start plan",
         "started_title": "Comexio: function plan started",
         "started": "The function plan {name} (ID {fub_id}) runs again.",
@@ -43,7 +46,7 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
     },
     "de": {
         "stopped_title": "Comexio: Logikplan gestoppt",
-        "stopped": "Der verwaltete Logikplan {name} (ID {fub_id}) läuft nicht.",
+        "stopped": "Der überwachte Logikplan {name} (ID {fub_id}) läuft nicht.",
         "start": "Plan starten",
         "started_title": "Comexio: Logikplan gestartet",
         "started": "Der Logikplan {name} (ID {fub_id}) läuft wieder.",
@@ -122,27 +125,42 @@ class ManagedPlanWatchdog:
         self._server_id = server_id
         self._start_plan = start_plan
         self._notify_targets = notify_targets
-        # Set by the auto-start switch (restored from its last state).
-        # On by default; the Plan Auto-Start switch restores the user's last choice over it.
+        # Set by the two auto-start switches, which restore the user's last choice over these
+        # defaults: HA's own plans should run (on), user plans only start when asked to (off).
         self.auto_restart = True
+        self.auto_restart_user = False
+        # fub ids of the watched user plans, as of the last check.
+        self._user_plans: frozenset[int] = frozenset()
         # fub_id → name of the managed plans not running; None until the first check.
         self.stopped: dict[int, str] | None = None
         # fub_id → time.monotonic() of the last refused auto-start (retry back-off).
         self._restart_refused_at: dict[int, float] = {}
         self._checking = False
 
-    async def async_check(self, managed: Mapping[int, str], run_state: Callable[[int], bool | None]) -> bool:
-        """Judge the managed plans; True if the set of stopped plans changed."""
+    async def async_check(
+        self,
+        managed: Mapping[int, str],
+        run_state: Callable[[int], bool | None],
+        user_plans: Collection[int] = (),
+    ) -> bool:
+        """Judge the watched plans; True if the set of stopped plans changed.
+
+        managed holds every watched plan; user_plans names the ones that are user plans, which
+        follow the user-plan auto-start switch instead of the HA-plan one.
+        """
         if self._checking:
             return False
         self._checking = True
         try:
+            self._user_plans = frozenset(user_plans)
             previous = self.stopped or {}
             stopped = next_stopped_plans(managed, run_state, previous)
             self._log_transitions(previous, stopped)
+            to_start = {fub_id: name for fub_id, name in stopped.items() if self._auto_start_enabled(fub_id)}
             auto_started: dict[int, str] = {}
-            if self.auto_restart and stopped:
-                stopped, auto_started = await self._async_auto_start(stopped)
+            if to_start:
+                auto_started = await self._async_auto_start(to_start)
+                stopped = {fub_id: name for fub_id, name in stopped.items() if fub_id not in auto_started}
             self._sync_issues(stopped)
             changed = self.stopped != stopped
             self.stopped = stopped
@@ -150,6 +168,12 @@ class ManagedPlanWatchdog:
             return changed
         finally:
             self._checking = False
+
+    def is_user_plan(self, fub_id: int) -> bool:
+        return fub_id in self._user_plans
+
+    def _auto_start_enabled(self, fub_id: int) -> bool:
+        return self.auto_restart_user if self.is_user_plan(fub_id) else self.auto_restart
 
     async def async_plan_started(self, fub_id: int, *, confirm: bool = False) -> None:
         """A stopped plan was started from its repair or push: clear it without waiting for the next poll.
@@ -173,25 +197,23 @@ class ManagedPlanWatchdog:
     def _log_transitions(self, previous: Mapping[int, str], stopped: Mapping[int, str]) -> None:
         for fub_id in stopped.keys() - previous.keys():
             _LOGGER.warning(
-                "[%s] Managed function plan '%s' (ID %s) is not running in Comexio",
+                "[%s] Monitored function plan '%s' (ID %s) is not running in Comexio",
                 self._server_id,
                 stopped[fub_id],
                 fub_id,
             )
         for fub_id in previous.keys() - stopped.keys():
             _LOGGER.info(
-                "[%s] Managed function plan '%s' (ID %s) runs again", self._server_id, previous[fub_id], fub_id
+                "[%s] Monitored function plan '%s' (ID %s) runs again", self._server_id, previous[fub_id], fub_id
             )
 
-    async def _async_auto_start(self, stopped: dict[int, str]) -> tuple[dict[int, str], dict[int, str]]:
-        """Start the stopped plans; returns (still stopped, started)."""
-        still_stopped: dict[int, str] = {}
+    async def _async_auto_start(self, stopped: Mapping[int, str]) -> dict[int, str]:
+        """Start the stopped plans; returns the ones started."""
         started: dict[int, str] = {}
         now = time.monotonic()
         for fub_id, name in stopped.items():
             refused_at = self._restart_refused_at.get(fub_id)
             if refused_at is not None and now - refused_at < FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC:
-                still_stopped[fub_id] = name
                 continue
             if await self._start_plan(fub_id):
                 self._restart_refused_at.pop(fub_id, None)
@@ -200,22 +222,22 @@ class ManagedPlanWatchdog:
                 continue
             if refused_at is None:
                 _LOGGER.warning(
-                    "[%s] Auto-start of managed function plan '%s' (ID %s) failed; retrying every %s s",
+                    "[%s] Auto-start of monitored function plan '%s' (ID %s) failed; retrying every %s s",
                     self._server_id,
                     name,
                     fub_id,
                     FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC,
                 )
             self._restart_refused_at[fub_id] = now
-            still_stopped[fub_id] = name
-        return still_stopped, started
+        return started
 
     def _notify_auto_started(self, fub_id: int, name: str) -> None:
-        _LOGGER.warning("[%s] Auto-started managed function plan '%s' (ID %s)", self._server_id, name, fub_id)
+        _LOGGER.warning("[%s] Auto-started monitored function plan '%s' (ID %s)", self._server_id, name, fub_id)
+        switch = "Plan Auto-Start (user plans)" if self.is_user_plan(fub_id) else "Plan Auto-Start (HA plans)"
         persistent_notification.async_create(
             self._hass,
-            f"The managed function plan **{name}** (ID {fub_id}) was not running in Comexio and has been "
-            "started again by the **Plan Auto-Start** switch.",
+            f"The monitored function plan **{name}** (ID {fub_id}) was not running in Comexio and has been "
+            f"started again by the **{switch}** switch.",
             title=f"Comexio {self._server_id}: function plan started",
             notification_id=f"{DOMAIN}_{self._server_id}_plan_auto_start_{fub_id}",
         )
@@ -233,7 +255,9 @@ class ManagedPlanWatchdog:
                 issue_id,
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
-                translation_key=ISSUE_FUNCTION_PLAN_STOPPED,
+                translation_key=(
+                    ISSUE_FUNCTION_PLAN_STOPPED_USER if self.is_user_plan(fub_id) else ISSUE_FUNCTION_PLAN_STOPPED
+                ),
                 translation_placeholders=details,
                 # The fix flow gets only this data, not the placeholders.
                 data={"entry_id": self._entry_id, **details},

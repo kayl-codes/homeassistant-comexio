@@ -122,7 +122,8 @@
           "function_plan_backup_retention_months": "Rétention des sauvegardes orphelines",
           "bus_watchdog_enabled": "Activer le Bus-Load Watchdog",
           "bus_watchdog_auto_reboot": "Autoriser le redémarrage automatique de Comexio en cas de charge de bus critique",
-          "function_plan_watchdog_notify": "Watchdog des plans de fonctions : push vers"
+          "function_plan_watchdog_notify": "Watchdog des plans de fonctions : push vers",
+          "function_plan_watchdog_user_plans": "Watchdog des plans de fonctions : surveiller aussi des plans utilisateur"
         },
         "data_description": {
           "schema_marker": "Variables disponibles : '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -137,7 +138,8 @@
           "function_plan_backup_retention_months": "Dès que la sauvegarde la plus récente d'un plan supprimé directement dans Comexio dépasse ce délai, une réparation demande s'il faut supprimer ou conserver ses sauvegardes — rien n'est supprimé sans votre confirmation. Les sauvegardes d'un plan existant ne sont jamais concernées. L'action 'Function Plan Purge Orphaned Backups' supprime d'un coup toutes celles qui ont expiré.",
           "bus_watchdog_enabled": "En cas de hausse durable de la charge du bus, redémarre automatiquement les plans fonctionnels de cluster gérés par HA (de l'arrière vers l'avant) pour tenter de la soulager. Non destructif pour le système Comexio lui-même.",
           "bus_watchdog_auto_reboot": "Si la charge du bus dépasse en moyenne 90 % pendant 5 minutes, déclenche un redémarrage COMPLET et IMMÉDIAT de Comexio, sans confirmation. Désactivé par défaut — à activer une fois que vous faites confiance au mécanisme.",
-          "function_plan_watchdog_notify": "Services de notification (p. ex. notify.mobile_app_votre_telephone) qui reçoivent un push lorsqu'un plan de fonctions géré par HA s'arrête. Le push comporte un bouton « Démarrer le plan » et disparaît dès que le plan s'exécute de nouveau. Laisser vide pour aucun push ; la réparation est créée dans tous les cas."
+          "function_plan_watchdog_notify": "Services de notification (p. ex. notify.mobile_app_votre_telephone) qui reçoivent un push lorsqu'un plan de fonctions géré par HA s'arrête. Le push comporte un bouton « Démarrer le plan » et disparaît dès que le plan s'exécute de nouveau. Laisser vide pour aucun push ; la réparation est créée dans tous les cas.",
+          "function_plan_watchdog_user_plans": "Plans utilisateur (non gérés par Home Assistant) qui doivent toujours s'exécuter. Le watchdog les traite comme les plans HA : réparation, capteur de problème et push lorsqu'un plan s'arrête. L'interrupteur Démarrage auto des plans (plans utilisateur) les redémarre lui-même. N'y mettez pas les plans arrêtés volontairement (tests)."
         }
       }
     },
@@ -224,6 +226,9 @@
     "switch": {
       "function_plan_auto_start": {
         "name": "Démarrage auto des plans (plans HA)"
+      },
+      "function_plan_auto_start_user": {
+        "name": "Démarrage auto des plans (plans utilisateur)"
       }
     }
   },
@@ -361,7 +366,24 @@
         "step": {
           "function_plan_stopped": {
             "title": "Plan de fonctions géré arrêté",
-            "description": "Le plan de fonctions **{plan_name}** (ID {fub_id}) est géré par Home Assistant, mais il ne s'exécute pas dans Comexio. Les marqueurs, IO, objets KNX ou déclencheurs qu'il relie n'atteignent plus Home Assistant tant qu'il est arrêté.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans** de l'appareil des plans de fonctions."
+            "description": "Le plan de fonctions **{plan_name}** (ID {fub_id}) est géré par Home Assistant, mais il ne s'exécute pas dans Comexio. Les marqueurs, IO, objets KNX ou déclencheurs qu'il relie n'atteignent plus Home Assistant tant qu'il est arrêté.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans HA)** de l'appareil des plans de fonctions."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
+          "busy": "Une synchronisation, une restauration, une interrogation ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
+          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
+        }
+      }
+    },
+    "function_plan_stopped_user": {
+      "title": "Le plan de fonctions {plan_name} ne s'exécute pas",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Plan utilisateur surveillé arrêté",
+            "description": "Le plan utilisateur **{plan_name}** (ID {fub_id}) est surveillé par le watchdog des plans de fonctions, mais il ne s'exécute pas dans Comexio.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans utilisateur)** de l'appareil des plans de fonctions. Pour ne plus le surveiller, retirez-le des options de l'intégration."
           }
         },
         "abort": {
