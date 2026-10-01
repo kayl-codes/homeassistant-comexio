@@ -207,7 +207,6 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
         super().__init__(coordinator)
         self._fub_id = fub_id
         self._attr_unique_id = function_plan_run_state_unique_id(server_id, fub_id)
-        self._attr_extra_state_attributes = {"fub_id": fub_id}
 
     @property
     def _fub(self) -> dict[str, Any] | None:
@@ -227,6 +226,15 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
     @property
     def is_on(self) -> bool | None:
         return self.coordinator.api.get_fub_active(self._fub_id) if self._fub is not None else None
+
+    @property
+    def icon(self) -> str | None:
+        # A binary sensor has no third state: HA's own start/stop in progress shows as icon + attribute.
+        return "mdi:progress-clock" if self.coordinator.plan_transition(self._fub_id) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"fub_id": self._fub_id, "transition": self.coordinator.plan_transition(self._fub_id)}
 
     @property
     def device_info(self) -> DeviceInfo:

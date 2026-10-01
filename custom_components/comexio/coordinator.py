@@ -1,7 +1,8 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+import contextlib
 from datetime import datetime, timedelta
 import logging
 import pathlib
@@ -113,6 +114,7 @@ from .const import (
     ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     MARKER_READ_ONLY_SUFFIX,
+    PLAN_TRANSITION_STARTING,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -684,6 +686,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             start_plan=self._async_watchdog_start_plan,
             notify_targets=self._plan_watchdog_notify_targets,
         )
+        # fub_id → PLAN_TRANSITION_* while HA itself starts/stops the plan (async_plan_transition).
+        self._plan_transitions: dict[int, str] = {}
         # Two counters: the fail streak tracks the run-state endpoint itself (logging, reset only
         # by a working fetch); the stale count tracks failures since the last fresh state (sensor
         # availability, also reset by a full poll, whose $Fubs brings every Active flag).
@@ -3303,18 +3307,44 @@ class ComexioCoordinator(DataUpdateCoordinator):
             {**user_plans, **self._managed_plan_names()}, self._watchdog_run_state, user_plans.keys()
         )
 
-    async def _async_watchdog_start_plan(self, fub_id: int) -> bool:
+    def plan_transition(self, fub_id: int) -> str | None:
+        """PLAN_TRANSITION_STARTING/STOPPING while HA itself starts or stops the plan, else None."""
+        return self._plan_transitions.get(fub_id)
+
+    @contextlib.asynccontextmanager
+    async def async_plan_transition(self, fub_id: int, transition: str, *, refresh: bool = True) -> AsyncIterator[None]:
+        """Mark a plan as starting/stopping on its run-state sensor for the duration of HA's own action.
+
+        With `refresh`, the run states are read from Comexio right after the action, so the sensors,
+        the plan selector and the watchdog show the real result instead of waiting for the next poll.
+        The watchdog's auto-start runs inside that very fetch and passes refresh=False.
+        """
+        self._plan_transitions[fub_id] = transition
+        self.async_update_listeners()
+        try:
+            yield
+        finally:
+            self._plan_transitions.pop(fub_id, None)
+            if refresh:
+                await self._async_refresh_plan_run_states()
+            self.async_update_listeners()
+
+    async def _async_watchdog_start_plan(self, fub_id: int, *, refresh: bool = False) -> bool:
         """Start a stopped managed plan for the watchdog's auto-start; False if it was not started."""
         if self.managed_plan_start_blocked:
             return False
-        async with self._watchdog_lock:
-            return await self.api.function_plan_run_fup(fub_id)
+        async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
+            started = await self.api.function_plan_run_fup(fub_id)
+        if refresh:
+            # Outside the watchdog lock: the fetch judges the watched plans again.
+            await self._async_refresh_plan_run_states()
+        return started
 
     async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool:
         """Start a stopped managed plan from its repair or push; False if Comexio did not confirm it."""
         if not await self.api.login():
             return False
-        if not await self._async_watchdog_start_plan(fub_id):
+        if not await self._async_watchdog_start_plan(fub_id, refresh=True):
             return False
         await self.plan_watchdog.async_plan_started(fub_id, confirm=from_push)
         self.async_update_listeners()

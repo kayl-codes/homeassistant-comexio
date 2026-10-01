@@ -3401,7 +3401,7 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
         self.server_id = server_id
         self._attr_unique_id = f"comexio_{server_id}_function_plan_toggle_btn"
         # Set for the duration of async_press so the icon can show an in-flight state —
-        # the stop/activate service call + raw_config refresh below take a few seconds, during
+        # the stop/activate service call (with its run-state check) takes a few seconds, during
         # which the icon would otherwise still show the pre-press (now stale) state.
         self._pending = False
 
@@ -3446,15 +3446,8 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
                 {"config_entry": self.coordinator.config_entry.entry_id, "fub_id": fub_id},
                 blocking=True,
             )
-            # Reflect the actual resulting state right away — the selected plan's Active flag
-            # otherwise wouldn't update until the next poll cycle, leaving both this button's
-            # icon and the 'Function Plans' dropdown's inactive marker stale for a whole
-            # scan_interval.
-            api = self.coordinator.api
-            raw_config = await api.get_raw_config()
-            live_fub = raw_config.get("Fubs", {}).get(str(fub_id))
-            if live_fub is not None:
-                api.update_fub_cache_entry(fub_id, live_fub)
+            # The service reads the run states right after the action (coordinator.async_plan_transition),
+            # so this icon and the 'Function Plans' inactive marker already show the real result.
         finally:
             self._pending = False
             self.coordinator.async_update_listeners()

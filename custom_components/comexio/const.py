@@ -624,6 +624,9 @@ FUNCTION_PLAN_FETCH_MARK_SLOTS = 8
 # A plan HA itself stopped this recently is not judged: sort, connect and restore stop a plan
 # and start it again, and the bus-load cascade does the same, without holding the poll back.
 FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC = 300
+# Run-state sensor attribute `transition` while HA itself starts or stops a plan.
+PLAN_TRANSITION_STARTING = "starting"
+PLAN_TRANSITION_STOPPING = "stopping"
 # With auto-start on, a plan Comexio refused to start is tried again no sooner than this.
 FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC = 600
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
