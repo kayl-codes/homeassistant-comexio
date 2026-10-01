@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError
 import pytest
 
-from custom_components.comexio import binary_sensor as binary_sensor_module, coordinator as coordinator_module
+from custom_components.comexio import coordinator as coordinator_module, sensor as sensor_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
@@ -18,6 +18,8 @@ from custom_components.comexio.const import (
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
+    PLAN_TRANSITION_STARTING,
+    PLAN_TRANSITION_STOPPING,
     function_plan_ids,
     function_plan_run_state_unique_id,
 )
@@ -426,7 +428,8 @@ class _FakeRegistry:
         self.entity_ids = entity_ids
         self.removed: list[str] = []
 
-    def async_get_entity_id(self, _domain: str, _platform: str, unique_id: str) -> str | None:
+    def async_get_entity_id(self, domain: str, _platform: str, unique_id: str) -> str | None:
+        assert domain == "sensor"
         return self.entity_ids.get(unique_id)
 
     def async_remove(self, entity_id: str) -> None:
@@ -435,12 +438,12 @@ class _FakeRegistry:
 
 def _plan_sensor_sync(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, **coordinator_overrides):
     registry = _FakeRegistry(
-        {function_plan_run_state_unique_id("iosrv1", fid): f"binary_sensor.iosrv1_fub{fid}" for fid in (19, 43)}
+        {function_plan_run_state_unique_id("iosrv1", fid): f"sensor.iosrv1_fub{fid}" for fid in (19, 43)}
     )
-    monkeypatch.setattr(binary_sensor_module.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(sensor_module.er, "async_get", lambda _hass: registry)
     coordinator = _coordinator(api, **coordinator_overrides)
     added: list = []
-    sync = binary_sensor_module._PlanRunStateSensorSync(None, coordinator, lambda ents: added.extend(ents))
+    sync = sensor_module._PlanRunStateSensorSync(None, coordinator, lambda ents: added.extend(ents))
     return sync, coordinator, registry, added
 
 
@@ -474,7 +477,7 @@ def test_sensor_of_a_deleted_plan_is_removed_after_a_scraped_poll(
     coordinator.scraped_plan_ids = {43}
     coordinator.plan_scrape_generation = 2
     sync()
-    assert registry.removed == ["binary_sensor.iosrv1_fub19"]
+    assert registry.removed == ["sensor.iosrv1_fub19"]
 
 
 def test_plan_created_by_ha_after_the_scrape_keeps_its_sensor(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -482,7 +485,7 @@ def test_plan_created_by_ha_after_the_scrape_keeps_its_sensor(api: ComexioAPI, m
     sync, coordinator, registry, added = _plan_sensor_sync(
         api, monkeypatch, scraped_plan_ids={19, 43}, plan_scrape_generation=1
     )
-    registry.entity_ids[function_plan_run_state_unique_id("iosrv1", 77)] = "binary_sensor.iosrv1_fub77"
+    registry.entity_ids[function_plan_run_state_unique_id("iosrv1", 77)] = "sensor.iosrv1_fub77"
     sync()
     api._fub_data["77"] = {"Id": 77, "Name": "Neu", "Active": 1}
     sync()
@@ -493,6 +496,25 @@ def test_plan_created_by_ha_after_the_scrape_keeps_its_sensor(api: ComexioAPI, m
     sync()
     assert added[-1].unique_id == "comexio_iosrv1_fub77"
     assert registry.removed == []
+
+
+@pytest.mark.parametrize(
+    ("fub_id", "transition", "expected"),
+    [
+        (43, None, "running"),
+        (19, None, "stopped"),
+        (19, PLAN_TRANSITION_STARTING, "starting"),
+        (43, PLAN_TRANSITION_STOPPING, "stopping"),
+        (99, None, None),
+    ],
+    ids=["running", "stopped", "starting", "stopping", "unknown-plan"],
+)
+def test_run_state_sensor_value(api: ComexioAPI, fub_id: int, transition: str | None, expected: str | None) -> None:
+    coordinator = _coordinator(api)
+    coordinator.plan_transition = {fub_id: transition}.get
+    sensor = sensor_module.ComexioFunctionPlanRunStateSensor(coordinator, "iosrv1", fub_id)
+    assert sensor.native_value == expected
+    assert expected is None or expected in sensor.options
 
 
 def test_no_scraped_plan_list_removes_no_sensor(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:

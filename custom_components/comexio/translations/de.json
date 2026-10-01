@@ -181,6 +181,14 @@
       }
     },
     "sensor": {
+      "function_plan_run_state": {
+        "state": {
+          "running": "Läuft",
+          "stopped": "Gestoppt",
+          "starting": "Startet…",
+          "stopping": "Stoppt…"
+        }
+      },
       "sync_status": {
         "name": "WebIO Sync Status",
         "state": {

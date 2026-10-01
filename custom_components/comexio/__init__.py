@@ -298,7 +298,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_function_plan_auto_start")
     active_unique_ids.add(f"comexio_{server_id}_function_plan_auto_start_user")
 
-    # Function plan run-state sensors (binary_sensor.py), one per plan in $Fubs. Without a
+    # Function plan run-state sensors (sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
     # while running, the ones of plans deleted while HA was down go with the next scraped setup.
     if coordinator.scraped_plan_ids is not None:
@@ -358,6 +358,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 expected_platform[uid] = "binary_sensor" if is_input else "switch"
             else:
                 expected_platform[uid] = "sensor" if is_input else "number"
+    # The run-state sensors were binary sensors before they became enum sensors.
+    expected_platform.update(dict.fromkeys(plan_uids, "sensor"))
 
     # Before removing offline IO entities from the registry, snapshot their entity_ids.
     # async_detect_orphaned_statistics uses this set to exclude "temporarily orphaned"

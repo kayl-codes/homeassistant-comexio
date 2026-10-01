@@ -16,6 +16,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -27,6 +28,11 @@ from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_TYPE_INTERVAL,
+    PLAN_RUN_STATE_RUNNING,
+    PLAN_RUN_STATE_STOPPED,
+    PLAN_RUN_STATES,
+    PLAN_TRANSITION_STARTING,
+    PLAN_TRANSITION_STOPPING,
     SYNC_STATE_ERROR,
     SYNC_STATE_IDLE,
     SYNC_STATE_PARTIAL,
@@ -34,9 +40,17 @@ from .const import (
     SYNC_STATES,
     MarkerKind,
     bus_load_signal,
+    function_plan_ids,
+    function_plan_run_state_unique_id,
 )
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity, function_plan_device_info
+from .entity import (
+    ComexioIOEntity,
+    ComexioKnxEntity,
+    ComexioMarkerEntity,
+    ComexioStableEntityIdMixin,
+    function_plan_device_info,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -111,6 +125,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     )
 
     async_add_entities(entities)
+
+    sync_plan_sensors = _PlanRunStateSensorSync(hass, coordinator, async_add_entities)
+    sync_plan_sensors()
+    entry.async_on_unload(coordinator.async_add_listener(sync_plan_sensors))
+
+
+class _PlanRunStateSensorSync:
+    """Coordinator listener: a run-state sensor per new plan, removal of those of deleted plans."""
+
+    def __init__(
+        self, hass: HomeAssistant, coordinator: ComexioCoordinator, async_add_entities: AddEntitiesCallback
+    ) -> None:
+        self._hass = hass
+        self._coordinator = coordinator
+        self._async_add_entities = async_add_entities
+        self._known_plans: set[int] = set()
+        # The plan_scrape_generation last pruned against: every full poll that read $Fubs prunes
+        # once. fub_data alone proves nothing — a failed scrape elsewhere (e.g. a config reload
+        # during a sync) leaves it empty while the plans still exist.
+        self._pruned_generation = coordinator.plan_scrape_generation - 1
+
+    @callback
+    def __call__(self) -> None:
+        coordinator = self._coordinator
+        current = function_plan_ids(coordinator.api.fub_data)
+        if new := current - self._known_plans:
+            self._known_plans.update(new)
+            self._async_add_entities(
+                ComexioFunctionPlanRunStateSensor(coordinator, coordinator.server_id, fub_id) for fub_id in sorted(new)
+            )
+        scraped = coordinator.scraped_plan_ids
+        if scraped is None or self._pruned_generation == coordinator.plan_scrape_generation:
+            return
+        self._pruned_generation = coordinator.plan_scrape_generation
+        ent_reg = er.async_get(self._hass)
+        # A plan HA created after the scrape (create_fup during a poll) is in fub_data, not in scraped.
+        for fub_id in sorted(self._known_plans - scraped - current):
+            self._known_plans.discard(fub_id)
+            uid = function_plan_run_state_unique_id(coordinator.server_id, fub_id)
+            if entity_id := ent_reg.async_get_entity_id("sensor", DOMAIN, uid):
+                _LOGGER.info("Removing %s: function plan %s no longer exists in Comexio", entity_id, fub_id)
+                ent_reg.async_remove(entity_id)
 
 
 class ComexioIOSensor(ComexioIOEntity, SensorEntity):
@@ -656,3 +712,68 @@ class ComexioPlanPreviewSensor(CoordinatorEntity, SensorEntity):
             "source": preview.get("source"),
             "generated_at": preview.get("generated_at"),
         }
+
+
+_PLAN_RUN_STATE_ICONS = {
+    PLAN_RUN_STATE_RUNNING: "mdi:play-circle-outline",
+    PLAN_RUN_STATE_STOPPED: "mdi:stop-circle-outline",
+    PLAN_TRANSITION_STARTING: "mdi:progress-clock",
+    PLAN_TRANSITION_STOPPING: "mdi:progress-clock",
+}
+
+
+class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorEntity, SensorEntity):
+    """Whether one function plan runs in Comexio — on the function plan sub-device.
+
+    Reads the plan's Active flag from api.fub_data: a full poll that decodes $Fubs refreshes it
+    (one that cannot keeps the cached plans and their flags), the run-state poll in between (see
+    coordinator.async_start_plan_run_state_poll), and HA's own start/stop right away. While HA
+    itself starts or stops the plan, the state is starting/stopping (coordinator.async_plan_transition).
+    The id carries only the plan id; the plan name is the display name alone.
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = PLAN_RUN_STATES
+    _attr_translation_key = "function_plan_run_state"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, fub_id: int) -> None:
+        super().__init__(coordinator)
+        self._fub_id = fub_id
+        self._attr_unique_id = function_plan_run_state_unique_id(server_id, fub_id)
+
+    @property
+    def _fub(self) -> dict[str, Any] | None:
+        fub = self.coordinator.api.fub_data.get(str(self._fub_id))
+        return fub if isinstance(fub, dict) else None
+
+    @property
+    def name(self) -> str:
+        fub = self._fub
+        # The device is already called "<server> # Function plans", so the plan name alone reads well.
+        return (fub or {}).get("Name") or f"Plan {self._fub_id}"
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.plan_run_state_available(self._fub_id) and self._fub is not None
+
+    @property
+    def native_value(self) -> str | None:
+        if transition := self.coordinator.plan_transition(self._fub_id):
+            return transition
+        active = self.coordinator.api.get_fub_active(self._fub_id) if self._fub is not None else None
+        if active is None:
+            return None
+        return PLAN_RUN_STATE_RUNNING if active else PLAN_RUN_STATE_STOPPED
+
+    @property
+    def icon(self) -> str:
+        return _PLAN_RUN_STATE_ICONS.get(self.native_value, "mdi:help-circle-outline")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"fub_id": self._fub_id}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
