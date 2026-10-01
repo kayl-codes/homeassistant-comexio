@@ -16,6 +16,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -35,7 +36,7 @@ from .const import (
     bus_load_signal,
 )
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity
+from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity, function_plan_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -302,13 +303,8 @@ class ComexioFunctionPlanBackupSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"comexio_{server_id}_function_plan_backups_sensor"
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     async def async_added_to_hass(self) -> None:
         """Load the backup stores so the summary is available right after startup."""
@@ -409,13 +405,8 @@ class ComexioPlanChangedSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "plan_changed"
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     @property
     def native_value(self) -> int:
@@ -540,13 +531,8 @@ class ComexioFunctionPlanCountSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "function_plan_count"
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     @property
     def native_value(self) -> int:
@@ -645,13 +631,8 @@ class ComexioPlanPreviewSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "plan_preview"
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     @property
     def entity_picture(self) -> str | None:

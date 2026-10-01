@@ -135,3 +135,18 @@ def test_migration_resets_the_old_entity_id_ignore_flag() -> None:
     options = migrate_entry_options(2, {}, {CONF_SCHEMA_IO: "{IoTitle}", CONF_ENTITY_ID_MIGRATION_IGNORED: True})
 
     assert options == {CONF_SCHEMA_IO: "{IoTitle}"}
+
+
+def test_function_plan_device_sorts_right_below_the_hub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The plan sub-device keeps its own identifier and its '#' name sorts before every extension."""
+    from custom_components.comexio import entity
+
+    monkeypatch.setattr(entity, "hub_device_id", lambda _coordinator: "hub-device")
+    coordinator = MagicMock(server_id="iosrv1")
+
+    info = entity.function_plan_device_info(coordinator)
+
+    assert info["identifiers"] == {("comexio", "iosrv1_function_plans")}
+    assert info["via_device_id"] == "hub-device"
+    device_names = ["iosrv1 IOX1", "iosrv1 BASE", "iosrv1 0815", info["name"], "iosrv1 Markers", "iosrv1"]
+    assert sorted(device_names, key=str.casefold)[:2] == ["iosrv1", "iosrv1 # Function plans"]

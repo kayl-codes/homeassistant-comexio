@@ -18,6 +18,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_platform, entity_registry as er, issue_registry as ir
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -75,7 +76,7 @@ from .const import (
     webio_range_check_entity_id,
 )
 from .coordinator import PLAN_LOAD_FAILED, ComexioCoordinator, plan_cleanup_outcome, webio_still_present
-from .entity import ComexioKnxEntity, ComexioMarkerEntity
+from .entity import ComexioKnxEntity, ComexioMarkerEntity, function_plan_device_info
 from .function_plan_backup import format_backup_label
 from .repairs import count_referencing_automations_and_scripts
 from .services import async_resync_io_group_headers, async_sort_function_plan
@@ -3230,13 +3231,8 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     async def async_added_to_hass(self) -> None:
         """Track the 'Function Plans' selector so 'available' re-evaluates on every selection change.
@@ -3410,13 +3406,8 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
         self._pending = False
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     def _selected_fub_id(self) -> int | None:
         return self.coordinator.get_active_function_plan_fub_id()

@@ -15,12 +15,14 @@ from homeassistant.components.image import ImageEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import ComexioCoordinator
+from .entity import function_plan_device_info
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -51,13 +53,8 @@ class ComexioPlanPreviewImage(CoordinatorEntity, ImageEntity):
         self._sync_timestamp()
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     def _sync_timestamp(self) -> None:
         preview = self.coordinator.last_plan_preview

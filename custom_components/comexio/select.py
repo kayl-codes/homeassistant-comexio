@@ -9,6 +9,7 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
@@ -16,6 +17,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN, FUNCTION_PLAN_ORPHANED_VIEW_OPTION
 from .coordinator import ComexioCoordinator
+from .entity import function_plan_device_info
 from .function_plan_backup import format_backup_label
 from .services import format_plan_label
 
@@ -76,13 +78,8 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         self._selected: str | None = None
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     @property
     def options(self) -> list[str]:
@@ -189,13 +186,8 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
         self._last_orphan: tuple[int, str] | None = None
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
     async def async_added_to_hass(self) -> None:
         """Track the 'Function Plans' selector: a plan change resets this selector to its default.

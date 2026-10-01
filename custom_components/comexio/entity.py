@@ -52,6 +52,21 @@ def build_device_info(
     return info
 
 
+def function_plan_device_info(coordinator: ComexioCoordinator) -> DeviceInfo:
+    """Sub-device grouping every function plan entity (selectors, preview, backups, run states).
+
+    The '#' in the name is deliberate: HA lists a config entry's devices by name, and every
+    sub-device starts with "<server> ", so '#' (sorting before digits and letters) places this
+    group right below the hub instead of between the extension modules.
+    """
+    return build_device_info(
+        coordinator,
+        identifiers={(DOMAIN, f"{coordinator.server_id}_function_plans")},
+        name=f"{coordinator.server_id} # Function plans",
+        model="Function Plan Group",
+    )
+
+
 class ComexioStableEntityIdMixin:
     """Requests entity_id "<domain>.<stable_object_id(unique_id)>" instead of a name-derived one.
 
