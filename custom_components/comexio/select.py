@@ -9,7 +9,6 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
@@ -17,7 +16,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN, FUNCTION_PLAN_ORPHANED_VIEW_OPTION
 from .coordinator import ComexioCoordinator
-from .entity import function_plan_device_info
+from .entity import ComexioFunctionPlanEntityMixin
 from .function_plan_backup import format_backup_label
 from .services import format_plan_label
 
@@ -60,11 +59,12 @@ async def async_setup_entry(
     async_add_entities([ComexioPlanSelectEntity(coordinator), ComexioPlanBackupSelectEntity(coordinator)])
 
 
-class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
+class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SelectEntity):
     """Select entity listing available function plans for use in service calls."""
 
     _attr_has_entity_name = True
     _attr_name = "Function Plans"
+    _hub_era_name = "Function Plans"
     _attr_icon = "mdi:file-tree-outline"
     _attr_entity_category = EntityCategory.CONFIG
 
@@ -76,10 +76,6 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         # None = no explicit choice yet in this HA run; current_option then falls back to the
         # choice persisted in entry.options (see current_option).
         self._selected: str | None = None
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return function_plan_device_info(self.coordinator)
 
     @property
     def options(self) -> list[str]:
@@ -148,7 +144,7 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         return _plan_option_label(fub_id, fub)
 
 
-class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
+class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SelectEntity):
     """Select entity listing stored backup snapshots for the plan chosen in the 'Function Plans' selector.
 
     Lets the Plan Preview button (button.py) render a historical snapshot instead of the
@@ -170,6 +166,7 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Function Plan Backup"
+    _hub_era_name = "Function Plan Backup"
     _attr_icon = "mdi:backup-restore"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
@@ -184,10 +181,6 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
         # (a deleted snapshot, a plan row whose backup count changed) falls back to that plan's
         # row — and to no row once that plan is gone, never silently to another deleted plan.
         self._last_orphan: tuple[int, str] | None = None
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return function_plan_device_info(self.coordinator)
 
     async def async_added_to_hass(self) -> None:
         """Track the 'Function Plans' selector: a plan change resets this selector to its default.

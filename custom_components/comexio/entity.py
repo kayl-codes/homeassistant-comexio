@@ -10,7 +10,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, SOURCE_CATEGORIES, WebioClass, stable_object_id
+from .const import DOMAIN, SOURCE_CATEGORIES, WebioClass, hub_era_object_id, stable_object_id
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,6 +65,32 @@ def function_plan_device_info(coordinator: ComexioCoordinator) -> DeviceInfo:
         name=f"{coordinator.server_id} # Function plans",
         model="Function Plan Group",
     )
+
+
+class ComexioFunctionPlanEntityMixin:
+    """Function plan entity: lives on the function plan sub-device, keeps its hub-era entity_id.
+
+    These entities sat on the hub device (named after the server) before, so HA derived their
+    entity_id from "<server> <name>" — the ids the plan card docs and existing automations use.
+    On the sub-device HA would derive "<server> # Function plans <name>" instead, so a new
+    install requests the old id explicitly (same hook and registry semantics as
+    ComexioStableEntityIdMixin: existing entities keep their entity_id either way).
+    Subclasses set _hub_era_name to the entity's English name.
+    """
+
+    coordinator: ComexioCoordinator
+    entity_id: str
+    _hub_era_name: str
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
+
+    def add_to_platform_start(
+        self, hass: HomeAssistant, platform: EntityPlatform, parallel_updates: asyncio.Semaphore | None
+    ) -> None:
+        super().add_to_platform_start(hass, platform, parallel_updates)  # type: ignore[misc]
+        self.entity_id = f"{platform.domain}.{hub_era_object_id(self.coordinator.server_id, self._hub_era_name)}"
 
 
 class ComexioStableEntityIdMixin:

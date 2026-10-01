@@ -536,6 +536,15 @@ def stable_object_id(unique_id: str) -> str:
     return slugify(unique_id.removeprefix("comexio_"))
 
 
+def hub_era_object_id(server_id: str, name: str) -> str:
+    """Object id HA derived for an entity named ``name`` on the hub device (named ``server_id``).
+
+    The function plan entities moved to their own sub-device but keep requesting this id, so a
+    new install gets the same entity_ids as before the move (see entity.ComexioFunctionPlanEntityMixin).
+    """
+    return slugify(f"{server_id} {name}")
+
+
 def entity_id_migration_target(
     entity_id: str, unique_id: str, suggested_object_id: str | None, server_id: str
 ) -> str | None:

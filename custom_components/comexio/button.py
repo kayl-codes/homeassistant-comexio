@@ -18,7 +18,6 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_platform, entity_registry as er, issue_registry as ir
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -76,7 +75,7 @@ from .const import (
     webio_range_check_entity_id,
 )
 from .coordinator import PLAN_LOAD_FAILED, ComexioCoordinator, plan_cleanup_outcome, webio_still_present
-from .entity import ComexioKnxEntity, ComexioMarkerEntity, function_plan_device_info
+from .entity import ComexioFunctionPlanEntityMixin, ComexioKnxEntity, ComexioMarkerEntity
 from .function_plan_backup import format_backup_label
 from .repairs import count_referencing_automations_and_scripts
 from .services import async_resync_io_group_headers, async_sort_function_plan
@@ -3216,10 +3215,11 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
         self.coordinator.async_set_updated_data(self.coordinator.data)
 
 
-class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
+class ComexioPlanPreviewButton(ComexioFunctionPlanEntityMixin, CoordinatorEntity, ButtonEntity):
     """Button to render the plan currently selected in the 'Function Plans' selector as an SVG preview."""
 
     _attr_has_entity_name = True
+    _hub_era_name = "Preview"
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
@@ -3229,10 +3229,6 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         self._attr_translation_key = "plan_preview"
         self._attr_icon = "mdi:image-outline"
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return function_plan_device_info(self.coordinator)
 
     async def async_added_to_hass(self) -> None:
         """Track the 'Function Plans' selector so 'available' re-evaluates on every selection change.
@@ -3383,7 +3379,7 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
             )
 
 
-class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
+class ComexioPlanToggleButton(ComexioFunctionPlanEntityMixin, CoordinatorEntity, ButtonEntity):
     """Start/stop toggle for the currently selected 'Function Plans' plan.
 
     The icon always shows the OPPOSITE of the plan's current activation state — mdi:pause
@@ -3393,6 +3389,7 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
     """
 
     _attr_has_entity_name = True
+    _hub_era_name = "Function Plan Toggle"
     _attr_name = "Function Plan Toggle"
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
@@ -3404,10 +3401,6 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
         # the stop/activate service call + raw_config refresh below take a few seconds, during
         # which the icon would otherwise still show the pre-press (now stale) state.
         self._pending = False
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return function_plan_device_info(self.coordinator)
 
     def _selected_fub_id(self) -> int | None:
         return self.coordinator.get_active_function_plan_fub_id()
