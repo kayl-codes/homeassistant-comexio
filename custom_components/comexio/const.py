@@ -620,6 +620,12 @@ FUNCTION_PLAN_LIST_UNREAD_THRESHOLD = 2
 # path that writes a fetched plan list into the cache keeps HA's newer run states. More than this
 # many fetches in flight at once never happens (Comexio serializes requests).
 FUNCTION_PLAN_FETCH_MARK_SLOTS = 8
+# Watchdog of the HA-managed plans (plan_map, trigger plan included), see plan_watchdog.py.
+# A plan HA itself stopped this recently is not judged: sort, connect and restore stop a plan
+# and start it again, and the bus-load cascade does the same, without holding the poll back.
+FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC = 300
+# With auto-start on, a plan Comexio refused to start is tried again no sooner than this.
+FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC = 600
 
 
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:

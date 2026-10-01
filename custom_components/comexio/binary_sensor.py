@@ -75,6 +75,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         )
 
     entities.append(ComexioSdCardSensor(coordinator, coordinator.server_id))
+    entities.append(ComexioManagedPlansProblemSensor(coordinator, coordinator.server_id))
 
     async_add_entities(entities)
 
@@ -226,6 +227,35 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
     @property
     def is_on(self) -> bool | None:
         return self.coordinator.api.get_fub_active(self._fub_id) if self._fub is not None else None
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
+
+
+class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
+    """On while an HA-managed function plan does not run in Comexio (see plan_watchdog).
+
+    Unknown until the watchdog's first check after the first run-state poll.
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_translation_key = "managed_plans_problem"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_managed_plans_problem"
+
+    @property
+    def is_on(self) -> bool | None:
+        stopped = self.coordinator.plan_watchdog.stopped
+        return None if stopped is None else bool(stopped)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        stopped = self.coordinator.plan_watchdog.stopped or {}
+        return {"stopped_plans": [{"fub_id": fub_id, "name": name} for fub_id, name in sorted(stopped.items())]}
 
     @property
     def device_info(self) -> DeviceInfo:

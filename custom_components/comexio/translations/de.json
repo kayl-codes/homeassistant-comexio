@@ -213,6 +213,16 @@
       "watchdog_event": {
         "name": "Letztes Watchdog-Ereignis"
       }
+    },
+    "binary_sensor": {
+      "managed_plans_problem": {
+        "name": "Problem verwaltete Pläne"
+      }
+    },
+    "switch": {
+      "function_plan_auto_start": {
+        "name": "Plan Auto-Start"
+      }
     }
   },
   "issues": {
@@ -340,6 +350,23 @@
           "already_deleted": "Diese Backups wurden bereits gelöscht. Es wurde nichts geändert.",
           "loaded_in_preview": "Das neueste Backup des Plans wird jetzt in der Plan-Karte angezeigt (Function Plans → Orphaned plans). Diese Reparatur bleibt offen, bis du die Backups behältst oder löschst.",
           "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert."
+        }
+      }
+    },
+    "function_plan_stopped": {
+      "title": "Logikplan {plan_name} läuft nicht",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Verwalteter Logikplan gestoppt",
+            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start** am Logikplan-Gerät ein."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
         }
       }
     }

@@ -12,6 +12,7 @@ import pytest
 from custom_components.comexio import binary_sensor as binary_sensor_module, coordinator as coordinator_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
+    CONF_FUNCTION_PLAN_PLAN_MAP,
     FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
@@ -158,6 +159,10 @@ class _FakeCoordinator(SimpleNamespace):
     _async_refresh_run_states_in_preview = ComexioCoordinator._async_refresh_run_states_in_preview
     _async_plan_run_state_tick = ComexioCoordinator._async_plan_run_state_tick
     _async_plan_run_state_fetch_failed = ComexioCoordinator._async_plan_run_state_fetch_failed
+    _managed_plan_names = ComexioCoordinator._managed_plan_names
+    _watchdog_run_state = ComexioCoordinator._watchdog_run_state
+    managed_plan_start_blocked = ComexioCoordinator.managed_plan_start_blocked
+    async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
@@ -180,6 +185,9 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         scraped_plan_ids=None,
         plan_scrape_generation=0,
         async_update_listeners=MagicMock(),
+        _watchdog_lock=asyncio.Lock(),
+        config_entry=SimpleNamespace(options={}),
+        plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=False)),
     )
     fake.__dict__.update(overrides)
     return fake
@@ -550,3 +558,28 @@ def test_a_plan_left_out_of_every_answer_turns_unavailable_alone(
     assert coordinator.plan_run_state_available(43) is True
     assert coordinator.async_update_listeners.call_count == 2  # back available, without a state change
     assert "function plan 43 readable again" in caplog.text
+
+
+def test_poll_hands_the_managed_plans_to_the_watchdog(api: ComexioAPI) -> None:
+    """Only plan_map plans Comexio still has are judged; HA's own recent stop reads as unknown."""
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    plan_map = {"HA - TRIGGER": 19, "HA - Marker 1": "43", "HA - Gone": 99, "broken": "x"}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: plan_map}))
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    managed, run_state = coordinator.plan_watchdog.async_check.call_args.args
+    assert managed == {19: "Test1", 43: "Licht"}
+    assert (run_state(19), run_state(43)) == (False, True)
+    api.set_fub_active(43, False)  # HA itself stopped it, e.g. for a sort
+    assert run_state(43) is None
+
+
+def test_watchdog_waits_while_a_cascade_or_sync_runs(api: ComexioAPI) -> None:
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    coordinator = _coordinator(api)
+
+    async def poll_during_cascade() -> None:
+        async with coordinator._watchdog_lock:
+            await coordinator._async_refresh_plan_run_states()
+
+    asyncio.run(poll_during_cascade())
+    coordinator.plan_watchdog.async_check.assert_not_called()

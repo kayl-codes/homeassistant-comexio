@@ -4,13 +4,16 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_ON, EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MarkerKind
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity
+from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity, function_plan_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,7 +59,50 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if io.get("is_binary") and not io.get("is_input", True) and (not io.get("offline") or include_offline)
         )
 
+    entities.append(ComexioPlanAutoStartSwitch(coordinator, coordinator.server_id))
+
     async_add_entities(entities)
+
+
+class ComexioPlanAutoStartSwitch(SwitchEntity, RestoreEntity):
+    """Plan Auto-Start: the plan watchdog starts a stopped HA-managed plan again on its own.
+
+    Off by default; only HA's own setting, nothing is written to Comexio. The state survives
+    restarts through RestoreEntity.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_translation_key = "function_plan_auto_start"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self._attr_unique_id = f"comexio_{server_id}_function_plan_auto_start"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.plan_watchdog.auto_restart
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if (last_state := await self.async_get_last_state()) is not None:
+            self.coordinator.plan_watchdog.auto_restart = last_state.state == STATE_ON
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self.coordinator.plan_watchdog.auto_restart = True
+        self.async_write_ha_state()
+        # Plans already known stopped are started now, not only after the next run-state poll.
+        if self.coordinator.plan_watchdog.stopped and await self.coordinator.async_watch_managed_plans():
+            self.coordinator.async_update_listeners()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self.coordinator.plan_watchdog.auto_restart = False
+        self.async_write_ha_state()
 
 
 class ComexioMarkerSwitch(ComexioMarkerEntity, SwitchEntity):

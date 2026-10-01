@@ -100,6 +100,7 @@ from .const import (
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC,
     ICON_ADD,
     ICON_DELETE,
     ICON_FIX,
@@ -159,6 +160,7 @@ from .orphaned_statistics import (
     legacy_statistic_prefixes,
     stable_statistic_id_pattern,
 )
+from .plan_watchdog import ManagedPlanWatchdog
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -672,6 +674,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
         # sensors follow right away instead of on the next poll.
         self.api.run_state_listener = self.async_update_listeners
+        # Watchdog of the HA-managed plans, judged after every run-state fetch (async_watch_managed_plans).
+        self.plan_watchdog = ManagedPlanWatchdog(
+            hass,
+            entry_id=entry.entry_id,
+            server_id=self.server_id,
+            start_plan=self._async_watchdog_start_plan,
+        )
         # Two counters: the fail streak tracks the run-state endpoint itself (logging, reset only
         # by a working fetch); the stale count tracks failures since the last fresh state (sensor
         # availability, also reset by a full poll, whose $Fubs brings every Active flag).
@@ -3225,8 +3234,61 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_run_state_fail_streak = 0
         self._plan_run_state_stale_count = 0
         missed_out = self._count_missed_plan_run_states(fub_ids, states)
-        if self.api.apply_fub_run_states(states, since=run_state_mark) or was_unavailable or missed_out:
+        changed = self.api.apply_fub_run_states(states, since=run_state_mark) or was_unavailable or missed_out
+        if await self.async_watch_managed_plans() or changed:
             self.async_update_listeners()
+
+    def _managed_plan_names(self) -> dict[int, str]:
+        """fub_id → name of the HA-managed plans (plan_map, trigger plan included) Comexio still has."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(raw_map, dict):
+            return {}
+        managed: dict[int, str] = {}
+        for value in raw_map.values():
+            try:
+                fub_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            fub = self.api.fub_data.get(str(fub_id))
+            if isinstance(fub, dict):
+                managed[fub_id] = str(fub.get("Name") or fub_id)
+        return managed
+
+    def _watchdog_run_state(self, fub_id: int) -> bool | None:
+        """A managed plan's run state for the watchdog; None while unreadable or just stopped by HA itself."""
+        if not self.plan_run_state_available(fub_id) or self.api.ha_stopped_within(
+            fub_id, FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC
+        ):
+            return None
+        return self.api.get_fub_active(fub_id)
+
+    @property
+    def managed_plan_start_blocked(self) -> bool:
+        """Whether a sync, repair, restore, full poll or bus-load cascade runs — no plan is started meanwhile."""
+        return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
+
+    async def async_watch_managed_plans(self) -> bool:
+        """Judge the managed plans' run states (see plan_watchdog); True if the stopped set changed."""
+        if self.managed_plan_start_blocked:
+            return False
+        return await self.plan_watchdog.async_check(self._managed_plan_names(), self._watchdog_run_state)
+
+    async def _async_watchdog_start_plan(self, fub_id: int) -> bool:
+        """Start a stopped managed plan for the watchdog's auto-start; False if it was not started."""
+        if self.managed_plan_start_blocked:
+            return False
+        async with self._watchdog_lock:
+            return await self.api.function_plan_run_fup(fub_id)
+
+    async def async_start_managed_plan(self, fub_id: int) -> bool:
+        """Start a stopped managed plan from its repair; False if Comexio did not confirm it."""
+        if not await self.api.login():
+            return False
+        if not await self._async_watchdog_start_plan(fub_id):
+            return False
+        self.plan_watchdog.plan_started(fub_id)
+        self.async_update_listeners()
+        return True
 
     def _count_missed_plan_run_states(self, fub_ids: list[int], states: dict[int, bool]) -> bool:
         """Count the plans this fetch left out; True when one just crossed or recovered from the threshold."""

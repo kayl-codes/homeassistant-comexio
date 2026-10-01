@@ -213,6 +213,16 @@
       "watchdog_event": {
         "name": "Dernier événement du Watchdog"
       }
+    },
+    "binary_sensor": {
+      "managed_plans_problem": {
+        "name": "Problème plans gérés"
+      }
+    },
+    "switch": {
+      "function_plan_auto_start": {
+        "name": "Démarrage auto des plans"
+      }
     }
   },
   "issues": {
@@ -340,6 +350,23 @@
           "already_deleted": "Ces sauvegardes ont déjà été supprimées. Rien n'a été modifié.",
           "loaded_in_preview": "La sauvegarde la plus récente du plan est maintenant affichée dans la carte du plan (Function Plans → Orphaned plans). Cette réparation reste ouverte jusqu'à ce que vous conserviez ou supprimiez les sauvegardes.",
           "preview_failed": "Les sauvegardes n'ont pas pu être chargées dans l'aperçu du plan — elles ont peut-être été supprimées entre-temps, ou les sélecteurs de plan sont désactivés. Les sauvegardes n'ont pas été modifiées."
+        }
+      }
+    },
+    "function_plan_stopped": {
+      "title": "Le plan de fonctions {plan_name} ne s'exécute pas",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Plan de fonctions géré arrêté",
+            "description": "Le plan de fonctions **{plan_name}** (ID {fub_id}) est géré par Home Assistant, mais il ne s'exécute pas dans Comexio. Les marqueurs, IO, objets KNX ou déclencheurs qu'il relie n'atteignent plus Home Assistant tant qu'il est arrêté.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans** de l'appareil des plans de fonctions."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
+          "busy": "Une synchronisation, une restauration, une interrogation ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
+          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
         }
       }
     }
