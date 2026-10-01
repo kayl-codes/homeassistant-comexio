@@ -79,6 +79,8 @@ class _FakeCoordinator(SimpleNamespace):
     """Just the attributes the run-state poll reads, with the real coordinator methods."""
 
     plan_run_states_available = ComexioCoordinator.plan_run_states_available
+    plan_run_state_available = ComexioCoordinator.plan_run_state_available
+    _count_missed_plan_run_states = ComexioCoordinator._count_missed_plan_run_states
     _plan_run_state_poll_blocked = ComexioCoordinator._plan_run_state_poll_blocked
     _async_refresh_plan_run_states = ComexioCoordinator._async_refresh_plan_run_states
     _async_refresh_run_states_in_preview = ComexioCoordinator._async_refresh_run_states_in_preview
@@ -98,6 +100,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _connection_poll_fast_requested=False,
         _plan_run_state_fail_streak=0,
         _plan_run_state_stale_count=0,
+        _plan_run_state_missed={},
         _plan_run_state_last_fetch=0.0,
         _plan_run_state_relogin_refused=False,
         scraped_plan_ids=None,
@@ -376,3 +379,28 @@ def test_failed_connection_value_poll_keeps_the_run_states_coming(
     asyncio.run(ComexioCoordinator._async_poll_connection_values(coordinator, None))
     assert coordinator._connection_poll_fail_count == 1
     coordinator._async_refresh_run_states_in_preview.assert_awaited_once_with(None)
+
+
+def test_a_plan_left_out_of_every_answer_turns_unavailable_alone(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A working fetch for the other plans must not keep a plan's unreadable state alive."""
+    caplog.set_level(logging.INFO)
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False})
+    coordinator = _coordinator(api)
+    for _ in range(FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD - 1):
+        asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert coordinator.plan_run_state_available(43) is True
+    coordinator.async_update_listeners.assert_not_called()
+
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert coordinator.plan_run_state_available(43) is False
+    assert coordinator.plan_run_state_available(19) is True
+    coordinator.async_update_listeners.assert_called_once_with()
+    assert "function plan 43 unreadable" in caplog.text
+
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert coordinator.plan_run_state_available(43) is True
+    assert coordinator.async_update_listeners.call_count == 2  # back available, without a state change
+    assert "function plan 43 readable again" in caplog.text

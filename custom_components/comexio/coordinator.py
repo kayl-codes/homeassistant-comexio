@@ -572,6 +572,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # availability, also reset by a full poll, whose $Fubs brings every Active flag).
         self._plan_run_state_fail_streak = 0
         self._plan_run_state_stale_count = 0
+        # Per plan: fetches in a row that answered for other plans but not this one (aiocomexio
+        # leaves out a plan whose answer it cannot classify) — a working fetch for the others
+        # must not keep its old state alive. Unlike the stale count, a full poll does not reset it:
+        # a plan left out of every answer would flap between available and unavailable then.
+        self._plan_run_state_missed: dict[int, int] = {}
         self._plan_run_state_last_fetch: float = 0.0
         # Set when the run-state poll's own re-login was refused; the full poll owns reauth then.
         self._plan_run_state_relogin_refused = False
@@ -614,6 +619,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self._polled_plan_ids is not None:
             # $Fubs just delivered every plan's Active flag first hand.
             self._plan_run_state_stale_count = 0
+            self._plan_run_state_missed = {
+                fub_id: count
+                for fub_id, count in self._plan_run_state_missed.items()
+                if fub_id in self._polled_plan_ids
+            }
             self._plan_run_state_relogin_refused = False
             self.scraped_plan_ids = self._polled_plan_ids
             self.plan_scrape_generation += 1
@@ -3045,6 +3055,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """False once FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD fetches since the last fresh state failed."""
         return self._plan_run_state_stale_count < FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
 
+    def plan_run_state_available(self, fub_id: int) -> bool:
+        """Whether one plan's run state is fresh enough: the fetch works and answers for this plan."""
+        return (
+            self.plan_run_states_available
+            and self._plan_run_state_missed.get(fub_id, 0) < FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+        )
+
     def _plan_run_state_poll_blocked(self) -> bool:
         """Whether a sync, repair, restore or full poll runs — the run-state fetch waits for it."""
         return self.in_sync or self._full_poll_running or self._sync_lock.locked() or self._restore_lock.locked()
@@ -3096,8 +3113,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         self._plan_run_state_fail_streak = 0
         self._plan_run_state_stale_count = 0
-        if self.api.apply_fub_run_states(states) or was_unavailable:
+        missed_out = self._count_missed_plan_run_states(fub_ids, states)
+        if self.api.apply_fub_run_states(states) or was_unavailable or missed_out:
             self.async_update_listeners()
+
+    def _count_missed_plan_run_states(self, fub_ids: list[int], states: dict[int, bool]) -> bool:
+        """Count the plans this fetch left out; True when one just crossed or recovered from the threshold."""
+        changed = False
+        for fub_id in fub_ids:
+            before = self._plan_run_state_missed.get(fub_id, 0)
+            if fub_id in states:
+                self._plan_run_state_missed.pop(fub_id, None)
+                if before >= FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD:
+                    _LOGGER.info(
+                        "[%s] Run state of function plan %s readable again after %s misses",
+                        self.server_id,
+                        fub_id,
+                        before,
+                    )
+                    changed = True
+                continue
+            self._plan_run_state_missed[fub_id] = before + 1
+            if before + 1 == FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD:
+                _LOGGER.warning(
+                    "[%s] Run state of function plan %s unreadable %s times in a row; its sensor turns "
+                    "unavailable (debug logging for aiocomexio shows the answer)",
+                    self.server_id,
+                    fub_id,
+                    before + 1,
+                )
+                changed = True
+        return changed
 
     async def _async_plan_run_state_fetch_failed(self, err: Exception, session: aiohttp.ClientSession | None) -> None:
         """Count a failed run-state fetch, log it once per outage and heal a lapsed main session."""

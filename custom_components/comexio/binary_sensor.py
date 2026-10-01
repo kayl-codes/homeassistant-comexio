@@ -212,7 +212,7 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
 
     @property
     def available(self) -> bool:
-        return super().available and self.coordinator.plan_run_states_available and self._fub is not None
+        return super().available and self.coordinator.plan_run_state_available(self._fub_id) and self._fub is not None
 
     @property
     def is_on(self) -> bool | None:
