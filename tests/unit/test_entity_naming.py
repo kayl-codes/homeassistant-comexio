@@ -170,27 +170,26 @@ def _function_plan_entity_classes() -> list[type]:
 
 
 @pytest.mark.parametrize(
-    ("domain", "class_name", "expected"),
+    ("class_name", "expected"),
     [
-        # The ids the plan card docs (FUNCTION_PLAN_PREVIEW.md) and existing installs use.
-        ("select", "ComexioPlanSelectEntity", "select.iosrv1_function_plans"),
-        ("select", "ComexioPlanBackupSelectEntity", "select.iosrv1_function_plan_backup"),
-        ("image", "ComexioPlanPreviewImage", "image.iosrv1_plan_preview"),
-        ("sensor", "ComexioFunctionPlanBackupSensor", "sensor.iosrv1_function_plan_backups"),
-        ("sensor", "ComexioPlanChangedSensor", "sensor.iosrv1_plan_changed"),
-        ("sensor", "ComexioFunctionPlanCountSensor", "sensor.iosrv1_function_plan_count"),
-        ("sensor", "ComexioPlanPreviewSensor", "sensor.iosrv1_plan_preview_info"),
-        ("button", "ComexioPlanPreviewButton", "button.iosrv1_preview"),
-        ("button", "ComexioPlanToggleButton", "button.iosrv1_function_plan_toggle"),
+        # Object ids of the entity_ids the plan card docs (FUNCTION_PLAN_PREVIEW.md) and existing installs use.
+        ("ComexioPlanSelectEntity", "iosrv1_function_plans"),
+        ("ComexioPlanBackupSelectEntity", "iosrv1_function_plan_backup"),
+        ("ComexioPlanPreviewImage", "iosrv1_plan_preview"),
+        ("ComexioFunctionPlanBackupSensor", "iosrv1_function_plan_backups"),
+        ("ComexioPlanChangedSensor", "iosrv1_plan_changed"),
+        ("ComexioFunctionPlanCountSensor", "iosrv1_function_plan_count"),
+        ("ComexioPlanPreviewSensor", "iosrv1_plan_preview_info"),
+        ("ComexioPlanPreviewButton", "iosrv1_preview"),
+        ("ComexioPlanToggleButton", "iosrv1_function_plan_toggle"),
     ],
 )
-def test_function_plan_entities_keep_their_hub_era_entity_id(domain: str, class_name: str, expected: str) -> None:
+def test_function_plan_entities_keep_their_hub_era_entity_id(class_name: str, expected: str) -> None:
     """Moving to the function plan sub-device must not change the entity_id a new install gets."""
     cls = next(c for c in _function_plan_entity_classes() if c.__name__ == class_name)
 
     assert issubclass(cls, ComexioFunctionPlanEntityMixin)
-    entity_id = f"{domain}.{hub_era_object_id('iosrv1', cls._hub_era_name)}"
-    assert entity_id == expected
+    assert hub_era_object_id("iosrv1", cls._hub_era_name) == expected
 
 
 class _PlanEntity(ComexioFunctionPlanEntityMixin, _FakeEntity):
