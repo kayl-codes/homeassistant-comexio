@@ -4,7 +4,7 @@ import asyncio
 import datetime
 from typing import Any
 
-from custom_components.comexio.button import ComexioSyncButton, _SyncContext
+from custom_components.comexio.button import _FLANKE_UNUSABLE_LINE, ComexioSyncButton, _SyncContext
 from custom_components.comexio.const import WebioClass
 from custom_components.comexio.coordinator import ComexioCoordinator
 
@@ -162,6 +162,10 @@ class _FakeSyncCoordinator:
         self.knx_result = (bridge, list(loopback) if loopback is not None else None, _PARSED)
         self.trigger_result = trigger
         self.trigger_snapshots: list[dict[str, Any] | None] = []
+        self.flanke_blocked = False
+
+    def trigger_pairs_blocked(self) -> bool:
+        return self.flanke_blocked
 
     async def async_fresh_knx_audits(self):
         return self.knx_result
@@ -216,6 +220,15 @@ def _summaries(coordinator: _FakeSyncCoordinator) -> tuple[list[str], list[str]]
 
 def test_trigger_step_reuses_the_knx_snapshot_once_when_nothing_was_written() -> None:
     assert _sync_run(bridge=[]) == [_PARSED, None]
+
+
+def test_trigger_step_reports_a_blocked_flanke_instead_of_staying_silent() -> None:
+    coordinator = _FakeSyncCoordinator(bridge=[])
+    coordinator.flanke_blocked = True
+    button, ctx = _sync_button(coordinator)
+
+    assert asyncio.run(button._wire_trigger_pairs(ctx)) == [_FLANKE_UNUSABLE_LINE]
+    assert coordinator.trigger_snapshots == []  # no audit, no writes
 
 
 def test_trigger_step_fetches_itself_when_the_knx_step_had_work() -> None:
