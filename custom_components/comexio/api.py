@@ -904,9 +904,15 @@ class ComexioAPI:
         than one merged dict — see get_live_states' docstring for why merging them would be
         unsafe (markers and KNX objects share the same plain numeric id space).
         """
-        # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection)
-        self._fub_data = conf.get("Fubs", {})
-        self._paper_data = conf.get("Paper", {})
+        # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection).
+        # aiocomexio decodes each page variable on its own: a config whose $Fubs/$Paper did not
+        # decode keeps the last known cache — wiping it would turn every plan's run-state sensor
+        # unavailable and empty the plan selector until the next poll. An empty plan list still
+        # decodes to a dict and replaces the cache.
+        if isinstance(fubs := conf.get("Fubs"), dict):
+            self._fub_data = fubs
+        if isinstance(paper := conf.get("Paper"), dict):
+            self._paper_data = paper
 
         webio_name, schema_marker, schema_io, schema_knx, server_alias = self._load_config_names()
         data = comexio_config.parse_config(

@@ -164,6 +164,20 @@ def test_fub_metadata_is_cached_for_canvas_helpers(parsing_api: ComexioAPI) -> N
     )
 
 
+def test_config_without_fubs_keeps_the_cached_plans(parsing_api: ComexioAPI) -> None:
+    parsing_api.parse_config(load_json_fixture("config_basic.json"))
+
+    parsing_api.parse_config({"FubModules": {}})
+
+    assert parsing_api.get_fub_active(1) is True
+    assert parsing_api.get_fub_paper_format(1) == "A4"
+
+    parsing_api.parse_config({"Fubs": {}, "Paper": {}})
+
+    assert parsing_api.fub_data == {}
+    assert parsing_api.get_fub_active(1) is None
+
+
 def test_io_without_description_gets_placeholder_title(basic_result: dict[str, Any]) -> None:
     """Regression: an IO with an empty description rendered as "BASE AI1 AI1" under the default schema."""
     io = _by_id(basic_result["io"])["13"]

@@ -92,6 +92,7 @@ from .const import (
     FUNCTION_PLAN_LAYOUT_COMMENT_Y,
     FUNCTION_PLAN_LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
+    FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
@@ -577,6 +578,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # must not keep its old state alive. Unlike the stale count, a full poll does not reset it:
         # a plan left out of every answer would flap between available and unavailable then.
         self._plan_run_state_missed: dict[int, int] = {}
+        # Full polls in a row that read the config page but no plan list ($Fubs); api.parse_config
+        # keeps the cached plans then (see FUNCTION_PLAN_LIST_UNREAD_THRESHOLD).
+        self._plan_list_unread_polls = 0
         self._plan_run_state_last_fetch: float = 0.0
         # Set when the run-state poll's own re-login was refused; the full poll owns reauth then.
         self._plan_run_state_relogin_refused = False
@@ -627,7 +631,30 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._plan_run_state_relogin_refused = False
             self.scraped_plan_ids = self._polled_plan_ids
             self.plan_scrape_generation += 1
+        self._track_plan_list_read()
         return data
+
+    def _track_plan_list_read(self) -> None:
+        """Count full polls that read the config page but not its plan list; log the outage and the recovery once."""
+        if self._polled_plan_ids is not None:
+            if self._plan_list_unread_polls:
+                _LOGGER.info(
+                    "[%s] Plan list ($Fubs) readable again after %s polls", self.server_id, self._plan_list_unread_polls
+                )
+            self._plan_list_unread_polls = 0
+            return
+        # A skipped poll (sync running) or a failed page fetch read nothing at all — no plan list to miss.
+        if not self._last_poll_scraped:
+            return
+        self._plan_list_unread_polls += 1
+        if self._plan_list_unread_polls == 1:
+            _LOGGER.warning(
+                "[%s] Config poll brought no readable plan list ($Fubs); keeping the last known plans. Plans "
+                "created or deleted in Comexio are not picked up meanwhile, and the run-state sensors turn "
+                "unavailable after %s such polls (debug logging for aiocomexio shows the page variable)",
+                self.server_id,
+                FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
+            )
 
     async def _async_fetch_and_audit(self) -> dict[str, Any]:
         """Body of _async_update_data, run while _full_poll_running is set."""
@@ -3052,8 +3079,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     @property
     def plan_run_states_available(self) -> bool:
-        """False once FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD fetches since the last fresh state failed."""
-        return self._plan_run_state_stale_count < FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+        """False once FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD fetches since the last fresh state failed,
+        or once FUNCTION_PLAN_LIST_UNREAD_THRESHOLD full polls brought no plan list (deleted plans unknown)."""
+        return (
+            self._plan_run_state_stale_count < FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+            and self._plan_list_unread_polls < FUNCTION_PLAN_LIST_UNREAD_THRESHOLD
+        )
 
     def plan_run_state_available(self, fub_id: int) -> bool:
         """Whether one plan's run state is fresh enough: the fetch works and answers for this plan."""
@@ -3104,7 +3135,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         except (ComexioError, aiohttp.ClientError, TimeoutError) as err:
             await self._async_plan_run_state_fetch_failed(err, session)
             return
-        was_unavailable = not self.plan_run_states_available
+        # Only the fetch's own outage recovers here; an unread plan list ends with the next full poll.
+        was_unavailable = self._plan_run_state_stale_count >= FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
         if self._plan_run_state_fail_streak:
             _LOGGER.info(
                 "[%s] Function plan run-state fetch works again after %s failure(s)",

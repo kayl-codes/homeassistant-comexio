@@ -612,6 +612,10 @@ FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC = 10
 # Consecutive failed run-state fetches before the plan run-state sensors turn unavailable
 # instead of showing the last known state forever.
 FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD = 3
+# Full polls in a row that read the config page but not its plan list ($Fubs) before the plan
+# run-state sensors turn unavailable: the cached plan list is kept meanwhile, so a plan deleted
+# in Comexio would otherwise stay on as an available "stopped" sensor.
+FUNCTION_PLAN_LIST_UNREAD_THRESHOLD = 2
 
 
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:

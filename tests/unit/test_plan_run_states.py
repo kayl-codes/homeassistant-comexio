@@ -12,6 +12,7 @@ import pytest
 from custom_components.comexio import binary_sensor as binary_sensor_module, coordinator as coordinator_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
+    FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
@@ -81,6 +82,7 @@ class _FakeCoordinator(SimpleNamespace):
     plan_run_states_available = ComexioCoordinator.plan_run_states_available
     plan_run_state_available = ComexioCoordinator.plan_run_state_available
     _count_missed_plan_run_states = ComexioCoordinator._count_missed_plan_run_states
+    _track_plan_list_read = ComexioCoordinator._track_plan_list_read
     _plan_run_state_poll_blocked = ComexioCoordinator._plan_run_state_poll_blocked
     _async_refresh_plan_run_states = ComexioCoordinator._async_refresh_plan_run_states
     _async_refresh_run_states_in_preview = ComexioCoordinator._async_refresh_run_states_in_preview
@@ -101,6 +103,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_run_state_fail_streak=0,
         _plan_run_state_stale_count=0,
         _plan_run_state_missed={},
+        _plan_list_unread_polls=0,
         _plan_run_state_last_fetch=0.0,
         _plan_run_state_relogin_refused=False,
         scraped_plan_ids=None,
@@ -261,6 +264,40 @@ def test_only_a_full_poll_that_read_fubs_publishes_the_plan_list(
     assert coordinator.plan_scrape_generation == int(published)
     assert (coordinator._plan_run_state_stale_count == 0) is published
     assert coordinator._plan_run_state_relogin_refused is not published
+
+
+def test_polls_without_a_plan_list_turn_the_sensors_unavailable(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    coordinator = _coordinator(api)
+
+    def poll(scraped: bool, polled: set[int] | None) -> None:
+        async def fetch() -> dict:
+            coordinator._last_poll_scraped = scraped
+            coordinator._polled_plan_ids = polled
+            return {}
+
+        coordinator._async_fetch_and_audit = fetch
+        asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    poll(scraped=False, polled=None)  # skipped poll or failed page fetch: nothing read, nothing missed
+    assert coordinator._plan_list_unread_polls == 0
+    for count in range(1, FUNCTION_PLAN_LIST_UNREAD_THRESHOLD + 1):
+        assert _available(coordinator)
+        poll(scraped=True, polled=None)
+        assert coordinator._plan_list_unread_polls == count
+    assert not _available(coordinator)
+    assert caplog.text.count("no readable plan list") == 1
+    # A working run-state fetch meanwhile changes nothing, so it refreshes no entity either.
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    coordinator.async_update_listeners.assert_not_called()
+
+    poll(scraped=True, polled={19, 43})
+
+    assert _available(coordinator)
+    assert "Plan list ($Fubs) readable again" in caplog.text
 
 
 class _FakeRegistry:
