@@ -3202,6 +3202,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         self._plan_run_state_last_fetch = time.monotonic()
         run_state_mark = self.api.run_state_mark()
+        cache_epoch = self.api.fub_cache_epoch()
         self._plan_run_state_fetching = True
         try:
             states = await self.api.get_function_plan_run_states(fub_ids, session=session)
@@ -3225,8 +3226,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_run_state_fail_streak = 0
         self._plan_run_state_stale_count = 0
         missed_out = self._count_missed_plan_run_states(fub_ids, states)
-        if self.api.apply_fub_run_states(states, since=run_state_mark) or was_unavailable or missed_out:
+        if self._apply_fetched_run_states(states, run_state_mark, cache_epoch) or was_unavailable or missed_out:
             self.async_update_listeners()
+
+    def _apply_fetched_run_states(self, states: dict[int, bool], run_state_mark: int, cache_epoch: int) -> bool:
+        """Write a run-state answer into the cache unless a newer plan list arrived meanwhile; True if changed.
+
+        A full poll, sync or restore that wrote a fetched plan list or plan while this answer was
+        on its way may carry newer Active flags than this answer: it is dropped then, the next
+        tick reads the states again. The endpoint still counts as working (the fetch succeeded).
+        """
+        if self.api.fub_cache_epoch() != cache_epoch:
+            _LOGGER.debug(
+                "[%s] Function plan run states dropped: the plan cache was refreshed during the fetch",
+                self.server_id,
+            )
+            return False
+        return self.api.apply_fub_run_states(states, since=run_state_mark)
 
     def _count_missed_plan_run_states(self, fub_ids: list[int], states: dict[int, bool]) -> bool:
         """Count the plans this fetch left out; True when one just crossed or recovered from the threshold."""

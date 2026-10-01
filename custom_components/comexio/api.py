@@ -517,6 +517,9 @@ class ComexioAPI:
         # (fetched $Fubs dict, run_state_mark taken before its get_raw_config fetch): lets every
         # path that writes a fetched plan list or plan into the cache apply that guard on its own.
         self._fetch_marks: deque[tuple[dict[str, Any], int]] = deque(maxlen=FUNCTION_PLAN_FETCH_MARK_SLOTS)
+        # Bumped with every fetched plan list or plan written into the cache (fub_cache_epoch): a
+        # run-state answer whose fetch began before such a write may be older than its Active flags.
+        self._fub_cache_epoch = 0
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
@@ -622,6 +625,7 @@ class ComexioAPI:
         # holding fub_info would make it match too — with that older poll's mark.
         since = self._fetch_mark(lambda fubs: fubs.get(key) is fub_info)
         self._fub_data[key] = fub_info
+        self._fub_cache_epoch += 1
         if since is not None and (running := self._ha_run_states_since(since).get(int(fub_id))) is not None:
             self.apply_fub_run_states({int(fub_id): running})
 
@@ -637,12 +641,17 @@ class ComexioAPI:
         if run_state_mark is None:
             run_state_mark = self._fetch_mark(lambda known: known is fubs)
         self._fub_data = fubs
+        self._fub_cache_epoch += 1
         if run_state_mark is not None:
             self.apply_fub_run_states(self._ha_run_states_since(run_state_mark))
 
     def run_state_mark(self) -> int:
         """Mark to take before a config or run-state fetch; pass it on as `since` when applying the result."""
         return self._run_state_mark
+
+    def fub_cache_epoch(self) -> int:
+        """Counter of fetched plan lists/plans written into the cache; changes when one was written."""
+        return self._fub_cache_epoch
 
     def _ha_run_states_since(self, since: int) -> dict[int, bool]:
         """Run states HA caused after the mark `since` — newer than any fetch that started before it."""
