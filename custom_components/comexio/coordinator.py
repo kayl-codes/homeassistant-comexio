@@ -841,14 +841,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         await self.async_check_ignored_markers(conf, final_data)
         await self.async_check_ignored_knx(conf, final_data)
 
-        if not await self._async_audit_webio(conf, final_data, parsed_data):
-            return final_data
-
-        self._check_duplicate_plan_names()
-        self._spawn_function_plan_backup_cycle()
-
-        # Publish only now that the whole poll succeeded — see source_counts comment above.
-        self.available_source_counts = source_counts
+        # A missing Web-IO class ends the audit early: no plan checks, and the counts stay unpublished.
+        if await self._async_audit_webio(conf, final_data, parsed_data):
+            self._check_duplicate_plan_names()
+            self._spawn_function_plan_backup_cycle()
+            # Publish only now that the whole poll succeeded — see source_counts comment above.
+            self.available_source_counts = source_counts
         return final_data
 
     async def _async_fetch_parsed_config(
