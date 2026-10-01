@@ -2632,6 +2632,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._preview_plan_cache = None
         self._preview_cache_generation += 1
 
+    @property
+    def preview_armed(self) -> bool:
+        """True while a plan preview (live or snapshot) is armed and its wire-value poll runs."""
+        return self._preview_plan_cache is not None
+
     def stop_preview(self) -> bool:
         """Disarm the currently armed preview immediately (function_plan_preview_stop service).
 

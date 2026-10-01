@@ -34,8 +34,8 @@ import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-pl
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.43";
-console.info(`comexio-plan-card v${CARD_VERSION} (Version in der Hilfe rechtsbündig) loaded`);
+const CARD_VERSION = "0.9.44";
+console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
 // function_plan_backup.py) so the card can parse kind+slot back out of the select's state
@@ -351,6 +351,7 @@ class ComexioPlanCard extends HTMLElement {
     this._logPaused = false; // pause button: drop incoming events (deliberately NOT persisted)
     this._analysisHighlightIds = new Set(); // element ids highlighted from a clicked finding
     this._stopPreviewTimer = null; // pending function_plan_preview_stop grace timer (#75)
+    this._startPreviewPending = false; // function_plan_preview_start owed once hass is known
   }
 
   setConfig(config) {
@@ -1114,6 +1115,7 @@ class ComexioPlanCard extends HTMLElement {
     if (this._minimal) {
       return; // trigger-only card: no plan/debug state to drive
     }
+    this._startPreviewIfPending(); // first attach may come before hass
     if (this._debugOn) {
       void this._ensureDebugSubscription(); // deferred until hass exists (also re-arms after reconnect)
     }
@@ -1718,6 +1720,11 @@ class ComexioPlanCard extends HTMLElement {
     if (this._stopPreviewTimer) {
       clearTimeout(this._stopPreviewTimer);
       this._stopPreviewTimer = null;
+    } else if (!this._minimal) {
+      // A fresh open, not a reattach: arm the live preview right away — the counterpart of the
+      // stop below — instead of only after a plan switch or a "Preview" press.
+      this._startPreviewPending = true;
+      this._startPreviewIfPending();
     }
     // Mirror disconnectedCallback's _setDebugSession(false): without this, the backend stays on
     // the slow 2s cadence after any detach/reattach cycle instead of resuming the 0.5s debug
@@ -1732,7 +1739,26 @@ class ComexioPlanCard extends HTMLElement {
     }
   }
 
+  _previewServiceData() {
+    // Multiple Comexio config entries make config_entry required by the service — resolve it the
+    // same way the backup-restore call does, so a routine open/close doesn't hit the
+    // ambiguous-instance path and post a spurious "ERROR" notification (#75).
+    const configEntryId = this._hass?.entities?.[this._config.entity]?.config_entry_id;
+    return configEntryId ? { config_entry: configEntryId } : {};
+  }
+
+  _startPreviewIfPending() {
+    if (!this._startPreviewPending || !this._hass || !this.isConnected) {
+      return;
+    }
+    this._startPreviewPending = false;
+    this._hass.callService("comexio", "function_plan_preview_start", this._previewServiceData()).catch((err) => {
+      console.warn("comexio-plan-card: function_plan_preview_start failed", err);
+    });
+  }
+
   disconnectedCallback() {
+    this._startPreviewPending = false;
     if (this._minimal) {
       return; // trigger-only card never armed a plan/debug/preview session to begin with
     }
@@ -1749,11 +1775,7 @@ class ComexioPlanCard extends HTMLElement {
     // reattaches the card — doesn't freeze the live preview until the user re-triggers
     // "Generate Preview" by hand. connectedCallback cancels this if we reattach in time (#75).
     const hass = this._hass;
-    // Multiple Comexio config entries make config_entry required by the service — resolve it the
-    // same way the backup-restore call does, so a routine detach doesn't hit the ambiguous-instance
-    // path and post a spurious "ERROR" notification on every ordinary view switch (#75).
-    const configEntryId = hass?.entities?.[this._config.entity]?.config_entry_id;
-    const data = configEntryId ? { config_entry: configEntryId } : {};
+    const data = this._previewServiceData();
     this._stopPreviewTimer = setTimeout(() => {
       this._stopPreviewTimer = null;
       if (!hass) {

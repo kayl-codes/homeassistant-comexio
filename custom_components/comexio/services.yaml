@@ -599,6 +599,21 @@ function_plan_preview_extend:
           max: 1440
           mode: box
 
+function_plan_preview_start:
+  name: Function Plan Preview Start
+  description: >
+    Internal — called by the plan card when it is opened. Arms the live preview of the
+    plan selected in 'Function Plans' (same as pressing the Preview button), so the
+    wire-value poll runs right away. No effect while a preview is already armed.
+  fields:
+    config_entry:
+      name: Comexio instance
+      description: Select the Comexio instance (optional with a single instance).
+      required: false
+      selector:
+        config_entry:
+          integration: comexio
+
 function_plan_preview_stop:
   name: Function Plan Preview Stop
   description: >

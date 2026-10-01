@@ -28,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 _TITLE_SET_VALUE_ERR = "Set Value — Error"
 _TITLE_DEBUG_SESSION_ERR = "Function Plan Debug Session — Error"
 _TITLE_PREVIEW_EXTEND_ERR = "Function Plan Preview Extend — Error"
+_TITLE_PREVIEW_START_ERR = "Function Plan Preview Start — Error"
 _TITLE_PREVIEW_STOP_ERR = "Function Plan Preview Stop — Error"
 _TITLE_SEARCH_ERR = "Function Plan Search — Error"
 _INSTANCE_NOT_RESOLVED_ERR = "Comexio instance not resolved."
@@ -320,6 +321,37 @@ async def _handle_function_plan_preview_extend(hass: HomeAssistant, call: Servic
     if not extended:
         return {"success": False, "error": "No live plan preview is currently armed."}
     return {"success": True, "minutes": minutes}
+
+
+async def _handle_function_plan_preview_start(hass: HomeAssistant, call: ServiceCall) -> dict:
+    """Arm the live plan preview when the plan card is opened — the counterpart of preview_stop.
+
+    The card already shows the last rendered plan, but its wire-value poll only ran after a plan
+    switch or a "Preview" press. Opening the card now presses the Preview button itself, so the
+    selection logic (live plan, chosen backup snapshot, orphaned-plans view) stays in one place.
+    No-op while a preview is already armed (a second card, a reattach).
+    """
+    _LOGGER.info("Function Plan Preview Start: called (config_entry=%s)", call.data.get("config_entry"))
+    started = time.monotonic()
+    ctx = await _async_get_service_context(hass, call, _TITLE_PREVIEW_START_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
+    coordinator, _api, _fub_id = ctx
+
+    if coordinator.preview_armed:
+        _LOGGER.debug("Function Plan Preview Start: a plan preview is already armed")
+        return {"success": True, "already_armed": True}
+    button_eid = er.async_get(hass).async_get_entity_id(
+        "button", DOMAIN, f"comexio_{coordinator.server_id}_plan_preview_btn"
+    )
+    button_state = hass.states.get(button_eid) if button_eid else None
+    if button_state is None or button_state.state == STATE_UNAVAILABLE:
+        # No plan selected (or the button is not set up yet) — nothing to show live.
+        _LOGGER.debug("Function Plan Preview Start: preview button %s not available", button_eid)
+        return {"success": False, "error": "No plan is selected for the preview."}
+    await hass.services.async_call("button", "press", {"entity_id": button_eid}, blocking=True)
+    _LOGGER.info("Function Plan Preview Start: preview armed (Dauer: %.1fs)", time.monotonic() - started)
+    return {"success": True, "already_armed": False}
 
 
 async def _handle_function_plan_preview_stop(hass: HomeAssistant, call: ServiceCall) -> dict:

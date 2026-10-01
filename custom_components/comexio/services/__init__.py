@@ -16,7 +16,8 @@ multi-purpose") into thematic submodules:
   function_plan_list_backups handlers.
 - `marker_actions` — marker_delete handler (permanently deletes Markers on Comexio).
 - `misc`      — generate_web_io, set_value, function_plan_debug_session,
-  function_plan_preview_extend, function_plan_preview_stop, function_plan_search — handlers
+  function_plan_preview_extend, function_plan_preview_start, function_plan_preview_stop,
+  function_plan_search — handlers
   that don't share enough with the above groups.
 
 This module is imported as `from .services import ...` from outside the package (e.g.
@@ -59,6 +60,7 @@ from .marker_actions import handle_marker_delete
 from .misc import (
     _handle_function_plan_debug_session,
     _handle_function_plan_preview_extend,
+    _handle_function_plan_preview_start,
     _handle_function_plan_preview_stop,
     _handle_function_plan_search,
     _handle_set_value,
@@ -103,6 +105,7 @@ _SIMPLE_SERVICES: tuple[tuple[str, Any, SupportsResponse | None], ...] = (
     ("function_plan_list_backups", _handle_function_plan_list_backups, SupportsResponse.ONLY),
     ("function_plan_debug_session", _handle_function_plan_debug_session, None),
     ("function_plan_preview_extend", _handle_function_plan_preview_extend, SupportsResponse.OPTIONAL),
+    ("function_plan_preview_start", _handle_function_plan_preview_start, SupportsResponse.OPTIONAL),
     ("function_plan_preview_stop", _handle_function_plan_preview_stop, SupportsResponse.OPTIONAL),
     ("function_plan_search", _handle_function_plan_search, SupportsResponse.OPTIONAL),
 )
