@@ -1,5 +1,6 @@
 # Version: 0.7.5
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 import logging
@@ -40,6 +41,7 @@ from .const import (
     FLANKE_PORT_IN,
     FLANKE_PORT_OUT_RISING,
     FUB_BASE_REF_ID_FLANKE,
+    FUNCTION_PLAN_FETCH_MARK_SLOTS,
     FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH,
     FUNCTION_PLAN_LAYOUT_X_KNX_LOOPBACK,
     FUNCTION_PLAN_LAYOUT_X_MARKER,
@@ -512,6 +514,9 @@ class ComexioAPI:
         # write it back over HA's own — same idea as the webhook guard R1 in the coordinator.
         self._run_state_mark = 0
         self._ha_run_states: dict[str, tuple[bool, int]] = {}
+        # (fetched $Fubs dict, run_state_mark taken before its get_raw_config fetch): lets every
+        # path that writes a fetched plan list or plan into the cache apply that guard on its own.
+        self._fetch_marks: deque[tuple[dict[str, Any], int]] = deque(maxlen=FUNCTION_PLAN_FETCH_MARK_SLOTS)
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
@@ -608,8 +613,30 @@ class ComexioAPI:
         return self._fub_data
 
     def update_fub_cache_entry(self, fub_id: int | str, fub_info: dict[str, Any]) -> None:
-        """Refresh a single plan's cached metadata (e.g. after an out-of-band get_raw_config() lookup)."""
-        self._fub_data[str(fub_id)] = fub_info
+        """Refresh a single plan's cached metadata (e.g. after an out-of-band get_raw_config() lookup).
+
+        A plan HA started or stopped after that fetch began keeps HA's run state.
+        """
+        key = str(fub_id)
+        self._fub_data[key] = fub_info
+        since = self._fetch_mark(lambda fubs: fubs.get(key) is fub_info)
+        if since is not None and (running := self._ha_run_states_since(since).get(int(fub_id))) is not None:
+            self.apply_fub_run_states({int(fub_id): running})
+
+    def _fetch_mark(self, matches: Callable[[dict[str, Any]], bool]) -> int | None:
+        """run_state_mark taken before the remembered fetch whose $Fubs matches, None if unknown."""
+        return next((mark for fubs, mark in self._fetch_marks if matches(fubs)), None)
+
+    def _replace_fub_data(self, fubs: dict[str, Any], run_state_mark: int | None = None) -> None:
+        """Make a fetched plan list the cache, keeping the run states HA caused since its fetch began.
+
+        run_state_mark defaults to the mark get_raw_config() remembered for this $Fubs dict.
+        """
+        if run_state_mark is None:
+            run_state_mark = self._fetch_mark(lambda known: known is fubs)
+        self._fub_data = fubs
+        if run_state_mark is not None:
+            self.apply_fub_run_states(self._ha_run_states_since(run_state_mark))
 
     def run_state_mark(self) -> int:
         """Mark to take before a config or run-state fetch; pass it on as `since` when applying the result."""
@@ -732,6 +759,7 @@ class ComexioAPI:
         $FubModules) — callers check for FubModules. A transport failure raises
         aiohttp.ClientError / TimeoutError.
         """
+        run_state_mark = self._run_state_mark
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -750,6 +778,8 @@ class ComexioAPI:
         self.io_input_types = raw.io_input_types
         if raw.comexio_version:
             self.comexio_version = raw.comexio_version
+        if isinstance(fubs := raw.variables.get("Fubs"), dict):
+            self._fetch_marks.append((fubs, run_state_mark))
         return raw.variables
 
     async def get_knx_dpt_catalog(self) -> dict[str, Any]:
@@ -923,7 +953,8 @@ class ComexioAPI:
         than one merged dict — see get_live_states' docstring for why merging them would be
         unsafe (markers and KNX objects share the same plain numeric id space).
         run_state_mark (run_state_mark() taken before conf was fetched) keeps the run states HA
-        caused since then over the older Active flags in conf.
+        caused since then over the older Active flags in conf; without it, the mark
+        get_raw_config() remembered for conf does.
         """
         # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection).
         # aiocomexio decodes each page variable on its own: a config whose $Fubs/$Paper did not
@@ -931,9 +962,7 @@ class ComexioAPI:
         # unavailable and empty the plan selector until the next poll. An empty plan list still
         # decodes to a dict and replaces the cache.
         if isinstance(fubs := conf.get("Fubs"), dict):
-            self._fub_data = fubs
-            if run_state_mark is not None:
-                self.apply_fub_run_states(self._ha_run_states_since(run_state_mark))
+            self._replace_fub_data(fubs, run_state_mark)
         if isinstance(paper := conf.get("Paper"), dict):
             self._paper_data = paper
 
@@ -2208,7 +2237,7 @@ class ComexioAPI:
             bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
             _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in $Fubs — placement unknown", bad)
             return None
-        self._fub_data = fubs
+        self._replace_fub_data(fubs)
         if not fub_ids:
             return {}
         plans = await self.function_plan_load_all_plans(strict=strict)

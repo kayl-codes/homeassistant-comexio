@@ -87,6 +87,48 @@ def test_config_fetched_before_ha_started_a_plan_keeps_that_state(api: ComexioAP
     assert api.get_fub_active(19) is False  # without a mark the config is taken as it is
 
 
+def _fetch_while_ha_starts(api: ComexioAPI, start_during_fetch: bool) -> dict:
+    """get_raw_config() answering a config from before HA started plan 19 (mid-fetch if asked)."""
+    stale = {key: dict(fub) for key, fub in FUBS.items()}
+
+    async def fetch() -> SimpleNamespace:
+        if start_during_fetch:
+            api.set_fub_active(19, True)
+        return SimpleNamespace(variables={"Fubs": stale}, io_types={}, io_input_types={}, comexio_version=None)
+
+    api.client.get_raw_config = fetch
+    if not start_during_fetch:
+        api.set_fub_active(19, True)  # before the fetch: the config is newer and wins
+    return asyncio.run(api.get_raw_config())
+
+
+def _load_all_plans(api: ComexioAPI, conf: dict) -> None:
+    api.function_plan_load_all_plans = AsyncMock(return_value={19: {}, 43: {}})
+    asyncio.run(api._load_all_plans_verified(conf["Fubs"]))
+
+
+@pytest.mark.parametrize(
+    "write_cache",
+    [
+        lambda api, conf: api.parse_config(conf),
+        lambda api, conf: api.update_fub_cache_entry(19, conf["Fubs"]["19"]),
+        _load_all_plans,
+    ],
+    ids=["parse_config", "update_fub_cache_entry", "load_all_plans_verified"],
+)
+@pytest.mark.parametrize(("start_during_fetch", "running"), [(True, True), (False, False)])
+def test_every_cache_write_keeps_a_start_made_during_its_fetch(
+    api: ComexioAPI, write_cache, start_during_fetch: bool, running: bool
+) -> None:
+    # Regression: only the coordinator poll passed a run_state_mark; the other reloads wrote the
+    # older Active flag back over a plan HA had started while they were fetching.
+    conf = _fetch_while_ha_starts(api, start_during_fetch)
+
+    write_cache(api, conf)
+
+    assert api.get_fub_active(19) is running
+
+
 def test_plan_ids_and_unique_id() -> None:
     assert function_plan_ids({"19": {}, "43": {}, "x": {}}) == {19, 43}
     assert function_plan_run_state_unique_id("IOSRV1", 19) == "comexio_iosrv1_fub19"

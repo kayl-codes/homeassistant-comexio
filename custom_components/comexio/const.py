@@ -616,6 +616,10 @@ FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD = 3
 # run-state sensors turn unavailable: the cached plan list is kept meanwhile, so a plan deleted
 # in Comexio would otherwise stay on as an available "stopped" sensor.
 FUNCTION_PLAN_LIST_UNREAD_THRESHOLD = 2
+# Recent config fetches whose run-state mark ComexioAPI remembers (by their $Fubs dict), so every
+# path that writes a fetched plan list into the cache keeps HA's newer run states. More than this
+# many fetches in flight at once never happens (Comexio serializes requests).
+FUNCTION_PLAN_FETCH_MARK_SLOTS = 8
 
 
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
