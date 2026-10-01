@@ -600,6 +600,30 @@ def bus_load_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_bus_load_update"
 
 
+# Function plan run states (running / stopped), asked for all plans in one dashboard/refresh
+# request (~90 ms for 26 plans, measured live 2026-10-01). A plan started or stopped in Comexio
+# Studio sends no webhook, so the state is polled:
+# - without an armed plan preview, on its own timer;
+# - with one, piggybacked on the preview's connection-value poll, but no more often than this.
+#   The debug box polls the element values every 0.5 s, and those matter more there.
+FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC = 60
+FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC = 5
+FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC = 10
+# Consecutive failed run-state fetches before the plan run-state sensors turn unavailable
+# instead of showing the last known state forever.
+FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD = 3
+
+
+def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
+    """unique_id of a function plan's run-state binary sensor — the plan id only, never its name."""
+    return f"comexio_{server_id}_fub{fub_id}".lower()
+
+
+def function_plan_ids(fub_data: Mapping[str, Any]) -> set[int]:
+    """Plan ids in a $Fubs listing (api.fub_data), skipping keys that are no plain number."""
+    return {int(fid) for fid in fub_data if str(fid).isdigit()}
+
+
 # Bus-Load-Watchdog: self-healing reaction to a sustained bus-load rise (observed root cause:
 # a Comexio-side WebIO command stack that gets stuck over many hours; restarting the HA-managed
 # cluster function plans relieves it — discovered manually 2026-07-30/31). Kept as plain module

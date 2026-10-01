@@ -10,6 +10,7 @@ import socket
 import time
 from typing import Any
 
+from aiocomexio import ComexioAuthenticationError, ComexioDataError, ComexioError
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -93,6 +94,10 @@ from .const import (
     FUNCTION_PLAN_LAYOUT_Y_STEP,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
+    FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
+    FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC,
+    FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
+    FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
     ICON_ADD,
     ICON_DELETE,
@@ -133,6 +138,7 @@ from .const import (
     classify_audit_key,
     entity_id_migration_target,
     expand_ignored_marker_ids,
+    function_plan_ids,
     fw_update_signal,
     io_audit_key,
     io_column_rows,
@@ -556,6 +562,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.bus_workload: int | None = None
         self.bus_sd_card: bool | None = None
         self._bus_load_fail_streak = 0
+        # Function plan run states (see async_start_plan_run_state_poll): the fetched states go
+        # into api.fub_data's Active flags; the api reports the changes HA itself causes
+        # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
+        # sensors follow right away instead of on the next poll.
+        self.api.run_state_listener = self.async_update_listeners
+        # Two counters: the fail streak tracks the run-state endpoint itself (logging, reset only
+        # by a working fetch); the stale count tracks failures since the last fresh state (sensor
+        # availability, also reset by a full poll, whose $Fubs brings every Active flag).
+        self._plan_run_state_fail_streak = 0
+        self._plan_run_state_stale_count = 0
+        self._plan_run_state_last_fetch: float = 0.0
+        # Set when the run-state poll's own re-login was refused; the full poll owns reauth then.
+        self._plan_run_state_relogin_refused = False
+        # The plan ids of the last full poll that really read $Fubs, and a counter bumped with
+        # each such poll: only those prove a plan is gone (see binary_sensor's plan sensor sync).
+        self.scraped_plan_ids: set[int] | None = None
+        self.plan_scrape_generation = 0
+        self._polled_plan_ids: set[int] | None = None
+        # Set while _async_update_data runs: its $Fubs read brings the run states anyway, and
+        # Comexio serializes requests, so the run-state poll stays out of its way.
+        self._full_poll_running = False
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
         # _evaluate_bus_load_watchdog), trimmed to the longer of the two detection windows.
         # The lock also blocks a concurrent cascade and emergency reboot from overlapping.
@@ -577,7 +604,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
+        self._full_poll_running = True
+        try:
+            data = await self._async_fetch_and_audit()
+        finally:
+            self._full_poll_running = False
+        if self._last_poll_scraped and self._polled_plan_ids is not None:
+            # $Fubs just delivered every plan's Active flag first hand.
+            self._plan_run_state_stale_count = 0
+            self._plan_run_state_relogin_refused = False
+            self.scraped_plan_ids = self._polled_plan_ids
+            self.plan_scrape_generation += 1
+        return data
+
+    async def _async_fetch_and_audit(self) -> dict[str, Any]:
+        """Body of _async_update_data, run while _full_poll_running is set."""
         self._last_poll_scraped = False
+        self._polled_plan_ids = None
         if self.in_sync:
             _LOGGER.debug("[%s] Periodic audit skipped: Manual sync or repair is currently in progress", self.server_id)
             return self.data
@@ -604,6 +647,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Fetch current raw configuration from the Comexio API
             raw_config = await self.api.get_raw_config()
             self._last_poll_scraped = bool(raw_config.get("FubModules"))
+            # aiocomexio decodes each page variable on its own, so $FubModules alone does not
+            # prove $Fubs was read; an empty plan list still decodes to a dict.
+            if isinstance(fubs := raw_config.get("Fubs"), dict):
+                self._polled_plan_ids = function_plan_ids(fubs)
             marker_data = raw_config.get("FubModules", {}).get("2", {})
             max_id = max(int(m.get("Id", 0)) for m in marker_data.values()) if marker_data else 0
 
@@ -2548,6 +2595,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self._render_armed_preview()
         except Exception:
             _LOGGER.exception("[%s] Connection-value plan preview refresh failed", self.server_id)
+        # After the render, so the plan view never waits for it; a failure here is counted
+        # by the run-state poll itself and never disarms the preview.
+        await self._async_refresh_run_states_in_preview(preview_session)
 
     async def async_shutdown(self) -> None:
         """Cancel a pending preview refresh before the coordinator shuts down."""
@@ -2973,6 +3023,106 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return async_track_time_interval(
             self.hass, self._async_bus_load_tick, timedelta(seconds=BUS_LOAD_POLL_INTERVAL_SEC)
         )
+
+    def async_start_plan_run_state_poll(self):
+        """Start the function plan run-state poll; returns the cancel callback.
+
+        No immediate tick: the first refresh has just read every plan's Active flag.
+        """
+        return async_track_time_interval(
+            self.hass,
+            self._async_plan_run_state_tick,
+            timedelta(seconds=FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC),
+        )
+
+    @property
+    def plan_run_states_available(self) -> bool:
+        """False once FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD fetches since the last fresh state failed."""
+        return self._plan_run_state_stale_count < FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+
+    def _plan_run_state_poll_blocked(self) -> bool:
+        """Whether a sync, repair, restore or full poll runs — the run-state fetch waits for it."""
+        return self.in_sync or self._full_poll_running or self._sync_lock.locked() or self._restore_lock.locked()
+
+    async def _async_plan_run_state_tick(self, _now: datetime | None = None) -> None:
+        """Timer tick of the run-state poll; an armed preview's poll carries the states instead."""
+        if self._preview_plan_cache is None:
+            await self._async_refresh_plan_run_states()
+
+    async def _async_refresh_run_states_in_preview(self, session: aiohttp.ClientSession | None) -> None:
+        """Fetch the run states along with the preview's connection-value poll, rate-limited.
+
+        The debug box polls the element values every 0.5 s; the run states come second there.
+        """
+        interval = (
+            FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC
+            if self._connection_poll_fast_requested
+            else FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC
+        )
+        if time.monotonic() - self._plan_run_state_last_fetch >= interval:
+            await self._async_refresh_plan_run_states(session)
+
+    async def _async_refresh_plan_run_states(self, session: aiohttp.ClientSession | None = None) -> None:
+        """Fetch every known plan's run state and refresh the entities if one changed.
+
+        A failed fetch keeps the last known states; after FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+        failures since the last fresh state the run-state sensors turn unavailable
+        (plan_run_states_available). The endpoint's failure is logged once per outage, not per poll.
+        """
+        fub_ids = sorted(function_plan_ids(self.api.fub_data))
+        if not fub_ids or self._plan_run_state_poll_blocked():
+            return
+        self._plan_run_state_last_fetch = time.monotonic()
+        try:
+            states = await self.api.get_function_plan_run_states(fub_ids, session=session)
+            if not states:
+                # aiocomexio skips every plan whose answer it cannot classify; none at all means
+                # the answer format changed (e.g. new firmware) — no fresh state, not a success.
+                raise ComexioDataError("no plan's run state could be read")
+        except (ComexioError, aiohttp.ClientError, TimeoutError) as err:
+            await self._async_plan_run_state_fetch_failed(err, session)
+            return
+        was_unavailable = not self.plan_run_states_available
+        if self._plan_run_state_fail_streak:
+            _LOGGER.info(
+                "[%s] Function plan run-state fetch works again after %s failure(s)",
+                self.server_id,
+                self._plan_run_state_fail_streak,
+            )
+        self._plan_run_state_fail_streak = 0
+        self._plan_run_state_stale_count = 0
+        if self.api.apply_fub_run_states(states) or was_unavailable:
+            self.async_update_listeners()
+
+    async def _async_plan_run_state_fetch_failed(self, err: Exception, session: aiohttp.ClientSession | None) -> None:
+        """Count a failed run-state fetch, log it once per outage and heal a lapsed main session."""
+        self._plan_run_state_fail_streak += 1
+        self._plan_run_state_stale_count += 1
+        level = logging.WARNING if self._plan_run_state_fail_streak == 1 else logging.DEBUG
+        _LOGGER.log(
+            level,
+            "[%s] Function plan run-state fetch failed (%s in a row): %s",
+            self.server_id,
+            self._plan_run_state_fail_streak,
+            err,
+        )
+        if self._plan_run_state_stale_count == FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD:
+            self.async_update_listeners()
+        # The main session lapsed; log it in again for the next tick (the preview session is
+        # renewed by ensure_preview_session on its own). Refused credentials are left to the
+        # full poll, which reports them — a login a minute would only risk a server-side lockout.
+        if session is not None or not isinstance(err, ComexioAuthenticationError):
+            return
+        if self._plan_run_state_relogin_refused or await self.api.login():
+            return
+        if self.api.last_login_error == "rejected":
+            self._plan_run_state_relogin_refused = True
+            _LOGGER.warning(
+                "[%s] Comexio refused the re-login for the function plan run states; waiting for the next full poll",
+                self.server_id,
+            )
+        else:
+            _LOGGER.debug("[%s] Re-login for the function plan run states failed: %s", self.server_id, err)
 
     async def _async_bus_load_tick(self, _now: datetime | None = None) -> None:
         """Poll internal bus workload (%) + SD-card presence on a fast, independent cadence.

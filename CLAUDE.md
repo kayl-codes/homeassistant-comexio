@@ -131,6 +131,7 @@ The coordinator's `last_audit_results` dict (populated every poll) drives both s
 | Marker entity | `comexio_{server_id}_m{id}` | `{domain}.{server_id}_m{id}` |
 | KNX entity | `comexio_{server_id}_k{id}` | `{domain}.{server_id}_k{id}` |
 | IO entity | `comexio_{server_id}_{ext_name}_{identifier}` | `{domain}.{server_id}_{ext_name}_{identifier}` |
+| Function plan run state | `comexio_{server_id}_fub{id}` | `binary_sensor.{server_id}_fub{id}` |
 | Sync button | `comexio_{server_id}_webio_sync_start_btn` | HA-derived |
 | Cancel button | `comexio_{server_id}_webio_sync_cancel_btn` | HA-derived |
 | Status sensor | `comexio_{server_id}_webio_sync_status_sensor` | HA-derived |

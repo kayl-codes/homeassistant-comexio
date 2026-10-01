@@ -1,6 +1,6 @@
 # Version: 0.7.5
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 import logging
 import time
@@ -504,6 +504,9 @@ class ComexioAPI:
         self.io_input_types: dict[str, Any] = {}
         # Function plan + paper metadata (populated by parse_config)
         self._fub_data: dict[str, Any] = {}  # fub_id_str → {Id, Name, Paper, ...}
+        # Called with no arguments when set_fub_active changed a plan's cached Active flag, so
+        # the coordinator can refresh the entities showing it (see ComexioCoordinator.__init__).
+        self.run_state_listener: Callable[[], None] | None = None
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
@@ -602,6 +605,28 @@ class ComexioAPI:
     def update_fub_cache_entry(self, fub_id: int | str, fub_info: dict[str, Any]) -> None:
         """Refresh a single plan's cached metadata (e.g. after an out-of-band get_raw_config() lookup)."""
         self._fub_data[str(fub_id)] = fub_info
+
+    def apply_fub_run_states(self, states: Mapping[int, bool]) -> bool:
+        """Write fetched run states into the cached plans' Active flags; True if any flag changed.
+
+        Plans the cache does not know are skipped: a run state alone is no plan entry, the next
+        poll brings the plan's metadata. Each changed entry is replaced, not mutated, since
+        parse_config shares the dicts with the raw config it was given.
+        """
+        changed = False
+        for fub_id, running in states.items():
+            key = str(fub_id)
+            fub = self._fub_data.get(key)
+            if not isinstance(fub, dict) or self.get_fub_active(fub_id) is running:
+                continue
+            self._fub_data[key] = {**fub, "Active": int(running)}
+            changed = True
+        return changed
+
+    def set_fub_active(self, fub_id: int | str, running: bool) -> None:
+        """Record a run state HA itself just caused (run_fup / stop_fup) and tell the listener."""
+        if self.apply_fub_run_states({int(fub_id): running}) and self.run_state_listener is not None:
+            self.run_state_listener()
 
     async def login(self) -> bool:
         """Make sure the main session is logged in; a full RSA login only if it is not.
@@ -828,6 +853,28 @@ class ComexioAPI:
             raise
         self._connection_values_shape_warned.discard(fub_id)
         return values
+
+    async def get_function_plan_run_states(
+        self, fub_ids: Iterable[int], session: aiohttp.ClientSession | None = None
+    ) -> dict[int, bool]:
+        """Whether each plan runs, {fub_id: running}, for all fub_ids in one request.
+
+        A plan Comexio did not answer clearly is left out — the caller keeps its last known
+        state (see aiocomexio's get_function_plan_run_states). session: as for
+        get_function_plan_connection_values, the preview session when called from the preview
+        poll. Failures raise (ComexioError), so the caller can count them.
+        """
+        client = self.client
+        if session is not None:
+            if session is not self._preview_session or self._preview_client is None:
+                raise ComexioAuthenticationError("The preview session was dropped, its login lapsed")
+            client = self._preview_client
+        try:
+            return await client.get_function_plan_run_states(fub_ids)
+        except ComexioAuthenticationError:
+            if session is not None:
+                self._drop_preview_session(session)
+            raise
 
     def _drop_preview_session(self, session: aiohttp.ClientSession) -> None:
         """Forget a preview session whose login lapsed; ensure_preview_session opens a new one.
@@ -1722,6 +1769,8 @@ class ComexioAPI:
         """
         ok = await self._stop_plan(fub_id) is not False
         _LOGGER.info("function_plan_stop_fup: fub=%s result=%s", fub_id, ok)
+        if ok:
+            self.set_fub_active(fub_id, False)
         return ok
 
     async def _stop_plan(self, fub_id: int) -> bool | None:
@@ -3147,6 +3196,7 @@ class ComexioAPI:
             _LOGGER.warning("function_plan_run_fup: fub=%s failed: %s", fub_id, err)
             return False
         _LOGGER.info("function_plan_run_fup: fub=%s result=True", fub_id)
+        self.set_fub_active(fub_id, True)
         return True
 
     async def _reload_config_until_commands_ready(
