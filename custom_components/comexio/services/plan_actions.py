@@ -18,6 +18,7 @@ from homeassistant.exceptions import HomeAssistantError
 from ..const import (
     FUNCTION_PLAN_KNX_LAYOUT_Y_STEP,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
+    FUNCTION_PLAN_RUN_STOP_SUCCESS_NOTIFICATION,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     PLAN_TRANSITION_STARTING,
     PLAN_TRANSITION_STOPPING,
@@ -475,7 +476,7 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
         if success
         else f"Stop failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
-    persistent_notification.async_create(hass, msg, title=f"Function Plan Stop — {'OK' if success else 'Error'}")
+    _report_run_stop_result(hass, msg, success=success, action="Stop")
 
 
 async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -497,4 +498,15 @@ async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) 
         if success
         else f"Activation failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
-    persistent_notification.async_create(hass, msg, title=f"Function Plan Activate — {'OK' if success else 'Error'}")
+    _report_run_stop_result(hass, msg, success=success, action="Activate")
+
+
+def _report_run_stop_result(hass: HomeAssistant, msg: str, *, success: bool, action: str) -> None:
+    """Log the result of a plan stop/activate; notify on failure, on success only if enabled in const.py."""
+    if success:
+        _LOGGER.info("Function Plan %s: %s", action, msg.replace("\n", ", "))
+        if not FUNCTION_PLAN_RUN_STOP_SUCCESS_NOTIFICATION:
+            return
+    else:
+        _LOGGER.warning("Function Plan %s: %s", action, msg.replace("\n", ", "))
+    persistent_notification.async_create(hass, msg, title=f"Function Plan {action} — {'OK' if success else 'Error'}")
