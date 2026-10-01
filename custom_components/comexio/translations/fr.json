@@ -314,6 +314,10 @@
           "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois l'opération terminée."
         }
       }
+    },
+    "reference_catalog_mismatch": {
+      "title": "Bloc fonctionnel Comexio inutilisable ({server_id})",
+      "description": "Comexio {version} sur ce serveur ne fournit pas le(s) bloc(s) fonctionnel(s) **{blocks}** sous la forme prévue par cette intégration. Les fonctions qui placent ces blocs dans les plans fonctionnels (marqueurs déclencheurs `[TRIG]`) sont désactivées afin qu'aucun élément défectueux ne soit créé.\n\n**[Signaler sur GitHub]({issue_url})** — ouvre un nouveau ticket avec le diagnostic déjà rempli (uniquement les versions et le catalogue de blocs Comexio, aucune donnée personnelle). Vérifiez-le puis envoyez-le ; un compte GitHub est requis.\n\nSi une entrée indique « not checked », les fichiers de référence de l'intégration elle-même sont absents ou endommagés — réinstallez l'intégration."
     }
   }
 }
