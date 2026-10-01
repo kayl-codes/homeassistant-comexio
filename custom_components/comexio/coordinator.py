@@ -609,7 +609,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             data = await self._async_fetch_and_audit()
         finally:
             self._full_poll_running = False
-        if self._last_poll_scraped and self._polled_plan_ids is not None:
+        # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
+        # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
+        if self._polled_plan_ids is not None:
             # $Fubs just delivered every plan's Active flag first hand.
             self._plan_run_state_stale_count = 0
             self._plan_run_state_relogin_refused = False

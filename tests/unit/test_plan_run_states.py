@@ -1,6 +1,7 @@
 """Function plan run states: cache update, HA's own start/stop, the poll and its guards."""
 
 import asyncio
+import contextlib
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -230,18 +231,28 @@ def test_refused_relogin_is_not_retried_every_tick(api: ComexioAPI, caplog: pyte
     assert "refused the re-login" in caplog.text
 
 
-@pytest.mark.parametrize(("polled", "scraped"), [({43}, True), (None, True), ({43}, False)])
-def test_only_a_full_poll_that_read_fubs_publishes_the_plan_list(api: ComexioAPI, polled, scraped: bool) -> None:
+@pytest.mark.parametrize(
+    ("polled", "scraped", "fails"),
+    [({43}, True, False), (None, True, False), ({43}, False, False), ({43}, True, True)],
+    ids=["fubs read", "no fubs", "fubs read, empty fub modules", "poll failed after the scrape"],
+)
+def test_only_a_full_poll_that_read_fubs_publishes_the_plan_list(
+    api: ComexioAPI, polled, scraped: bool, fails: bool
+) -> None:
     coordinator = _coordinator(api, _plan_run_state_stale_count=5, _plan_run_state_relogin_refused=True)
 
     async def fetch() -> dict:
         coordinator._last_poll_scraped = scraped
         coordinator._polled_plan_ids = polled
+        if fails:
+            raise ComexioConnectionError("down")
         return {}
 
     coordinator._async_fetch_and_audit = fetch
-    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
-    published = polled is not None and scraped
+    poll = ComexioCoordinator._async_update_data(coordinator)
+    with pytest.raises(ComexioConnectionError) if fails else contextlib.nullcontext():
+        asyncio.run(poll)
+    published = polled is not None and not fails
     assert coordinator._full_poll_running is False
     assert coordinator.scraped_plan_ids == (polled if published else None)
     assert coordinator.plan_scrape_generation == int(published)
