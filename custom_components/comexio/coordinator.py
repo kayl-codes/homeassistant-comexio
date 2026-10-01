@@ -582,6 +582,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # keeps the cached plans then (see FUNCTION_PLAN_LIST_UNREAD_THRESHOLD).
         self._plan_list_unread_polls = 0
         self._plan_run_state_last_fetch: float = 0.0
+        # Set while a run-state fetch is in flight: a slow answer must not overlap the next preview
+        # tick or timer tick, whose newer answer an older one finishing last would overwrite.
+        self._plan_run_state_fetching = False
         # Set when the run-state poll's own re-login was refused; the full poll owns reauth then.
         self._plan_run_state_relogin_refused = False
         # The plan ids of the last full poll that really read $Fubs, and a counter bumped with
@@ -3130,10 +3133,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         (plan_run_states_available). The endpoint's failure is logged once per outage, not per poll.
         """
         fub_ids = sorted(function_plan_ids(self.api.fub_data))
-        if not fub_ids or self._plan_run_state_poll_blocked():
+        if not fub_ids or self._plan_run_state_fetching or self._plan_run_state_poll_blocked():
             return
         self._plan_run_state_last_fetch = time.monotonic()
         run_state_mark = self.api.run_state_mark()
+        self._plan_run_state_fetching = True
         try:
             states = await self.api.get_function_plan_run_states(fub_ids, session=session)
             if not states:
@@ -3143,6 +3147,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         except (ComexioError, aiohttp.ClientError, TimeoutError) as err:
             await self._async_plan_run_state_fetch_failed(err, session)
             return
+        finally:
+            self._plan_run_state_fetching = False
         # Only the fetch's own outage recovers here; an unread plan list ends with the next full poll.
         was_unavailable = self._plan_run_state_stale_count >= FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
         if self._plan_run_state_fail_streak:

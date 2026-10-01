@@ -121,6 +121,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_run_state_missed={},
         _plan_list_unread_polls=0,
         _plan_run_state_last_fetch=0.0,
+        _plan_run_state_fetching=False,
         _plan_run_state_relogin_refused=False,
         scraped_plan_ids=None,
         plan_scrape_generation=0,
@@ -154,6 +155,31 @@ def test_poll_does_not_undo_a_start_made_during_the_fetch(api: ComexioAPI) -> No
     assert api.get_fub_active(19) is True
     assert api.get_fub_active(43) is False
     coordinator.async_update_listeners.assert_called_once_with()
+
+
+def test_slow_fetch_is_not_overlapped_by_the_next_tick(api: ComexioAPI) -> None:
+    """A preview tick while the previous answer is still on its way must not start a second fetch."""
+    release = asyncio.Event()
+
+    async def slow_fetch(*_args, **_kwargs) -> dict[int, bool]:
+        await release.wait()
+        return {19: True, 43: True}
+
+    api.client.get_function_plan_run_states = AsyncMock(side_effect=slow_fetch)
+    coordinator = _coordinator(api)
+
+    async def run() -> None:
+        first = asyncio.create_task(coordinator._async_refresh_plan_run_states())
+        await asyncio.sleep(0)
+        second = asyncio.create_task(coordinator._async_refresh_plan_run_states())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+        await coordinator._async_refresh_plan_run_states()
+
+    asyncio.run(run())
+    assert api.client.get_function_plan_run_states.await_count == 2
+    assert api.get_fub_active(19) is True
 
 
 def test_poll_without_change_does_not_refresh_the_entities(api: ComexioAPI) -> None:

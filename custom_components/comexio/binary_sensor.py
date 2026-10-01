@@ -186,9 +186,10 @@ class ComexioKnxBinarySensor(ComexioKnxEntity, ComexioMarkerBinarySensor):
 class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorEntity, BinarySensorEntity):
     """Whether one function plan runs in Comexio — on the hub device, next to the sync button.
 
-    Reads the plan's Active flag from api.fub_data: every full poll refreshes it, the run-state
-    poll in between (see coordinator.async_start_plan_run_state_poll), and HA's own start/stop
-    right away. The id carries only the plan id; the plan name is the display name alone.
+    Reads the plan's Active flag from api.fub_data: a full poll that decodes $Fubs refreshes it
+    (one that cannot keeps the cached plans and their flags), the run-state poll in between (see
+    coordinator.async_start_plan_run_state_poll), and HA's own start/stop right away.
+    The id carries only the plan id; the plan name is the display name alone.
     """
 
     _attr_has_entity_name = True
