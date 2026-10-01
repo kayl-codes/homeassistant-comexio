@@ -143,7 +143,7 @@ class ReferenceCheck:
     def summary(self, include_duration: bool = True) -> str:
         """One-line result; without the duration it is stable across polls (Repair issue text)."""
         parts = [_catalog_summary(catalog) for _kind, catalog in sorted(self.catalogs.items())]
-        text = f"Comexio {self.comexio_version or '?'}: " + "; ".join(parts)
+        text = f"Comexio {self.comexio_version or '?'}: {'; '.join(parts)}"
         return text + f" ({self.duration_ms:.1f} ms)" if include_duration else text
 
 
@@ -189,8 +189,7 @@ def _port_type_code(port: Mapping[str, Any]) -> str:
 
 def fub_base_key(entry: Mapping[str, Any]) -> str | None:
     """Stable key of one $FubModules["5"] entry, or None when it has no internal Name."""
-    name = entry.get("Name")
-    if not name:
+    if not (name := entry.get("Name")):
         return None
     return KEY_SEPARATOR.join((str(name), _port_signature(entry.get("input")), _port_signature(entry.get("output"))))
 
@@ -342,12 +341,18 @@ def find_unknown_fub_base_refs(
         if not isinstance(elements, Mapping):
             continue
         for elem_id, element in elements.items():
-            reference = element.get("reference") if isinstance(element, Mapping) else None
-            if not isinstance(reference, Mapping):
-                continue
-            if str(reference.get("type")) == "5" and str(reference.get("ref_id")) not in known:
-                found.append((str(fub_id), str(elem_id), str(reference.get("ref_id"))))
+            ref_id = _fub_base_ref_id(element)
+            if ref_id is not None and ref_id not in known:
+                found.append((str(fub_id), str(elem_id), ref_id))
     return found
+
+
+def _fub_base_ref_id(element: Any) -> str | None:
+    """ref_id of a type-5 (block) plan element, None for any other or malformed element."""
+    reference = element.get("reference") if isinstance(element, Mapping) else None
+    if not isinstance(reference, Mapping) or str(reference.get("type")) != "5":
+        return None
+    return str(reference.get("ref_id"))
 
 
 # ---------------------------------------------------------------------------
@@ -359,12 +364,10 @@ def parse_reference(kind: str, data: Any) -> ReferenceCatalog:
     """Validate one reference file's content; raises ValueError on a malformed file."""
     if not isinstance(data, dict) or data.get("format") != REFERENCE_FORMAT or data.get("kind") != kind:
         raise ValueError(f"reference/{kind}.json: wrong format/kind header")
-    entries = data.get("entries")
-    if not isinstance(entries, dict) or not entries:
+    if not isinstance(entries := data.get("entries"), dict) or not entries:
         raise ValueError(f"reference/{kind}.json: no entries")
     parsed = {str(key): _as_int(ref_id) for key, ref_id in entries.items()}
-    bad = [key for key, ref_id in parsed.items() if ref_id is None]
-    if bad:
+    if bad := [key for key, ref_id in parsed.items() if ref_id is None]:
         raise ValueError(f"reference/{kind}.json: non-integer ids for {bad[:5]}")
     return ReferenceCatalog(
         kind, data.get("comexio_version"), {key: ref_id for key, ref_id in parsed.items() if ref_id is not None}
@@ -394,11 +397,9 @@ def load_reference_catalogs(directory: Path = REFERENCE_DIR) -> dict[str, Refere
 
 def build_reference(kind: str, raw_config: Mapping[str, Any], comexio_version: str | None) -> dict[str, Any]:
     """Reference file content for kind from a live raw config (used by scripts/build_reference_catalog.py)."""
-    live = LIVE_EXTRACTORS[kind](raw_config)
-    if not live:
+    if not (live := LIVE_EXTRACTORS[kind](raw_config)):
         raise ValueError(f"{kind}: no live entries in this raw config — refusing to write an empty reference")
-    duplicates = sorted(key for key, ids in live.items() if len(ids) > 1)
-    if duplicates:
+    if duplicates := sorted(key for key, ids in live.items() if len(ids) > 1):
         raise ValueError(f"{kind}: keys not unique on the source server: {duplicates}")
     return {
         "format": REFERENCE_FORMAT,
@@ -432,8 +433,7 @@ def _ref_id_owner(check: ReferenceCheck, kind: str, ref_id: int | None) -> str:
     """What the reference id points at on this server: a key, an installed app, or nothing."""
     if ref_id is None:
         return "-"
-    owners = [key for key, ids in (check.live_ids.get(kind) or {}).items() if ref_id in ids]
-    if owners:
+    if owners := [key for key, ids in (check.live_ids.get(kind) or {}).items() if ref_id in ids]:
         return ", ".join(owners)
     if kind == KIND_FUB_BASE and ref_id in check.fub_base_ids:
         return "installed app"
