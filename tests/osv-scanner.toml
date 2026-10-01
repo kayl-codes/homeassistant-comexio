@@ -101,6 +101,12 @@ id = "GHSA-jwrc-g2q2-pq5p"
 ignoreUntil = 2027-03-31
 reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102270); fixed by HA's own bump"
 
+# No fixed PyJWT release yet (last_affected 2.13.0); revisit once one exists and HA picks it up.
+[[IgnoredVulns]]
+id = "GHSA-gvp8-978c-rx2q"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-103001); no fixed release yet"
+
 # --- anyio / idna / pygments: false positives. OSV-Scanner reports the dependency *lower bounds*
 # from HA's metadata (anyio 4.9.0, idna 3.9.0, pygments 2.9.0) as if they were installed versions;
 # pip actually resolves anyio 4.15.1, idna 3.20, pygments 2.21.0 (CI job log, PR #90), all past
