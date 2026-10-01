@@ -40,7 +40,7 @@ ignoreUntil = 2027-03-31
 reason = "Alias of PYSEC-2026-3554 (cryptography==48.0.1 pinned by homeassistant, test-only)"
 
 # --- PyJWT 2.13.0: Home Assistant Core's own exact pin (homeassistant==2026.8.3 requires
-# PyJWT==2.13.0; still pinned in 2026.9.4), fixed in 2.14.0. The integration never imports jwt.
+# PyJWT==2.13.0; still pinned in 2026.9.4), fixed in 2.14.0 / 2.15.0. The integration never imports jwt.
 [[IgnoredVulns]]
 id = "GHSA-2gx3-rcp4-g85q"
 ignoreUntil = 2027-03-31
@@ -90,6 +90,16 @@ reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchai
 id = "GHSA-w6j9-cwv2-h6wq"
 ignoreUntil = 2027-03-31
 reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102274); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-42vr-xj54-vc7v"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-101918); fixed by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-jwrc-g2q2-pq5p"
+ignoreUntil = 2027-03-31
+reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-102270); fixed by HA's own bump"
 
 # --- anyio / idna / pygments: false positives. OSV-Scanner reports the dependency *lower bounds*
 # from HA's metadata (anyio 4.9.0, idna 3.9.0, pygments 2.9.0) as if they were installed versions;
