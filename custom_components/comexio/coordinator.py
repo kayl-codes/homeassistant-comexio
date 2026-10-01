@@ -15,7 +15,7 @@ from aiocomexio.function_plan import build_source_id_translation, render_plan_sv
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -65,6 +65,7 @@ from .const import (
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
+    CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_HOST,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_KNX_PRERELEASE_CLEANUP_PENDING,
@@ -160,7 +161,7 @@ from .orphaned_statistics import (
     legacy_statistic_prefixes,
     stable_statistic_id_pattern,
 )
-from .plan_watchdog import ManagedPlanWatchdog
+from .plan_watchdog import ManagedPlanWatchdog, parse_start_action
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -680,6 +681,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             entry_id=entry.entry_id,
             server_id=self.server_id,
             start_plan=self._async_watchdog_start_plan,
+            notify_targets=self._plan_watchdog_notify_targets,
         )
         # Two counters: the fail streak tracks the run-state endpoint itself (logging, reset only
         # by a working fetch); the stale count tracks failures since the last fresh state (sensor
@@ -3280,15 +3282,39 @@ class ComexioCoordinator(DataUpdateCoordinator):
         async with self._watchdog_lock:
             return await self.api.function_plan_run_fup(fub_id)
 
-    async def async_start_managed_plan(self, fub_id: int) -> bool:
-        """Start a stopped managed plan from its repair; False if Comexio did not confirm it."""
+    async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool:
+        """Start a stopped managed plan from its repair or push; False if Comexio did not confirm it."""
         if not await self.api.login():
             return False
         if not await self._async_watchdog_start_plan(fub_id):
             return False
-        self.plan_watchdog.plan_started(fub_id)
+        await self.plan_watchdog.async_plan_started(fub_id, confirm=from_push)
         self.async_update_listeners()
         return True
+
+    def _plan_watchdog_notify_targets(self) -> list[str]:
+        targets = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or []
+        return [str(target) for target in targets] if isinstance(targets, list) else []
+
+    @callback
+    def async_handle_notification_action(self, event: Event) -> None:
+        """The "Start plan" button of a watchdog push was pressed on a phone."""
+        fub_id = parse_start_action(self.server_id, event.data.get("action"))
+        if fub_id is not None:
+            self.hass.async_create_background_task(
+                self._async_start_plan_from_push(fub_id), name=f"{DOMAIN}_{self.server_id}_start_plan_{fub_id}"
+            )
+
+    async def _async_start_plan_from_push(self, fub_id: int) -> None:
+        _LOGGER.info("[%s] Starting function plan %s from the watchdog push", self.server_id, fub_id)
+        if self.api.get_fub_active(fub_id):
+            await self.plan_watchdog.async_plan_started(fub_id, confirm=True)
+            self.async_update_listeners()
+            return
+        if not self.managed_plan_start_blocked and await self.async_start_managed_plan(fub_id, from_push=True):
+            return
+        _LOGGER.warning("[%s] Function plan %s could not be started from the watchdog push", self.server_id, fub_id)
+        await self.plan_watchdog.async_push_start_failed(fub_id, self.api.function_plan_name(fub_id))
 
     def _count_missed_plan_run_states(self, fub_ids: list[int], states: dict[int, bool]) -> bool:
         """Count the plans this fetch left out; True when one just crossed or recovered from the threshold."""

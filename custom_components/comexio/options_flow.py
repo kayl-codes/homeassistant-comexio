@@ -14,6 +14,7 @@ from .const import (
     CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
+    CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
@@ -233,6 +234,20 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 options=["1", "3", "6", "12"],
                 mode=SelectSelectorMode.DROPDOWN,
                 translation_key="function_plan_backup_retention_months",
+            )
+        )
+        schema_dict[
+            vol.Optional(
+                CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
+                default=list(conf.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY, [])),
+            )
+        ] = SelectSelector(
+            # No translation_key: the options are this instance's notify service names.
+            SelectSelectorConfig(
+                options=sorted(self.hass.services.async_services_for_domain("notify")),
+                multiple=True,
+                custom_value=True,
+                mode=SelectSelectorMode.DROPDOWN,
             )
         )
 

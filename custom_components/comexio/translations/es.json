@@ -121,7 +121,8 @@
           "cover_keywords": "Palabras clave para detectar persianas",
           "function_plan_backup_retention_months": "Retención de backups huérfanos",
           "bus_watchdog_enabled": "Activar el Bus-Load Watchdog",
-          "bus_watchdog_auto_reboot": "Permitir el reinicio automático de Comexio ante una carga de bus de emergencia"
+          "bus_watchdog_auto_reboot": "Permitir el reinicio automático de Comexio ante una carga de bus de emergencia",
+          "function_plan_watchdog_notify": "Watchdog de planes de funciones: push a"
         },
         "data_description": {
           "schema_marker": "Variables disponibles: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -135,7 +136,8 @@
           "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)",
           "function_plan_backup_retention_months": "Cuando la copia más reciente de un plan eliminado directamente en Comexio supera este plazo, una reparación pregunta si eliminar o conservar sus copias — no se elimina nada sin tu confirmación. Las copias de un plan que sigue existiendo nunca se ven afectadas. La acción 'Function Plan Purge Orphaned Backups' elimina de una vez todas las vencidas.",
           "bus_watchdog_enabled": "Ante una subida sostenida de la carga del bus, reinicia automáticamente los planes de función de clúster gestionados por HA (de atrás hacia adelante) para intentar aliviarla. No es destructivo para el propio sistema Comexio.",
-          "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo."
+          "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo.",
+          "function_plan_watchdog_notify": "Servicios de notificación (p. ej. notify.mobile_app_tu_telefono) que reciben un push cuando se detiene un plan de funciones gestionado por HA. El push tiene un botón «Iniciar plan» y desaparece en cuanto el plan vuelve a ejecutarse. Déjalo vacío para no enviar push; la reparación se crea en cualquier caso."
         }
       }
     },

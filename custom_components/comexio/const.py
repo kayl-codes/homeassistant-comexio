@@ -626,6 +626,10 @@ FUNCTION_PLAN_FETCH_MARK_SLOTS = 8
 FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC = 300
 # With auto-start on, a plan Comexio refused to start is tried again no sooner than this.
 FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC = 600
+# notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
+# managed plan stops; the action comes back as a mobile_app_notification_action event.
+CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
+MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 
 
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:

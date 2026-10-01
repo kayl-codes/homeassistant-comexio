@@ -121,7 +121,8 @@
           "cover_keywords": "Mots-clés pour la détection des volets",
           "function_plan_backup_retention_months": "Rétention des sauvegardes orphelines",
           "bus_watchdog_enabled": "Activer le Bus-Load Watchdog",
-          "bus_watchdog_auto_reboot": "Autoriser le redémarrage automatique de Comexio en cas de charge de bus critique"
+          "bus_watchdog_auto_reboot": "Autoriser le redémarrage automatique de Comexio en cas de charge de bus critique",
+          "function_plan_watchdog_notify": "Watchdog des plans de fonctions : push vers"
         },
         "data_description": {
           "schema_marker": "Variables disponibles : '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -135,7 +136,8 @@
           "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)",
           "function_plan_backup_retention_months": "Dès que la sauvegarde la plus récente d'un plan supprimé directement dans Comexio dépasse ce délai, une réparation demande s'il faut supprimer ou conserver ses sauvegardes — rien n'est supprimé sans votre confirmation. Les sauvegardes d'un plan existant ne sont jamais concernées. L'action 'Function Plan Purge Orphaned Backups' supprime d'un coup toutes celles qui ont expiré.",
           "bus_watchdog_enabled": "En cas de hausse durable de la charge du bus, redémarre automatiquement les plans fonctionnels de cluster gérés par HA (de l'arrière vers l'avant) pour tenter de la soulager. Non destructif pour le système Comexio lui-même.",
-          "bus_watchdog_auto_reboot": "Si la charge du bus dépasse en moyenne 90 % pendant 5 minutes, déclenche un redémarrage COMPLET et IMMÉDIAT de Comexio, sans confirmation. Désactivé par défaut — à activer une fois que vous faites confiance au mécanisme."
+          "bus_watchdog_auto_reboot": "Si la charge du bus dépasse en moyenne 90 % pendant 5 minutes, déclenche un redémarrage COMPLET et IMMÉDIAT de Comexio, sans confirmation. Désactivé par défaut — à activer une fois que vous faites confiance au mécanisme.",
+          "function_plan_watchdog_notify": "Services de notification (p. ex. notify.mobile_app_votre_telephone) qui reçoivent un push lorsqu'un plan de fonctions géré par HA s'arrête. Le push comporte un bouton « Démarrer le plan » et disparaît dès que le plan s'exécute de nouveau. Laisser vide pour aucun push ; la réparation est créée dans tous les cas."
         }
       }
     },

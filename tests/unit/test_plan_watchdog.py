@@ -3,7 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,6 +13,8 @@ from custom_components.comexio.plan_watchdog import (
     ISSUE_FUNCTION_PLAN_STOPPED,
     ManagedPlanWatchdog,
     next_stopped_plans,
+    parse_start_action,
+    start_action_id,
     stopped_plan_issue_id,
 )
 
@@ -55,7 +57,9 @@ def ir(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     return registry
 
 
-def _watchdog(start_results: list[bool] | None = None) -> tuple[ManagedPlanWatchdog, list[int]]:
+def _watchdog(
+    start_results: list[bool] | None = None, targets: list[str] | None = None
+) -> tuple[ManagedPlanWatchdog, list[int]]:
     started: list[int] = []
     results = iter(start_results or [])
 
@@ -63,7 +67,13 @@ def _watchdog(start_results: list[bool] | None = None) -> tuple[ManagedPlanWatch
         started.append(fub_id)
         return next(results)
 
-    return ManagedPlanWatchdog(MagicMock(), entry_id="e1", server_id=SERVER_ID, start_plan=start), started
+    hass = MagicMock()
+    hass.config.language = "de"
+    hass.services.async_call = AsyncMock()
+    watchdog = ManagedPlanWatchdog(
+        hass, entry_id="e1", server_id=SERVER_ID, start_plan=start, notify_targets=lambda: list(targets or [])
+    )
+    return watchdog, started
 
 
 def test_stopped_plan_raises_and_clears_its_repair(ir: MagicMock) -> None:
@@ -115,7 +125,7 @@ def test_refused_auto_start_keeps_the_repair_and_backs_off(ir: MagicMock) -> Non
 def test_plan_started_by_the_repair_clears_it_at_once(ir: MagicMock) -> None:
     watchdog, _ = _watchdog()
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=False)))
-    watchdog.plan_started(34)
+    asyncio.run(watchdog.async_plan_started(34))
     assert watchdog.stopped == {42: "HA - TRIGGER"}
     assert list(ir.async_get.return_value.issues) == [(DOMAIN, stopped_plan_issue_id(SERVER_ID, 42))]
 
@@ -133,3 +143,49 @@ def test_ha_stop_grace_ends_with_a_start_or_the_time(comexio_api: Any, monkeypat
     comexio_api.set_fub_active(34, False)
     comexio_api.set_fub_active(34, True)
     assert comexio_api.ha_stopped_within(34, 300) is False
+
+
+def _pushes(watchdog: ManagedPlanWatchdog) -> list[tuple[str, str, dict[str, Any]]]:
+    return [call.args[:3] for call in watchdog._hass.services.async_call.call_args_list]
+
+
+def test_stop_pushes_an_alarm_with_a_start_action_and_recovery_clears_it(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    pushes = _pushes(watchdog)
+    assert [(domain, service) for domain, service, _ in pushes] == [
+        ("notify", "mobile_app_phone"),
+        ("notify", "mobile_app_tablet"),
+    ]
+    alarm = pushes[0][2]
+    assert "HA - Marker 1" in alarm["message"]
+    assert alarm["data"]["actions"] == [{"action": start_action_id(SERVER_ID, 34), "title": "Plan starten"}]
+    tag = alarm["data"]["tag"]
+
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert len(_pushes(watchdog)) == 2  # still stopped: no repeated alarm
+
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert _pushes(watchdog)[2][2] == {"message": "clear_notification", "data": {"tag": tag}}
+
+
+def test_failing_notify_service_does_not_stop_the_watchdog(ir: MagicMock) -> None:
+    from homeassistant.exceptions import HomeAssistantError
+
+    watchdog, _ = _watchdog(targets=["mobile_app_gone", "mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("service not found"), None]
+    assert asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True))) is True
+    assert [service for _, service, _ in _pushes(watchdog)] == ["mobile_app_gone", "mobile_app_phone"]
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        (start_action_id(SERVER_ID, 34), 34),
+        (start_action_id(f"{SERVER_ID}_2", 34), None),  # another server's action
+        ("SOME_OTHER_ACTION", None),
+        (None, None),
+    ],
+)
+def test_parse_start_action(action: Any, expected: int | None) -> None:
+    assert parse_start_action(SERVER_ID, action) == expected

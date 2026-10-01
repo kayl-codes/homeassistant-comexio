@@ -1270,7 +1270,7 @@ class ComexioRepairFlow(RepairsFlow):
         fub_id = int(self.issue_data["fub_id"])
         if coordinator.api.get_fub_active(fub_id):
             # Started meanwhile (in Comexio, by the auto-start or another repair).
-            coordinator.plan_watchdog.plan_started(fub_id)
+            await coordinator.plan_watchdog.async_plan_started(fub_id)
             coordinator.async_update_listeners()
             return self.async_abort(reason="already_running", description_placeholders=placeholders)
         if coordinator.managed_plan_start_blocked:
