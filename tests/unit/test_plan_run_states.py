@@ -71,6 +71,22 @@ def test_unconfirmed_start_leaves_the_flag(api: ComexioAPI) -> None:
     listener.assert_not_called()
 
 
+def test_config_fetched_before_ha_started_a_plan_keeps_that_state(api: ComexioAPI) -> None:
+    api.set_fub_active(43, False)  # before the fetch: the config is newer and wins
+    mark = api.run_state_mark()
+    stale = {key: dict(fub) for key, fub in FUBS.items()}  # fetched before the start below
+    api.set_fub_active(19, True)
+
+    api.parse_config({"Fubs": stale}, run_state_mark=mark)
+
+    assert api.get_fub_active(19) is True
+    assert api.get_fub_active(43) is True
+
+    api.parse_config({"Fubs": {key: dict(fub) for key, fub in FUBS.items()}})
+
+    assert api.get_fub_active(19) is False  # without a mark the config is taken as it is
+
+
 def test_plan_ids_and_unique_id() -> None:
     assert function_plan_ids({"19": {}, "43": {}, "x": {}}) == {19, 43}
     assert function_plan_run_state_unique_id("IOSRV1", 19) == "comexio_iosrv1_fub19"
@@ -124,6 +140,19 @@ def test_poll_applies_a_changed_state_and_refreshes_the_entities(api: ComexioAPI
     asyncio.run(coordinator._async_refresh_plan_run_states())
     assert api.client.get_function_plan_run_states.await_args.args[0] == [19, 43]
     assert api.get_fub_active(19) is True
+    coordinator.async_update_listeners.assert_called_once_with()
+
+
+def test_poll_does_not_undo_a_start_made_during_the_fetch(api: ComexioAPI) -> None:
+    async def fetch(*_args, **_kwargs) -> dict[int, bool]:
+        api.set_fub_active(19, True)  # HA started the plan while the answer was on its way
+        return {19: False, 43: False}
+
+    api.client.get_function_plan_run_states = AsyncMock(side_effect=fetch)
+    coordinator = _coordinator(api)
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert api.get_fub_active(19) is True
+    assert api.get_fub_active(43) is False
     coordinator.async_update_listeners.assert_called_once_with()
 
 

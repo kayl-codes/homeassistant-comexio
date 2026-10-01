@@ -507,6 +507,11 @@ class ComexioAPI:
         # Called with no arguments when set_fub_active changed a plan's cached Active flag, so
         # the coordinator can refresh the entities showing it (see ComexioCoordinator.__init__).
         self.run_state_listener: Callable[[], None] | None = None
+        # Run states HA itself caused: fub_id_str → (running, mark). A config or run-state fetch
+        # that started before such a change (run_state_mark) brings the older state and must not
+        # write it back over HA's own — same idea as the webhook guard R1 in the coordinator.
+        self._run_state_mark = 0
+        self._ha_run_states: dict[str, tuple[bool, int]] = {}
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
@@ -606,13 +611,24 @@ class ComexioAPI:
         """Refresh a single plan's cached metadata (e.g. after an out-of-band get_raw_config() lookup)."""
         self._fub_data[str(fub_id)] = fub_info
 
-    def apply_fub_run_states(self, states: Mapping[int, bool]) -> bool:
+    def run_state_mark(self) -> int:
+        """Mark to take before a config or run-state fetch; pass it on as `since` when applying the result."""
+        return self._run_state_mark
+
+    def _ha_run_states_since(self, since: int) -> dict[int, bool]:
+        """Run states HA caused after the mark `since` — newer than any fetch that started before it."""
+        return {int(key): running for key, (running, mark) in self._ha_run_states.items() if mark > since}
+
+    def apply_fub_run_states(self, states: Mapping[int, bool], since: int | None = None) -> bool:
         """Write fetched run states into the cached plans' Active flags; True if any flag changed.
 
         Plans the cache does not know are skipped: a run state alone is no plan entry, the next
         poll brings the plan's metadata. Each changed entry is replaced, not mutated, since
-        parse_config shares the dicts with the raw config it was given.
+        parse_config shares the dicts with the raw config it was given. With `since` (the
+        run_state_mark taken before the fetch), plans HA started or stopped meanwhile keep that state.
         """
+        if since is not None and (newer := self._ha_run_states_since(since)):
+            states = {fub_id: running for fub_id, running in states.items() if fub_id not in newer}
         changed = False
         for fub_id, running in states.items():
             key = str(fub_id)
@@ -625,6 +641,8 @@ class ComexioAPI:
 
     def set_fub_active(self, fub_id: int | str, running: bool) -> None:
         """Record a run state HA itself just caused (run_fup / stop_fup) and tell the listener."""
+        self._run_state_mark += 1
+        self._ha_run_states[str(fub_id)] = (running, self._run_state_mark)
         if self.apply_fub_run_states({int(fub_id): running}) and self.run_state_listener is not None:
             self.run_state_listener()
 
@@ -895,6 +913,7 @@ class ComexioAPI:
         referenced_markers: set[str] | None = None,
         knx_live_states: dict[str, Any] | None = None,
         knx_dpt_catalog: dict[str, Any] | None = None,
+        run_state_mark: int | None = None,
     ) -> dict[str, Any]:
         """
         Processes the raw configuration and performs a technical audit.
@@ -903,6 +922,8 @@ class ComexioAPI:
         live_states and knx_live_states are kept as two separate params (both id-keyed) rather
         than one merged dict — see get_live_states' docstring for why merging them would be
         unsafe (markers and KNX objects share the same plain numeric id space).
+        run_state_mark (run_state_mark() taken before conf was fetched) keeps the run states HA
+        caused since then over the older Active flags in conf.
         """
         # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection).
         # aiocomexio decodes each page variable on its own: a config whose $Fubs/$Paper did not
@@ -911,6 +932,8 @@ class ComexioAPI:
         # decodes to a dict and replaces the cache.
         if isinstance(fubs := conf.get("Fubs"), dict):
             self._fub_data = fubs
+            if run_state_mark is not None:
+                self.apply_fub_run_states(self._ha_run_states_since(run_state_mark))
         if isinstance(paper := conf.get("Paper"), dict):
             self._paper_data = paper
 

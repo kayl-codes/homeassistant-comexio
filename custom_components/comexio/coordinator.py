@@ -683,7 +683,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             import_ios = conf.get("import_ios", True)
             import_knx = conf.get("import_knx", False)
 
-            # Fetch current raw configuration from the Comexio API
+            # Fetch current raw configuration from the Comexio API. A plan HA starts or stops
+            # while this poll runs keeps that state over the older Active flag in raw_config.
+            run_state_mark = self.api.run_state_mark()
             raw_config = await self.api.get_raw_config()
             self._last_poll_scraped = bool(raw_config.get("FubModules"))
             # aiocomexio decodes each page variable on its own, so $FubModules alone does not
@@ -731,7 +733,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if import_knx and knx_dpt_catalog:
                 await self._maybe_persist_knx_dpt_catalog()
             parsed_data = self.api.parse_config(
-                raw_config, live_states, referenced_markers, knx_live_states, knx_dpt_catalog
+                raw_config,
+                live_states,
+                referenced_markers,
+                knx_live_states,
+                knx_dpt_catalog,
+                run_state_mark=run_state_mark,
             )
             # Unfiltered per-category counts — parsed_data carries every category regardless of
             # import_* opt-in, unlike final_data below. See available_source_counts docstring.
@@ -3126,6 +3133,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not fub_ids or self._plan_run_state_poll_blocked():
             return
         self._plan_run_state_last_fetch = time.monotonic()
+        run_state_mark = self.api.run_state_mark()
         try:
             states = await self.api.get_function_plan_run_states(fub_ids, session=session)
             if not states:
@@ -3146,7 +3154,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_run_state_fail_streak = 0
         self._plan_run_state_stale_count = 0
         missed_out = self._count_missed_plan_run_states(fub_ids, states)
-        if self.api.apply_fub_run_states(states) or was_unavailable or missed_out:
+        if self.api.apply_fub_run_states(states, since=run_state_mark) or was_unavailable or missed_out:
             self.async_update_listeners()
 
     def _count_missed_plan_run_states(self, fub_ids: list[int], states: dict[int, bool]) -> bool:
