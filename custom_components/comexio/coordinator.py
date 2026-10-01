@@ -2576,6 +2576,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     self._connection_poll_fail_count,
                     _CONNECTION_POLL_MAX_FAILURES,
                 )
+                # The armed preview still pauses the run-state timer — keep the states coming, on
+                # the admin session, since the preview session may be what just failed.
+                await self._async_refresh_run_states_in_preview(None)
             return
         if self._preview_plan_cache is not cache:
             # Stale response for a preview that's no longer armed (stopped/replaced while

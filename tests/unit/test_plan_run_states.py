@@ -360,3 +360,19 @@ def test_preview_poll_fetches_the_run_states_rate_limited(
     now += 0.5
     asyncio.run(coordinator._async_refresh_run_states_in_preview(None))
     assert api.client.get_function_plan_run_states.await_count == 2
+
+
+def test_failed_connection_value_poll_keeps_the_run_states_coming(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The armed preview pauses the run-state timer, so its poll must fetch the states even when
+    # its own request fails — on the admin session, the preview session may be what failed.
+    monkeypatch.setattr(api, "ensure_preview_session", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        api, "get_function_plan_connection_values", AsyncMock(side_effect=ComexioConnectionError("down"))
+    )
+    coordinator = _coordinator(api, _preview_plan_cache={"fub_id": 19}, _connection_poll_fail_count=0)
+    coordinator._async_refresh_run_states_in_preview = AsyncMock()
+    asyncio.run(ComexioCoordinator._async_poll_connection_values(coordinator, None))
+    assert coordinator._connection_poll_fail_count == 1
+    coordinator._async_refresh_run_states_in_preview.assert_awaited_once_with(None)
