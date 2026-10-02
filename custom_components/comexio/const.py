@@ -538,6 +538,15 @@ def stable_object_id(unique_id: str) -> str:
     return slugify(unique_id.removeprefix("comexio_"))
 
 
+def hub_era_object_id(server_id: str, name: str) -> str:
+    """Object id HA derived for an entity named ``name`` on the hub device (named ``server_id``).
+
+    The function plan entities moved to their own sub-device but keep requesting this id, so a
+    new install gets the same entity_ids as before the move (see entity.ComexioFunctionPlanEntityMixin).
+    """
+    return slugify(f"{server_id} {name}")
+
+
 def entity_id_migration_target(
     entity_id: str, unique_id: str, suggested_object_id: str | None, server_id: str
 ) -> str | None:
@@ -671,7 +680,7 @@ FUNCTION_PLAN_CHANGE_BACKUP_SLOTS = 10
 CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = "function_plan_backup_retention_months"
 DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS = 6
 TIMESTAMP_DISPLAY_FORMAT = "%d.%m.%Y %H:%M"
-# Last entry of the 'Function Plans' selector: switches the plan card to the backups of deleted
+# Last entry of the 'Plan' selector: switches the plan card to the backups of deleted
 # plans. A view choice only — it never replaces the persisted managed plan (see
 # coordinator.get_managed_function_plan_fub_id), so audit and sync keep working meanwhile.
 FUNCTION_PLAN_ORPHANED_VIEW_OPTION = "Orphaned plans"

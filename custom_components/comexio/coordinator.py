@@ -1632,7 +1632,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
 
     def get_active_function_plan_fub_id(self) -> int | None:
-        """Return the fub_id for the currently selected 'Function Plans' plan, or None.
+        """Return the fub_id for the currently selected 'Plan' plan, or None.
 
         Shared by select.py (backup selector) — kept on the coordinator rather than as a
         free function in an entity-platform module. Parses the fub_id directly out of the
@@ -1657,7 +1657,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return next((int(fid) for fid, fi in self.api.fub_data.items() if fi.get("Name") == lp_state.state), None)
 
     def orphaned_plans_view_active(self) -> bool:
-        """Whether the 'Function Plans' selector shows the orphaned-plans view."""
+        """Whether the 'Plan' selector shows the orphaned-plans view."""
         lp_state = self._active_plan_selector_state()
         return lp_state is not None and lp_state.state == FUNCTION_PLAN_ORPHANED_VIEW_OPTION
 
@@ -1673,7 +1673,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return self.get_active_function_plan_fub_id()
 
     def persisted_function_plan_fub_id(self) -> int | None:
-        """fub_id the 'Function Plans' selector last persisted, or None if unset/legacy 'auto'."""
+        """fub_id the 'Plan' selector last persisted, or None if unset/legacy 'auto'."""
         saved = self.config_entry.options.get(CONF_FUNCTION_PLAN_FUB_ID)
         if saved in (None, "", FUNCTION_PLAN_FUB_ID_AUTO):
             return None
@@ -2269,7 +2269,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_load_orphaned_plan_into_preview(self, fub_id: int, plan_name: str) -> bool:
         """Switch the plan card to a deleted plan's backups and render its newest one.
 
-        Used by the orphaned_plan_backups repair: sets the 'Function Plans' selector to the
+        Used by the orphaned_plan_backups repair: sets the 'Plan' selector to the
         orphaned-plans view and the backup selector to this plan's row, then renders it
         directly, since re-rendering on selector changes is left to a user automation. False
         when the plan has no backups left or the selectors are not set up.
@@ -2293,7 +2293,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not plan_eid or not backup_eid:
             _LOGGER.warning("[%s] Orphaned plan preview: plan selectors are not set up", self.server_id)
             return False
-        # Order matters: a 'Function Plans' change resets the backup selector (select.py).
+        # Order matters: a 'Plan' change resets the backup selector (select.py).
         try:
             for entity_id, option in ((plan_eid, FUNCTION_PLAN_ORPHANED_VIEW_OPTION), (backup_eid, label)):
                 await self.hass.services.async_call(

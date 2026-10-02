@@ -75,7 +75,7 @@ from .const import (
     webio_range_check_entity_id,
 )
 from .coordinator import PLAN_LOAD_FAILED, ComexioCoordinator, plan_cleanup_outcome, webio_still_present
-from .entity import ComexioKnxEntity, ComexioMarkerEntity
+from .entity import ComexioFunctionPlanEntityMixin, ComexioKnxEntity, ComexioMarkerEntity
 from .function_plan_backup import format_backup_label
 from .repairs import count_referencing_automations_and_scripts
 from .services import async_resync_io_group_headers, async_sort_function_plan
@@ -3228,10 +3228,11 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
         self.coordinator.async_set_updated_data(self.coordinator.data)
 
 
-class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
-    """Button to render the plan currently selected in the 'Function Plans' selector as an SVG preview."""
+class ComexioPlanPreviewButton(ComexioFunctionPlanEntityMixin, CoordinatorEntity, ButtonEntity):
+    """Button to render the plan currently selected in the 'Plan' selector as an SVG preview."""
 
     _attr_has_entity_name = True
+    _hub_era_name = "Preview"
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
@@ -3242,17 +3243,8 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         self._attr_icon = "mdi:image-outline"
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
-
     async def async_added_to_hass(self) -> None:
-        """Track the 'Function Plans' selector so 'available' re-evaluates on every selection change.
+        """Track the 'Plan' selector so 'available' re-evaluates on every selection change.
 
         Picking a plan there only writes the select's own state (see select.py's
         async_select_option, which explicitly skips a coordinator reload) — without this
@@ -3272,7 +3264,7 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
 
     @property
     def available(self) -> bool:
-        """Available while the 'Function Plans' selector points at one concrete plan or the orphaned-plans view."""
+        """Available while the 'Plan' selector points at one concrete plan or the orphaned-plans view."""
         return (
             self.coordinator.get_active_function_plan_fub_id() is not None
             or self.coordinator.orphaned_plans_view_active()
@@ -3305,7 +3297,7 @@ class ComexioPlanPreviewButton(CoordinatorEntity, ButtonEntity):
         label = self._backup_selector_state()
         choice = self.coordinator.orphaned_backup_choice(label) if label is not None else None
         if choice is None:
-            raise HomeAssistantError("No backup of a deleted plan is selected in 'Function Plan Backup'.")
+            raise HomeAssistantError("No backup of a deleted plan is selected in the function plan 'Backup' selector.")
         url = await self.coordinator.async_generate_orphaned_plan_preview(
             choice["fub_id"], choice["plan_name"], choice["kind"], choice["slot"]
         )
@@ -3400,8 +3392,8 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
             )
 
 
-class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
-    """Start/stop toggle for the currently selected 'Function Plans' plan.
+class ComexioPlanToggleButton(ComexioFunctionPlanEntityMixin, CoordinatorEntity, ButtonEntity):
+    """Start/stop toggle for the currently selected 'Plan' plan.
 
     The icon always shows the OPPOSITE of the plan's current activation state — mdi:pause
     while it's running (press to stop it), mdi:play while it's stopped (press to start it).
@@ -3410,7 +3402,8 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Function Plan Toggle"
+    _hub_era_name = "Function Plan Toggle"
+    _attr_name = "Start/Stop"
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
@@ -3421,15 +3414,6 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
         # the stop/activate service call + raw_config refresh below take a few seconds, during
         # which the icon would otherwise still show the pre-press (now stale) state.
         self._pending = False
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
 
     def _selected_fub_id(self) -> int | None:
         return self.coordinator.get_active_function_plan_fub_id()
@@ -3470,7 +3454,7 @@ class ComexioPlanToggleButton(CoordinatorEntity, ButtonEntity):
             )
             # Reflect the actual resulting state right away — the selected plan's Active flag
             # otherwise wouldn't update until the next poll cycle, leaving both this button's
-            # icon and the 'Function Plans' dropdown's inactive marker stale for a whole
+            # icon and the 'Plan' dropdown's inactive marker stale for a whole
             # scan_interval.
             api = self.coordinator.api
             raw_config = await api.get_raw_config()

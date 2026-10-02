@@ -185,7 +185,7 @@ def format_backup_label(entry: dict[str, Any]) -> str:
     Shared by select.py (building the backup-selector's dropdown options) and button.py
     (matching the selector's current state back to a concrete kind/slot) so both sides stay
     in sync without a hidden value encoding — the visible label IS the lookup key, same
-    approach the existing 'Function Plans' plan selector already uses (plan name as state).
+    approach the existing 'Plan' plan selector already uses (plan name as state).
     """
     ts = dt_util.parse_datetime(str(entry.get("captured_at", "")))
     ts_label = dt_util.as_local(ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if ts else "?"

@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN, FUNCTION_PLAN_ORPHANED_VIEW_OPTION
 from .coordinator import ComexioCoordinator
+from .entity import ComexioFunctionPlanEntityMixin
 from .function_plan_backup import format_backup_label
 from .services import format_plan_label
 
@@ -58,11 +59,12 @@ async def async_setup_entry(
     async_add_entities([ComexioPlanSelectEntity(coordinator), ComexioPlanBackupSelectEntity(coordinator)])
 
 
-class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
+class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SelectEntity):
     """Select entity listing available function plans for use in service calls."""
 
     _attr_has_entity_name = True
-    _attr_name = "Function Plans"
+    _attr_name = "Plan"
+    _hub_era_name = "Function Plans"
     _attr_icon = "mdi:file-tree-outline"
     _attr_entity_category = EntityCategory.CONFIG
 
@@ -74,15 +76,6 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         # None = no explicit choice yet in this HA run; current_option then falls back to the
         # choice persisted in entry.options (see current_option).
         self._selected: str | None = None
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
 
     @property
     def options(self) -> list[str]:
@@ -151,14 +144,14 @@ class ComexioPlanSelectEntity(CoordinatorEntity, SelectEntity):
         return _plan_option_label(fub_id, fub)
 
 
-class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
-    """Select entity listing stored backup snapshots for the plan chosen in the 'Function Plans' selector.
+class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SelectEntity):
+    """Select entity listing stored backup snapshots for the plan chosen in the 'Plan' selector.
 
     Lets the Plan Preview button (button.py) render a historical snapshot instead of the
     live plan, so a backup can be visually sighted before deciding whether to restore it.
     Purely an in-memory preview/targeting control — no entry.options persistence, since it is
     an ephemeral viewing choice, not a lasting configuration value. Without an explicit user
-    choice the selector defaults to LIVE_BACKUP_OPTION; a 'Function Plans' plan change discards
+    choice the selector defaults to LIVE_BACKUP_OPTION; a 'Plan' plan change discards
     the explicit choice and falls back to that same default, so a stale backup choice can never
     be silently applied to a newly-selected, unrelated plan.
     Picking a stored snapshot freezes the preview's wiring/elements at that snapshot while its
@@ -166,13 +159,14 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
     and coordinator.prime_snapshot_preview_cache) — it does NOT silently drift back to the live
     plan's wiring on the next webhook push. LIVE_BACKUP_OPTION is the only way back to the fully
     live view.
-    While the 'Function Plans' selector shows the orphaned-plans view, the selector instead
+    While the 'Plan' selector shows the orphaned-plans view, the selector instead
     lists the backups of every deleted plan (coordinator.orphaned_backup_options): one plan row
     per deleted plan (showing its newest snapshot) followed by its snapshot rows.
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Function Plan Backup"
+    _attr_name = "Backup"
+    _hub_era_name = "Function Plan Backup"
     _attr_icon = "mdi:backup-restore"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
@@ -188,17 +182,8 @@ class ComexioPlanBackupSelectEntity(CoordinatorEntity, SelectEntity):
         # row — and to no row once that plan is gone, never silently to another deleted plan.
         self._last_orphan: tuple[int, str] | None = None
 
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
-
     async def async_added_to_hass(self) -> None:
-        """Track the 'Function Plans' selector: a plan change resets this selector to its default.
+        """Track the 'Plan' selector: a plan change resets this selector to its default.
 
         Also eagerly loads the backup manager's caches so options() is populated from
         persisted storage right after a restart, instead of staying empty until some

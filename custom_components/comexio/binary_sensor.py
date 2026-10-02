@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -23,7 +24,13 @@ from .const import (
     function_plan_run_state_unique_id,
 )
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity, ComexioStableEntityIdMixin
+from .entity import (
+    ComexioIOEntity,
+    ComexioKnxEntity,
+    ComexioMarkerEntity,
+    ComexioStableEntityIdMixin,
+    function_plan_device_info,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -184,7 +191,7 @@ class ComexioKnxBinarySensor(ComexioKnxEntity, ComexioMarkerBinarySensor):
 
 
 class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorEntity, BinarySensorEntity):
-    """Whether one function plan runs in Comexio — on the hub device, next to the sync button.
+    """Whether one function plan runs in Comexio — on the function plan sub-device.
 
     Reads the plan's Active flag from api.fub_data: a full poll that decodes $Fubs refreshes it
     (one that cannot keeps the cached plans and their flags), the run-state poll in between (see
@@ -209,7 +216,8 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
     @property
     def name(self) -> str:
         fub = self._fub
-        return f"Function plan {(fub or {}).get('Name') or self._fub_id}"
+        # The device is already called "<server> # Function plans", so the plan name alone reads well.
+        return (fub or {}).get("Name") or f"Plan {self._fub_id}"
 
     @property
     def available(self) -> bool:
@@ -220,13 +228,8 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
         return self.coordinator.api.get_fub_active(self._fub_id) if self._fub is not None else None
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
 
 
 class ComexioSdCardSensor(BinarySensorEntity):

@@ -221,7 +221,7 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
         )
         persistent_notification.async_create(
             hass,
-            f"Preview for '{plan_name}' updated — see the Plan Preview sensor.",
+            f"Preview for '{plan_name}' updated — see the Preview image.",
             title=f"Function Plan Visualize — {plan_name}",
         )
         return {"plan_name": plan_name, "url": preview_url}

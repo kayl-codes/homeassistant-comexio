@@ -21,6 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import ComexioCoordinator
+from .entity import ComexioFunctionPlanEntityMixin
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -29,7 +30,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     async_add_entities([ComexioPlanPreviewImage(hass, coordinator, coordinator.server_id)])
 
 
-class ComexioPlanPreviewImage(CoordinatorEntity, ImageEntity):
+class ComexioPlanPreviewImage(ComexioFunctionPlanEntityMixin, CoordinatorEntity, ImageEntity):
     """Serves the last rendered Function Plan preview SVG as an image entity.
 
     Fed by coordinator.async_generate_plan_preview (Preview button, function_plan_visualize
@@ -39,6 +40,7 @@ class ComexioPlanPreviewImage(CoordinatorEntity, ImageEntity):
     """
 
     _attr_has_entity_name = True
+    _hub_era_name = "Plan Preview"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_content_type = "image/svg+xml"
     _attr_translation_key = "plan_preview"
@@ -49,15 +51,6 @@ class ComexioPlanPreviewImage(CoordinatorEntity, ImageEntity):
         self._attr_unique_id = f"comexio_{server_id}_plan_preview_image"
         self._preview_path = pathlib.Path(hass.config.path("www", f"comexio_{server_id}_plan_preview.svg"))
         self._sync_timestamp()
-
-    @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.server_id)},
-            "name": self.coordinator.server_id,
-            "manufacturer": "Comexio",
-            "model": "IO-Server",
-        }
 
     def _sync_timestamp(self) -> None:
         preview = self.coordinator.last_plan_preview
