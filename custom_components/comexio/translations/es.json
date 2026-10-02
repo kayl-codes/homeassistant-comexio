@@ -401,6 +401,10 @@
           "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
         }
       }
+    },
+    "reference_catalog_mismatch": {
+      "title": "Bloque funcional de Comexio no utilizable ({server_id})",
+      "description": "Comexio {version} en este servidor no proporciona el/los bloque(s) funcional(es) **{blocks}** en la forma para la que se creó esta integración. Las funciones que colocan estos bloques en los planes funcionales (marcadores disparadores `[TRIG]`) están desactivadas para que no se creen elementos defectuosos.\n\n**[Informar en GitHub]({issue_url})**: abre una nueva incidencia con el diagnóstico ya rellenado (solo versiones y el catálogo de bloques de Comexio, sin datos personales). Revísela y envíela; se necesita una cuenta de GitHub.\n\nSi una entrada indica «not checked», faltan los archivos de referencia de la propia integración o están dañados: reinstale la integración."
     }
   }
 }

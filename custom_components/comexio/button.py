@@ -82,6 +82,9 @@ from .services import async_resync_io_group_headers, async_sort_function_plan
 
 _LOGGER = logging.getLogger(__name__)
 
+# Sync line when the Flanke block can't be resolved on this server (reference_catalog_mismatch Repair).
+_FLANKE_UNUSABLE_LINE = f"{ICON_WARNING} Trigger pairs: Flanke block not usable on this Comexio — skipped, see Repairs."
+
 # Progress percentages of the function plan wiring pass, which runs after the Web-IO sync
 # has already consumed the SYNC_PROGRESS_START_PCT..SYNC_PROGRESS_END_PCT span.
 _PCT_PLAN_PAIRS = 60
@@ -1919,6 +1922,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """
         if ctx.action not in {"full_sync", "function_plan_add_missing"}:
             return []
+        if self.coordinator.trigger_pairs_blocked():
+            # The audit reports no trigger pairs while the Flanke is unusable — say so here.
+            return [_FLANKE_UNUSABLE_LINE]
         if refresh_audit:
             # One-shot: the snapshot is only valid right after the KNX step that left it.
             snapshot, ctx.unchanged_config_snapshot = ctx.unchanged_config_snapshot, None
@@ -2010,6 +2016,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         _resolve_knx_trigger_bridge_markers) — the actual element created is always type=2.
         """
         api = ctx.api
+        if api.flanke_ref_id() is None:
+            # Checked before the plan is resolved/created, backed up or stopped: none of that may
+            # happen for pairs that can't be written (see reference_catalog_mismatch Repair).
+            return _FLANKE_UNUSABLE_LINE
         fub_id, is_fresh = await self.coordinator.resolve_trigger_plan()
         if fub_id is None:
             ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, _FAILURE_NOT_RESOLVED))
@@ -2066,6 +2076,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         _is_managed_function_plan()'s prefix check — otherwise changing CONF_FUNCTION_PLAN_PLAN_PREFIX
         away from its default would make this guard reject the trigger plan itself.
         """
+        if ctx.api.flanke_ref_id() is None:
+            # The paired Flanken can't be identified — deleting only the sources would strand them.
+            return _FLANKE_UNUSABLE_LINE
         raw_fub_id = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}).get(
             FUNCTION_PLAN_TRIGGER_PLAN_NAME
         )

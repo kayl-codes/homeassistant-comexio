@@ -401,6 +401,10 @@
           "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
         }
       }
+    },
+    "reference_catalog_mismatch": {
+      "title": "Comexio function block not usable ({server_id})",
+      "description": "Comexio {version} on this server does not provide the function block(s) **{blocks}** in the layout this integration was built for. Features that place these blocks in function plans (trigger markers `[TRIG]`) are disabled so no broken elements are written.\n\n**[Report this on GitHub]({issue_url})** — opens a new issue with the diagnosis already filled in (versions and Comexio block catalog only, no personal data). Please review it and submit; a GitHub account is required.\n\nIf an entry reads \"not checked\", the integration's own reference files are missing or damaged — reinstall the integration."
     }
   }
 }

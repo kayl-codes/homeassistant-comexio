@@ -40,7 +40,7 @@ from .const import (
     DEFAULT_SCHEMA_MARKER,
     FLANKE_PORT_IN,
     FLANKE_PORT_OUT_RISING,
-    FUB_BASE_REF_ID_FLANKE,
+    FUB_BASE_KEY_FLANKE,
     FUNCTION_PLAN_FETCH_MARK_SLOTS,
     FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH,
     FUNCTION_PLAN_LAYOUT_X_KNX_LOOPBACK,
@@ -64,6 +64,7 @@ from .const import (
     is_valid_entity_name_schema,
     knx_loopback_command_name,
 )
+from .reference_catalog import KIND_FUB_BASE, ReferenceCheck
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
@@ -493,6 +494,9 @@ class ComexioAPI:
 
         # Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
         self.comexio_version: str | None = None
+        # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
+        # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
+        self.reference_check: ReferenceCheck | None = None
         # KNX DPT catalog cache (get_knx_dpt_catalog) — $KnxDevices/$KnxPoints only change on
         # an ETS edit and $KnxDpt is a firmware-static table, so refetching this admin
         # sub-page on every poll would be pointless load on a server that serializes requests
@@ -3554,7 +3558,9 @@ class ComexioAPI:
         return str(ref.get("type")) == "5" and str(ref.get("ref_id")) == flanke_ref_id
 
     @staticmethod
-    def _function_plan_trigger_wired_source_ids(plan_data: dict | None, ref_type: int = 2) -> set[int]:
+    def _function_plan_trigger_wired_source_ids(
+        plan_data: dict | None, flanke_ref_id: int, ref_type: int = 2
+    ) -> set[int]:
         """Source (marker=2/KNX=11) ref_ids in plan_data with a complete <->Flanke round trip.
 
         A source element that exists but is missing either the ->Flanke or the
@@ -3566,7 +3572,6 @@ class ComexioAPI:
         if not plan_data:
             return set()
         elements = plan_data.get("elements", {})
-        flanke_ref_id = str(FUB_BASE_REF_ID_FLANKE)
 
         edges: set[tuple[int, int]] = set()
         for conn in (plan_data.get("connections") or {}).values():
@@ -3582,7 +3587,7 @@ class ComexioAPI:
         wired_marker_elem_ids = {
             src
             for src, dst in edges
-            if ComexioAPI._function_plan_elem_is_flanke(elements, dst, flanke_ref_id) and (dst, src) in edges
+            if ComexioAPI._function_plan_elem_is_flanke(elements, dst, str(flanke_ref_id)) and (dst, src) in edges
         }
         return {
             int(ComexioAPI._function_plan_elem_ref(elements, elem_id)["ref_id"])
@@ -3944,6 +3949,18 @@ class ComexioAPI:
             plan_data,
         )
 
+    def flanke_ref_id(self) -> int | None:
+        """This server's $FubModules["5"] id of the Flanke block, or None when it can't be trusted.
+
+        Resolved by the stable catalog key (reference_catalog), never by a hard-coded id: None
+        while no reconciliation has run yet, and when the block is missing, ambiguous or has a
+        different port layout on this server — the trigger-pair features then refuse to write
+        instead of placing elements Comexio can't resolve ("Configuration fault ... 5 <ref>").
+        """
+        if self.reference_check is None:
+            return None
+        return self.reference_check.resolve(KIND_FUB_BASE, FUB_BASE_KEY_FLANKE)
+
     async def function_plan_add_trigger_pairs(
         self,
         fub_id: int,
@@ -3960,7 +3977,18 @@ class ComexioAPI:
         fresh_plan=True places the pairs directly at their final grid positions
         (sorted by source ID), matching function_plan_add_source_pairs.
         Returns (added_source_ids, error_messages).
+        Refuses up front (no element written) when the Flanke block can't be resolved on this
+        server — see flanke_ref_id.
         """
+        flanke_ref_id = self.flanke_ref_id()
+        if flanke_ref_id is None:
+            _LOGGER.error(
+                "trigger pairs: Flanke block (%s) not usable on this Comexio (%s) — nothing written, "
+                "see the reference catalog check in the log",
+                FUB_BASE_KEY_FLANKE,
+                self.comexio_version,
+            )
+            return [], [f"Flanke block {FUB_BASE_KEY_FLANKE} not available on this Comexio"]
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, _ = self._function_plan_existing_refs(plan_data)
 
@@ -3995,7 +4023,7 @@ class ComexioAPI:
         errors: list[str] = []
         for i, source_id in enumerate(source_ids):
             err = await self._function_plan_add_single_trigger(
-                fub_id, source_id, plan_data, existing_by_ref, _pair_pos(len(added), i), ref_type
+                fub_id, source_id, plan_data, existing_by_ref, _pair_pos(len(added), i), ref_type, flanke_ref_id
             )
             if err is None:
                 added.append(source_id)
@@ -4013,7 +4041,8 @@ class ComexioAPI:
         plan_data: dict | None,
         existing_by_ref: dict[tuple[int, int], int],
         pos: tuple[float, float, float],
-        ref_type: int = 2,
+        ref_type: int,
+        flanke_ref_id: int,
     ) -> str | None:
         """Add one Source+Flanke self-reset pair at pos=(x_source, x_flanke, y).
 
@@ -4036,7 +4065,6 @@ class ComexioAPI:
         """
         label = f"{category_by_fub_module_type(ref_type).audit_key_prefix}{source_id}"
         x_source, x_flanke, y = pos
-        flanke_ref_id = int(FUB_BASE_REF_ID_FLANKE)
 
         existing_marker_elem = existing_by_ref.get((ref_type, source_id))
         existing_flanke_elem: int | None = None
@@ -4179,12 +4207,22 @@ class ComexioAPI:
         Each trigger source has its own dedicated Flanke element (never shared), so it is
         always safe to remove alongside its source (marker=2/KNX=11).
         """
+        flanke_ref_id = self.flanke_ref_id()
+        if flanke_ref_id is None:
+            # Without the Flanke id the paired Flanken can't be told apart from other blocks —
+            # deleting only the sources would strand their Flanken where no audit finds them.
+            _LOGGER.error(
+                "trigger pairs: Flanke block (%s) not usable on this Comexio (%s) — orphan removal skipped",
+                FUB_BASE_KEY_FLANKE,
+                self.comexio_version,
+            )
+            return 0, False
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, _ = self._function_plan_existing_refs(plan_data)
         marker_elem_ids = [
             elem_id for source_id in source_ids if (elem_id := existing_by_ref.get((ref_type, source_id)))
         ]
-        flanke_elem_ids = self._function_plan_paired_flanke_ids(plan_data, marker_elem_ids, int(FUB_BASE_REF_ID_FLANKE))
+        flanke_elem_ids = self._function_plan_paired_flanke_ids(plan_data, marker_elem_ids, flanke_ref_id)
         elem_ids = marker_elem_ids + flanke_elem_ids
         if not elem_ids:
             return 0, False
