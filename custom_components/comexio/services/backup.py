@@ -249,7 +249,7 @@ async def _resolve_restore_target(
 
     Accepts the composite 'fub_id:plan_name' dropdown value (plan_name_hint is then already
     exact and unambiguous). Otherwise resolves via _resolve_fub_id (bare fub_id, plan name, or
-    the 'Function Plans' selector entity when the field is left empty) — if that fub_id is
+    the 'Plan' selector entity when the field is left empty) — if that fub_id is
     currently live, its live name is used as the hint; if not (plan deleted), plan_name_hint
     stays None and the caller must disambiguate via _resolve_backup_identity. Falls back to a
     name lookup in the stored backup metadata for a plan name that no longer exists live.
@@ -818,7 +818,7 @@ async def _restore_plan_as_copy(
     Unlike _restore_plan_as_new (which supersedes a deleted/reassigned plan's identity: it
     rekeys the backup lineage onto the new ID and repoints any consumers), the source plan
     here is untouched and still live: its backup lineage stays exactly where it is, and no
-    consumer (cluster plan_map, 'Function Plans' selector) is repointed at the copy. The copy
+    consumer (cluster plan_map, 'Plan' selector) is repointed at the copy. The copy
     is not part of any backup lineage yet — it just starts fresh from here on.
     """
     source_name = snapshot.get("plan_name", str(source_fub_id))

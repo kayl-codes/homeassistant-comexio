@@ -1643,7 +1643,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
 
     def get_active_function_plan_fub_id(self) -> int | None:
-        """Return the fub_id for the currently selected 'Function Plans' plan, or None.
+        """Return the fub_id for the currently selected 'Plan' plan, or None.
 
         Shared by select.py (backup selector) — kept on the coordinator rather than as a
         free function in an entity-platform module. Parses the fub_id directly out of the
@@ -1668,7 +1668,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return next((int(fid) for fid, fi in self.api.fub_data.items() if fi.get("Name") == lp_state.state), None)
 
     def orphaned_plans_view_active(self) -> bool:
-        """Whether the 'Function Plans' selector shows the orphaned-plans view."""
+        """Whether the 'Plan' selector shows the orphaned-plans view."""
         lp_state = self._active_plan_selector_state()
         return lp_state is not None and lp_state.state == FUNCTION_PLAN_ORPHANED_VIEW_OPTION
 
@@ -1684,7 +1684,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return self.get_active_function_plan_fub_id()
 
     def persisted_function_plan_fub_id(self) -> int | None:
-        """fub_id the 'Function Plans' selector last persisted, or None if unset/legacy 'auto'."""
+        """fub_id the 'Plan' selector last persisted, or None if unset/legacy 'auto'."""
         saved = self.config_entry.options.get(CONF_FUNCTION_PLAN_FUB_ID)
         if saved in (None, "", FUNCTION_PLAN_FUB_ID_AUTO):
             return None
@@ -2280,7 +2280,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_load_orphaned_plan_into_preview(self, fub_id: int, plan_name: str) -> bool:
         """Switch the plan card to a deleted plan's backups and render its newest one.
 
-        Used by the orphaned_plan_backups repair: sets the 'Function Plans' selector to the
+        Used by the orphaned_plan_backups repair: sets the 'Plan' selector to the
         orphaned-plans view and the backup selector to this plan's row, then renders it
         directly, since re-rendering on selector changes is left to a user automation. False
         when the plan has no backups left or the selectors are not set up.
@@ -2304,7 +2304,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not plan_eid or not backup_eid:
             _LOGGER.warning("[%s] Orphaned plan preview: plan selectors are not set up", self.server_id)
             return False
-        # Order matters: a 'Function Plans' change resets the backup selector (select.py).
+        # Order matters: a 'Plan' change resets the backup selector (select.py).
         try:
             for entity_id, option in ((plan_eid, FUNCTION_PLAN_ORPHANED_VIEW_OPTION), (backup_eid, label)):
                 await self.hass.services.async_call(
@@ -3223,6 +3223,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         self._plan_run_state_last_fetch = time.monotonic()
         run_state_mark = self.api.run_state_mark()
+        cache_epoch = self.api.fub_cache_epoch()
         self._plan_run_state_fetching = True
         try:
             states = await self.api.get_function_plan_run_states(fub_ids, session=session)
@@ -3246,7 +3247,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_run_state_fail_streak = 0
         self._plan_run_state_stale_count = 0
         missed_out = self._count_missed_plan_run_states(fub_ids, states)
-        changed = self.api.apply_fub_run_states(states, since=run_state_mark) or was_unavailable or missed_out
+        changed = self._apply_fetched_run_states(states, run_state_mark, cache_epoch) or was_unavailable or missed_out
         if await self.async_watch_managed_plans() or changed:
             self.async_update_listeners()
 
@@ -3373,6 +3374,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         _LOGGER.warning("[%s] Function plan %s could not be started from the watchdog push", self.server_id, fub_id)
         await self.plan_watchdog.async_push_start_failed(fub_id, self.api.function_plan_name(fub_id))
+
+    def _apply_fetched_run_states(self, states: dict[int, bool], run_state_mark: int, cache_epoch: int) -> bool:
+        """Write a run-state answer into the cache unless a newer plan list arrived meanwhile; True if changed.
+
+        A full poll, sync or restore that wrote a fetched plan list or plan while this answer was
+        on its way may carry newer Active flags than this answer: it is dropped then, the next
+        tick reads the states again. The endpoint still counts as working (the fetch succeeded).
+        """
+        if self.api.fub_cache_epoch() != cache_epoch:
+            _LOGGER.debug(
+                "[%s] Function plan run states dropped: the plan cache was refreshed during the fetch",
+                self.server_id,
+            )
+            return False
+        return self.api.apply_fub_run_states(states, since=run_state_mark)
 
     def _count_missed_plan_run_states(self, fub_ids: list[int], states: dict[int, bool]) -> bool:
         """Count the plans this fetch left out; True when one just crossed or recovered from the threshold."""

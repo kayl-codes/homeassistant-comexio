@@ -177,7 +177,7 @@
     },
     "image": {
       "plan_preview": {
-        "name": "Vista previa del plan"
+        "name": "Imagen de vista previa"
       }
     },
     "sensor": {
@@ -205,7 +205,7 @@
         "name": "Versión de Comexio"
       },
       "plan_preview": {
-        "name": "Info de vista previa del plan"
+        "name": "Info de vista previa"
       },
       "plan_changed": {
         "name": "Plan modificado"
@@ -217,7 +217,7 @@
         "name": "Número de marcadores activos"
       },
       "function_plan_count": {
-        "name": "Número de planes de función"
+        "name": "Número"
       },
       "webio_command_count": {
         "name": "Número de comandos Web-IO"
@@ -355,7 +355,7 @@
         "step": {
           "orphaned_backups": {
             "title": "Copias de seguridad de un plan de funciones eliminado",
-            "description": "Comexio ya no tiene ningún plan de funciones **{plan_name}** con el ID {fub_id}: se eliminó o se renombró. Plan que usa ahora el ID {fub_id}: **{current_plan}**. Si es este plan con otro nombre, sus copias más recientes se guardan con ese nombre; aquí se trata de las anteriores.\n\nSus {count} copia(s) se conservan {months} mes(es) después de la más reciente ({newest}); ese plazo ya ha pasado.\n\n**Conservar** guarda estas copias y no vuelve a preguntar por este plan. Aún puedes eliminarlas más tarde con la acción **Function Plan Delete Backups**.\n**Eliminar** las borra definitivamente.\n\n**Cargar en la vista previa del plan** muestra la copia más reciente en la tarjeta del plan (el selector **Function Plans** cambia a **Orphaned plans**) sin decidir nada — esta reparación sigue abierta. Allí también puedes recorrer, restaurar (como plan nuevo), eliminar o conservar las copias. Para ver antes qué contenía el plan: Herramientas para desarrolladores → Acciones → **Function Plan Visualize**, campo **Snapshot** → elige una entrada que empiece por **{plan_name} — fub {fub_id}**. Más información en la [guía de copias de seguridad]({docs_url})."
+            "description": "Comexio ya no tiene ningún plan de funciones **{plan_name}** con el ID {fub_id}: se eliminó o se renombró. Plan que usa ahora el ID {fub_id}: **{current_plan}**. Si es este plan con otro nombre, sus copias más recientes se guardan con ese nombre; aquí se trata de las anteriores.\n\nSus {count} copia(s) se conservan {months} mes(es) después de la más reciente ({newest}); ese plazo ya ha pasado.\n\n**Conservar** guarda estas copias y no vuelve a preguntar por este plan. Aún puedes eliminarlas más tarde con la acción **Function Plan Delete Backups**.\n**Eliminar** las borra definitivamente.\n\n**Cargar en la vista previa del plan** muestra la copia más reciente en la tarjeta del plan (el selector **Plan** cambia a **Orphaned plans**) sin decidir nada — esta reparación sigue abierta. Allí también puedes recorrer, restaurar (como plan nuevo), eliminar o conservar las copias. Para ver antes qué contenía el plan: Herramientas para desarrolladores → Acciones → **Function Plan Visualize**, campo **Snapshot** → elige una entrada que empiece por **{plan_name} — fub {fub_id}**. Más información en la [guía de copias de seguridad]({docs_url})."
           }
         },
         "abort": {
@@ -363,7 +363,7 @@
           "plans_unavailable": "No se pudo leer la lista de planes de Comexio en este momento. No se ha cambiado nada — inténtalo de nuevo en unos minutos.",
           "plan_exists_again": "Este plan vuelve a existir en Comexio, así que sus copias ya no están huérfanas. No se ha cambiado nada.",
           "already_deleted": "Estas copias ya se eliminaron. No se ha cambiado nada.",
-          "loaded_in_preview": "La copia más reciente del plan se muestra ahora en la tarjeta del plan (Function Plans → Orphaned plans). Esta reparación sigue abierta hasta que conserves o elimines las copias.",
+          "loaded_in_preview": "La copia más reciente del plan se muestra ahora en la tarjeta del plan (Plan → Orphaned plans). Esta reparación sigue abierta hasta que conserves o elimines las copias.",
           "preview_failed": "No se pudieron cargar las copias en la vista previa del plan — puede que se hayan eliminado entretanto o que los selectores de plan estén desactivados. Las copias no se han modificado."
         }
       }

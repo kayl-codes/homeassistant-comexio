@@ -45,6 +45,7 @@ from .const import (
 )
 from .coordinator import ComexioCoordinator
 from .entity import (
+    ComexioFunctionPlanEntityMixin,
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
@@ -346,21 +347,18 @@ class ComexioSyncStatusSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
         return attrs
 
 
-class ComexioFunctionPlanBackupSensor(CoordinatorEntity, SensorEntity):
+class ComexioFunctionPlanBackupSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
     """Diagnostic sensor summarizing stored function plan backup snapshots."""
 
     _attr_has_entity_name = True
+    _hub_era_name = "Function Plan Backups"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_name = "Function Plan Backups"
+    _attr_name = "Backups"
     _attr_icon = "mdi:backup-restore"
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"comexio_{server_id}_function_plan_backups_sensor"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return function_plan_device_info(self.coordinator)
 
     async def async_added_to_hass(self) -> None:
         """Load the backup stores so the summary is available right after startup."""
@@ -442,7 +440,7 @@ class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
         return self.coordinator.api.comexio_version
 
 
-class ComexioPlanChangedSensor(CoordinatorEntity, SensorEntity):
+class ComexioPlanChangedSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
     """Diagnostic sensor listing plans whose auto-backup got a new snapshot this poll cycle.
 
     Pure last-cycle control aid (does not accumulate across polls): right after making an
@@ -452,6 +450,7 @@ class ComexioPlanChangedSensor(CoordinatorEntity, SensorEntity):
     """
 
     _attr_has_entity_name = True
+    _hub_era_name = "Plan Changed"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:file-compare"
 
@@ -459,10 +458,6 @@ class ComexioPlanChangedSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"comexio_{server_id}_plan_changed_sensor"
         self._attr_translation_key = "plan_changed"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return function_plan_device_info(self.coordinator)
 
     @property
     def native_value(self) -> int:
@@ -574,10 +569,11 @@ class ComexioActiveMarkerCountSensor(CoordinatorEntity, SensorEntity):
         return sum(int(m["id"]) not in ignored for m in self.coordinator.data.get("markers", []))
 
 
-class ComexioFunctionPlanCountSensor(CoordinatorEntity, SensorEntity):
+class ComexioFunctionPlanCountSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
     """Diagnostic sensor: total number of function plans on the Comexio server (managed + others)."""
 
     _attr_has_entity_name = True
+    _hub_era_name = "Function Plan Count"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:sitemap"
 
@@ -585,10 +581,6 @@ class ComexioFunctionPlanCountSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"comexio_{server_id}_function_plan_count_sensor"
         self._attr_translation_key = "function_plan_count"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return function_plan_device_info(self.coordinator)
 
     @property
     def native_value(self) -> int:
@@ -668,7 +660,7 @@ class ComexioWatchdogEventSensor(CoordinatorEntity, SensorEntity):
         }
 
 
-class ComexioPlanPreviewSensor(CoordinatorEntity, SensorEntity):
+class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
     """Diagnostic sensor showing the last generated Function Plan preview (SVG) as entity_picture.
 
     Fed by coordinator.async_generate_plan_preview, called either from the Preview button
@@ -678,6 +670,7 @@ class ComexioPlanPreviewSensor(CoordinatorEntity, SensorEntity):
     """
 
     _attr_has_entity_name = True
+    _hub_era_name = "Plan Preview Info"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:image-outline"
 
@@ -685,10 +678,6 @@ class ComexioPlanPreviewSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"comexio_{server_id}_plan_preview_sensor"
         self._attr_translation_key = "plan_preview"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return function_plan_device_info(self.coordinator)
 
     @property
     def entity_picture(self) -> str | None:

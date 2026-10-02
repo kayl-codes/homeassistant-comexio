@@ -17,10 +17,11 @@ from custom_components.comexio.const import (
     DEFAULT_SCHEMA_IO,
     LEGACY_DEFAULT_SCHEMA_IO,
     entity_id_migration_target,
+    hub_era_object_id,
     migrate_entry_options,
     stable_object_id,
 )
-from custom_components.comexio.entity import ComexioStableEntityIdMixin
+from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, ComexioStableEntityIdMixin
 
 
 @pytest.mark.parametrize(
@@ -150,3 +151,63 @@ def test_function_plan_device_sorts_right_below_the_hub(monkeypatch: pytest.Monk
     assert info["via_device_id"] == "hub-device"
     device_names = ["iosrv1 IOX1", "iosrv1 BASE", "iosrv1 0815", info["name"], "iosrv1 Markers", "iosrv1"]
     assert sorted(device_names, key=str.casefold)[:2] == ["iosrv1", "iosrv1 # Function plans"]
+
+
+def _function_plan_entity_classes() -> list[type]:
+    from custom_components.comexio import button, image, select, sensor
+
+    return [
+        select.ComexioPlanSelectEntity,
+        select.ComexioPlanBackupSelectEntity,
+        image.ComexioPlanPreviewImage,
+        sensor.ComexioFunctionPlanBackupSensor,
+        sensor.ComexioPlanChangedSensor,
+        sensor.ComexioFunctionPlanCountSensor,
+        sensor.ComexioPlanPreviewSensor,
+        button.ComexioPlanPreviewButton,
+        button.ComexioPlanToggleButton,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("class_name", "expected"),
+    [
+        # Object ids of the entity_ids the plan card docs (FUNCTION_PLAN_PREVIEW.md) and existing installs use.
+        ("ComexioPlanSelectEntity", "iosrv1_function_plans"),
+        ("ComexioPlanBackupSelectEntity", "iosrv1_function_plan_backup"),
+        ("ComexioPlanPreviewImage", "iosrv1_plan_preview"),
+        ("ComexioFunctionPlanBackupSensor", "iosrv1_function_plan_backups"),
+        ("ComexioPlanChangedSensor", "iosrv1_plan_changed"),
+        ("ComexioFunctionPlanCountSensor", "iosrv1_function_plan_count"),
+        ("ComexioPlanPreviewSensor", "iosrv1_plan_preview_info"),
+        ("ComexioPlanPreviewButton", "iosrv1_preview"),
+        ("ComexioPlanToggleButton", "iosrv1_function_plan_toggle"),
+    ],
+)
+def test_function_plan_entities_keep_their_hub_era_entity_id(class_name: str, expected: str) -> None:
+    """Moving to the function plan sub-device must not change the entity_id a new install gets."""
+    cls = next(c for c in _function_plan_entity_classes() if c.__name__ == class_name)
+
+    assert issubclass(cls, ComexioFunctionPlanEntityMixin)
+    assert hub_era_object_id("iosrv1", cls._hub_era_name) == expected
+
+
+class _PlanEntity(ComexioFunctionPlanEntityMixin, _FakeEntity):
+    _hub_era_name = "Plan Preview"
+
+    def __init__(self, server_id: str) -> None:
+        self.coordinator = MagicMock(server_id=server_id)
+        self.entity_id = None  # type: ignore[assignment]
+
+
+@pytest.mark.parametrize(
+    ("server_id", "expected"),
+    [("iosrv1", "image.iosrv1_plan_preview"), ("io-srv 2", "image.io_srv_2_plan_preview")],
+)
+def test_function_plan_mixin_requests_the_hub_era_entity_id(server_id: str, expected: str) -> None:
+    entity = _PlanEntity(server_id)
+
+    entity.add_to_platform_start(MagicMock(), MagicMock(domain="image"), None)
+
+    assert entity.started
+    assert entity.entity_id == expected

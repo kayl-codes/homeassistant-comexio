@@ -159,6 +159,7 @@ class _FakeCoordinator(SimpleNamespace):
     _track_plan_list_read = ComexioCoordinator._track_plan_list_read
     _plan_run_state_poll_blocked = ComexioCoordinator._plan_run_state_poll_blocked
     _async_refresh_plan_run_states = ComexioCoordinator._async_refresh_plan_run_states
+    _apply_fetched_run_states = ComexioCoordinator._apply_fetched_run_states
     _async_refresh_run_states_in_preview = ComexioCoordinator._async_refresh_run_states_in_preview
     _async_plan_run_state_tick = ComexioCoordinator._async_plan_run_state_tick
     _async_plan_run_state_fetch_failed = ComexioCoordinator._async_plan_run_state_fetch_failed
@@ -223,6 +224,39 @@ def test_poll_does_not_undo_a_start_made_during_the_fetch(api: ComexioAPI) -> No
     assert api.get_fub_active(19) is True
     assert api.get_fub_active(43) is False
     coordinator.async_update_listeners.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "write_cache",
+    [
+        lambda api, fubs: api.parse_config({"Fubs": fubs}),
+        lambda api, fubs: api.update_fub_cache_entry(19, fubs["19"]),
+        lambda api, fubs: api._load_all_plans_verified(fubs),
+    ],
+    ids=["full poll", "single plan re-read", "sync plan reload"],
+)
+def test_older_answer_does_not_overwrite_a_plan_list_fetched_during_it(api: ComexioAPI, write_cache) -> None:
+    # Regression (Sourcery, PR #126): the poll guard only checks before the fetch; a plan list a
+    # full poll, sync or restore wrote while the answer was on its way was overwritten by it.
+    api.function_plan_load_all_plans = AsyncMock(return_value={19: {}, 43: {}})
+
+    async def fetch(*_args, **_kwargs) -> dict[int, bool]:
+        fresh = {key: dict(fub) for key, fub in FUBS.items()}
+        fresh["19"]["Active"] = 1  # Comexio started plan 19 after the run-state answer was read
+        if asyncio.iscoroutine(written := write_cache(api, fresh)):
+            await written
+        return {19: False, 43: False}
+
+    api.client.get_function_plan_run_states = AsyncMock(side_effect=fetch)
+    coordinator = _coordinator(api)
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert api.get_fub_active(19) is True
+    assert api.get_fub_active(43) is True
+    assert _available(coordinator) is True  # the fetch worked, only its answer was dropped
+
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: False})
+    asyncio.run(coordinator._async_refresh_plan_run_states())  # nothing written meanwhile: applied
+    assert api.get_fub_active(19) is False
 
 
 def test_slow_fetch_is_not_overlapped_by_the_next_tick(api: ComexioAPI) -> None:

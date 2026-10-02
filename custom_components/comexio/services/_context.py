@@ -32,7 +32,7 @@ _NO_INSTANCE_MSG = (
 )
 _LOGIN_FAILED_MSG = "Comexio admin login failed."
 NO_PLAN_SELECTED_MSG = (
-    "No plan selected — the 'Function Plans' selector is empty or shows 'Orphaned plans'. "
+    "No plan selected — the 'Plan' selector is empty or shows 'Orphaned plans'. "
     "Please specify the plan (fub_id) explicitly."
 )
 _INSTANCE_NOT_FOUND_LOG = "Comexio instance %s not found in hass.data"
