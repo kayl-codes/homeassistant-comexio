@@ -24,6 +24,7 @@ from .const import (
     SOURCE_CATEGORIES,
     MarkerKind,
     WebioClass,
+    function_plan_ids,
     function_plan_run_state_unique_id,
     migrate_entry_options,
     stable_object_id,
@@ -293,8 +294,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Function plan run-state sensors (binary_sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
     # while running, the ones of plans deleted while HA was down go with the next scraped setup.
+    # Like the platform, keep the plans in the cache too: a plan HA created after the scrape
+    # (create_fup via a service while the setup awaits) is in fub_data, not in scraped_plan_ids.
     if coordinator.scraped_plan_ids is not None:
-        plan_uids = {function_plan_run_state_unique_id(server_id, fid) for fid in coordinator.scraped_plan_ids}
+        plan_uids = {
+            function_plan_run_state_unique_id(server_id, fid)
+            for fid in coordinator.scraped_plan_ids | function_plan_ids(coordinator.api.fub_data)
+        }
     else:
         plan_uids = {
             e.unique_id
