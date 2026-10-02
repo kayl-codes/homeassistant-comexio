@@ -342,6 +342,10 @@
           "preview_failed": "The backups could not be loaded into the plan preview — they may have been deleted meanwhile, or the plan selectors are disabled. The backups were not changed."
         }
       }
+    },
+    "reference_catalog_mismatch": {
+      "title": "Comexio function block not usable ({server_id})",
+      "description": "Comexio {version} on this server does not provide the function block(s) **{blocks}** in the layout this integration was built for. Features that place these blocks in function plans (trigger markers `[TRIG]`) are disabled so no broken elements are written.\n\n**[Report this on GitHub]({issue_url})** — opens a new issue with the diagnosis already filled in (versions and Comexio block catalog only, no personal data). Please review it and submit; a GitHub account is required.\n\nIf an entry reads \"not checked\", the integration's own reference files are missing or damaged — reinstall the integration."
     }
   }
 }

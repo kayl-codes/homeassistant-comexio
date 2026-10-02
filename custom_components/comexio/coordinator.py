@@ -159,6 +159,7 @@ from .orphaned_statistics import (
     legacy_statistic_prefixes,
     stable_statistic_id_pattern,
 )
+from .reference_monitor import ReferenceCatalogMonitor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -494,6 +495,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api.config_entry = entry
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
+        self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id)
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
@@ -809,6 +811,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # async_update_from_raw_config never raises (own contract, enforced internally) —
         # no local guard needed here.
         await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
+        # Resolves this server's block-type ids (e.g. the Flanke) before any plan write below.
+        await self.reference_monitor.async_check(raw_config)
 
         final_data = _imported_data(parsed_data, conf)
         self._merge_polled_states(final_data)
@@ -1509,6 +1513,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 )
                 return
             self.function_plan_plans = plans
+            self.reference_monitor.check_plans(plans)
             # Re-evaluate which unlabeled markers are now referenced in a plan (see
             # aiocomexio parse_config). Compared against the set last USED by parse_config —
             # a no-op on every normal cycle; only an actual change (marker newly wired in,
@@ -5777,6 +5782,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if cat.key in active
         }
 
+    def trigger_pairs_blocked(self) -> bool:
+        """True while [TRIG] sources exist but the Flanke block isn't usable on this server.
+
+        _audit_trigger_pairs then reports nothing, so sync uses this to say why it skipped them.
+        """
+        if self.api.flanke_ref_id() is not None or not self.data:
+            return False
+        try:
+            return any(self._trigger_ids_by_ref(self.data).values())
+        except (KeyError, TypeError):  # partial data right after setup — no sources known yet
+            return False
+
     def _audit_all_trigger_pairs(
         self, trigger_ids_by_ref: dict[int, list[int]]
     ) -> tuple[dict[int, list[int]], dict[int, list[int]]] | None:
@@ -5839,7 +5856,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         _relevant_plans_loaded guards against for the generic Web-IO wiring check) — otherwise
         an unloaded-but-real plan would read as "zero wired pairs" and misreport every trigger
         source as missing until the next poll.
+
+        Returns ([], []) while the Flanke block id is not trusted on this server (api.flanke_ref_id,
+        reference catalog check): no pair can then be recognized or written, so reporting the
+        sources as missing would only send sync into writes it refuses — the
+        reference_catalog_mismatch Repair is the visible signal instead.
         """
+        if self.api.flanke_ref_id() is None:
+            return [], []
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         plan_map = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
         fub_id = plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
@@ -5847,6 +5871,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return list(trigger_source_ids), []
         if fub_id not in self.function_plan_plans:
             return None
+        flanke_ref_id = self.api.flanke_ref_id()
+        if flanke_ref_id is None:  # narrowing only — checked at the top
+            return [], []
 
         marker_ref_type = int(category_by_fub_module_type("2").fub_module_type)
         knx_ref_type = int(category_by_fub_module_type("11").fub_module_type)
@@ -5859,7 +5886,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         if ref_type == knx_ref_type:
             marker_by_k_id = {k_id: bridge_marker_by_k_id.get(str(k_id)) for k_id in trigger_source_ids}
-            wired_marker_ids = self.api._function_plan_trigger_wired_source_ids(plan_data, marker_ref_type)
+            wired_marker_ids = self.api._function_plan_trigger_wired_source_ids(
+                plan_data, flanke_ref_id, marker_ref_type
+            )
             missing_ids = [k_id for k_id, m in marker_by_k_id.items() if m is None or int(m) not in wired_marker_ids]
 
             all_wired_marker_ids = {ref_id for rt, ref_id in existing_by_ref if rt == marker_ref_type}
@@ -5879,7 +5908,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # never be swept up as a plain-marker orphan.
         bridge_marker_ids = {int(m) for m in bridge_marker_by_k_id.values() if m is not None}
         all_marker_ids = {ref_id for rt, ref_id in existing_by_ref if rt == ref_type} - bridge_marker_ids
-        wired_marker_ids = self.api._function_plan_trigger_wired_source_ids(plan_data, ref_type)
+        wired_marker_ids = self.api._function_plan_trigger_wired_source_ids(plan_data, flanke_ref_id, ref_type)
 
         missing_ids = [mid for mid in trigger_source_ids if mid not in wired_marker_ids]
         trigger_id_set = set(trigger_source_ids)
