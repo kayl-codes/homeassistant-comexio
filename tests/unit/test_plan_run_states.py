@@ -245,6 +245,21 @@ def test_older_answer_does_not_overwrite_a_plan_list_fetched_during_it(api: Come
     assert api.get_fub_active(19) is False
 
 
+def test_dropped_answer_counts_no_misses(api: ComexioAPI) -> None:
+    # Regression (Sourcery, PR #126): an answer dropped for a plan list written during the fetch
+    # still counted its omissions, so an obsolete answer could turn a plan's sensor unavailable.
+    async def fetch(*_args, **_kwargs) -> dict[int, bool]:
+        api.parse_config({"Fubs": {key: dict(fub) for key, fub in FUBS.items()}})
+        return {19: False}  # leaves plan 43 out
+
+    api.client.get_function_plan_run_states = AsyncMock(side_effect=fetch)
+    coordinator = _coordinator(api)
+    for _ in range(FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD):
+        asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert coordinator.plan_run_state_available(43) is True
+    coordinator.async_update_listeners.assert_not_called()
+
+
 def test_slow_fetch_is_not_overlapped_by_the_next_tick(api: ComexioAPI) -> None:
     """A preview tick while the previous answer is still on its way must not start a second fetch."""
     release = asyncio.Event()
