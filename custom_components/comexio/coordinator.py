@@ -3246,8 +3246,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         self._plan_run_state_fail_streak = 0
         self._plan_run_state_stale_count = 0
-        missed_out = self._count_missed_plan_run_states(fub_ids, states)
-        changed = self._apply_fetched_run_states(states, run_state_mark, cache_epoch) or was_unavailable or missed_out
+        # A dropped answer counts no misses either: its omissions may predate the plan list written meanwhile.
+        state_changed = self._apply_fetched_run_states(states, run_state_mark, cache_epoch)
+        missed_out = self.api.fub_cache_epoch() == cache_epoch and self._count_missed_plan_run_states(fub_ids, states)
+        changed = state_changed or was_unavailable or missed_out
         if await self.async_watch_managed_plans() or changed:
             self.async_update_listeners()
 

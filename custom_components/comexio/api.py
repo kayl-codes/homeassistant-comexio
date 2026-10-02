@@ -506,8 +506,9 @@ class ComexioAPI:
         self.io_input_types: dict[str, Any] = {}
         # Function plan + paper metadata (populated by parse_config)
         self._fub_data: dict[str, Any] = {}  # fub_id_str → {Id, Name, Paper, ...}
-        # Called with no arguments when set_fub_active changed a plan's cached Active flag, so
-        # the coordinator can refresh the entities showing it (see ComexioCoordinator.__init__).
+        # Called with no arguments when set_fub_active changed a plan's cached Active flag or
+        # create_fup added a plan, so the coordinator can refresh the entities showing the plans
+        # (see ComexioCoordinator.__init__) — a new plan gets its run-state sensor right away.
         self.run_state_listener: Callable[[], None] | None = None
         # Run states HA itself caused: fub_id_str → (running, mark). A config or run-state fetch
         # that started before such a change (run_state_mark) brings the older state and must not
@@ -1965,6 +1966,8 @@ class ComexioAPI:
             return None
         _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, created.fub_id)
         self._fub_data[str(created.fub_id)] = created.fubs_entry
+        if self.run_state_listener is not None:
+            self.run_state_listener()
         return created.fub_id
 
     async def _find_created_plan(self, plan_name: str, known_ids: set[str]) -> CreatedFunctionPlan | None:
