@@ -51,7 +51,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `button` | System Functions | Manual "Smart-Sync" trigger and cancel button directly from the HA device view. |
 | `select` | Function Plans | Lists all Comexio function plans; used as the default target for the function-plan services. |
 | `sensor` (diagnostic) | Integration | `Offline Extensions` — shows how many extension modules are currently offline and lists their names as a state attribute. |
-| `sensor` (diagnostic) | Integration | `Function Plan Backups` — total number of stored plan snapshots, per-plan details as state attributes. |
+| `sensor` (diagnostic) | Integration | `Backups` (Function plans device) — total number of stored plan snapshots, per-plan details as state attributes. |
 | `sensor` (diagnostic) | Integration | `Bus Workload` — internal Comexio bus/CPU load in %, polled independently every 10 s. |
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
@@ -269,7 +269,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `button` | System-Funktionen | Manueller "Smart-Sync" Abgleich und Abbruch direkt aus der HA-Geräteansicht. |
 | `select` | Funktionspläne | Listet alle Comexio-Funktionspläne; dient als Standard-Ziel für die Funktionsplan-Actions. |
 | `sensor` (Diagnose) | Integration | `Offline Extensions` — zeigt, wie viele Erweiterungsmodule gerade offline sind, und listet deren Namen als State-Attribut. |
-| `sensor` (Diagnose) | Integration | `Function Plan Backups` — Gesamtzahl der gespeicherten Plan-Snapshots, Details je Plan als State-Attribute. |
+| `sensor` (Diagnose) | Integration | `Backups` (Gerät „Function plans“) — Gesamtzahl der gespeicherten Plan-Snapshots, Details je Plan als State-Attribute. |
 | `sensor` (Diagnose) | Integration | `Bus Workload` — interne Comexio Bus-/CPU-Auslastung in %, unabhängig alle 10 s abgefragt. |
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
