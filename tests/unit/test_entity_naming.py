@@ -30,6 +30,7 @@ from custom_components.comexio.entity import ComexioStableEntityIdMixin
         ("comexio_iosrv1_m12", "iosrv1_m12"),
         ("comexio_iosrv1_k5", "iosrv1_k5"),
         ("comexio_iosrv1_k1_k2", "iosrv1_k1_k2"),
+        ("comexio_iosrv1_fub19", "iosrv1_fub19"),
         ("comexio_io-srv_ext 2_ei1_win", "io_srv_ext_2_ei1_win"),
     ],
 )

@@ -34,8 +34,8 @@ import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-pl
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.42";
-console.info(`comexio-plan-card v${CARD_VERSION} (Orphaned plans: Restore-Dialog-Texte, Version in der Hilfe) loaded`);
+const CARD_VERSION = "0.9.43";
+console.info(`comexio-plan-card v${CARD_VERSION} (Version in der Hilfe rechtsbündig) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
 // function_plan_backup.py) so the card can parse kind+slot back out of the select's state
@@ -521,7 +521,10 @@ class ComexioPlanCard extends HTMLElement {
         .help-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
         .help-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
         .help-head h3 { margin: 0; font-size: 1.1em; }
-        .help-head .help-version { color: var(--secondary-text-color, #888); font-size: 0.75em; font-weight: normal; }
+        .help-head .help-version {
+          margin-left: auto; margin-right: 8px;
+          color: var(--secondary-text-color, #888); font-size: 0.85em; white-space: nowrap;
+        }
         .help-close {
           background: none; border: none; padding: 2px; margin: 0; cursor: pointer;
           color: var(--secondary-text-color, #888); line-height: 0;
@@ -640,7 +643,8 @@ class ComexioPlanCard extends HTMLElement {
       </ha-card>
       <dialog class="help-dialog">
         <div class="help-head">
-          <h3>Bedienung der Plan-Vorschau <span class="help-version">v${CARD_VERSION}</span></h3>
+          <h3>Bedienung der Plan-Vorschau</h3>
+          <span class="help-version">v${CARD_VERSION}</span>
           <button class="help-close" title="Schließen" aria-label="Schließen"><ha-icon icon="mdi:close"></ha-icon></button>
         </div>
         <table>

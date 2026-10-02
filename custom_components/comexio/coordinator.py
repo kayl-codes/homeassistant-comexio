@@ -10,6 +10,7 @@ import socket
 import time
 from typing import Any
 
+from aiocomexio import ComexioAuthenticationError, ComexioDataError, ComexioError
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -91,8 +92,13 @@ from .const import (
     FUNCTION_PLAN_LAYOUT_COMMENT_Y,
     FUNCTION_PLAN_LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
+    FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
+    FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
+    FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC,
+    FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
+    FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
     ICON_ADD,
     ICON_DELETE,
@@ -133,6 +139,7 @@ from .const import (
     classify_audit_key,
     entity_id_migration_target,
     expand_ignored_marker_ids,
+    function_plan_ids,
     fw_update_signal,
     io_audit_key,
     io_column_rows,
@@ -279,6 +286,110 @@ def _format_by_ref(by_ref: dict[int, list[int]]) -> str:
         for ref_type, ids in by_ref.items()
         for mid in ids
     )
+
+
+def _source_max_ids(raw_config: dict[str, Any]) -> tuple[int, int]:
+    """Highest marker id and highest KNX object id in a raw config (0 if there are none)."""
+    marker_data = raw_config.get("FubModules", {}).get("2", {})
+    max_id = max(int(m.get("Id", 0)) for m in marker_data.values()) if marker_data else 0
+    # KNX groups are frequently small and gap-free (e.g. K1-K10), which is exactly the
+    # shape Comexio serializes as a JSON array instead of an object (see
+    # aiocomexio parse_config docstring) — handle both shapes, unlike marker_data
+    # above, which has never been observed as an array in practice.
+    knx_group = raw_config.get("FubModules", {}).get("11", {})
+    knx_items = knx_group.values() if isinstance(knx_group, dict) else (knx_group or [])
+    # Same per-item guard as aiocomexio parse_config, which parses this exact group:
+    # a malformed entry (non-dict, or Id missing/None) must be skipped here too, or a
+    # single bad KNX record raises out of this comprehension and fails the entire poll.
+    knx_max_id = max(
+        (int(k["Id"]) for k in knx_items if isinstance(k, dict) and k.get("Id") is not None),
+        default=0,
+    )
+    return max_id, knx_max_id
+
+
+def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[str, Any]:
+    """The parsed config narrowed to the categories the user imports (import_* options)."""
+    import_markers = conf.get("import_markers", True)
+    import_ios = conf.get("import_ios", True)
+    import_knx = conf.get("import_knx", False)
+    return {
+        "markers": parsed_data["markers"] if import_markers else [],
+        "io": parsed_data["io"] if import_ios else [],
+        "io_all": parsed_data.get("io_all", []) if import_ios else [],
+        "knx": parsed_data.get("knx", []) if import_knx else [],
+        "webio_commands": parsed_data.get("webio_commands", {}),
+        "webio_names": parsed_data.get("webio_names", {}),
+        "webio_devices": parsed_data.get("webio_devices", {}),
+        "extensions": parsed_data.get("extensions", {}),
+    }
+
+
+def _fallback_audit_key(full_name: str) -> str:
+    """Best-effort audit key of a Web-IO command with no current HA counterpart, for grouping only.
+
+    Registry-driven: any range_clustered category ("HA <prefix><ID> <Name>", e.g. Marker/KNX)
+    is identified by its audit_key_prefix, so a further range_clustered category needs no new
+    branch here. IOs via "HA IO <Ext> <Ident>" may misparse if <Ext> itself contains spaces.
+    """
+    parts = full_name.split(" ")
+    if len(parts) < 3:
+        return full_name
+    if any(cat.range_clustered and parts[1].startswith(cat.audit_key_prefix) for cat in SOURCE_CATEGORIES.values()):
+        return parts[1]
+    if parts[1] == "IO" and len(parts) >= 4:
+        return io_audit_key(parts[2], parts[3])
+    return full_name
+
+
+def _build_com_audit_map(
+    com_commands: dict[str, Any], ha_map: dict[str, dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    """The Comexio side of the audit: Web-IO commands grouped by the audit key they serve.
+
+    Exact reverse lookup first: ha_map's "name" values are built from the same extension names
+    that may contain spaces, so a positional full_name.split(" ") would misparse
+    "HA IO <Ext With Space> <Ident>" (parts[2] wouldn't be the whole extension name). Only
+    commands with no current HA counterpart (renamed/deleted markers or extensions) fall back
+    to the positional heuristic, purely for grouping.
+    """
+    name_to_key = {info["name"]: key for key, info in ha_map.items()}
+    com_map: dict[str, list[dict[str, Any]]] = {}
+    for full_name, info in com_commands.items():
+        key = name_to_key.get(full_name, full_name)
+        if key == full_name:
+            key = _fallback_audit_key(full_name)
+        com_map.setdefault(key, []).append(
+            {
+                "name": full_name,
+                # Mapping Web-IO Command TypeId: 1 = Digital, 2 = Analog
+                "type": "analog" if int(info.get("typeId", 1)) == 2 else "digital",
+                "id": info.get("cmdId"),
+                "webio_class": info.get("webioClass"),
+                "webIoId": info.get("webIoId"),
+            }
+        )
+    return com_map
+
+
+def _add_audit_orphan(orphans: list[dict[str, Any]], mismatches: set[str], com: dict[str, Any]) -> None:
+    """Record a Web-IO command no HA source needs (a duplicate, or one whose source is gone)."""
+    orphans.append(
+        {
+            "id": com["id"],
+            "name": com["name"],
+            "webio_class": com.get("webio_class"),
+            "webIoId": com.get("webIoId"),
+        }
+    )
+    mismatches.add(f"orphan_{com['id']}")
+
+
+def _log_audit_items(icon: str, label: str, items: list[dict[str, Any]]) -> None:
+    """One audit summary category: its count, then one line per item."""
+    _LOGGER.info("%s %s (%d):", icon, label, len(items))
+    for item in items:
+        _LOGGER.info("   -> %s", item["name"])
 
 
 async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
@@ -558,6 +669,38 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.bus_workload: int | None = None
         self.bus_sd_card: bool | None = None
         self._bus_load_fail_streak = 0
+        # Function plan run states (see async_start_plan_run_state_poll): the fetched states go
+        # into api.fub_data's Active flags; the api reports the changes HA itself causes
+        # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
+        # sensors follow right away instead of on the next poll.
+        self.api.run_state_listener = self.async_update_listeners
+        # Two counters: the fail streak tracks the run-state endpoint itself (logging, reset only
+        # by a working fetch); the stale count tracks failures since the last fresh state (sensor
+        # availability, also reset by a full poll, whose $Fubs brings every Active flag).
+        self._plan_run_state_fail_streak = 0
+        self._plan_run_state_stale_count = 0
+        # Per plan: fetches in a row that answered for other plans but not this one (aiocomexio
+        # leaves out a plan whose answer it cannot classify) — a working fetch for the others
+        # must not keep its old state alive. Unlike the stale count, a full poll does not reset it:
+        # a plan left out of every answer would flap between available and unavailable then.
+        self._plan_run_state_missed: dict[int, int] = {}
+        # Full polls in a row that read the config page but no plan list ($Fubs); api.parse_config
+        # keeps the cached plans then (see FUNCTION_PLAN_LIST_UNREAD_THRESHOLD).
+        self._plan_list_unread_polls = 0
+        self._plan_run_state_last_fetch: float = 0.0
+        # Set while a run-state fetch is in flight: a slow answer must not overlap the next preview
+        # tick or timer tick, whose newer answer an older one finishing last would overwrite.
+        self._plan_run_state_fetching = False
+        # Set when the run-state poll's own re-login was refused; the full poll owns reauth then.
+        self._plan_run_state_relogin_refused = False
+        # The plan ids of the last full poll that really read $Fubs, and a counter bumped with
+        # each such poll: only those prove a plan is gone (see binary_sensor's plan sensor sync).
+        self.scraped_plan_ids: set[int] | None = None
+        self.plan_scrape_generation = 0
+        self._polled_plan_ids: set[int] | None = None
+        # Set while _async_update_data runs: its $Fubs read brings the run states anyway, and
+        # Comexio serializes requests, so the run-state poll stays out of its way.
+        self._full_poll_running = False
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
         # _evaluate_bus_load_watchdog), trimmed to the longer of the two detection windows.
         # The lock also blocks a concurrent cascade and emergency reboot from overlapping.
@@ -579,7 +722,53 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
+        self._full_poll_running = True
+        try:
+            data = await self._async_fetch_and_audit()
+        finally:
+            self._full_poll_running = False
+        # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
+        # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
+        if self._polled_plan_ids is not None:
+            # $Fubs just delivered every plan's Active flag first hand.
+            self._plan_run_state_stale_count = 0
+            self._plan_run_state_missed = {
+                fub_id: count
+                for fub_id, count in self._plan_run_state_missed.items()
+                if fub_id in self._polled_plan_ids
+            }
+            self._plan_run_state_relogin_refused = False
+            self.scraped_plan_ids = self._polled_plan_ids
+            self.plan_scrape_generation += 1
+        self._track_plan_list_read()
+        return data
+
+    def _track_plan_list_read(self) -> None:
+        """Count full polls that read the config page but not its plan list; log the outage and the recovery once."""
+        if self._polled_plan_ids is not None:
+            if self._plan_list_unread_polls:
+                _LOGGER.info(
+                    "[%s] Plan list ($Fubs) readable again after %s polls", self.server_id, self._plan_list_unread_polls
+                )
+            self._plan_list_unread_polls = 0
+            return
+        # A skipped poll (sync running) or a failed page fetch read nothing at all — no plan list to miss.
+        if not self._last_poll_scraped:
+            return
+        self._plan_list_unread_polls += 1
+        if self._plan_list_unread_polls == 1:
+            _LOGGER.warning(
+                "[%s] Config poll brought no readable plan list ($Fubs); keeping the last known plans. Plans "
+                "created or deleted in Comexio are not picked up meanwhile, and the run-state sensors turn "
+                "unavailable after %s such polls (debug logging for aiocomexio shows the page variable)",
+                self.server_id,
+                FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
+            )
+
+    async def _async_fetch_and_audit(self) -> dict[str, Any]:
+        """Body of _async_update_data, run while _full_poll_running is set."""
         self._last_poll_scraped = False
+        self._polled_plan_ids = None
         if self.in_sync:
             _LOGGER.debug("[%s] Periodic audit skipped: Manual sync or repair is currently in progress", self.server_id)
             return self.data
@@ -593,731 +782,703 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._webhook_updated_knx_ids.clear()
 
         try:
-            conf = {**self.config_entry.data, **self.config_entry.options}
+            return await self._async_poll_and_audit()
+        except Exception as e:
+            _LOGGER.exception("[%s] Data fetch failed: %s", self.server_id, e)
+            raise
 
-            # Precompute cover keywords once per update
-            kw_str = str(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
-            self.cover_keywords = [kw.strip().lower() for kw in kw_str.split(",") if kw.strip()]
+    async def _async_poll_and_audit(self) -> dict[str, Any]:
+        """Fetch and merge the config, then audit it against Comexio's Web-IO side."""
+        conf = {**self.config_entry.data, **self.config_entry.options}
 
-            import_markers = conf.get("import_markers", True)
-            import_ios = conf.get("import_ios", True)
-            import_knx = conf.get("import_knx", False)
+        # Precompute cover keywords once per update
+        kw_str = str(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
+        self.cover_keywords = [kw.strip().lower() for kw in kw_str.split(",") if kw.strip()]
 
-            # Fetch current raw configuration from the Comexio API
-            raw_config = await self.api.get_raw_config()
-            self._last_poll_scraped = bool(raw_config.get("FubModules"))
-            marker_data = raw_config.get("FubModules", {}).get("2", {})
-            max_id = max(int(m.get("Id", 0)) for m in marker_data.values()) if marker_data else 0
+        raw_config, parsed_data, knx_live_states = await self._async_fetch_parsed_config(conf)
+        # Unfiltered per-category counts — parsed_data carries every category regardless of
+        # import_* opt-in, unlike final_data below. See available_source_counts docstring.
+        # Held locally and only published to self.available_source_counts right before the
+        # final `return final_data` below — this dict is built early in the poll, well
+        # before the rest of this method (audits, IP checks, Function Plan sync) has had a
+        # chance to fail, and the attribute's contract is "last *successful* poll". Writing
+        # it here directly would leak counts from a poll that ends up raising further down.
+        source_counts = {cat.key: len(parsed_data.get(cat.data_key, [])) for cat in SOURCE_CATEGORIES.values()}
+        self._knx_bridge_markers_present = any(
+            m.get("kind") == MarkerKind.KNX_BRIDGE for m in parsed_data.get("markers", [])
+        )
 
-            # KNX groups are frequently small and gap-free (e.g. K1-K10), which is exactly the
-            # shape Comexio serializes as a JSON array instead of an object (see
-            # aiocomexio parse_config docstring) — handle both shapes, unlike marker_data
-            # above, which has never been observed as an array in practice.
-            knx_group = raw_config.get("FubModules", {}).get("11", {})
-            knx_items = knx_group.values() if isinstance(knx_group, dict) else (knx_group or [])
-            # Same per-item guard as aiocomexio parse_config, which parses this exact group:
-            # a malformed entry (non-dict, or Id missing/None) must be skipped here too, or a
-            # single bad KNX record raises out of this comprehension and fails the entire poll.
-            knx_max_id = max(
-                (int(k["Id"]) for k in knx_items if isinstance(k, dict) and k.get("Id") is not None),
-                default=0,
+        # async_update_from_raw_config never raises (own contract, enforced internally) —
+        # no local guard needed here.
+        await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
+        # Resolves this server's block-type ids (e.g. the Flanke) before any plan write below.
+        await self.reference_monitor.async_check(raw_config)
+
+        final_data = _imported_data(parsed_data, conf)
+        self._merge_polled_states(final_data)
+        self._merge_polled_knx_states(final_data["knx"], knx_live_states)
+
+        # Prune knx_states down to the object ids the server still reports. The merge loop
+        # above only revisits ids currently present in final_data["knx"] — a value cached
+        # for a since-deleted KNX object would otherwise linger forever and be inherited by
+        # a different object that later reuses the same numeric id. Keyed off parsed_data
+        # (not final_data) so the cache stays correct even while import_knx is off, and
+        # gated on a non-empty scrape (get_raw_config returns {} on a transient
+        # HTTP failure — pruning then would wipe every cached value over a blip).
+        if raw_config.get("FubModules"):
+            known_knx_ids = {k["id"] for k in parsed_data.get("knx", [])}
+            self.knx_states = {kid: v for kid, v in self.knx_states.items() if kid in known_knx_ids}
+
+        # Rebuild O(1) lookup index for webhook IO updates
+        self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
+        self._track_offline_extensions(final_data["io"])
+        self._update_entity_id_mismatch_issue(conf)
+
+        # --- ORPHANED STATISTICS DETECTION ---
+        await self.async_check_orphaned_statistics(conf)
+
+        # --- IGNORED SOURCES AUDIT (markers=2/KNX=11, registry-driven) ---
+        # Reset the shared cleanup accumulator once per cycle; each wrapper below extends it
+        # rather than overwriting, so neither category's contribution clobbers the other's.
+        self._cleanup_entity_ids = []
+        self._cleanup_function_plan_count = 0
+        await self.async_check_ignored_markers(conf, final_data)
+        await self.async_check_ignored_knx(conf, final_data)
+
+        # A missing Web-IO class ends the audit early: no plan checks, and the counts stay unpublished.
+        if await self._async_audit_webio(conf, final_data, parsed_data):
+            self._check_duplicate_plan_names()
+            self._spawn_function_plan_backup_cycle()
+            # Publish only now that the whole poll succeeded — see source_counts comment above.
+            self.available_source_counts = source_counts
+        return final_data
+
+    async def _async_fetch_parsed_config(
+        self, conf: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Fetch the raw config and live states and parse them: (raw_config, parsed_data, knx_live_states)."""
+        import_knx = conf.get("import_knx", False)
+        # Fetch current raw configuration from the Comexio API. A plan HA starts or stops
+        # while this poll runs keeps that state over the older Active flag in raw_config.
+        run_state_mark = self.api.run_state_mark()
+        raw_config = await self.api.get_raw_config()
+        self._last_poll_scraped = bool(raw_config.get("FubModules"))
+        # aiocomexio decodes each page variable on its own, so $FubModules alone does not
+        # prove $Fubs was read; an empty plan list still decodes to a dict.
+        if isinstance(fubs := raw_config.get("Fubs"), dict):
+            self._polled_plan_ids = function_plan_ids(fubs)
+
+        live_states, knx_live_states = await self.api.get_live_states(*_source_max_ids(raw_config))
+        if live_states is None:
+            # Fetch/parse failure this cycle (see get_live_states' docstring) — keep last
+            # known values instead of letting parse_config default every item to 0/off.
+            _LOGGER.warning("[%s] Live states fetch failed; keeping last known values", self.server_id)
+            live_states = self.marker_states
+        if knx_live_states is None:
+            knx_live_states = self.knx_states
+        # Cold start: the bulk plan snapshot isn't loaded yet (it lands after this first
+        # cycle, via the backup cycle) — fall back to the last stored auto-backup so an
+        # unnamed-but-wired marker still gets an entity on every restart, not just after
+        # the first backup cycle has run.
+        referenced_markers = self._referenced_marker_ids()
+        if referenced_markers is None:
+            referenced_markers = await self.function_plan_backup.async_referenced_marker_ids()
+        self._last_referenced_marker_ids = referenced_markers
+        # Only fetched when KNX import is enabled — an extra HTTP round-trip nobody without
+        # KNX objects needs. get_knx_dpt_catalog() never raises (own contract, {} on
+        # failure), so an unreachable/failed fetch just leaves every KNX analog item on its
+        # generic fallback range rather than failing this whole poll.
+        knx_dpt_catalog = await self.api.get_knx_dpt_catalog() if import_knx else None
+        if import_knx and knx_dpt_catalog:
+            await self._maybe_persist_knx_dpt_catalog()
+        parsed_data = self.api.parse_config(
+            raw_config,
+            live_states,
+            referenced_markers,
+            knx_live_states,
+            knx_dpt_catalog,
+            run_state_mark=run_state_mark,
+        )
+        return raw_config, parsed_data, knx_live_states
+
+    def _merge_polled_states(self, final_data: dict[str, Any]) -> None:
+        """R1: Merge the API snapshot with any webhook values that arrived during the fetch.
+
+        Webhooks that fired while awaiting get_raw_config / get_live_states already updated
+        marker_states / io_states — prefer those over the (older) API value.
+        """
+        for m in final_data["markers"]:
+            if m["id"] in self._webhook_updated_markers:
+                m["value"] = self.marker_states.get(m["id"], m["value"])
+            else:
+                self.marker_states[m["id"]] = m["value"]
+
+        for io in final_data["io"]:
+            if io["id"] in self._webhook_updated_io_ids:
+                io["value"] = self.io_states.get(io["id"], io["value"])
+            else:
+                self.io_states[io["id"]] = io["value"]
+
+    def _merge_polled_knx_states(self, knx_items: list[dict[str, Any]], knx_live_states: dict[str, Any]) -> None:
+        """The R1 merge of _merge_polled_states for KNX objects.
+
+        get_live_states() gained a real per-object KNX query 2026-09-20 (live-tested against a
+        real KNX-equipped Comexio instance, see project_knx_write_path_design memory) — a
+        webhook that fired during the get_raw_config/get_live_states round-trip wins over this
+        poll's (older) snapshot; otherwise the fresh, authoritative poll value wins and is cached.
+
+        knx_live_states membership is checked explicitly (not just "value differs from cache")
+        because aiocomexio.config._build_source_item defaults a KNX id absent from the dashboard
+        response to 0 — an HTTP 200 that simply omits one requested key (partial refresh,
+        unsupported/stale K-element) would otherwise overwrite a real cached value with that 0
+        and make the entity report off/0 until the object reappears in a response (Sourcery
+        finding, review 2026-09-21).
+        """
+        for k in knx_items:
+            if k["id"] in self._webhook_updated_knx_ids:
+                k["value"] = self.knx_states.get(k["id"], k["value"])
+            elif k["id"] in knx_live_states:
+                self.knx_states[k["id"]] = k["value"]
+            else:
+                k["value"] = self.knx_states.get(k["id"], k["value"])
+
+    def _track_offline_extensions(self, io_items: list[dict[str, Any]]) -> None:
+        """Track offline extensions and log transitions."""
+        new_offline = {io["ext_name"] for io in io_items if io.get("offline")}
+        if self.offline_extensions is None:
+            # Startup: initialize silently — modules may be intentionally decommissioned.
+            if new_offline:
+                _LOGGER.info("[%s] Extensions already offline at startup: %s", self.server_id, new_offline)
+            self.offline_extensions = new_offline
+        elif new_offline != self.offline_extensions:
+            self._handle_offline_extension_transitions(new_offline)
+
+    def _update_entity_id_mismatch_issue(self, conf: dict[str, Any]) -> None:
+        """ENTITY-ID MISMATCH DETECTION: runs every poll so the migration button reflects the real state.
+
+        The ignore flag only suppresses the repair issue, never the button.
+        """
+        mismatches = self.detect_entity_id_mismatches()
+        if mismatches and not conf.get(CONF_ENTITY_ID_MIGRATION_IGNORED, False):
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"entity_id_mismatch_{self.server_id}",
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="entity_id_mismatch",
+                translation_placeholders={"server_id": self.server_id, "count": str(len(mismatches))},
+                data={"entry_id": self.config_entry.entry_id, "count": len(mismatches)},
             )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
 
-            live_states, knx_live_states = await self.api.get_live_states(max_id, knx_max_id)
-            if live_states is None:
-                # Fetch/parse failure this cycle (see get_live_states' docstring) — keep last
-                # known values instead of letting parse_config default every item to 0/off.
-                _LOGGER.warning("[%s] Live states fetch failed; keeping last known values", self.server_id)
-                live_states = self.marker_states
-            if knx_live_states is None:
-                knx_live_states = self.knx_states
-            # Cold start: the bulk plan snapshot isn't loaded yet (it lands after this first
-            # cycle, via the backup cycle) — fall back to the last stored auto-backup so an
-            # unnamed-but-wired marker still gets an entity on every restart, not just after
-            # the first backup cycle has run.
-            referenced_markers = self._referenced_marker_ids()
-            if referenced_markers is None:
-                referenced_markers = await self.function_plan_backup.async_referenced_marker_ids()
-            self._last_referenced_marker_ids = referenced_markers
-            # Only fetched when KNX import is enabled — an extra HTTP round-trip nobody without
-            # KNX objects needs. get_knx_dpt_catalog() never raises (own contract, {} on
-            # failure), so an unreachable/failed fetch just leaves every KNX analog item on its
-            # generic fallback range rather than failing this whole poll.
-            knx_dpt_catalog = await self.api.get_knx_dpt_catalog() if import_knx else None
-            if import_knx and knx_dpt_catalog:
-                await self._maybe_persist_knx_dpt_catalog()
-            parsed_data = self.api.parse_config(
-                raw_config, live_states, referenced_markers, knx_live_states, knx_dpt_catalog
+    async def _async_audit_webio(
+        self, conf: dict[str, Any], final_data: dict[str, Any], parsed_data: dict[str, Any]
+    ) -> bool:
+        """SMART AUDIT: compare HA's sources with Comexio's Web-IO commands into last_audit_results.
+
+        False if a Web-IO class is missing on the server: the audit then only raises that
+        repair issue (see _report_missing_webio_classes) and the poll ends early.
+        """
+        ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
+        com_map = _build_com_audit_map(final_data["webio_commands"], ha_map)
+
+        webio_devices = parsed_data.get("webio_devices", {})
+        if self._report_missing_webio_classes(conf, webio_devices):
+            return False
+
+        # Reset internal failure flag when the audit is successful
+        self.last_audit_failed = False
+
+        # Prepare payload map for future delta updates via button/repairs
+        payload_map = {
+            cmd["Name"]: cmd
+            for cmd in self.api.build_webio_commands(
+                self.server_id, final_data, None, self.ignored_marker_ids, self.ignored_knx_ids
             )
-            # Unfiltered per-category counts — parsed_data carries every category regardless of
-            # import_* opt-in, unlike final_data below. See available_source_counts docstring.
-            # Held locally and only published to self.available_source_counts right before the
-            # final `return final_data` below — this dict is built early in the poll, well
-            # before the rest of this method (audits, IP checks, Function Plan sync) has had a
-            # chance to fail, and the attribute's contract is "last *successful* poll". Writing
-            # it here directly would leak counts from a poll that ends up raising further down.
-            source_counts = {cat.key: len(parsed_data.get(cat.data_key, [])) for cat in SOURCE_CATEGORIES.values()}
-            self._knx_bridge_markers_present = any(
-                m.get("kind") == MarkerKind.KNX_BRIDGE for m in parsed_data.get("markers", [])
+        }
+
+        # The name a device already carries bounds the search, so a fresh resolver after a
+        # restart does not look up the KNOWN_DOMAINS behind the name Comexio already stores.
+        ha_address = await self.ha_address.async_get(hint=webio_device_hint(webio_devices))
+        webio_device_audit = await self._async_audit_webio_devices(webio_devices, ha_address)
+        ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
+
+        # Check whether a function plan is actively selected (guards against false positives).
+        # At startup the select entity is not yet in the state machine; fall back to the
+        # fub_id persisted in options by async_select_option.
+        has_active_plan = self._has_active_function_plan()
+
+        # Wiring truth comes from the plan bulk snapshot (loadelements): the server-side
+        # WebCommandIoId survives plan deletion and is not maintained by add_element
+        # wiring, so it cannot be trusted. While the snapshot is still empty (first poll
+        # after startup/reload) the check is skipped and re-run once the backup cycle
+        # has loaded the plans.
+        # Offline extensions are exempt from the wiring check: their hardware is not
+        # present, so wiring their IOs is pointless. Once the extension comes back
+        # online the next poll flags any remaining gaps again.
+        managed_io_exts: set[str] = set(self.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
+        managed_io_exts -= self.offline_extensions or set()
+        wired = self._audit_wired_pairs(has_active_plan, managed_io_exts)
+        wired_knx_webio_pairs = wired[2]
+
+        mismatches: set[str] = {"ip_address"} if ip_mismatch else set()
+        found = self._compare_audit_maps(
+            ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_exts, mismatches
+        )
+        dangling_items = self._function_plan_dangling_items(
+            final_data, wired, has_active_plan, managed_io_exts, mismatches
+        )
+        trigger_missing_by_ref, trigger_orphan_by_ref = self._audit_trigger_constructs(final_data, mismatches)
+
+        # KNX write path (Entwurf A "Merker-Brücke") audit, incl. Phase 7's API-Loopback
+        # fan-out check — see _audit_knx_bridge_items's own docstring for the full rationale.
+        knx_bridge_missing_items, knx_bridge_loopback_missing_items = self._audit_knx_bridge_items(
+            has_active_plan, final_data["knx"], ha_map, wired_knx_webio_pairs, mismatches
+        )
+
+        # DPT1.x classification for digital KNX objects with no [RO]/[TRIG]/[K<id>] suffix
+        # yet (real ETS imports never carry Comexio's own naming convention) — see
+        # _auto_suffix_unambiguous_knx / _audit_knx_dpt_ambiguous docstrings.
+        if conf.get("import_knx", False):
+            await self._auto_suffix_unambiguous_knx(final_data["knx"])
+            self._audit_knx_dpt_ambiguous(final_data["knx"])
+
+        self.last_audit_results = {
+            "type": found["type"],
+            "missing": found["missing"],
+            "rename": found["rename"],
+            "orphan": found["orphan"],
+            "ip_mismatch": ip_mismatch,
+            "ha_address": ha_address,
+            "webio_devices": webio_device_audit,
+            "cleanup_entities": self._cleanup_entity_ids,
+            "cleanup_function_plan_count": self._cleanup_function_plan_count,
+            "function_plan_missing": found["function_plan_missing"],
+            "function_plan_dangling": dangling_items,
+            "function_plan_trigger_missing": trigger_missing_by_ref,
+            "function_plan_trigger_orphan": trigger_orphan_by_ref,
+            "knx_bridge_missing": knx_bridge_missing_items,
+            "knx_bridge_loopback_missing": knx_bridge_loopback_missing_items,
+        }
+
+        # Include pending entity cleanups (ignored markers/KNX with remaining HA entities) in mismatches
+        for cls_val, mid in self._cleanup_entity_ids:
+            mismatches.add(f"cleanup_entity_{cls_val}_{mid}")
+
+        self._log_audit_summary(mismatches)
+        self._update_sync_mismatch_issue(mismatches, ha_map, com_map, io_meta_by_key)
+        return True
+
+    def _build_ha_audit_map(
+        self, final_data: dict[str, Any]
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        """The HA side of the audit: (audit key → expected Web-IO command, IO audit key → IO item).
+
+        Markers + KNX objects are registry-driven over the range_clustered categories. Ignored
+        ids are intentionally excluded from the Web-IO/Function Plan sync (see
+        CONF_IGNORED_MARKERS/CONF_IGNORED_KNX) — leaving them in would make the audit report
+        them as permanently "missing" and let Full Sync / create_missing actually create and
+        wire Web-IO commands for sources the user explicitly opted out of. Auto-created
+        write-path bridge Markers (kind == KNX_BRIDGE, title suffix "[K<id>]" — see
+        MARKER_KNX_BRIDGE_SUFFIX_RE) are excluded the same way: they are pure internal wiring
+        glue with no HA entity and no Web-IO command of their own (see
+        project_knx_write_path_design memory) — without this they permanently show up as
+        "Fehlend" since no webIO is ever expected to exist for them.
+        IOs have their own composite ext_name+identifier key shape.
+        """
+        ha_map: dict[str, dict[str, Any]] = {}
+        for cat in SOURCE_CATEGORIES.values():
+            if not cat.range_clustered:
+                continue
+            ignored_ids = self.ignored_ids_for(cat.key)
+            for item in final_data[cat.data_key]:
+                if int(item["id"]) in ignored_ids or item.get("kind") == MarkerKind.KNX_BRIDGE:
+                    continue
+                ha_map[source_audit_key(cat, item["id"])] = {
+                    "name": f"HA {item['name']}",
+                    "type": item["type"],  # Trusting the preprocessing of api.py
+                }
+
+        io_meta_by_key: dict[str, dict[str, Any]] = {}
+        for io in final_data["io"]:
+            key = io_audit_key(io["ext_name"], io["identifier"])
+            # api.py provides 'is_binary'; the audit type ('digital'/'analog') derives from it.
+            mapped_type = "digital" if io.get("is_binary") else "analog"
+            ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
+            io_meta_by_key[key] = io
+        return ha_map, io_meta_by_key
+
+    def _report_missing_webio_classes(self, conf: dict[str, Any], webio_devices: dict[str, Any]) -> bool:
+        """Raise a repair issue if a Web-IO class is entirely missing on the server; True if one is.
+
+        Checked directly against the resolved device_id (not "com_map empty") so a half-missing
+        setup (e.g. only the Marker class deleted) is still caught — the normal sync_mismatch
+        flow would otherwise try to save_single_command against a dev_id of None for that class.
+        Only classes the user has opted into (import_conf_key) count as "missing" — an
+        opted-out category (e.g. KNX by default) has no Web-IO device on the server by design,
+        and flagging that as missing would wipe last_audit_results on every poll (see
+        active_webio_classes docstring).
+        """
+        missing_classes = [cls for cls in active_webio_classes(conf) if not webio_devices.get(cls, {}).get("device_id")]
+        if not missing_classes:
+            return False
+        self.last_audit_results = {}
+        if not conf.get("audit_ignored", False) and not self.in_sync:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"sync_mismatch_{self.server_id}",
+                is_fixable=True,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="missing_webio_class",
+                translation_placeholders={
+                    "server_id": self.server_id,
+                    "missing_classes": ", ".join(webio_class_label(c) for c in missing_classes),
+                },
+                data={
+                    "entry_id": self.config_entry.entry_id,
+                    "missing_classes": missing_classes,
+                },
             )
+        return True
 
-            # async_update_from_raw_config never raises (own contract, enforced internally) —
-            # no local guard needed here.
-            await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
-            # Resolves this server's block-type ids (e.g. the Flanke) before any plan write below.
-            await self.reference_monitor.async_check(raw_config)
+    async def _async_audit_webio_devices(
+        self, webio_devices: dict[str, Any], ha_address: str
+    ) -> dict[str, dict[str, Any]]:
+        """IP/Port Audit, checked independently per Web-IO class.
 
-            final_data = {
-                "markers": parsed_data["markers"] if import_markers else [],
-                "io": parsed_data["io"] if import_ios else [],
-                "io_all": parsed_data.get("io_all", []) if import_ios else [],
-                "knx": parsed_data.get("knx", []) if import_knx else [],
-                "webio_commands": parsed_data.get("webio_commands", {}),
-                "webio_names": parsed_data.get("webio_names", {}),
-                "webio_devices": parsed_data.get("webio_devices", {}),
-                "extensions": parsed_data.get("extensions", {}),
+        Marker and IO devices can in theory drift out of sync with each other.
+        """
+        webio_device_audit: dict[str, dict[str, Any]] = {}
+        for cls in WEBIO_CLASSES:
+            dev = webio_devices.get(cls, {})
+            webio_device_audit[cls] = {
+                "device_id": dev.get("device_id"),
+                "base_id": dev.get("base_id"),
+                "device_ip": dev.get("device_ip"),
+                "ip_mismatch": await _device_ip_mismatch(
+                    self.hass, ha_address, dev.get("device_ip"), dev.get("device_id")
+                ),
             }
+        return webio_device_audit
 
-            # R1: Merge API snapshot with any webhook values that arrived during the fetch.
-            # Webhooks that fired while awaiting get_raw_config / get_live_states already
-            # updated marker_states / io_states — prefer those over the (older) API value.
-            for m in final_data["markers"]:
-                if m["id"] in self._webhook_updated_markers:
-                    m["value"] = self.marker_states.get(m["id"], m["value"])
-                else:
-                    self.marker_states[m["id"]] = m["value"]
-
-            for io in final_data["io"]:
-                if io["id"] in self._webhook_updated_io_ids:
-                    io["value"] = self.io_states.get(io["id"], io["value"])
-                else:
-                    self.io_states[io["id"]] = io["value"]
-
-            # KNX now follows the same R1 pattern as markers/IO above: get_live_states() gained
-            # a real per-object KNX query 2026-09-20 (live-tested against a real KNX-equipped
-            # Comexio instance, see project_knx_write_path_design memory) — a webhook that fired
-            # during the get_raw_config/get_live_states round-trip wins over this poll's (older)
-            # snapshot; otherwise the fresh, authoritative poll value wins and is cached.
-            #
-            # knx_live_states membership is checked explicitly (not just "value differs from
-            # cache") because aiocomexio.config._build_source_item defaults a KNX id absent from the dashboard
-            # response to 0 — an HTTP 200 that simply omits one requested key (partial refresh,
-            # unsupported/stale K-element) would otherwise overwrite a real cached value with
-            # that 0 and make the entity report off/0 until the object reappears in a response
-            # (Sourcery finding, review 2026-09-21).
-            for k in final_data["knx"]:
-                if k["id"] in self._webhook_updated_knx_ids:
-                    k["value"] = self.knx_states.get(k["id"], k["value"])
-                elif k["id"] in knx_live_states:
-                    self.knx_states[k["id"]] = k["value"]
-                else:
-                    k["value"] = self.knx_states.get(k["id"], k["value"])
-
-            # Prune knx_states down to the object ids the server still reports. The merge loop
-            # above only revisits ids currently present in final_data["knx"] — a value cached
-            # for a since-deleted KNX object would otherwise linger forever and be inherited by
-            # a different object that later reuses the same numeric id. Keyed off parsed_data
-            # (not final_data) so the cache stays correct even while import_knx is off, and
-            # gated on a non-empty scrape (get_raw_config returns {} on a transient
-            # HTTP failure — pruning then would wipe every cached value over a blip).
-            if raw_config.get("FubModules"):
-                known_knx_ids = {k["id"] for k in parsed_data.get("knx", [])}
-                self.knx_states = {kid: v for kid, v in self.knx_states.items() if kid in known_knx_ids}
-
-            # Rebuild O(1) lookup index for webhook IO updates
-            self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
-
-            # Track offline extensions and log transitions
-            new_offline = {io["ext_name"] for io in final_data["io"] if io.get("offline")}
-            if self.offline_extensions is None:
-                # Startup: initialize silently — modules may be intentionally decommissioned.
-                if new_offline:
-                    _LOGGER.info("[%s] Extensions already offline at startup: %s", self.server_id, new_offline)
-                self.offline_extensions = new_offline
-            elif new_offline != self.offline_extensions:
-                self._handle_offline_extension_transitions(new_offline)
-
-            # --- ENTITY-ID MISMATCH DETECTION ---
-            # Runs every poll so the migration button reflects the real state.
-            # The ignore flag only suppresses the repair issue, never the button.
-            mismatches = self.detect_entity_id_mismatches()
-            if mismatches and not conf.get(CONF_ENTITY_ID_MIGRATION_IGNORED, False):
-                ir.async_create_issue(
-                    self.hass,
-                    DOMAIN,
-                    f"entity_id_mismatch_{self.server_id}",
-                    is_fixable=True,
-                    severity=ir.IssueSeverity.WARNING,
-                    translation_key="entity_id_mismatch",
-                    translation_placeholders={"server_id": self.server_id, "count": str(len(mismatches))},
-                    data={"entry_id": self.config_entry.entry_id, "count": len(mismatches)},
+    def _compare_audit_maps(
+        self,
+        ha_map: dict[str, dict[str, Any]],
+        com_map: dict[str, list[dict[str, Any]]],
+        payload_map: dict[str, Any],
+        wired_pairs: tuple[Any, ...],
+        io_meta_by_key: dict[str, dict[str, Any]],
+        managed_io_exts: set[str],
+        mismatches: set[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Missing, renamed, type-mismatched, unwired and orphaned Web-IO commands, by audit category."""
+        found: dict[str, list[dict[str, Any]]] = {
+            "type": [],
+            "missing": [],
+            "rename": [],
+            "orphan": [],
+            "function_plan_missing": [],
+        }
+        for key, ha in ha_map.items():
+            if key in com_map:
+                self._compare_audit_key(
+                    key,
+                    ha,
+                    com_map[key],
+                    payload_map,
+                    wired_pairs,
+                    io_meta_by_key.get(key),
+                    managed_io_exts,
+                    found,
+                    mismatches,
                 )
             else:
-                ir.async_delete_issue(self.hass, DOMAIN, f"entity_id_mismatch_{self.server_id}")
-
-            # --- ORPHANED STATISTICS DETECTION ---
-            await self.async_check_orphaned_statistics(conf)
-
-            # --- IGNORED SOURCES AUDIT (markers=2/KNX=11, registry-driven) ---
-            # Reset the shared cleanup accumulator once per cycle; each wrapper below extends it
-            # rather than overwriting, so neither category's contribution clobbers the other's.
-            self._cleanup_entity_ids = []
-            self._cleanup_function_plan_count = 0
-            await self.async_check_ignored_markers(conf, final_data)
-            await self.async_check_ignored_knx(conf, final_data)
-
-            # --- SMART AUDIT LOGIC ---
-            com_commands = final_data["webio_commands"]
-
-            # 1. HA Map: Markers + KNX objects (registry-driven over range_clustered categories)
-            # Ignored ids are intentionally excluded from the Web-IO/Function Plan sync (see
-            # CONF_IGNORED_MARKERS/CONF_IGNORED_KNX) — leaving them in would make the audit
-            # report them as permanently "missing" and let Full Sync / create_missing actually
-            # create and wire Web-IO commands for sources the user explicitly opted out of.
-            # Auto-created write-path bridge Markers (kind == KNX_BRIDGE, title suffix
-            # "[K<id>]" — see MARKER_KNX_BRIDGE_SUFFIX_RE) are excluded the same way: they are
-            # pure internal wiring glue with no HA entity and no Web-IO command of their own
-            # (see project_knx_write_path_design memory) — without this they permanently show
-            # up as "Fehlend" since no webIO is ever expected to exist for them.
-            ha_map = {}
-            for cat in SOURCE_CATEGORIES.values():
-                if not cat.range_clustered:
-                    continue
-                ignored_ids = self.ignored_ids_for(cat.key)
-                for item in final_data[cat.data_key]:
-                    if int(item["id"]) in ignored_ids or item.get("kind") == MarkerKind.KNX_BRIDGE:
-                        continue
-                    ha_map[source_audit_key(cat, item["id"])] = {
-                        "name": f"HA {item['name']}",
-                        "type": item["type"],  # Trusting the preprocessing of api.py
-                    }
-
-            # 2. HA Map: IOs (own composite ext_name+identifier key shape, kept as its own block)
-            io_meta_by_key: dict[str, dict[str, Any]] = {}
-            for io in final_data["io"]:
-                key = io_audit_key(io["ext_name"], io["identifier"])
-
-                # Since api.py now provides 'is_binary', derive
-                # the audit type ('digital'/'analog') here:
-                mapped_type = "digital" if io.get("is_binary") else "analog"
-
-                ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
-                io_meta_by_key[key] = io
-
-            # 4. Comexio Map (Audit the counterpart on the server)
-            # Exact reverse lookup first: ha_map's "name" values are built from the same
-            # extension names that may contain spaces, so a positional full_name.split(" ")
-            # would misparse "HA IO <Ext With Space> <Ident>" (parts[2] wouldn't be the whole
-            # extension name). Only fall back to the positional heuristic for commands with no
-            # current HA counterpart (renamed/deleted markers or extensions) purely for grouping.
-            name_to_key = {info["name"]: key for key, info in ha_map.items()}
-            com_map = {}
-            for full_name, info in com_commands.items():
-                cmd_id = info.get("cmdId")
-                comexio_type_id = int(info.get("typeId", 1))
-                # Mapping Web-IO Command TypeId: 1 = Digital, 2 = Analog
-                mapped_type = "analog" if comexio_type_id == 2 else "digital"
-
-                key = name_to_key.get(full_name, full_name)
-                if key == full_name:
-                    parts = full_name.split(" ")
-                    if len(parts) >= 3:
-                        # Registry-driven: any range_clustered category ("HA <prefix><ID> <Name>",
-                        # e.g. Marker/KNX) is identified by its audit_key_prefix, so a further
-                        # range_clustered category needs no new branch here.
-                        range_clustered_cat = next(
-                            (
-                                cat
-                                for cat in SOURCE_CATEGORIES.values()
-                                if cat.range_clustered and parts[1].startswith(cat.audit_key_prefix)
-                            ),
-                            None,
-                        )
-                        if range_clustered_cat is not None:
-                            key = parts[1]
-                        elif parts[1] == "IO" and len(parts) >= 4:
-                            # IO identification via "HA IO <Ext> <Ident>" (best-effort only —
-                            # may misparse if <Ext> itself contains spaces)
-                            key = io_audit_key(parts[2], parts[3])
-
-                if key not in com_map:
-                    com_map[key] = []
-                com_map[key].append(
-                    {
-                        "name": full_name,
-                        "type": mapped_type,
-                        "id": cmd_id,
-                        "webio_class": info.get("webioClass"),
-                        "webIoId": info.get("webIoId"),
-                    }
+                found["missing"].append(
+                    {"name": ha["name"], "payload": payload_map.get(ha["name"]), "webio_class": classify_audit_key(key)}
                 )
+                mismatches.add(f"missing_{key}")
 
-            # Create a repair issue if either Web-IO class is entirely missing on the server.
-            # Checked directly against the resolved device_id (not "com_map empty") so a
-            # half-missing setup (e.g. only the Marker class deleted) is still caught — the
-            # normal sync_mismatch flow below would otherwise try to save_single_command
-            # against a dev_id of None for that class.
-            webio_devices = parsed_data.get("webio_devices", {})
-            # Only classes the user has opted into (import_conf_key) count as "missing" — an
-            # opted-out category (e.g. KNX by default) has no Web-IO device on the server by
-            # design, and flagging that as missing would wipe last_audit_results on every poll
-            # (see active_webio_classes docstring).
-            missing_classes = [
-                cls for cls in active_webio_classes(conf) if not webio_devices.get(cls, {}).get("device_id")
-            ]
-            if missing_classes:
-                is_ignored = conf.get("audit_ignored", False)
-                self.last_audit_results = {}
-                if not is_ignored and not self.in_sync:
-                    ir.async_create_issue(
-                        self.hass,
-                        DOMAIN,
-                        f"sync_mismatch_{self.server_id}",
-                        is_fixable=True,
-                        severity=ir.IssueSeverity.ERROR,
-                        translation_key="missing_webio_class",
-                        translation_placeholders={
-                            "server_id": self.server_id,
-                            "missing_classes": ", ".join(webio_class_label(c) for c in missing_classes),
-                        },
-                        data={
-                            "entry_id": self.config_entry.entry_id,
-                            "missing_classes": missing_classes,
-                        },
-                    )
-                return final_data
+        # Find items in Comexio that no longer exist in HA
+        for key, com_list in com_map.items():
+            if key not in ha_map:
+                for com in com_list:
+                    _add_audit_orphan(found["orphan"], mismatches, com)
+        return found
 
-            # Reset internal failure flag when the audit is successful
-            self.last_audit_failed = False
+    def _compare_audit_key(
+        self,
+        key: str,
+        ha: dict[str, Any],
+        com_list: list[dict[str, Any]],
+        payload_map: dict[str, Any],
+        wired_pairs: tuple[Any, ...],
+        io_meta: dict[str, Any] | None,
+        managed_io_exts: set[str],
+        found: dict[str, list[dict[str, Any]]],
+        mismatches: set[str],
+    ) -> None:
+        """Compare one HA source with the Web-IO commands serving its audit key."""
+        # A perfect name match first; otherwise the first command stands for the source.
+        best_match = next((com for com in com_list if com["name"] == ha["name"]), com_list[0])
+        item = {
+            "id": best_match["id"],
+            "name": ha["name"],
+            "payload": payload_map.get(ha["name"]),
+            "webio_class": best_match.get("webio_class") or classify_audit_key(key),
+        }
+        if ha["name"] != best_match["name"]:
+            found["rename"].append(item)
+            mismatches.add(f"rename_{key}")
+        else:
+            if ha["type"] != best_match.get("type"):
+                found["type"].append(item)
+                mismatches.add(f"type_{key}")
+            # Function Plan gap: command exists but is not wired directly to its
+            # marker (M-keys) / IO (IO_-keys of managed extensions)
+            gap_item = self._function_plan_gap_item(key, ha["name"], best_match, wired_pairs, io_meta, managed_io_exts)
+            if gap_item:
+                found["function_plan_missing"].append(gap_item)
+                mismatches.add(f"function_plan_missing_{key}")
 
-            # Prepare payload map for future delta updates via button/repairs
-            payload_map = {
-                cmd["Name"]: cmd
-                for cmd in self.api.build_webio_commands(
-                    self.server_id, final_data, None, self.ignored_marker_ids, self.ignored_knx_ids
-                )
-            }
+        # All other commands pointing to this key are duplicates -> Orphans
+        for com in com_list:
+            if com != best_match:
+                _add_audit_orphan(found["orphan"], mismatches, com)
 
-            # --- IP/Port Audit --- (checked independently per Web-IO class — marker and IO
-            # devices can in theory drift out of sync with each other)
-            # The name a device already carries bounds the search, so a fresh resolver after a
-            # restart does not look up the KNOWN_DOMAINS behind the name Comexio already stores.
-            ha_address = await self.ha_address.async_get(hint=webio_device_hint(webio_devices))
+    def _function_plan_dangling_items(
+        self,
+        final_data: dict[str, Any],
+        wired: tuple[Any, ...],
+        has_active_plan: bool,
+        managed_io_exts: set[str],
+        mismatches: set[str],
+    ) -> list[dict[str, Any]]:
+        """Function Plan debris: source elements left in a managed plan without their Web-IO counterpart.
 
-            webio_device_audit: dict[str, dict[str, Any]] = {}
-            for cls in WEBIO_CLASSES:
-                dev = webio_devices.get(cls, {})
-                webio_device_audit[cls] = {
-                    "device_id": dev.get("device_id"),
-                    "base_id": dev.get("base_id"),
-                    "device_ip": dev.get("device_ip"),
-                    "ip_mismatch": await _device_ip_mismatch(
-                        self.hass, ha_address, dev.get("device_ip"), dev.get("device_id")
-                    ),
-                }
-            ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
-
-            # Check whether a function plan is actively selected (guards against false positives).
-            # At startup the select entity is not yet in the state machine; fall back to the
-            # fub_id persisted in options by async_select_option.
-            has_active_plan = self._has_active_function_plan()
-
-            # Wiring truth comes from the plan bulk snapshot (loadelements): the server-side
-            # WebCommandIoId survives plan deletion and is not maintained by add_element
-            # wiring, so it cannot be trusted. While the snapshot is still empty (first poll
-            # after startup/reload) the check is skipped and re-run once the backup cycle
-            # has loaded the plans.
-            # Offline extensions are exempt from the wiring check: their hardware is not
-            # present, so wiring their IOs is pointless. Once the extension comes back
-            # online the next poll flags any remaining gaps again.
-            managed_io_exts: set[str] = set(self.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
-            managed_io_exts -= self.offline_extensions or set()
-            (
-                wired_marker_webio_pairs,
-                wired_io_webio_pairs,
-                wired_knx_webio_pairs,
-                connected_marker_ids,
-                connected_io_ids,
-                connected_knx_ids,
-            ) = self._audit_wired_pairs(has_active_plan, managed_io_exts)
-
-            # Compare HA entities with Comexio commands to find inconsistencies
-            type_mismatches: list[dict[str, Any]] = []
-            missing_items: list[dict[str, Any]] = []
-            renamed_items: list[dict[str, Any]] = []
-            orphans: list[dict[str, Any]] = []
-            function_plan_missing_items: list[dict[str, Any]] = []
-            mismatches: set[str] = set()
-
-            if ip_mismatch:
-                mismatches.add("ip_address")
-
-            # Check for missing, renamed or type-mismatched items
-            for key, ha in ha_map.items():
-                key_class = classify_audit_key(key)
-                if key not in com_map:
-                    missing_items.append(
-                        {"name": ha["name"], "payload": payload_map.get(ha["name"]), "webio_class": key_class}
-                    )
-                    mismatches.add(f"missing_{key}")
-                else:
-                    com_list = com_map[key]
-
-                    # Try to find a perfect name match first
-                    best_match = None
-                    for com in com_list:
-                        if com["name"] == ha["name"]:
-                            best_match = com
-                            break
-
-                    # Fallback: if no perfect match, use the first one
-                    if not best_match:
-                        best_match = com_list[0]
-
-                    is_renamed = False
-                    match_class = best_match.get("webio_class") or key_class
-
-                    # Name comparison
-                    if ha["name"] != best_match["name"]:
-                        renamed_items.append(
-                            {
-                                "id": best_match["id"],
-                                "name": ha["name"],
-                                "payload": payload_map.get(ha["name"]),
-                                "webio_class": match_class,
-                            }
-                        )
-                        mismatches.add(f"rename_{key}")
-                        is_renamed = True
-
-                    if not is_renamed:
-                        if ha["type"] != best_match.get("type"):
-                            type_mismatches.append(
-                                {
-                                    "id": best_match["id"],
-                                    "name": ha["name"],
-                                    "payload": payload_map.get(ha["name"]),
-                                    "webio_class": match_class,
-                                }
-                            )
-                            mismatches.add(f"type_{key}")
-
-                        # Function Plan gap: command exists but is not wired directly to its
-                        # marker (M-keys) / IO (IO_-keys of managed extensions)
-                        gap_item = self._function_plan_gap_item(
-                            key,
-                            ha["name"],
-                            best_match,
-                            (wired_marker_webio_pairs, wired_io_webio_pairs, wired_knx_webio_pairs),
-                            io_meta_by_key.get(key),
-                            managed_io_exts,
-                        )
-                        if gap_item:
-                            function_plan_missing_items.append(gap_item)
-                            mismatches.add(f"function_plan_missing_{key}")
-
-                    # All other commands pointing to this key are duplicates -> Orphans
-                    for com in com_list:
-                        if com != best_match:
-                            orphans.append(
-                                {
-                                    "id": com["id"],
-                                    "name": com["name"],
-                                    "webio_class": com.get("webio_class"),
-                                    "webIoId": com.get("webIoId"),
-                                }
-                            )
-                            mismatches.add(f"orphan_{com['id']}")
-
-            # Find items in Comexio that no longer exist in HA
-            for key, com_list in com_map.items():
-                if key not in ha_map:
-                    for com in com_list:
-                        orphans.append(
-                            {
-                                "id": com["id"],
-                                "name": com["name"],
-                                "webio_class": com.get("webio_class"),
-                                "webIoId": com.get("webIoId"),
-                            }
-                        )
-                        mismatches.add(f"orphan_{com['id']}")
-
-            # Function Plan debris: marker/IO elements left in a managed plan after their
-            # WebIO counterpart was removed (e.g. directly in Comexio Studio) without also
-            # removing the wired source element — invisible to every check above since those
-            # all pivot on webio_commands/ha_map, never the raw plan elements themselves.
+        Marker/IO elements stay behind after their WebIO counterpart was removed (e.g. directly
+        in Comexio Studio) without also removing the wired source element — invisible to every
+        Web-IO check since those all pivot on webio_commands/ha_map, never the raw plan
+        elements themselves.
+        """
+        wired_marker, wired_io, wired_knx, connected_marker, connected_io, connected_knx = wired
+        items: list[dict[str, Any]] = []
+        if has_active_plan:
             markers_by_id = {str(m["id"]): m["name"] for m in final_data["markers"]}
+            for rid in self._dangling_source_ids("2", wired_marker, connected_marker):
+                items.append(
+                    {"name": markers_by_id.get(rid, f"M{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_MARKER}
+                )
+                mismatches.add(f"function_plan_dangling_M{rid}")
             knx_by_id = {str(k["id"]): k["name"] for k in final_data["knx"]}
+            for rid in self._dangling_source_ids("11", wired_knx, connected_knx):
+                items.append({"name": knx_by_id.get(rid, f"K{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_KNX})
+                mismatches.add(f"function_plan_dangling_K{rid}")
+        if managed_io_exts:
             # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
             # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
             # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
             io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
-            function_plan_dangling_items: list[dict[str, Any]] = []
-            if has_active_plan:
-                for rid in self._dangling_source_ids("2", wired_marker_webio_pairs, connected_marker_ids):
-                    function_plan_dangling_items.append(
-                        {"name": markers_by_id.get(rid, f"M{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_MARKER}
-                    )
-                    mismatches.add(f"function_plan_dangling_M{rid}")
-                for rid in self._dangling_source_ids("11", wired_knx_webio_pairs, connected_knx_ids):
-                    function_plan_dangling_items.append(
-                        {"name": knx_by_id.get(rid, f"K{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_KNX}
-                    )
-                    mismatches.add(f"function_plan_dangling_K{rid}")
-            if managed_io_exts:
-                for rid in self._dangling_source_ids("1", wired_io_webio_pairs, connected_io_ids):
-                    io = io_by_id.get(rid)
-                    name = f"{io['ext_name']} {io['identifier']}" if io else f"IO#{rid}"
-                    function_plan_dangling_items.append({"name": name, "ref_id": rid, "webio_class": WEBIO_CLASS_IO})
-                    mismatches.add(f"function_plan_dangling_IO{rid}")
+            for rid in self._dangling_source_ids("1", wired_io, connected_io):
+                io = io_by_id.get(rid)
+                name = f"{io['ext_name']} {io['identifier']}" if io else f"IO#{rid}"
+                items.append({"name": name, "ref_id": rid, "webio_class": WEBIO_CLASS_IO})
+                mismatches.add(f"function_plan_dangling_IO{rid}")
+        return items
 
-            # Trigger markers/KNX objects ([TRIG]/[TP]): independent of the Web-IO comparison
-            # above — the source's own Web-IO wiring is audited exactly like any other
-            # marker/KNX object (missing_items etc.); this only checks the separate
-            # Marker+Flanke self-reset construct, shared verbatim by KNX triggers.
-            trigger_ids_by_ref = self._trigger_ids_by_ref(final_data)
-            trigger_audit_result = self._audit_all_trigger_pairs(trigger_ids_by_ref)
-            if trigger_audit_result is None:
-                # Trigger plan exists but its data has not landed in the bulk snapshot yet —
-                # defer the whole trigger check to the next cycle rather than misread an
-                # unloaded plan as "every trigger source unwired" (same partial-snapshot
-                # guard #78 added for the generic Web-IO wiring check).
-                self._lp_missing_recheck_pending = True
-                trigger_audit_result = ({}, {})
-            function_plan_trigger_missing_by_ref, function_plan_trigger_orphan_by_ref = trigger_audit_result
-            for ref_type, ids in function_plan_trigger_missing_by_ref.items():
-                prefix = category_by_fub_module_type(ref_type).audit_key_prefix
-                for mid in ids:
-                    mismatches.add(f"function_plan_trigger_missing_{prefix}{mid}")
-            for ref_type, ids in function_plan_trigger_orphan_by_ref.items():
-                prefix = category_by_fub_module_type(ref_type).audit_key_prefix
-                for mid in ids:
-                    mismatches.add(f"function_plan_trigger_orphan_{prefix}{mid}")
+    def _audit_trigger_constructs(
+        self, final_data: dict[str, Any], mismatches: set[str]
+    ) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
+        """Trigger markers/KNX objects ([TRIG]/[TP]): (missing, orphaned) self-reset constructs by ref_type.
 
-            # KNX write path (Entwurf A "Merker-Brücke") audit, incl. Phase 7's API-Loopback
-            # fan-out check — see _audit_knx_bridge_items's own docstring for the full rationale.
-            knx_bridge_missing_items, knx_bridge_loopback_missing_items = self._audit_knx_bridge_items(
-                has_active_plan, final_data["knx"], ha_map, wired_knx_webio_pairs, mismatches
+        Independent of the Web-IO comparison — the source's own Web-IO wiring is audited
+        exactly like any other marker/KNX object (missing_items etc.); this only checks the
+        separate Marker+Flanke self-reset construct, shared verbatim by KNX triggers.
+        """
+        trigger_audit_result = self._audit_all_trigger_pairs(self._trigger_ids_by_ref(final_data))
+        if trigger_audit_result is None:
+            # Trigger plan exists but its data has not landed in the bulk snapshot yet —
+            # defer the whole trigger check to the next cycle rather than misread an
+            # unloaded plan as "every trigger source unwired" (same partial-snapshot
+            # guard #78 added for the generic Web-IO wiring check).
+            self._lp_missing_recheck_pending = True
+            return {}, {}
+        missing_by_ref, orphan_by_ref = trigger_audit_result
+        for kind, by_ref in (("missing", missing_by_ref), ("orphan", orphan_by_ref)):
+            for ref_type, ids in by_ref.items():
+                prefix = category_by_fub_module_type(ref_type).audit_key_prefix
+                mismatches.update(f"function_plan_trigger_{kind}_{prefix}{mid}" for mid in ids)
+        return missing_by_ref, orphan_by_ref
+
+    def _log_audit_summary(self, mismatches: set[str]) -> None:
+        """AUDIT SUMMARY LOGGING of last_audit_results — only when the result changed since the last poll."""
+        if not mismatches:
+            if self.last_summary_hash is not None:
+                _LOGGER.info("[%s] Audit successful: All systems are 100%% in sync!", self.server_id)
+            self.last_summary_hash = None
+            return
+
+        audit = self.last_audit_results
+        # Create a simple string representation to detect changes
+        current_summary_content = (
+            f"{len(audit['type'])}-{len(audit['missing'])}-{len(audit['rename'])}"
+            f"-{len(audit['orphan'])}-{audit['ip_mismatch']}-{len(audit['function_plan_missing'])}"
+            f"-{len(audit['function_plan_dangling'])}-{_count_by_ref(audit['function_plan_trigger_missing'])}"
+            f"-{_count_by_ref(audit['function_plan_trigger_orphan'])}-{len(audit['knx_bridge_missing'])}"
+            f"-{len(audit['knx_bridge_loopback_missing'])}"
+        )
+        # Only log details if the audit result differs from the previous run
+        if self.last_summary_hash == current_summary_content:
+            return
+        self.last_summary_hash = current_summary_content
+        self._log_audit_details(len(mismatches))
+
+    def _log_audit_details(self, mismatch_count: int) -> None:
+        """The consolidated warning plus the per-category audit summary of last_audit_results."""
+        audit = self.last_audit_results
+        trigger_missing = audit["function_plan_trigger_missing"]
+        trigger_orphan = audit["function_plan_trigger_orphan"]
+        ip_mismatch = audit["ip_mismatch"]
+        mismatched_ips = {cls: v["device_ip"] for cls, v in audit["webio_devices"].items() if v["ip_mismatch"]}
+
+        # Consolidated warning for the Home Assistant log overview
+        _LOGGER.warning(
+            "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
+            "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d, Trigger gaps:%d, Trigger orphans:%d, "
+            "KNX bridges:%d, KNX loopback:%d)",
+            self.server_id,
+            mismatch_count,
+            len(audit["type"]),
+            len(audit["missing"]),
+            len(audit["rename"]),
+            len(audit["orphan"]),
+            1 if ip_mismatch else 0,
+            len(audit["function_plan_dangling"]),
+            _count_by_ref(trigger_missing),
+            _count_by_ref(trigger_orphan),
+            len(audit["knx_bridge_missing"]),
+            len(audit["knx_bridge_loopback_missing"]),
+        )
+        if ip_mismatch:
+            _LOGGER.warning(
+                "[%s] Server address mismatch: HA=%s, Comexio=%s", self.server_id, audit["ha_address"], mismatched_ips
             )
 
-            # DPT1.x classification for digital KNX objects with no [RO]/[TRIG]/[K<id>] suffix
-            # yet (real ETS imports never carry Comexio's own naming convention) — see
-            # _auto_suffix_unambiguous_knx / _audit_knx_dpt_ambiguous docstrings.
-            if import_knx:
-                await self._auto_suffix_unambiguous_knx(final_data["knx"])
-                self._audit_knx_dpt_ambiguous(final_data["knx"])
+        # Consolidated audit summary with details for each category; the first four are
+        # always listed, the others only when they have items.
+        _LOGGER.info("=== %s COMEXIO AUDIT SUMMARY [%s] ===", ICON_WARNING, self.server_id)
+        sections = (
+            (ICON_FIX, "Type-Mismatches", "type", True),
+            (ICON_ADD, "Missing Webhooks", "missing", True),
+            (ICON_RENAME, "Renames", "rename", True),
+            (ICON_DELETE, "Orphans", "orphan", True),
+            (ICON_LINK, "Not wired in Function Plan", "function_plan_missing", False),
+            (ICON_DELETE, "Function Plan debris", "function_plan_dangling", False),
+            (ICON_LINK, "KNX objects without bridge Marker", "knx_bridge_missing", False),
+            (ICON_LINK, "KNX bridges without API-Loopback fan-out", "knx_bridge_loopback_missing", False),
+        )
+        for icon, label, result_key, always in sections:
+            if always or audit[result_key]:
+                _log_audit_items(icon, label, audit[result_key])
 
-            self.last_audit_results = {
-                "type": type_mismatches,
-                "missing": missing_items,
-                "rename": renamed_items,
-                "orphan": orphans,
-                "ip_mismatch": ip_mismatch,
-                "ha_address": ha_address,
-                "webio_devices": webio_device_audit,
-                "cleanup_entities": self._cleanup_entity_ids,
-                "cleanup_function_plan_count": self._cleanup_function_plan_count,
-                "function_plan_missing": function_plan_missing_items,
-                "function_plan_dangling": function_plan_dangling_items,
-                "function_plan_trigger_missing": function_plan_trigger_missing_by_ref,
-                "function_plan_trigger_orphan": function_plan_trigger_orphan_by_ref,
-                "knx_bridge_missing": knx_bridge_missing_items,
-                "knx_bridge_loopback_missing": knx_bridge_loopback_missing_items,
-            }
+        if trigger_missing:
+            _LOGGER.info(
+                "%s Trigger markers not wired (%d): %s",
+                ICON_LINK,
+                _count_by_ref(trigger_missing),
+                _format_by_ref(trigger_missing),
+            )
+        if trigger_orphan:
+            _LOGGER.info(
+                "%s Orphaned trigger constructs (%d): %s",
+                ICON_DELETE,
+                _count_by_ref(trigger_orphan),
+                _format_by_ref(trigger_orphan),
+            )
+        if ip_mismatch:
+            _LOGGER.info(
+                "%s IP/Port Mismatch: Comexio expects %s, but HA is at %s",
+                ICON_NETWORK,
+                mismatched_ips,
+                audit["ha_address"],
+            )
+        _LOGGER.info("========================================")
 
-            # Include pending entity cleanups (ignored markers/KNX with remaining HA entities) in mismatches
-            for cls_val, mid in self._cleanup_entity_ids:
-                mismatches.add(f"cleanup_entity_{cls_val}_{mid}")
+    def _update_sync_mismatch_issue(
+        self,
+        mismatches: set[str],
+        ha_map: dict[str, dict[str, Any]],
+        com_map: dict[str, list[dict[str, Any]]],
+        io_meta_by_key: dict[str, dict[str, Any]],
+    ) -> None:
+        """Manage the sync_mismatch repair issue in the Home Assistant UI from last_audit_results."""
+        if not mismatches:
+            ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
+            return
+        audit = self.last_audit_results
+        ip_count = 1 if audit["ip_mismatch"] else 0
+        issue_data_counts = {
+            "type": len(audit["type"]),
+            "missing": len(audit["missing"]),
+            "rename": len(audit["rename"]),
+            "orphan": len(audit["orphan"]),
+            "ip_mismatch": ip_count,
+            "cleanup_entities": len(self._cleanup_entity_ids),
+            "cleanup_function_plan_count": self._cleanup_function_plan_count,
+            "function_plan_missing": len(audit["function_plan_missing"]),
+            "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(audit["function_plan_missing"]),
+            "function_plan_dangling": len(audit["function_plan_dangling"]),
+            "function_plan_trigger_missing": _count_by_ref(audit["function_plan_trigger_missing"]),
+            "function_plan_trigger_orphan": _count_by_ref(audit["function_plan_trigger_orphan"]),
+            "knx_bridge_missing": len(audit["knx_bridge_missing"]),
+            "knx_bridge_loopback_missing": len(audit["knx_bridge_loopback_missing"]),
+            "all": len(mismatches),
+        }
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            f"sync_mismatch_{self.server_id}",
+            is_fixable=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="sync_mismatch",
+            translation_placeholders={
+                "ha_count": str(len(ha_map)),
+                "com_count": str(len(com_map)),
+                "t_count": str(len(audit["type"])),
+                "m_count": str(len(audit["missing"])),
+                "r_count": str(len(audit["rename"])),
+                "o_count": str(len(audit["orphan"])),
+                "i_count": str(ip_count),
+                "ce_count": str(len(self._cleanup_entity_ids)),
+            },
+            data={
+                "entry_id": self.config_entry.entry_id,
+                "counts": issue_data_counts,
+                "function_plan_missing_detail": self._function_plan_missing_detail(
+                    audit["function_plan_missing"], ha_map, io_meta_by_key
+                ),
+            },
+        )
 
-            # 📈 --- AUDIT SUMMARY LOGGING ---
-            if mismatches:
-                # Create a simple string representation to detect changes
-                current_summary_content = (
-                    f"{len(type_mismatches)}-{len(missing_items)}-{len(renamed_items)}"
-                    f"-{len(orphans)}-{ip_mismatch}-{len(function_plan_missing_items)}"
-                    f"-{len(function_plan_dangling_items)}-{_count_by_ref(function_plan_trigger_missing_by_ref)}"
-                    f"-{_count_by_ref(function_plan_trigger_orphan_by_ref)}-{len(knx_bridge_missing_items)}"
-                    f"-{len(knx_bridge_loopback_missing_items)}"
-                )
+    def _spawn_function_plan_backup_cycle(self) -> None:
+        """Load all plan wirings + rotate auto backups in the background.
 
-                # Only log details if the audit result differs from the previous run
-                if self.last_summary_hash != current_summary_content:
-                    self.last_summary_hash = current_summary_content
-
-                    # Consolidated warning for the Home Assistant log overview
-                    _LOGGER.warning(
-                        "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
-                        "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d, Trigger gaps:%d, Trigger orphans:%d, "
-                        "KNX bridges:%d, KNX loopback:%d)",
-                        self.server_id,
-                        len(mismatches),
-                        len(type_mismatches),
-                        len(missing_items),
-                        len(renamed_items),
-                        len(orphans),
-                        1 if ip_mismatch else 0,
-                        len(function_plan_dangling_items),
-                        _count_by_ref(function_plan_trigger_missing_by_ref),
-                        _count_by_ref(function_plan_trigger_orphan_by_ref),
-                        len(knx_bridge_missing_items),
-                        len(knx_bridge_loopback_missing_items),
-                    )
-                    if ip_mismatch:
-                        mismatched = {cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]}
-                        _LOGGER.warning(
-                            "[%s] Server address mismatch: HA=%s, Comexio=%s", self.server_id, ha_address, mismatched
-                        )
-
-                    # Consolidated audit summary with details for each category
-                    _LOGGER.info("=== %s COMEXIO AUDIT SUMMARY [%s] ===", ICON_WARNING, self.server_id)
-                    _LOGGER.info("%s Type-Mismatches (%d):", ICON_FIX, len(type_mismatches))
-                    for item in type_mismatches:
-                        _LOGGER.info("   -> %s", item["name"])
-
-                    _LOGGER.info("%s Missing Webhooks (%d):", ICON_ADD, len(missing_items))
-                    for item in missing_items:
-                        _LOGGER.info("   -> %s", item["name"])
-
-                    _LOGGER.info("%s Renames (%d):", ICON_RENAME, len(renamed_items))
-                    for item in renamed_items:
-                        _LOGGER.info("   -> %s", item["name"])
-
-                    _LOGGER.info("%s Orphans (%d):", ICON_DELETE, len(orphans))
-                    for item in orphans:
-                        _LOGGER.info("   -> %s", item["name"])
-
-                    if function_plan_missing_items:
-                        _LOGGER.info("%s Not wired in Function Plan (%d):", ICON_LINK, len(function_plan_missing_items))
-                        for item in function_plan_missing_items:
-                            _LOGGER.info("   -> %s", item["name"])
-
-                    if function_plan_dangling_items:
-                        _LOGGER.info("%s Function Plan debris (%d):", ICON_DELETE, len(function_plan_dangling_items))
-                        for item in function_plan_dangling_items:
-                            _LOGGER.info("   -> %s", item["name"])
-
-                    if knx_bridge_missing_items:
-                        _LOGGER.info(
-                            "%s KNX objects without bridge Marker (%d):", ICON_LINK, len(knx_bridge_missing_items)
-                        )
-                        for item in knx_bridge_missing_items:
-                            _LOGGER.info("   -> %s", item["name"])
-
-                    if knx_bridge_loopback_missing_items:
-                        _LOGGER.info(
-                            "%s KNX bridges without API-Loopback fan-out (%d):",
-                            ICON_LINK,
-                            len(knx_bridge_loopback_missing_items),
-                        )
-                        for item in knx_bridge_loopback_missing_items:
-                            _LOGGER.info("   -> %s", item["name"])
-
-                    if function_plan_trigger_missing_by_ref:
-                        _LOGGER.info(
-                            "%s Trigger markers not wired (%d): %s",
-                            ICON_LINK,
-                            _count_by_ref(function_plan_trigger_missing_by_ref),
-                            _format_by_ref(function_plan_trigger_missing_by_ref),
-                        )
-
-                    if function_plan_trigger_orphan_by_ref:
-                        _LOGGER.info(
-                            "%s Orphaned trigger constructs (%d): %s",
-                            ICON_DELETE,
-                            _count_by_ref(function_plan_trigger_orphan_by_ref),
-                            _format_by_ref(function_plan_trigger_orphan_by_ref),
-                        )
-
-                    if ip_mismatch:
-                        mismatched_ips = {
-                            cls: v["device_ip"] for cls, v in webio_device_audit.items() if v["ip_mismatch"]
-                        }
-                        _LOGGER.info(
-                            "%s IP/Port Mismatch: Comexio expects %s, but HA is at %s",
-                            ICON_NETWORK,
-                            mismatched_ips,
-                            ha_address,
-                        )
-
-                    _LOGGER.info("========================================")
-            else:
-                if self.last_summary_hash is not None:
-                    _LOGGER.info("[%s] Audit successful: All systems are 100%% in sync!", self.server_id)
-                self.last_summary_hash = None
-
-            # Manage repair issues in the Home Assistant UI
-            if mismatches:
-                issue_data_counts = {
-                    "type": len(type_mismatches),
-                    "missing": len(missing_items),
-                    "rename": len(renamed_items),
-                    "orphan": len(orphans),
-                    "ip_mismatch": 1 if ip_mismatch else 0,
-                    "cleanup_entities": len(self._cleanup_entity_ids),
-                    "cleanup_function_plan_count": self._cleanup_function_plan_count,
-                    "function_plan_missing": len(function_plan_missing_items),
-                    "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(function_plan_missing_items),
-                    "function_plan_dangling": len(function_plan_dangling_items),
-                    "function_plan_trigger_missing": _count_by_ref(function_plan_trigger_missing_by_ref),
-                    "function_plan_trigger_orphan": _count_by_ref(function_plan_trigger_orphan_by_ref),
-                    "knx_bridge_missing": len(knx_bridge_missing_items),
-                    "knx_bridge_loopback_missing": len(knx_bridge_loopback_missing_items),
-                    "all": len(mismatches),
-                }
-
-                ir.async_create_issue(
-                    self.hass,
-                    DOMAIN,
-                    f"sync_mismatch_{self.server_id}",
-                    is_fixable=True,
-                    severity=ir.IssueSeverity.WARNING,
-                    translation_key="sync_mismatch",
-                    translation_placeholders={
-                        "ha_count": str(len(ha_map)),
-                        "com_count": str(len(com_map)),
-                        "t_count": str(len(type_mismatches)),
-                        "m_count": str(len(missing_items)),
-                        "r_count": str(len(renamed_items)),
-                        "o_count": str(len(orphans)),
-                        "i_count": str(1 if ip_mismatch else 0),
-                        "ce_count": str(len(self._cleanup_entity_ids)),
-                    },
-                    data={
-                        "entry_id": self.config_entry.entry_id,
-                        "counts": issue_data_counts,
-                        "function_plan_missing_detail": self._function_plan_missing_detail(
-                            function_plan_missing_items, ha_map, io_meta_by_key
-                        ),
-                    },
-                )
-            else:
-                ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
-
-            self._check_duplicate_plan_names()
-
-            # Function Plan backup: load all plan wirings + rotate auto backups in the background.
-            # Entry-scoped task (cancelled on unload/reload) so neither startup nor the poll
-            # cycle is blocked by the ~0.5s/plan bulk load. Skip spawning a new task entirely
-            # while a previous cycle is still running, instead of creating one just to have it
-            # return immediately on the lock check.
-            if not self._function_plan_backup_lock.locked():
-                _LOGGER.debug("[%s] Function Plan backup cycle: spawning background task", self.server_id)
-                self.config_entry.async_create_background_task(
-                    self.hass,
-                    self._async_function_plan_backup_cycle(),
-                    name=f"comexio_{self.server_id}_function_plan_backup",
-                )
-            else:
-                _LOGGER.debug("[%s] Function Plan backup cycle: NOT spawned — lock already held", self.server_id)
-
-            # Publish only now that the whole poll succeeded — see source_counts comment above.
-            self.available_source_counts = source_counts
-            return final_data
-
-        except Exception as e:
-            _LOGGER.exception("[%s] Data fetch failed: %s", self.server_id, e)
-            raise
+        Entry-scoped task (cancelled on unload/reload) so neither startup nor the poll cycle is
+        blocked by the ~0.5s/plan bulk load. Skip spawning a new task entirely while a previous
+        cycle is still running, instead of creating one just to have it return immediately on
+        the lock check.
+        """
+        if not self._function_plan_backup_lock.locked():
+            _LOGGER.debug("[%s] Function Plan backup cycle: spawning background task", self.server_id)
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self._async_function_plan_backup_cycle(),
+                name=f"comexio_{self.server_id}_function_plan_backup",
+            )
+        else:
+            _LOGGER.debug("[%s] Function Plan backup cycle: NOT spawned — lock already held", self.server_id)
 
     async def _async_function_plan_backup_cycle(self) -> None:
         """Load all plan wirings and rotate auto backups (runs as entry-scoped background task)."""
@@ -2532,6 +2693,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     self._connection_poll_fail_count,
                     _CONNECTION_POLL_MAX_FAILURES,
                 )
+                # The armed preview still pauses the run-state timer — keep the states coming, on
+                # the admin session, since the preview session may be what just failed.
+                await self._async_refresh_run_states_in_preview(None)
             return
         if self._preview_plan_cache is not cache:
             # Stale response for a preview that's no longer armed (stopped/replaced while
@@ -2553,6 +2717,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self._render_armed_preview()
         except Exception:
             _LOGGER.exception("[%s] Connection-value plan preview refresh failed", self.server_id)
+        # After the render, so the plan view never waits for it; a failure here is counted
+        # by the run-state poll itself and never disarms the preview.
+        await self._async_refresh_run_states_in_preview(preview_session)
 
     async def async_shutdown(self) -> None:
         """Cancel a pending preview refresh before the coordinator shuts down."""
@@ -2978,6 +3145,169 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return async_track_time_interval(
             self.hass, self._async_bus_load_tick, timedelta(seconds=BUS_LOAD_POLL_INTERVAL_SEC)
         )
+
+    def async_start_plan_run_state_poll(self):
+        """Start the function plan run-state poll; returns the cancel callback.
+
+        No immediate tick: the first refresh has just read every plan's Active flag.
+        """
+        return async_track_time_interval(
+            self.hass,
+            self._async_plan_run_state_tick,
+            timedelta(seconds=FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC),
+        )
+
+    @property
+    def plan_run_states_available(self) -> bool:
+        """False once FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD fetches since the last fresh state failed,
+        or once FUNCTION_PLAN_LIST_UNREAD_THRESHOLD full polls brought no plan list (deleted plans unknown)."""
+        return (
+            self._plan_run_state_stale_count < FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+            and self._plan_list_unread_polls < FUNCTION_PLAN_LIST_UNREAD_THRESHOLD
+        )
+
+    def plan_run_state_available(self, fub_id: int) -> bool:
+        """Whether one plan's run state is fresh enough: the fetch works and answers for this plan."""
+        return (
+            self.plan_run_states_available
+            and self._plan_run_state_missed.get(fub_id, 0) < FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+        )
+
+    def _plan_run_state_poll_blocked(self) -> bool:
+        """Whether a sync, repair, restore or full poll runs — the run-state fetch waits for it."""
+        return self.in_sync or self._full_poll_running or self._sync_lock.locked() or self._restore_lock.locked()
+
+    async def _async_plan_run_state_tick(self, _now: datetime | None = None) -> None:
+        """Timer tick of the run-state poll; an armed preview's poll carries the states instead."""
+        if self._preview_plan_cache is None:
+            await self._async_refresh_plan_run_states()
+
+    async def _async_refresh_run_states_in_preview(self, session: aiohttp.ClientSession | None) -> None:
+        """Fetch the run states along with the preview's connection-value poll, rate-limited.
+
+        The debug box polls the element values every 0.5 s; the run states come second there.
+        """
+        interval = (
+            FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC
+            if self._connection_poll_fast_requested
+            else FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC
+        )
+        if time.monotonic() - self._plan_run_state_last_fetch >= interval:
+            await self._async_refresh_plan_run_states(session)
+
+    async def _async_refresh_plan_run_states(self, session: aiohttp.ClientSession | None = None) -> None:
+        """Fetch every known plan's run state and refresh the entities if one changed.
+
+        A failed fetch keeps the last known states; after FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+        failures since the last fresh state the run-state sensors turn unavailable
+        (plan_run_states_available). The endpoint's failure is logged once per outage, not per poll.
+        """
+        fub_ids = sorted(function_plan_ids(self.api.fub_data))
+        if not fub_ids or self._plan_run_state_fetching or self._plan_run_state_poll_blocked():
+            return
+        self._plan_run_state_last_fetch = time.monotonic()
+        run_state_mark = self.api.run_state_mark()
+        cache_epoch = self.api.fub_cache_epoch()
+        self._plan_run_state_fetching = True
+        try:
+            states = await self.api.get_function_plan_run_states(fub_ids, session=session)
+            if not states:
+                # aiocomexio skips every plan whose answer it cannot classify; none at all means
+                # the answer format changed (e.g. new firmware) — no fresh state, not a success.
+                raise ComexioDataError("no plan's run state could be read")
+        except (ComexioError, aiohttp.ClientError, TimeoutError) as err:
+            await self._async_plan_run_state_fetch_failed(err, session)
+            return
+        finally:
+            self._plan_run_state_fetching = False
+        # Only the fetch's own outage recovers here; an unread plan list ends with the next full poll.
+        was_unavailable = self._plan_run_state_stale_count >= FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
+        if self._plan_run_state_fail_streak:
+            _LOGGER.info(
+                "[%s] Function plan run-state fetch works again after %s failure(s)",
+                self.server_id,
+                self._plan_run_state_fail_streak,
+            )
+        self._plan_run_state_fail_streak = 0
+        self._plan_run_state_stale_count = 0
+        # A dropped answer counts no misses either: its omissions may predate the plan list written meanwhile.
+        state_changed = self._apply_fetched_run_states(states, run_state_mark, cache_epoch)
+        missed_out = self.api.fub_cache_epoch() == cache_epoch and self._count_missed_plan_run_states(fub_ids, states)
+        if state_changed or was_unavailable or missed_out:
+            self.async_update_listeners()
+
+    def _apply_fetched_run_states(self, states: dict[int, bool], run_state_mark: int, cache_epoch: int) -> bool:
+        """Write a run-state answer into the cache unless a newer plan list arrived meanwhile; True if changed.
+
+        A full poll, sync or restore that wrote a fetched plan list or plan while this answer was
+        on its way may carry newer Active flags than this answer: it is dropped then, the next
+        tick reads the states again. The endpoint still counts as working (the fetch succeeded).
+        """
+        if self.api.fub_cache_epoch() != cache_epoch:
+            _LOGGER.debug(
+                "[%s] Function plan run states dropped: the plan cache was refreshed during the fetch",
+                self.server_id,
+            )
+            return False
+        return self.api.apply_fub_run_states(states, since=run_state_mark)
+
+    def _count_missed_plan_run_states(self, fub_ids: list[int], states: dict[int, bool]) -> bool:
+        """Count the plans this fetch left out; True when one just crossed or recovered from the threshold."""
+        changed = False
+        for fub_id in fub_ids:
+            before = self._plan_run_state_missed.get(fub_id, 0)
+            if fub_id in states:
+                self._plan_run_state_missed.pop(fub_id, None)
+                if before >= FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD:
+                    _LOGGER.info(
+                        "[%s] Run state of function plan %s readable again after %s misses",
+                        self.server_id,
+                        fub_id,
+                        before,
+                    )
+                    changed = True
+                continue
+            self._plan_run_state_missed[fub_id] = before + 1
+            if before + 1 == FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD:
+                _LOGGER.warning(
+                    "[%s] Run state of function plan %s unreadable %s times in a row; its sensor turns "
+                    "unavailable (debug logging for aiocomexio shows the answer)",
+                    self.server_id,
+                    fub_id,
+                    before + 1,
+                )
+                changed = True
+        return changed
+
+    async def _async_plan_run_state_fetch_failed(self, err: Exception, session: aiohttp.ClientSession | None) -> None:
+        """Count a failed run-state fetch, log it once per outage and heal a lapsed main session."""
+        self._plan_run_state_fail_streak += 1
+        self._plan_run_state_stale_count += 1
+        level = logging.WARNING if self._plan_run_state_fail_streak == 1 else logging.DEBUG
+        _LOGGER.log(
+            level,
+            "[%s] Function plan run-state fetch failed (%s in a row): %s",
+            self.server_id,
+            self._plan_run_state_fail_streak,
+            err,
+        )
+        if self._plan_run_state_stale_count == FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD:
+            self.async_update_listeners()
+        # The main session lapsed; log it in again for the next tick (the preview session is
+        # renewed by ensure_preview_session on its own). Refused credentials are left to the
+        # full poll, which reports them — a login a minute would only risk a server-side lockout.
+        if session is not None or not isinstance(err, ComexioAuthenticationError):
+            return
+        if self._plan_run_state_relogin_refused or await self.api.login():
+            return
+        if self.api.last_login_error == "rejected":
+            self._plan_run_state_relogin_refused = True
+            _LOGGER.warning(
+                "[%s] Comexio refused the re-login for the function plan run states; waiting for the next full poll",
+                self.server_id,
+            )
+        else:
+            _LOGGER.debug("[%s] Re-login for the function plan run states failed: %s", self.server_id, err)
 
     async def _async_bus_load_tick(self, _now: datetime | None = None) -> None:
         """Poll internal bus workload (%) + SD-card presence on a fast, independent cadence.

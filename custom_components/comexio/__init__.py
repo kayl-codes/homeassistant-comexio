@@ -24,6 +24,8 @@ from .const import (
     SOURCE_CATEGORIES,
     MarkerKind,
     WebioClass,
+    function_plan_ids,
+    function_plan_run_state_unique_id,
     migrate_entry_options,
     stable_object_id,
     webio_range_check_entity_id,
@@ -154,6 +156,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
     # cancelled automatically on unload/reload.
     entry.async_on_unload(coordinator.async_start_bus_load_poll())
+    # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
+    entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
 
     # Set up services
     await async_setup_services(hass)
@@ -287,12 +291,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_plan_preview_image")
     active_unique_ids.add(f"comexio_{server_id}_function_plan_toggle_btn")
 
+    # Function plan run-state sensors (binary_sensor.py), one per plan in $Fubs. Without a
+    # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
+    # while running, the ones of plans deleted while HA was down go with the next scraped setup.
+    # Like the platform, keep the plans in the cache too: a plan HA created after the scrape
+    # (create_fup via a service while the setup awaits) is in fub_data, not in scraped_plan_ids.
+    if coordinator.scraped_plan_ids is not None:
+        plan_uids = {
+            function_plan_run_state_unique_id(server_id, fid)
+            for fid in coordinator.scraped_plan_ids | function_plan_ids(coordinator.api.fub_data)
+        }
+    else:
+        plan_uids = {
+            e.unique_id
+            for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+            if e.unique_id.startswith(function_plan_run_state_unique_id(server_id, ""))
+        }
+    active_unique_ids |= plan_uids
+
     # Bus-Load-Watchdog diagnostic sensors (always active, independent of extension/marker state)
-    active_unique_ids.add(f"comexio_{server_id}_extension_count_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_active_marker_count_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_function_plan_count_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_webio_command_count_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_watchdog_event_sensor")
+    active_unique_ids.update(
+        {
+            f"comexio_{server_id}_extension_count_sensor",
+            f"comexio_{server_id}_active_marker_count_sensor",
+            f"comexio_{server_id}_function_plan_count_sensor",
+            f"comexio_{server_id}_webio_command_count_sensor",
+            f"comexio_{server_id}_watchdog_event_sensor",
+        }
+    )
 
     # Extension firmware updates (update.py): one entity per known extension + BASE. Built the
     # same way as the IO entities above, since extension existence is independent of the
