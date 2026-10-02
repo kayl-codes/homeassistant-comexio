@@ -719,6 +719,17 @@ def test_create_fup_caches_the_new_plan(comexio_api: ComexioAPI, client: MagicMo
     client.get_raw_config.assert_not_awaited()  # the lib already read the entry back
 
 
+def test_create_fup_tells_the_listener(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Regression: without the call the new plan got its run-state sensor only with the next coordinator update.
+    comexio_api.run_state_listener = listener = MagicMock()
+    client.create_function_plan = AsyncMock(return_value=CreatedFunctionPlan(8, NEW_PLAN))
+    asyncio.run(comexio_api.create_fup("HA - IO"))
+    listener.assert_called_once_with()
+    _fail(client, "create_function_plan", ComexioRequestRejectedError("name already in use"))
+    asyncio.run(comexio_api.create_fup("HA - IO"))
+    listener.assert_called_once_with()  # a failed create changes no plan
+
+
 def test_create_fup_finds_a_plan_created_without_id(comexio_api: ComexioAPI, client: MagicMock) -> None:
     # Regression (p): the plan exists once Comexio confirmed it — None read as "name in use" before.
     comexio_api.update_fub_cache_entry(3, {"Id": 3, "Name": "HA - IO"})  # an older namesake
