@@ -22,6 +22,8 @@ from .const import (
     CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
     SOURCE_CATEGORIES,
+    STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC,
+    STATISTICS_UNIT_FIX_START_DELAY_SEC,
     MarkerKind,
     WebioClass,
     function_plan_ids,
@@ -163,7 +165,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await async_setup_services(hass)
 
     # Auto-fix statistics unit mismatches (one-time migration: empty → correct unit)
-    hass.async_create_task(_async_fix_statistics_units(hass, server_id, entry.entry_id))
+    # A background task: its waits for the recorder (STATISTICS_UNIT_FIX_*) must not hold up
+    # hass.async_block_till_done() (startup, tests); unload cancels it.
+    entry.async_create_background_task(
+        hass, _async_fix_statistics_units(hass, server_id, entry.entry_id), f"comexio_{server_id}_fix_statistics_units"
+    )
 
     # ---------------------------
     # Webhook Setup
@@ -461,7 +467,8 @@ def _migrate_webio_range_check_entity_id(hass: HomeAssistant, server_id: str) ->
 def _delete_stale_statistics_issues(hass: HomeAssistant, issue_reg, server_slug: str) -> int:
     """Remove recorder repair issues for this server's statistics."""
     deleted = 0
-    for domain, issue_id in issue_reg.issues:
+    # A copy: deleting from the registry while iterating it raises RuntimeError.
+    for domain, issue_id in list(issue_reg.issues):
         if domain == "recorder" and server_slug in issue_id.lower():
             ir.async_delete_issue(hass, domain, issue_id)
             deleted += 1
@@ -481,7 +488,7 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
     """
     import asyncio
 
-    await asyncio.sleep(15)
+    await asyncio.sleep(STATISTICS_UNIT_FIX_START_DELAY_SEC)
 
     if "recorder" not in hass.config.components:
         return
@@ -539,15 +546,20 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
             new_unit_class=None,
         )
 
-    # Give the recorder queue time to commit — async_block_till_done() can deadlock
-    # when HA is still starting up (new recorder tasks keep arriving), so a short
-    # sleep is the safe alternative.
-    await asyncio.sleep(5)
-
     # Remove stale repair issues — validate_statistics creates them on every Statistics
     # page load whenever it detects a stored-vs-entity unit mismatch. Now that the DB
     # is corrected, future runs will find no mismatch and not recreate them.
     issue_reg = ir.async_get(hass)
+    # Give the recorder queue time to commit — async_block_till_done() can deadlock
+    # when HA is still starting up (new recorder tasks keep arriving), so a short
+    # sleep is the safe alternative.
+    try:
+        await asyncio.sleep(STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC)
+    except asyncio.CancelledError:
+        # Unload/reload during the wait: the metadata updates are queued already, so the next run
+        # finds no mismatch and would never get here — remove the issues now or they stay for good.
+        _delete_stale_statistics_issues(hass, issue_reg, server_slug)
+        raise
     deleted = _delete_stale_statistics_issues(hass, issue_reg, server_slug)
 
     _LOGGER.info(

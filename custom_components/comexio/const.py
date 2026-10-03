@@ -399,6 +399,11 @@ ICON_INACTIVE = "➖"
 
 DEFAULT_NAME = "Comexio"
 
+# One-time statistics unit fix after setup (__init__._async_fix_statistics_units): wait for the
+# entities' first states before comparing units, then for the recorder to commit the metadata.
+STATISTICS_UNIT_FIX_START_DELAY_SEC = 15
+STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC = 5
+
 SCAN_INTERVAL_DEFAULT = 15
 SCAN_INTERVAL_OPTIONS = ["1", "5", "10", "15", "30", "45", "60", "120", "300", "600", "1440"]
 

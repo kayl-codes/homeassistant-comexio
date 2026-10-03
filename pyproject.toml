@@ -45,7 +45,8 @@ module = ["yaml"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# tests/ha needs its own environment (tests/ha/requirements.txt) and runs explicitly.
+testpaths = ["tests/unit"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true

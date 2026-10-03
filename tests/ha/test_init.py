@@ -1,0 +1,161 @@
+"""Setup, setup failures and unload of a config entry."""
+
+import asyncio
+from typing import Any
+from unittest.mock import patch
+
+from homeassistant.components.webhook import DOMAIN as WEBHOOK_DOMAIN
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.const import DOMAIN
+
+from .conftest import SERVER_ID
+
+WEBHOOK_ID = f"comexio_{SERVER_ID}"
+
+# One entity per kind the fixture config (config_basic.json) yields; None = state not asserted.
+EXPECTED_ENTITIES = {
+    "switch.iosrv1_m1": "on",  # digital marker, value from get_live_states
+    "number.iosrv1_m2": None,  # analog marker
+    "binary_sensor.iosrv1_m3": None,  # [RO] digital marker
+    "button.iosrv1_m4": None,  # [TRIG] marker
+    "binary_sensor.iosrv1_base_i1": "on",  # digital input
+    "switch.iosrv1_base_q1": "off",  # digital output
+    "sensor.iosrv1_base_ai1": "21.5",  # analog input, Comexio decimal comma in the config
+}
+
+
+async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_setup_and_unload(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+) -> None:
+    """The entry loads the fixture's entities with their live values; unload closes the session and webhook."""
+    api_returns["get_live_states"] = ({"1": "1"}, {})
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    entries = er.async_entries_for_config_entry(er.async_get(hass), mock_config_entry.entry_id)
+    assert set(EXPECTED_ENTITIES) <= {entry.entity_id for entry in entries}
+    for entity_id, expected_state in EXPECTED_ENTITIES.items():
+        state = hass.states.get(entity_id)
+        assert state is not None, entity_id
+        if expected_state is not None:
+            assert state.state == expected_state, entity_id
+    assert WEBHOOK_ID in hass.data[WEBHOOK_DOMAIN]
+    api = mock_comexio_api[0]
+    api.close.assert_not_called()
+
+    assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert mock_config_entry.state is ConfigEntryState.NOT_LOADED
+    assert hass.states.get("switch.iosrv1_m1").state == "unavailable"
+    assert WEBHOOK_ID not in hass.data[WEBHOOK_DOMAIN]
+    api.close.assert_called_once()
+
+
+async def test_statistics_unit_fix_runs_in_background_and_stops_on_unload(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The fix waits for the recorder without holding up async_block_till_done; unload cancels it."""
+    started: list[tuple[Any, ...]] = []
+    cancelled = asyncio.Event()
+
+    async def _waiting_fix(*args: Any) -> None:
+        started.append(args)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    with patch("custom_components.comexio._async_fix_statistics_units", _waiting_fix):
+        async with asyncio.timeout(10):
+            await _setup(hass, mock_config_entry)
+
+    assert started == [(hass, SERVER_ID, mock_config_entry.entry_id)]
+    assert not cancelled.is_set()
+
+    await hass.config_entries.async_unload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert cancelled.is_set()
+
+
+@pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])
+async def test_setup_retry_when_unreachable(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+) -> None:
+    """A login that fails on the connection retries the setup and closes the session."""
+    api_returns["login"] = False
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    mock_comexio_api[0].close.assert_called_once()
+
+
+@pytest.mark.logged_exception  # the coordinator logs the failed first refresh with its traceback
+async def test_setup_retry_when_first_refresh_fails(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+) -> None:
+    """A failing config fetch after a good login retries the setup and closes the session."""
+    api_returns["get_raw_config"] = OSError("connection reset")
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    mock_comexio_api[0].close.assert_called_once()
+
+
+@pytest.mark.parametrize("api_attributes", [{"last_login_error": "rejected"}])
+async def test_setup_auth_failed(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+) -> None:
+    """Rejected credentials fail the setup for good (no retry) and close the session."""
+    api_returns["login"] = False
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
+    mock_comexio_api[0].close.assert_called_once()
+
+
+@pytest.mark.xfail(
+    raises=AssertionError,
+    strict=True,
+    reason="ComexioConfigFlow has no async_step_reauth: HA aborts the reauth flow it starts",
+)
+@pytest.mark.parametrize("api_attributes", [{"last_login_error": "rejected"}])
+async def test_setup_auth_failed_offers_reauth(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+) -> None:
+    """Rejected credentials leave a reauth flow for the user to enter new ones."""
+    api_returns["login"] = False
+
+    await _setup(hass, mock_config_entry)
+
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]

@@ -41,6 +41,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 
 - `tests/unit/` holds pure-logic tests with synthetic fixtures in `tests/fixtures/comexio/` (never real
   installation data). Every bug fix in pure logic needs a regression test that fails without the fix.
+- `tests/ha/` holds Home Assistant integration tests; they build a `ComexioAPI` only through the `mock_comexio_api`
+  fixture in `tests/ha/conftest.py` and never reach the network. Flag a test that constructs or patches it elsewhere.
+- Exact pins of manifest.json requirements in `tests/requirements.txt`, `tests/ha/requirements.txt` and `ci.yml` must
+  match manifest.json (`scripts/generate_requirements.py --check` enforces it).
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
 - Test function parameters carry type annotations.
 
