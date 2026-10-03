@@ -3,8 +3,9 @@
 
 manifest.json's "requirements" array is the single source of truth for this
 integration's Python dependencies (it's what HA installs at runtime).
-requirements.txt exists only so OSV-Scanner has a lockfile-shaped format it
-can parse; it must never be hand-edited independently of manifest.json.
+requirements.txt is both the lockfile-shaped input OSV-Scanner parses and the
+dependency source of the CI mypy job; it must never be hand-edited independently
+of manifest.json.
 
 The test requirement files list their own packages; every exact manifest pin
 (name==version) must appear in them at the same version, so tests never run
@@ -30,7 +31,7 @@ PINNED_ELSEWHERE = [
 # name[extras] == version, as pip reads it (spaces allowed around ==). A wildcard (==0.3.0.*) stays
 # part of the version, so it reads as a drift instead of the exact pin it starts with.
 _PIN = re.compile(r"(?<![\w.-])([A-Za-z0-9][\w.-]*)(?:\[[^\]]*\])?\s*==\s*([\w.+!*-]*[\w*])")
-# A comment as pip and YAML read it: "#" at line start or after whitespace, to the end of the line.
+# A comment as pip reads it: "#" at line start or after whitespace, to the end of the line.
 _COMMENT = re.compile(r"(?:^|(?<=\s))#.*$", re.MULTILINE)
 
 
