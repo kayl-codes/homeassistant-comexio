@@ -208,7 +208,7 @@
         "name": "Vorschau-Info"
       },
       "plan_changed": {
-        "name": "Plan geändert"
+        "name": "Plan-Änderungen im letzten Intervall"
       },
       "extension_count": {
         "name": "Anzahl Erweiterungen"

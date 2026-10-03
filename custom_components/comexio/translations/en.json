@@ -208,7 +208,7 @@
         "name": "Preview info"
       },
       "plan_changed": {
-        "name": "Plan Changed"
+        "name": "Plan changes in last interval"
       },
       "extension_count": {
         "name": "Extension Count"
