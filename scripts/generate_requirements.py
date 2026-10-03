@@ -27,8 +27,9 @@ PINNED_ELSEWHERE = [
 ]
 
 
-# name[extras] == version, as pip reads it (spaces allowed around ==).
-_PIN = re.compile(r"(?<![\w.-])([A-Za-z0-9][\w.-]*)(?:\[[^\]]*\])?\s*==\s*([\w.+!-]*\w)")
+# name[extras] == version, as pip reads it (spaces allowed around ==). A wildcard (==0.3.0.*) stays
+# part of the version, so it reads as a drift instead of the exact pin it starts with.
+_PIN = re.compile(r"(?<![\w.-])([A-Za-z0-9][\w.-]*)(?:\[[^\]]*\])?\s*==\s*([\w.+!*-]*[\w*])")
 # A comment as pip and YAML read it: "#" at line start or after whitespace, to the end of the line.
 _COMMENT = re.compile(r"(?:^|(?<=\s))#.*$", re.MULTILINE)
 

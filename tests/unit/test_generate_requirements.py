@@ -56,6 +56,7 @@ def test_matching_pin_spellings_pass(repo: Path, ci_line: str) -> None:
     ("ci_text", "message"),
     [
         ("pip install --no-deps aiocomexio==0.1.0\n", "ci.yml: aiocomexio==0.1.0 (manifest.json: 0.3.0)"),
+        ("pip install --no-deps aiocomexio==0.3.0.*\n", "ci.yml: aiocomexio==0.3.0.* (manifest.json: 0.3.0)"),
         ("pip install --no-deps aiocomexio_x==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
         ("pip install --no-deps aiocomexio>=0.2\n", "ci.yml: no aiocomexio==0.3.0 pin"),
         ("# pip install --no-deps aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
