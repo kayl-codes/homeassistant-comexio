@@ -466,13 +466,13 @@ def _migrate_webio_range_check_entity_id(hass: HomeAssistant, server_id: str) ->
 
 def _delete_stale_statistics_issues(hass: HomeAssistant, issue_reg, server_slug: str) -> int:
     """Remove recorder repair issues for this server's statistics."""
-    deleted = 0
-    # A copy: deleting from the registry while iterating it raises RuntimeError.
-    for domain, issue_id in list(issue_reg.issues):
-        if domain == "recorder" and server_slug in issue_id.lower():
-            ir.async_delete_issue(hass, domain, issue_id)
-            deleted += 1
-    return deleted
+    # Collected first: deleting from the registry while iterating it raises RuntimeError.
+    stale = [
+        issue_id for domain, issue_id in issue_reg.issues if domain == "recorder" and server_slug in issue_id.lower()
+    ]
+    for issue_id in stale:
+        ir.async_delete_issue(hass, "recorder", issue_id)
+    return len(stale)
 
 
 async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry_id: str) -> None:

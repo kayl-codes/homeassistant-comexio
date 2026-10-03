@@ -18,10 +18,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "custom_components" / "comexio" / "manifest.json"
-REQUIREMENTS = ROOT / "requirements.txt"
+REQUIREMENTS_TXT = "requirements.txt"
+REQUIREMENTS = ROOT / REQUIREMENTS_TXT
 PINNED_ELSEWHERE = [
-    ROOT / "tests" / "requirements.txt",
-    ROOT / "tests" / "ha" / "requirements.txt",
+    ROOT / "tests" / REQUIREMENTS_TXT,
+    ROOT / "tests" / "ha" / REQUIREMENTS_TXT,
     ROOT / ".github" / "workflows" / "ci.yml",
 ]
 
