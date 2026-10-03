@@ -32,11 +32,17 @@ pytest tests/unit
 # Unit tests with coverage report
 pytest tests/unit --cov --cov-report=term-missing
 
+# Changed lines no unit test reaches (non-blocking report, also in the CI job summary of every PR)
+pytest tests/unit --cov --cov-report=xml && diff-cover coverage.xml --compare-branch=origin/master
+
 # Regenerate snapshots after an intended output change (review the diff!)
 pytest tests/unit --snapshot-update
+
+# HA integration tests — Linux/WSL only, own venv (install once: pip install -r tests/ha/requirements.txt)
+pytest tests/ha -o asyncio_mode=auto
 ```
 
-`tests/unit/` holds pure-logic tests (parsers, Web-IO command builders, KNX DPT handling, function plan diff/render/analysis) — no HA instance, runs natively on Windows. Test data lives in `tests/fixtures/comexio/` (synthetic, never real installation data); the only place that constructs a `ComexioAPI` is the `comexio_api` fixture in `tests/unit/conftest.py`. Anything needing a running HA (config flow, setup, webhook, coordinator) is still manual testing against a live HA + Comexio instance.
+`tests/unit/` holds pure-logic tests (parsers, Web-IO command builders, KNX DPT handling, function plan diff/render/analysis) — no HA instance, runs natively on Windows. Test data lives in `tests/fixtures/comexio/` (synthetic, never real installation data); the only place that constructs a `ComexioAPI` is the `comexio_api` fixture in `tests/unit/conftest.py`. `tests/ha/` holds Home Assistant integration tests (pytest-homeassistant-custom-component): entry setup/unload and its failure paths, the config flow, the webhook. They need their own environment — the package pins pytest/syrupy versions that clash with `tests/requirements.txt` — and do not run on Windows (use WSL). The only place they construct a `ComexioAPI` is the `mock_comexio_api` fixture in `tests/ha/conftest.py`: `parse_config` stays real on the synthetic fixtures, every coroutine method is an `AsyncMock` (values via the `api_returns` fixture), so no test reaches the network. Anything not covered there (sync, repairs, options flow, live Comexio behaviour) is still manual testing against a live HA + Comexio instance.
 
 ## Code quality rules
 
@@ -44,7 +50,7 @@ pytest tests/unit --snapshot-update
 - Ruff rule sets: B, C4, E, F, I, SIM, UP, W
 - Sourcery enabled for all files except `.github/` and `tests/`
 - Cognitive complexity ≤ 15; no duplicated string literals (extract constants)
-- **Tests alongside ruff:** every change runs `pytest tests/unit` in addition to `ruff check` / `ruff format` before it counts as done (the pre-commit hook `pytest-unit` and the CI job `tests` enforce the same). A red test is a finding, not an obstacle — never delete or loosen an assertion to make it pass.
+- **Tests alongside ruff:** every change runs `pytest tests/unit` (and, for HA-facing code, `pytest tests/ha` in WSL) in addition to `ruff check` / `ruff format` before it counts as done (the pre-commit hook `pytest-unit` and the CI job `tests` enforce the same). A red test is a finding, not an obstacle — never delete or loosen an assertion to make it pass.
 - **Snapshots:** a failing snapshot means the output changed. If the change is intended, regenerate with `--snapshot-update` and state the reviewed snapshot diff in the PR; otherwise fix the code.
 - **Regression tests:** every bug fix in pure logic (parsers, command builders, diff/render/analysis) gets a test that fails without the fix. Test data goes to `tests/fixtures/comexio/` and must be synthetic.
 
@@ -124,7 +130,7 @@ The coordinator's `last_audit_results` dict (populated every poll) drives both s
 
 ### Unique ID and entity_id scheme
 
-**Rule: ids carry only the technical address; only the display name carries the Comexio description.** A renamed description or a changed naming schema must never change a unique_id or entity_id. Every case below is pinned by a test (`tests/unit/test_entity_naming.py`, `test_api_parse_config.py`) — extend those tables instead of special-casing.
+**Rule: ids carry only the technical address; only the display name carries the Comexio description.** A renamed description or a changed naming schema must never change a unique_id or entity_id. Every case below is pinned by a test (`tests/unit/test_entity_naming.py`, `test_api_parse_config.py`) — extend those tables instead of special-casing. A new entity class requests its entity_id through `ComexioStableEntityIdMixin` (or `ComexioFunctionPlanEntityMixin` on the function plan device); `test_every_entity_class_requests_a_stable_entity_id` fails otherwise. HA-derived ids are a deliberate exception listed in `HA_DERIVED_ENTITY_ID_CLASSES`.
 
 | Entity type | unique_id | entity_id (new entities) |
 |-------------|-----------|--------------------------|

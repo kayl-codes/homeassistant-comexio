@@ -37,3 +37,4 @@ venv/
 hs_err_pid*.log
 
 coverage.xml
+diff-cover.md
