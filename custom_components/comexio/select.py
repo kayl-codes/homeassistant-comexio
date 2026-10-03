@@ -168,7 +168,8 @@ class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorE
     _attr_name = "Backup"
     _hub_era_name = "Function Plan Backup"
     _attr_icon = "mdi:backup-restore"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Next to the 'Plan' select whose backups it lists.
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: ComexioCoordinator) -> None:
         super().__init__(coordinator)

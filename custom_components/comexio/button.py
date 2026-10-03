@@ -3403,7 +3403,9 @@ class ComexioPlanToggleButton(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
 
     _attr_has_entity_name = True
     _hub_era_name = "Function Plan Toggle"
-    _attr_name = "Start/Stop"
+    _attr_name = "Plan start/stop toggle"
+    # Next to the 'Plan' select it acts on.
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
