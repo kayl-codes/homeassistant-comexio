@@ -12,9 +12,9 @@ from custom_components.comexio import plan_preview
 from custom_components.comexio.services import misc
 
 
-def _run_start(*, armed: bool, selection: bool) -> tuple[dict, AsyncMock]:
+def _run_start(*, armed: bool, selection: bool, render: AsyncMock | None = None) -> tuple[dict, AsyncMock]:
     coordinator = SimpleNamespace(preview_armed=armed, server_id="iosrv1")
-    render = AsyncMock()
+    render = render or AsyncMock()
     call = SimpleNamespace(data={})
     with (
         patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
@@ -41,6 +41,13 @@ def test_nothing_to_preview_is_reported() -> None:
     result, render = _run_start(armed=False, selection=False)
     assert result["success"] is False
     render.assert_not_called()
+
+
+def test_a_failed_render_is_not_reported_as_armed() -> None:
+    """E.g. an expired session: the plan does not load, so the card must not be told the poll runs."""
+    render = AsyncMock(side_effect=HomeAssistantError("The plan 'X' (ID 3) could not be loaded from Comexio."))
+    result, _ = _run_start(armed=False, selection=True, render=render)
+    assert result == {"success": False, "error": "The plan 'X' (ID 3) could not be loaded from Comexio."}
 
 
 def _run_follow(*, armed: bool, selection: bool, render: AsyncMock) -> None:
@@ -73,3 +80,12 @@ def test_a_failed_follow_render_is_logged(caplog: pytest.LogCaptureFixture) -> N
     with caplog.at_level(logging.WARNING):
         _run_follow(armed=True, selection=True, render=render)
     assert "backup vanished" in caplog.text
+
+
+def test_an_unexpected_follow_error_is_logged_not_raised(caplog: pytest.LogCaptureFixture) -> None:
+    """The follow runs as a background task: an error must end in our log, not in asyncio's."""
+    render = AsyncMock(side_effect=OSError("disk full"))
+    with caplog.at_level(logging.ERROR):
+        _run_follow(armed=True, selection=True, render=render)
+    assert "failed to follow the new selection" in caplog.text
+    assert "disk full" in caplog.text

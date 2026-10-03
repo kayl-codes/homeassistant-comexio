@@ -20,7 +20,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 import voluptuous as vol
 
-from .const import DOMAIN, FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC
+from .const import DOMAIN, FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC, FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ ISSUE_FUNCTION_PLAN_STOPPED = "function_plan_stopped"
 ISSUE_FUNCTION_PLAN_STOPPED_USER = "function_plan_stopped_user"
 START_ACTION_PREFIX = "COMEXIO_START_PLAN_"
 NOTIFY_DOMAIN = "notify"
+MOBILE_APP_SERVICE_PREFIX = "mobile_app_"
 
 # Push texts by HA language (English fallback); {name} and {fub_id} are filled in.
 PUSH_TEXTS: dict[str, dict[str, str]] = {
@@ -135,6 +136,8 @@ class ManagedPlanWatchdog:
         self.stopped: dict[int, str] | None = None
         # fub_id → time.monotonic() of the last refused auto-start (retry back-off).
         self._restart_refused_at: dict[int, float] = {}
+        # fub_id → time.monotonic() of the last successful auto-start (stopped-again detection).
+        self._auto_started_at: dict[int, float] = {}
         self._checking = False
 
     async def async_check(
@@ -155,7 +158,7 @@ class ManagedPlanWatchdog:
             self._user_plans = frozenset(user_plans)
             previous = self.stopped or {}
             stopped = next_stopped_plans(managed, run_state, previous)
-            self._log_transitions(previous, stopped)
+            self._log_transitions(previous, stopped, managed)
             to_start = {fub_id: name for fub_id, name in stopped.items() if self._auto_start_enabled(fub_id)}
             auto_started: dict[int, str] = {}
             if to_start:
@@ -181,6 +184,7 @@ class ManagedPlanWatchdog:
         confirm replaces the push with a "runs again" one (started from the phone), else the push is removed.
         """
         self._restart_refused_at.pop(fub_id, None)
+        self._auto_started_at.pop(fub_id, None)
         ir.async_delete_issue(self._hass, DOMAIN, stopped_plan_issue_id(self._server_id, fub_id))
         name = (self.stopped or {}).get(fub_id, str(fub_id))
         if self.stopped is not None:
@@ -194,7 +198,9 @@ class ManagedPlanWatchdog:
         """Tell the phone a start from its push failed, with the "Start plan" action again."""
         await self._async_push(fub_id, name, "failed_title", "failed", with_action=True)
 
-    def _log_transitions(self, previous: Mapping[int, str], stopped: Mapping[int, str]) -> None:
+    def _log_transitions(
+        self, previous: Mapping[int, str], stopped: Mapping[int, str], managed: Mapping[int, str]
+    ) -> None:
         for fub_id in stopped.keys() - previous.keys():
             _LOGGER.warning(
                 "[%s] Monitored function plan '%s' (ID %s) is not running in Comexio",
@@ -203,9 +209,32 @@ class ManagedPlanWatchdog:
                 fub_id,
             )
         for fub_id in previous.keys() - stopped.keys():
+            # A stopped plan deleted in Comexio (or no longer picked) drops out of managed: no recovery.
+            verdict = "runs again" if fub_id in managed else "is no longer watched (deleted or unselected)"
             _LOGGER.info(
-                "[%s] Monitored function plan '%s' (ID %s) runs again", self._server_id, previous[fub_id], fub_id
+                "[%s] Monitored function plan '%s' (ID %s) %s", self._server_id, previous[fub_id], fub_id, verdict
             )
+
+    def _stopped_again_after_auto_start(self, fub_id: int, name: str, now: float) -> bool:
+        """A plan that stops again soon after its auto-start is reported, not restarted over and over.
+
+        Counts as a refused start, so the repair, the problem sensor and the alarm push show it
+        and the next try waits for the retry back-off.
+        """
+        started_at = self._auto_started_at.pop(fub_id, None)
+        if started_at is None or now - started_at >= FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
+            return False
+        _LOGGER.warning(
+            "[%s] Monitored function plan '%s' (ID %s) stopped again within %s s of its auto-start; "
+            "not restarting it for %s s",
+            self._server_id,
+            name,
+            fub_id,
+            FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
+            FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC,
+        )
+        self._restart_refused_at[fub_id] = now
+        return True
 
     async def _async_auto_start(self, stopped: Mapping[int, str]) -> dict[int, str]:
         """Start the stopped plans; returns the ones started."""
@@ -215,8 +244,11 @@ class ManagedPlanWatchdog:
             refused_at = self._restart_refused_at.get(fub_id)
             if refused_at is not None and now - refused_at < FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC:
                 continue
+            if self._stopped_again_after_auto_start(fub_id, name, now):
+                continue
             if await self._start_plan(fub_id):
                 self._restart_refused_at.pop(fub_id, None)
+                self._auto_started_at[fub_id] = now
                 self._notify_auto_started(fub_id, name)
                 started[fub_id] = name
                 continue
@@ -307,15 +339,24 @@ class ManagedPlanWatchdog:
         )
 
     async def _async_clear_push(self, fub_id: int) -> None:
-        await self._async_send({"message": "clear_notification", "data": {"tag": self._push_tag(fub_id)}})
+        # A companion-app command: any other notify service would deliver it as the text "clear_notification".
+        await self._async_send(
+            {"message": "clear_notification", "data": {"tag": self._push_tag(fub_id)}}, mobile_app_only=True
+        )
 
-    async def _async_send(self, service_data: dict[str, Any]) -> None:
+    async def _async_send(self, service_data: dict[str, Any], *, mobile_app_only: bool = False) -> None:
         """Send to every configured notify service; a failing one is logged and does not stop the others."""
         for target in self._notify_targets():
             service = target.removeprefix(f"{NOTIFY_DOMAIN}.")
+            if mobile_app_only and not service.startswith(MOBILE_APP_SERVICE_PREFIX):
+                continue
             try:
                 await self._hass.services.async_call(NOTIFY_DOMAIN, service, service_data, blocking=True)
             except (HomeAssistantError, vol.Invalid) as err:
                 _LOGGER.warning(
                     "[%s] Function plan watchdog push to notify.%s failed: %s", self._server_id, service, err
                 )
+            except Exception:
+                # Third-party notify platforms raise their own errors (aiohttp, timeouts, ...); none of
+                # them may skip the remaining targets or the watchdog check that sends the push.
+                _LOGGER.exception("[%s] Function plan watchdog push to notify.%s failed", self._server_id, service)

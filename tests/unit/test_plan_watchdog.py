@@ -214,6 +214,48 @@ def test_failing_notify_service_does_not_stop_the_watchdog(ir: MagicMock) -> Non
     assert [service for _, service, _ in _pushes(watchdog)] == ["mobile_app_gone", "mobile_app_phone"]
 
 
+def test_any_notify_error_spares_the_other_targets_and_the_check(ir: MagicMock) -> None:
+    """Third-party notify platforms raise their own errors; the check must still finish and report."""
+    watchdog, _ = _watchdog(targets=["mobile_app_flaky", "mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = [TimeoutError("push timed out"), None]
+    assert asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True))) is True
+    assert [service for _, service, _ in _pushes(watchdog)] == ["mobile_app_flaky", "mobile_app_phone"]
+    assert watchdog.stopped == {34: "HA - Marker 1"}
+
+
+def test_clear_notification_goes_to_companion_apps_only(ir: MagicMock) -> None:
+    """Any other notify service would deliver the command as the text "clear_notification"."""
+    watchdog, _ = _watchdog(targets=["mobile_app_phone", "notify.telegram"])
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    clears = [service for _, service, data in _pushes(watchdog) if data["message"] == "clear_notification"]
+    assert clears == ["mobile_app_phone"]
+
+
+def test_plan_stopping_again_after_its_auto_start_is_reported(ir: MagicMock) -> None:
+    """No silent restart loop: a plan that stops right after its auto-start gets the repair and the alarm."""
+    watchdog, started = _watchdog([True, True], targets=["mobile_app_phone"])
+    watchdog.auto_restart = True
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34]
+    assert watchdog.stopped == {}
+
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34]  # within FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC: not started again
+    assert watchdog.stopped == {34: "HA - Marker 1"}
+    assert (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34)) in ir.async_get.return_value.issues
+    assert "actions" in _pushes(watchdog)[-1][2]["data"]  # alarm with the "Start plan" action
+
+
+def test_deleted_watched_plan_is_not_logged_as_running_again(ir: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
+    watchdog, _ = _watchdog()
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    with caplog.at_level("INFO"):
+        asyncio.run(watchdog.async_check({42: "HA - TRIGGER"}, _states(p42=True)))
+    assert "is no longer watched" in caplog.text
+    assert "runs again" not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("action", "expected"),
     [

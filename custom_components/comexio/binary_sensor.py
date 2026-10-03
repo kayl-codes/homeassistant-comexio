@@ -150,7 +150,8 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
 
     See plan_watchdog.
 
-    Unknown until the watchdog's first check right after setup (coordinator.async_initial_plan_watch).
+    Unknown until the watchdog's first check right after setup (coordinator.async_initial_plan_watch),
+    unavailable while the plan run states cannot be read.
     """
 
     _attr_has_entity_name = True
@@ -161,6 +162,11 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"comexio_{server_id}_managed_plans_problem"
+
+    @property
+    def available(self) -> bool:
+        # While the run states cannot be read the watchdog is blind: "off" would claim all plans run.
+        return super().available and self.coordinator.plan_run_states_available
 
     @property
     def is_on(self) -> bool | None:

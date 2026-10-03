@@ -345,8 +345,14 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
     if not preview_selection_available(coordinator):
         _LOGGER.debug("Function Plan Preview Start: no plan is selected")
         return {"success": False, "error": "No plan is selected for the preview."}
-    await async_render_selected_preview(coordinator)
-    _LOGGER.info("Function Plan Preview Start: preview armed (Dauer: %.1fs)", time.monotonic() - started)
+    try:
+        await async_render_selected_preview(coordinator)
+    except HomeAssistantError as err:
+        _LOGGER.warning(
+            "Function Plan Preview Start: preview not armed (Duration: %.1fs): %s", time.monotonic() - started, err
+        )
+        return {"success": False, "error": str(err)}
+    _LOGGER.info("Function Plan Preview Start: preview armed (Duration: %.1fs)", time.monotonic() - started)
     return {"success": True, "already_armed": False}
 
 

@@ -63,15 +63,17 @@ async def _async_render_orphaned(coordinator: ComexioCoordinator) -> None:
 
 
 async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None:
-    """Render the selected plan (or chosen backup snapshot) and arm the live preview."""
+    """Render the selected plan (or chosen backup snapshot) and arm the live preview.
+
+    Raises HomeAssistantError when nothing could be rendered, so no caller reports an armed preview.
+    """
     if coordinator.orphaned_plans_view_active():
         await _async_render_orphaned(coordinator)
         return
     api = coordinator.api
     fub_id = coordinator.get_active_function_plan_fub_id()
     if fub_id is None:
-        _LOGGER.warning("[%s] Plan preview requested but no plan is selected", coordinator.server_id)
-        return
+        raise HomeAssistantError("No plan is selected for the preview.")
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
 
     backup_choice = _active_backup_choice(coordinator, fub_id, plan_name)
@@ -79,10 +81,7 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
         kind, slot = backup_choice
         snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
         if snapshot is None:
-            _LOGGER.warning(
-                "[%s] Plan preview: backup %s[%d] not found for '%s'", coordinator.server_id, kind, slot, plan_name
-            )
-            return
+            raise HomeAssistantError(f"The backup {kind}[{slot}] of plan '{plan_name}' was not found.")
         await coordinator.async_generate_plan_preview(
             fub_id,
             plan_name,
@@ -95,8 +94,7 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
 
     plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
-        _LOGGER.warning("[%s] Plan preview: could not load plan %s", coordinator.server_id, fub_id)
-        return
+        raise HomeAssistantError(f"The plan '{plan_name}' (ID {fub_id}) could not be loaded from Comexio.")
     await coordinator.async_generate_plan_preview(
         fub_id, plan_name, plan_data.get("elements", {}), plan_data.get("connections", {}), "live"
     )
@@ -113,3 +111,7 @@ async def async_follow_selection(coordinator: ComexioCoordinator) -> None:
         await async_render_selected_preview(coordinator)
     except HomeAssistantError as err:
         _LOGGER.warning("[%s] Plan preview not updated to the new selection: %s", coordinator.server_id, err)
+    except Exception:
+        # Last line of a background task: anything else would end it with asyncio's bare
+        # "Task exception was never retrieved".
+        _LOGGER.exception("[%s] Plan preview failed to follow the new selection", coordinator.server_id)
