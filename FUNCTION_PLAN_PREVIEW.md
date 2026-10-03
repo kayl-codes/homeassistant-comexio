@@ -78,13 +78,14 @@ interact with it).
 
 ## 3. Adding the Card to a Dashboard
 
-Three entities work together (replace `iosrv1` with your instance name):
+These entities work together (replace `iosrv1` with your instance name):
 
 | Entity | Role |
 |---|---|
 | `select.iosrv1_function_plans` | Choose which plan to preview. |
 | `select.iosrv1_function_plan_backup` | Live plan (default) or one of its stored backups. |
 | `image.iosrv1_plan_preview` | Holds the last rendered SVG — the picture source for the card. |
+| `sensor.iosrv1_plan_preview_info` | Name of the plan last rendered, its source (live or backup) and render time as attributes (diagnostic, optional). |
 
 Example dashboard section:
 
@@ -112,6 +113,8 @@ cards:
 - **Structural** changes (elements or wires added/removed in Comexio) show up after
   re-selecting the plan or reopening the card. **Live wire colors**, however, update
   themselves automatically while values just change.
+- After a Home Assistant restart, the preview image and **Preview info** keep showing the
+  last render until the card is opened again — no `unknown` state in between.
 - To preview a **stored backup** instead of the live plan, pick it in the **Backup**
   select, or use the `function_plan_visualize` action with its `snapshot` field and
   `format: svg` — both work fully offline.
@@ -905,7 +908,7 @@ Bild-Entität-Karte kann nur nicht damit interagieren).
 
 ## 3. Karte zum Dashboard hinzufügen
 
-Drei Entitäten arbeiten zusammen (Instanzname `iosrv1` durch die eigene Instanz
+Diese Entitäten arbeiten zusammen (Instanzname `iosrv1` durch die eigene Instanz
 ersetzen):
 
 | Entität | Rolle |
@@ -913,6 +916,7 @@ ersetzen):
 | `select.iosrv1_function_plans` | Plan für die Vorschau auswählen. |
 | `select.iosrv1_function_plan_backup` | Live-Plan (Standard) oder eines seiner gespeicherten Backups. |
 | `image.iosrv1_plan_preview` | Enthält das zuletzt gerenderte SVG — Bildquelle für die Karte. |
+| `sensor.iosrv1_plan_preview_info` | Name des zuletzt gerenderten Plans, Quelle (live oder Backup) und Renderzeit als Attribute (Diagnose, optional). |
 
 Beispiel-Dashboard-Abschnitt:
 
@@ -943,6 +947,8 @@ cards:
 - **Strukturelle** Änderungen (Elemente/Drähte in Comexio hinzugefügt/entfernt)
   erscheinen nach erneuter Planauswahl oder erneutem Öffnen der Karte. **Live-Drahtfarben**
   hingegen aktualisieren sich von selbst, solange sich nur Werte ändern.
+- Nach einem Home-Assistant-Neustart zeigen Vorschaubild und **Vorschau-Info** weiter den
+  letzten Stand, bis die Karte wieder geöffnet wird — kein `unknown` zwischendurch.
 - Um stattdessen ein **gespeichertes Backup** anzuzeigen, es in der **Backup**-Auswahl
   wählen oder die Aktion `function_plan_visualize` mit dem Feld `snapshot` und
   `format: svg` verwenden — beides funktioniert vollständig offline.

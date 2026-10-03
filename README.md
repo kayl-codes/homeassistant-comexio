@@ -52,6 +52,10 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `select` | Function Plans | Lists all Comexio function plans; used as the default target for the function-plan services. |
 | `sensor` (diagnostic) | Integration | `Offline Extensions` — shows how many extension modules are currently offline and lists their names as a state attribute. |
 | `sensor` (diagnostic) | Integration | `Backups` (Function plans device) — total number of stored plan snapshots, per-plan details as state attributes. |
+| `sensor` (diagnostic) | Integration | `Backups (deleted plans)` (Function plans device) — number of stored snapshots whose plan no longer exists in Comexio (deleted or renamed), the plans as a state attribute. |
+| `sensor` | Function Plans | One per plan (`sensor.iosrv1_fub19`, named after the plan) — run state `Running` / `Stopped`, or `Starting…` / `Stopping…` while HA itself starts or stops it. |
+| `binary_sensor` (diagnostic) | Integration | `Managed Plans Problem` (Function plans device) — on while a watched function plan does not run; the stopped plans as a state attribute. See [Function plan watchdog](#function-plan-watchdog). |
+| `switch` (config) | Integration | `Plan Auto-Start (HA plans)` / `(user plans)` (Function plans device) — start a stopped watched plan again on their own. |
 | `sensor` (diagnostic) | Integration | `Bus Workload` — internal Comexio bus/CPU load in %, polled independently every 10 s. |
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
@@ -174,6 +178,16 @@ The integration can manage Comexio **function plans** directly from Home Assista
 | `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimental:* flags likely wiring mistakes, and lays a plan out by signal-flow topology instead of its physical position. |
 | `comexio.marker_delete` | Permanently deletes Markers this integration created itself (e.g. leftover KNX bridge markers). Factory-provisioned and Studio-created Markers are protected regardless of ID — they are skipped and listed as `protected`, the rest is still deleted. With `force: true`, protected Markers are deleted too if they have no name and are not placed in any function plan. Accepts a single ID, a comma-separated list, or a `from-to` range; requires `confirm: true`. |
 
+### Function plan watchdog
+
+HA's markers, IOs, KNX objects and triggers only work while the function plans the integration manages run in Comexio. Their run state is read about every 60 s (more often while the plan card is open), so a plan stopped in Comexio Studio is noticed without a webhook. When a watched plan does not run:
+
+- a **repair** offers to start it right away, and the **Managed Plans Problem** sensor turns on;
+- the notify services set in the options (**Function plan watchdog: push to**) get a push with a **Start plan** button, which disappears again once the plan runs;
+- with **Plan Auto-Start (HA plans)** on (the default), the integration starts it again on its own.
+
+User plans that should always run can be added in the options (**Function plan watchdog: also watch user plans**). They get the same repair, sensor and push; **Plan Auto-Start (user plans)** is off by default. A plan HA itself just stopped (sort, connect, restore, bus-load cascade) is not judged for 5 minutes.
+
 📖 **[Function Plan Preview guide →](FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
 
 ### 🗂️ Automatic Backups & Restore
@@ -270,6 +284,10 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `select` | Funktionspläne | Listet alle Comexio-Funktionspläne; dient als Standard-Ziel für die Funktionsplan-Actions. |
 | `sensor` (Diagnose) | Integration | `Offline Extensions` — zeigt, wie viele Erweiterungsmodule gerade offline sind, und listet deren Namen als State-Attribut. |
 | `sensor` (Diagnose) | Integration | `Backups` (Gerät „Function plans“) — Gesamtzahl der gespeicherten Plan-Snapshots, Details je Plan als State-Attribute. |
+| `sensor` (Diagnose) | Integration | `Backups (gelöschter Pläne)` (Gerät „Function plans“) — Anzahl der Snapshots, deren Plan es in Comexio nicht mehr gibt (gelöscht oder umbenannt), die Pläne als State-Attribut. |
+| `sensor` | Funktionspläne | Je Plan einer (`sensor.iosrv1_fub19`, benannt nach dem Plan) — Laufzustand `Läuft` / `Gestoppt`, bzw. `Startet…` / `Stoppt…`, solange HA den Plan selbst startet oder stoppt. |
+| `binary_sensor` (Diagnose) | Integration | `Problem verwaltete Pläne` (Gerät „Function plans“) — an, solange ein überwachter Logikplan nicht läuft; die gestoppten Pläne als State-Attribut. Siehe [Logikplan-Watchdog](#logikplan-watchdog). |
+| `switch` (Konfiguration) | Integration | `Plan Auto-Start (HA-Pläne)` / `(User-Pläne)` (Gerät „Function plans“) — starten einen gestoppten überwachten Plan selbst wieder. |
 | `sensor` (Diagnose) | Integration | `Bus Workload` — interne Comexio Bus-/CPU-Auslastung in %, unabhängig alle 10 s abgefragt. |
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
@@ -391,6 +409,16 @@ Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwa
 | `comexio.function_plan_search` | Findet Pläne mit Elementen, die zu einem Suchtext passen (gleiche Platzhalter-Syntax wie die Suchleiste der Vorschau-Karte). |
 | `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimentell:* markiert wahrscheinliche Verdrahtungsfehler bzw. ordnet einen Plan nach Signalfluss statt nach physischer Position an. |
 | `comexio.marker_delete` | Löscht dauerhaft Merker, die die Integration selbst angelegt hat (z. B. übrig gebliebene KNX-Brücken-Merker). Werksseitige und in Comexio Studio angelegte Merker sind unabhängig von der ID geschützt — sie werden übersprungen und als `protected` gemeldet, der Rest wird trotzdem gelöscht. Mit `force: true` werden auch geschützte Merker gelöscht, sofern sie keinen Namen haben und in keinem Logikplan platziert sind. Akzeptiert eine einzelne ID, eine Komma-Liste oder einen Bereich `von-bis`; erfordert `confirm: true`. |
+
+### Logikplan-Watchdog
+
+Merker, IOs, KNX-Objekte und Trigger von HA funktionieren nur, solange die von der Integration verwalteten Logikpläne in Comexio laufen. Ihr Laufzustand wird etwa alle 60 s gelesen (bei offener Plan-Karte öfter), sodass auch ein in Comexio Studio gestoppter Plan ohne Webhook auffällt. Läuft ein überwachter Plan nicht:
+
+- bietet eine **Reparaturmeldung** an, ihn sofort zu starten, und der Sensor **Problem verwaltete Pläne** geht an;
+- die in den Optionen eingetragenen Benachrichtigungsdienste (**Logikplan-Watchdog: Push an**) bekommen eine Push-Meldung mit einem Knopf **Plan starten**, die wieder verschwindet, sobald der Plan läuft;
+- ist **Plan Auto-Start (HA-Pläne)** an (Standard), startet die Integration ihn selbst wieder.
+
+Eigene Pläne, die immer laufen sollen, lassen sich in den Optionen hinzufügen (**Logikplan-Watchdog: zusätzlich überwachte Pläne**). Sie bekommen dieselbe Reparaturmeldung, denselben Sensor und Push; **Plan Auto-Start (User-Pläne)** ist standardmäßig aus. Einen Plan, den HA selbst gerade gestoppt hat (Sortieren, Verdrahten, Restore, Buslast-Kaskade), bewertet der Watchdog 5 Minuten lang nicht.
 
 📖 **[Logikplan-Vorschau — Anleitung →](FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
 
