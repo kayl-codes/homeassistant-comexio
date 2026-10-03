@@ -1,6 +1,8 @@
 # Version: 0.7.5
+from collections.abc import Mapping
 from datetime import datetime
 import logging
+import pathlib
 from typing import Any
 from urllib.parse import quote
 
@@ -12,6 +14,8 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
     EntityCategory,
     UnitOfTemperature,
 )
@@ -706,13 +710,29 @@ class ComexioWatchdogEventSensor(CoordinatorEntity, SensorEntity):
         }
 
 
-class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
+def restored_plan_preview(state: str, attributes: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The last_plan_preview a 'Preview info' state from before a restart stands for, or None."""
+    generated_at = attributes.get("generated_at")
+    if state in (STATE_UNKNOWN, STATE_UNAVAILABLE) or not isinstance(generated_at, str):
+        return None
+    return {
+        "fub_id": attributes.get("fub_id"),
+        "plan_name": state,
+        "source": attributes.get("source"),
+        "generated_at": generated_at,
+    }
+
+
+class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, RestoreEntity, SensorEntity):
     """Diagnostic sensor showing the last generated Function Plan preview (SVG) as entity_picture.
 
     Fed by coordinator.async_generate_plan_preview, called either from plan_preview (plan card,
     'Plan'/'Backup' selection) or a function_plan_visualize service call with format=svg (live or a stored
     backup snapshot) — both paths update the same coordinator.last_plan_preview, so this
     sensor always reflects whatever was last generated, regardless of the trigger.
+    Like the preview image (which falls back to the SVG file), it survives a restart: the last
+    state is restored as long as that file still exists, instead of showing unknown until the
+    next render.
     """
 
     _attr_has_entity_name = True
@@ -724,6 +744,16 @@ class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity
         super().__init__(coordinator)
         self._attr_unique_id = f"comexio_{server_id}_plan_preview_sensor"
         self._attr_translation_key = "plan_preview"
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if self.coordinator.last_plan_preview is not None or (last := await self.async_get_last_state()) is None:
+            return
+        restored = restored_plan_preview(last.state, last.attributes)
+        svg_path = pathlib.Path(self.hass.config.path("www", f"comexio_{self.coordinator.server_id}_plan_preview.svg"))
+        if restored is not None and await self.hass.async_add_executor_job(svg_path.is_file):
+            self.coordinator.last_plan_preview = restored
+            self.async_write_ha_state()
 
     @property
     def entity_picture(self) -> str | None:
@@ -744,6 +774,7 @@ class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity
     def extra_state_attributes(self) -> dict[str, Any]:
         preview = self.coordinator.last_plan_preview or {}
         return {
+            "fub_id": preview.get("fub_id"),
             "source": preview.get("source"),
             "generated_at": preview.get("generated_at"),
         }
