@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from homeassistant.components.webhook import DOMAIN as WEBHOOK_DOMAIN
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -63,6 +63,24 @@ async def test_setup_and_unload(
     assert hass.states.get("switch.iosrv1_m1").state == "unavailable"
     assert WEBHOOK_ID not in hass.data[WEBHOOK_DOMAIN]
     api.close.assert_called_once()
+
+
+async def test_setup_keeps_every_entity_it_registers(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The orphan cleanup removes no entity the platforms just registered: the always-active list is complete."""
+    removed: list[str] = []
+
+    @callback
+    def _record_removal(event: Event[er.EventEntityRegistryUpdatedData]) -> None:
+        if event.data["action"] == "remove":
+            removed.append(event.data["entity_id"])
+
+    hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, _record_removal)
+
+    await _setup(hass, mock_config_entry)
+
+    assert removed == []
 
 
 async def test_statistics_unit_fix_runs_in_background_and_stops_on_unload(
