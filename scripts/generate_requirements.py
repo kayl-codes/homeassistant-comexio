@@ -3,12 +3,14 @@
 
 manifest.json's "requirements" array is the single source of truth for this
 integration's Python dependencies (it's what HA installs at runtime).
-requirements.txt exists only so OSV-Scanner has a lockfile-shaped format it
-can parse; it must never be hand-edited independently of manifest.json.
+requirements.txt is both the lockfile-shaped input OSV-Scanner parses and the
+dependency source of the CI mypy job; it must never be hand-edited independently
+of manifest.json.
 
-The test requirements and the CI workflow install the same packages on their own
-lines; their exact pins (name==version) are checked against the manifest too, so
-tests and mypy never run against another library version than HA installs.
+The test requirement files list their own packages; every exact manifest pin
+(name==version) must appear in them at the same version, so tests never run
+against another library version than HA installs. The CI workflow pins nothing
+itself: it installs from requirements.txt.
 """
 
 import json
@@ -23,14 +25,13 @@ REQUIREMENTS = ROOT / REQUIREMENTS_TXT
 PINNED_ELSEWHERE = [
     ROOT / "tests" / REQUIREMENTS_TXT,
     ROOT / "tests" / "ha" / REQUIREMENTS_TXT,
-    ROOT / ".github" / "workflows" / "ci.yml",
 ]
 
 
 # name[extras] == version, as pip reads it (spaces allowed around ==). A wildcard (==0.3.0.*) stays
 # part of the version, so it reads as a drift instead of the exact pin it starts with.
 _PIN = re.compile(r"(?<![\w.-])([A-Za-z0-9][\w.-]*)(?:\[[^\]]*\])?\s*==\s*([\w.+!*-]*[\w*])")
-# A comment as pip and YAML read it: "#" at line start or after whitespace, to the end of the line.
+# A comment as pip reads it: "#" at line start or after whitespace, to the end of the line.
 _COMMENT = re.compile(r"(?:^|(?<=\s))#.*$", re.MULTILINE)
 
 

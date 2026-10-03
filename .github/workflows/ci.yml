@@ -85,8 +85,9 @@ jobs:
           # package itself, so install it with --no-deps to skip that tree entirely.
           pip install --only-binary :all: mypy==2.3.1
           pip install --only-binary :all: --no-deps homeassistant-stubs==2026.8.3
-          # The integration's own library ships py.typed; same pin as manifest.json.
-          pip install --only-binary :all: --no-deps aiocomexio==0.3.0
+          # The integration's own library ships py.typed. Installed from requirements.txt, which
+          # generate_requirements.py keeps equal to manifest.json, so this job never pins a version itself.
+          pip install --only-binary :all: --no-deps -r requirements.txt
       - name: Run mypy
         id: mypy
         continue-on-error: true
