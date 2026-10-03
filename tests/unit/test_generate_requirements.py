@@ -47,6 +47,8 @@ def test_real_repository_is_in_sync() -> None:
         "- run: 'pip install --no-deps aiocomexio==0.3.0'",  # quoted YAML run value
         "run: python -m pip install --no-deps aiocomexio==0.3.0",
         "pip install -U pip && pip install --no-deps aiocomexio==0.3.0",  # second command on the line
+        "run: cd tests && (pip install --no-deps aiocomexio==0.3.0)",  # subshell
+        "pip3 install --no-deps aiocomexio==0.3.0",
     ],
 )
 def test_matching_pin_spellings_pass(repo: Path, ci_line: str) -> None:
@@ -76,6 +78,7 @@ def test_matching_pin_spellings_pass(repo: Path, ci_line: str) -> None:
         ('run: pip install other; echo "aiocomexio==0.3.0"\n', "ci.yml: no aiocomexio==0.3.0 pin"),
         ("run: pip install other | tee aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
         ("run: pip install other\nenv:\n  PIN: aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
+        ("- name: pip install aiocomexio==0.3.0\n  run: pip install other\n", "ci.yml: no aiocomexio==0.3.0 pin"),
         # A drift counts anywhere, even in an install spelling the command filter does not recognise
         (
             "pip install --no-deps aiocomexio==0.3.0\nrun: uv pip install --system aiocomexio==0.2.0\n",

@@ -33,11 +33,11 @@ _PIN = re.compile(r"(?<![\w.-])([A-Za-z0-9][\w.-]*)(?:\[[^\]]*\])?\s*==\s*([\w.+
 # A comment as pip and YAML read it: "#" at line start or after whitespace, to the end of the line.
 _COMMENT = re.compile(r"(?:^|(?<=\s))#.*$", re.MULTILINE)
 # In a workflow only a pip install command pins; a name==version elsewhere (an echo, an env value) does not.
-# The command must start a line (optionally after "- run:" and a quote) or follow a shell separator, and it
-# ends at the next separator: "echo pip install x==1" and "pip install a && echo x==1" pin nothing.
+# A command runs to the next line end or shell separator, and it must start with pip install (optionally
+# after "- run:", a quote or a subshell "("): "echo pip install x==1" and "pip install a && echo x==1" pin nothing.
+_COMMAND_END = re.compile(r"[;&|\n]")
 _PIP_INSTALL = re.compile(
-    r"(?:^[ \t-]*(?:run:[ \t]*)?['\"]?|[;&|(][ \t]*)(?:python3?[ \t]+-m[ \t]+)?pip3?[ \t]+install\b[^;&|\n]*",
-    re.MULTILINE,
+    r"[ \t(-]*+(?:run:[ \t]*+)?(?:['\"(][ \t]*+)?(?:python3?[ \t]++-m[ \t]++)?pip3?[ \t]++install\b"
 )
 # A shell line continuation: the next line belongs to the same command.
 _CONTINUATION = re.compile(r"\\\r?\n")
@@ -69,7 +69,8 @@ def _file_mismatches(path: Path, pins: dict[str, tuple[str, str]]) -> list[str]:
     installed = written
     if path.suffix in {".yml", ".yaml"}:
         text = _CONTINUATION.sub(" ", text)
-        installed = _pins_by_name("\n".join(command[0] for command in _PIP_INSTALL.finditer(text)))
+        commands = _COMMAND_END.split(text)
+        installed = _pins_by_name("\n".join(command for command in commands if _PIP_INSTALL.match(command)))
     mismatches = []
     for key, (name, version) in pins.items():
         drifted = [other for other in written.get(key, []) if other != version]
