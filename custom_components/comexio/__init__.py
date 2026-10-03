@@ -278,27 +278,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         if not io.get("offline") or include_offline:
             active_unique_ids.add(f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower())
 
-    # Add buttons (these are always active)
-    active_unique_ids.add(f"comexio_{server_id}_webio_sync_start_btn")
-    active_unique_ids.add(f"comexio_{server_id}_webio_sync_cancel_btn")
-    active_unique_ids.add(f"comexio_{server_id}_webio_sync_status_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_entity_id_fix_btn")
-    active_unique_ids.add(f"comexio_{server_id}_fw_check_btn")
-    active_unique_ids.add(f"comexio_{server_id}_webio_range_check_btn")
-    active_unique_ids.add(f"comexio_{server_id}_statistics_cleanup_btn")
-    active_unique_ids.add(f"comexio_{server_id}_uninstall_cleanup_btn")
-    active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_logikplan_plan_selector")
-    active_unique_ids.add(f"comexio_{server_id}_function_plan_backups_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_version_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_plan_changed_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_plan_backup_selector")
-    active_unique_ids.add(f"comexio_{server_id}_bus_load_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_sd_card_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_plan_preview_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_plan_preview_btn")
-    active_unique_ids.add(f"comexio_{server_id}_plan_preview_image")
-    active_unique_ids.add(f"comexio_{server_id}_function_plan_toggle_btn")
+    # Server-level buttons and sensors (these are always active)
+    active_unique_ids.update(
+        f"comexio_{server_id}_{suffix}"
+        for suffix in (
+            "webio_sync_start_btn",
+            "webio_sync_cancel_btn",
+            "webio_sync_status_sensor",
+            "entity_id_fix_btn",
+            "fw_check_btn",
+            "webio_range_check_btn",
+            "statistics_cleanup_btn",
+            "uninstall_cleanup_btn",
+            "offline_extensions_sensor",
+            "logikplan_plan_selector",
+            "function_plan_backups_sensor",
+            "version_sensor",
+            "plan_changed_sensor",
+            "plan_backup_selector",
+            "bus_load_sensor",
+            "sd_card_sensor",
+            "plan_preview_sensor",
+            "plan_preview_btn",
+            "plan_preview_image",
+            "function_plan_toggle_btn",
+        )
+    )
 
     # Function plan run-state sensors (binary_sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
