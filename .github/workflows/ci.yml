@@ -112,6 +112,9 @@ jobs:
     steps:
       - name: Check out code from GitHub
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history: the diff coverage report compares against the PR's base branch.
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -125,7 +128,20 @@ jobs:
         # "resolution-too-deep" (verified on PR #90). Test-only toolchain, exact top-level pins.
         run: pip install -r tests/requirements.txt
       - name: Run unit tests
-        run: pytest tests/unit -q
+        run: pytest tests/unit -q --cov --cov-report=xml
+      - name: Diff coverage report
+        # Non-blocking: most HA-bound code (coordinator, repairs, platforms) has no unit tests yet, so a
+        # threshold would fail nearly every PR. The report lists the changed lines no test reaches.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if ! diff-cover coverage.xml --compare-branch="origin/${BASE_REF}" --format markdown:diff-cover.md; then
+            echo "### Diff coverage report failed - see the step log" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          cat diff-cover.md >> "$GITHUB_STEP_SUMMARY"
 
   check-requirements-sync:
     name: Verify requirements.txt matches manifest.json

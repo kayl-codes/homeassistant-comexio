@@ -32,6 +32,9 @@ pytest tests/unit
 # Unit tests with coverage report
 pytest tests/unit --cov --cov-report=term-missing
 
+# Changed lines no unit test reaches (non-blocking report, also in the CI job summary of every PR)
+pytest tests/unit --cov --cov-report=xml && diff-cover coverage.xml --compare-branch=origin/master
+
 # Regenerate snapshots after an intended output change (review the diff!)
 pytest tests/unit --snapshot-update
 ```
@@ -124,7 +127,7 @@ The coordinator's `last_audit_results` dict (populated every poll) drives both s
 
 ### Unique ID and entity_id scheme
 
-**Rule: ids carry only the technical address; only the display name carries the Comexio description.** A renamed description or a changed naming schema must never change a unique_id or entity_id. Every case below is pinned by a test (`tests/unit/test_entity_naming.py`, `test_api_parse_config.py`) — extend those tables instead of special-casing.
+**Rule: ids carry only the technical address; only the display name carries the Comexio description.** A renamed description or a changed naming schema must never change a unique_id or entity_id. Every case below is pinned by a test (`tests/unit/test_entity_naming.py`, `test_api_parse_config.py`) — extend those tables instead of special-casing. A new entity class requests its entity_id through `ComexioStableEntityIdMixin` (or `ComexioFunctionPlanEntityMixin` on the function plan device); `test_every_entity_class_requests_a_stable_entity_id` fails otherwise. HA-derived ids are a deliberate exception listed in `HA_DERIVED_ENTITY_ID_CLASSES`.
 
 | Entity type | unique_id | entity_id (new entities) |
 |-------------|-----------|--------------------------|
