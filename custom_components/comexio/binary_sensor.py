@@ -19,6 +19,7 @@ from .const import (
     DOMAIN,
     MarkerKind,
     bus_load_signal,
+    plan_watch_signal,
 )
 from .coordinator import ComexioCoordinator
 from .entity import (
@@ -158,7 +159,7 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_translation_key = "managed_plans_problem"
-    # Changes with every check (about once a minute): kept out of the recorder history.
+    # Changes with every check (about once a minute, via plan_watch_signal): kept out of the recorder history.
     _unrecorded_attributes = frozenset({"last_check"})
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
@@ -195,6 +196,14 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         return function_plan_device_info(self.coordinator)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, plan_watch_signal(self.coordinator.server_id), self._handle_coordinator_update
+            )
+        )
 
 
 class ComexioSdCardSensor(BinarySensorEntity):

@@ -148,6 +148,7 @@ from .const import (
     fw_update_signal,
     io_audit_key,
     io_column_rows,
+    plan_watch_signal,
     snap_to_grid,
     source_audit_key,
     source_category,
@@ -3311,9 +3312,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self.managed_plan_start_blocked:
             return False
         user_plans = self._watched_user_plan_names()
-        return await self.plan_watchdog.async_check(
+        stopped_changed = await self.plan_watchdog.async_check(
             {**user_plans, **self._managed_plan_names()}, self._watchdog_run_state, user_plans.keys()
         )
+        # The problem sensor's last_check moves with every check, not only when a listener update follows.
+        async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
+        return stopped_changed
 
     async def async_initial_plan_watch(self) -> None:
         """First watchdog judgement right after setup, not only with the first run-state poll.

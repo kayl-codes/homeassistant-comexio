@@ -22,10 +22,19 @@ from custom_components.comexio.const import (
     PLAN_TRANSITION_STOPPING,
     function_plan_ids,
     function_plan_run_state_unique_id,
+    plan_watch_signal,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
+
+
+@pytest.fixture(autouse=True)
+def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Dispatcher signals the coordinator sends (no hass in these tests)."""
+    signals: list[str] = []
+    monkeypatch.setattr(coordinator_module, "async_dispatcher_send", lambda _hass, signal: signals.append(signal))
+    return signals
 
 
 @pytest.fixture
@@ -192,6 +201,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_run_state_relogin_refused=False,
         scraped_plan_ids=None,
         plan_scrape_generation=0,
+        hass=None,
         async_update_listeners=MagicMock(),
         _watchdog_lock=asyncio.Lock(),
         config_entry=SimpleNamespace(options={}),
@@ -199,6 +209,21 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
     )
     fake.__dict__.update(overrides)
     return fake
+
+
+def test_every_watchdog_check_signals_the_problem_sensor(api: ComexioAPI, dispatched: list[str]) -> None:
+    """last_check moves with every check, also when nothing changed and no listener update follows."""
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    coordinator = _coordinator(api)
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    coordinator.async_update_listeners.assert_not_called()
+    assert dispatched == [plan_watch_signal("iosrv1")]
+
+
+def test_a_blocked_watchdog_check_does_not_signal(api: ComexioAPI, dispatched: list[str]) -> None:
+    coordinator = _coordinator(api, in_sync=True)
+    assert asyncio.run(coordinator.async_watch_managed_plans()) is False
+    assert dispatched == []
 
 
 def _available(coordinator: _FakeCoordinator) -> bool:

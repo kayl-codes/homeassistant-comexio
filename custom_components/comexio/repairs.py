@@ -1260,17 +1260,17 @@ class ComexioRepairFlow(RepairsFlow):
     async def async_step_function_plan_stopped(self, user_input=None):
         """Start a stopped HA-managed function plan again."""
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
+        if coordinator is None:
+            return self.async_abort(reason="entry_not_found")
         placeholders = {
             key: str(self.issue_data.get(key, "?")) for key in ("plan_name", "fub_id", "attempts", "gave_up_at")
         }
         # Read when the dialog opens, so it is current without rewriting the issue on every check.
-        placeholders["last_check"] = coordinator.plan_watchdog.last_check_text() if coordinator else "?"
+        placeholders["last_check"] = coordinator.plan_watchdog.last_check_text()
         if user_input is None:
             return self.async_show_form(
                 step_id="function_plan_stopped", description_placeholders=placeholders, data_schema=vol.Schema({})
             )
-        if coordinator is None:
-            return self.async_abort(reason="entry_not_found")
         fub_id = int(self.issue_data["fub_id"])
         if coordinator.api.get_fub_active(fub_id):
             # Started meanwhile (in Comexio, by the auto-start or another repair).

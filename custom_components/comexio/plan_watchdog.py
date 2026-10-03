@@ -319,7 +319,16 @@ class ManagedPlanWatchdog:
             started_at = self._auto_started_at.pop(fub_id, None)
             if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
                 self._count_failed_start(fub_id, name, "stopped again shortly after its start")
-            if fub_id in self.suspended or self._retry_too_soon(fub_id, now):
+            if fub_id in self.suspended:
+                continue
+            if self._retry_too_soon(fub_id, now):
+                _LOGGER.debug(
+                    "[%s] Auto-start of monitored function plan '%s' (ID %s) waits until %s s after its refusal",
+                    self._server_id,
+                    name,
+                    fub_id,
+                    FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+                )
                 continue
             result = await self._start_plan(fub_id)
             if result:

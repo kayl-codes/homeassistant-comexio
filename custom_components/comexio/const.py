@@ -606,6 +606,11 @@ BUS_LOAD_POLL_INTERVAL_SEC = 10
 BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
 
 
+def plan_watch_signal(server_id: str) -> str:
+    """Dispatcher signal fired after every plan watchdog check (keeps the problem sensor's last_check current)."""
+    return f"{DOMAIN}_{server_id}_plan_watch"
+
+
 def bus_load_signal(server_id: str) -> str:
     """Dispatcher signal fired when a fresh Comexio bus workload reading arrives."""
     return f"{DOMAIN}_{server_id}_bus_load_update"
