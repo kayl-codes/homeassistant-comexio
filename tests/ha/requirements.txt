@@ -1,0 +1,9 @@
+# Test dependencies for the Home Assistant integration tests (tests/ha/), separate from tests/requirements.txt:
+# pytest-homeassistant-custom-component pins its own pytest/syrupy (and the full HA test toolchain), which
+# clash with the unit-test pins. Each release pins one homeassistant version; 0.13.357 is the one for
+# homeassistant==2026.8.3, the same version as tests/requirements.txt and homeassistant-stubs in ci.yml.
+# Runs on Linux only (CI, WSL): pytest tests/ha -o asyncio_mode=auto
+pytest-homeassistant-custom-component==0.13.357
+# The integration's own runtime requirements (manifest.json), at the same pins.
+aiocomexio==0.3.0
+idna>=3.15

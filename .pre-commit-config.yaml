@@ -26,7 +26,7 @@ repos:
         name: Generate requirements.txt from manifest.json
         entry: python scripts/generate_requirements.py
         language: system
-        files: ^(custom_components/comexio/manifest\.json|requirements\.txt)$
+        files: ^(custom_components/comexio/manifest\.json|requirements\.txt|tests/(ha/)?requirements\.txt|\.github/workflows/ci\.yml)$
         pass_filenames: false
 
       # Unit tests (tests/unit, pure logic, ~2 s) — needs `pip install -r tests/requirements.txt` once.
