@@ -7,6 +7,7 @@ marker / KNX id), only the display name carries the Comexio description.
 from typing import Any
 from unittest.mock import MagicMock
 
+from homeassistant.helpers.entity import Entity
 import pytest
 
 from custom_components.comexio.const import (
@@ -211,3 +212,83 @@ def test_function_plan_mixin_requests_the_hub_era_entity_id(server_id: str, expe
 
     assert entity.started
     assert entity.entity_id == expected
+
+
+# Entity classes whose entity_id HA derives from the device name + translated entity name (see the
+# "HA-derived" rows of the unique_id table in CLAUDE.md). Existing installs already carry these ids;
+# a new entity class must not be added here by default — give it ComexioStableEntityIdMixin (or
+# ComexioFunctionPlanEntityMixin on the function plan device) unless HA-derived is a deliberate choice.
+HA_DERIVED_ENTITY_ID_CLASSES = frozenset(
+    {
+        "binary_sensor.ComexioSdCardSensor",
+        "button.ComexioCancelSyncButton",
+        "button.ComexioCleanupButton",
+        "button.ComexioEntityIdMigrationButton",
+        "button.ComexioFirmwareCheckButton",
+        "button.ComexioStatisticsCleanupButton",
+        "button.ComexioSyncButton",
+        "button.ComexioWebioRangeCheckButton",
+        "sensor.ComexioActiveMarkerCountSensor",
+        "sensor.ComexioBusLoadSensor",
+        "sensor.ComexioExtensionCountSensor",
+        "sensor.ComexioOfflineExtensionsSensor",
+        "sensor.ComexioSyncStatusSensor",
+        "sensor.ComexioVersionSensor",
+        "sensor.ComexioWatchdogEventSensor",
+        "sensor.ComexioWebioCommandCountSensor",
+        "update.ComexioBaseFirmwareUpdate",
+        "update.ComexioExtensionFirmwareUpdate",
+        "update.ComexioFirmwareUpdateBase",
+    }
+)
+
+
+def _integration_entity_classes() -> dict[str, type]:
+    """Every Entity subclass defined in the integration's modules (subpackages included), keyed "module.Class"."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    import custom_components.comexio as package
+
+    prefix = f"{package.__name__}."
+    classes: dict[str, type] = {}
+    for module_info in pkgutil.walk_packages(package.__path__, prefix):
+        module = importlib.import_module(module_info.name)
+        for name, cls in inspect.getmembers(module, inspect.isclass):
+            if cls.__module__ == module.__name__ and issubclass(cls, Entity):
+                classes[f"{module.__name__.removeprefix(prefix)}.{name}"] = cls
+    return classes
+
+
+def _requests_its_entity_id(cls: type) -> bool:
+    """The mixin's add_to_platform_start runs only if it precedes Entity in the MRO (Entity's hook calls no super)."""
+    mro = cls.__mro__
+    return any(
+        mixin in mro and mro.index(mixin) < mro.index(Entity)
+        for mixin in (ComexioStableEntityIdMixin, ComexioFunctionPlanEntityMixin)
+    )
+
+
+def test_every_entity_class_requests_a_stable_entity_id() -> None:
+    """A new entity class without an id mixin would get a language-dependent, name-derived entity_id."""
+    classes = _integration_entity_classes()
+    # Guards against a discovery that silently finds nothing: one class per id mixin and platform kind.
+    assert {"sensor.ComexioMarkerSensor", "select.ComexioPlanSelectEntity", "light.ComexioKnxLight"} <= classes.keys()
+    unstable = sorted(
+        key
+        for key, cls in classes.items()
+        if not _requests_its_entity_id(cls) and key not in HA_DERIVED_ENTITY_ID_CLASSES
+    )
+
+    assert not unstable, (
+        "Entity classes without ComexioStableEntityIdMixin / ComexioFunctionPlanEntityMixin "
+        f"(add the mixin, or list them in HA_DERIVED_ENTITY_ID_CLASSES if that is deliberate): {unstable}"
+    )
+
+
+def test_ha_derived_entity_id_allowlist_has_no_stale_entries() -> None:
+    classes = _integration_entity_classes()
+
+    assert sorted(HA_DERIVED_ENTITY_ID_CLASSES - classes.keys()) == []
+    assert sorted(key for key in HA_DERIVED_ENTITY_ID_CLASSES if _requests_its_entity_id(classes[key])) == []
