@@ -244,7 +244,7 @@ HA_DERIVED_ENTITY_ID_CLASSES = frozenset(
 
 
 def _integration_entity_classes() -> dict[str, type]:
-    """Every Entity subclass defined in the integration's modules (subpackages included), keyed "module.Class"."""
+    """Every Entity subclass defined in the integration (package root and subpackages), keyed "module.Class"."""
     import importlib
     import inspect
     import pkgutil
@@ -253,11 +253,16 @@ def _integration_entity_classes() -> dict[str, type]:
 
     prefix = f"{package.__name__}."
     classes: dict[str, type] = {}
-    for module_info in pkgutil.walk_packages(package.__path__, prefix):
-        module = importlib.import_module(module_info.name)
+    # walk_packages yields only the children, so the package root (__init__) is added explicitly.
+    modules = [
+        package,
+        *(importlib.import_module(info.name) for info in pkgutil.walk_packages(package.__path__, prefix)),
+    ]
+    for module in modules:
+        relative = "__init__" if module is package else module.__name__.removeprefix(prefix)
         for name, cls in inspect.getmembers(module, inspect.isclass):
             if cls.__module__ == module.__name__ and issubclass(cls, Entity):
-                classes[f"{module.__name__.removeprefix(prefix)}.{name}"] = cls
+                classes[f"{relative}.{name}"] = cls
     return classes
 
 

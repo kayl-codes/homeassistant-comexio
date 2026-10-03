@@ -137,7 +137,10 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          diff-cover coverage.xml --compare-branch="origin/${BASE_REF}" --format markdown:diff-cover.md
+          if ! diff-cover coverage.xml --compare-branch="origin/${BASE_REF}" --format markdown:diff-cover.md; then
+            echo "### Diff coverage report failed - see the step log" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           cat diff-cover.md >> "$GITHUB_STEP_SUMMARY"
 
   check-requirements-sync:
