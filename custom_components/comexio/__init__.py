@@ -159,6 +159,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     entry.async_on_unload(coordinator.async_start_bus_load_poll())
     # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
     entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
+    # After the platforms: the auto-start switches have restored the user's choice by now.
+    entry.async_create_background_task(
+        hass, coordinator.async_initial_plan_watch(), f"comexio_{server_id}_initial_plan_watch"
+    )
     # "Start plan" button of the managed-plan watchdog's phone push (see plan_watchdog).
     entry.async_on_unload(
         hass.bus.async_listen(MOBILE_APP_NOTIFICATION_ACTION_EVENT, coordinator.async_handle_notification_action)

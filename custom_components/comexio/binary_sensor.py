@@ -150,10 +150,11 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
 
     See plan_watchdog.
 
-    Unknown until the watchdog's first check after the first run-state poll.
+    Unknown until the watchdog's first check right after setup (coordinator.async_initial_plan_watch).
     """
 
     _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_translation_key = "managed_plans_problem"
 

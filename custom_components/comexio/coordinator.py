@@ -3315,6 +3315,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             {**user_plans, **self._managed_plan_names()}, self._watchdog_run_state, user_plans.keys()
         )
 
+    async def async_initial_plan_watch(self) -> None:
+        """First watchdog judgement right after setup, not only with the first run-state poll.
+
+        The first refresh has just read every plan's Active flag, so the problem sensor and the
+        repairs need not stay unknown for a poll interval.
+        """
+        if await self.async_watch_managed_plans():
+            self.async_update_listeners()
+
     def plan_transition(self, fub_id: int) -> str | None:
         """PLAN_TRANSITION_STARTING/STOPPING while HA itself starts or stops the plan, else None."""
         return self._plan_transitions.get(fub_id)

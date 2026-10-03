@@ -170,6 +170,7 @@ class _FakeCoordinator(SimpleNamespace):
     _watchdog_run_state = ComexioCoordinator._watchdog_run_state
     managed_plan_start_blocked = ComexioCoordinator.managed_plan_start_blocked
     async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
+    async_initial_plan_watch = ComexioCoordinator.async_initial_plan_watch
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
@@ -680,3 +681,29 @@ def test_watchdog_waits_while_a_cascade_or_sync_runs(api: ComexioAPI) -> None:
 
     asyncio.run(poll_during_cascade())
     coordinator.plan_watchdog.async_check.assert_not_called()
+
+
+def test_setup_judges_the_watched_plans_without_waiting_for_a_poll(api: ComexioAPI) -> None:
+    """The problem sensor gets its first verdict from the run states the first refresh read."""
+    coordinator = _coordinator(
+        api,
+        config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}),
+        plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=True)),
+    )
+    asyncio.run(coordinator.async_initial_plan_watch())
+    managed, _, _ = coordinator.plan_watchdog.async_check.call_args.args
+    assert managed == {19: "Test1"}
+    api.client.get_function_plan_run_states.assert_not_called()
+    coordinator.async_update_listeners.assert_called_once()
+
+
+def test_setup_judgement_waits_while_a_sync_runs(api: ComexioAPI) -> None:
+    coordinator = _coordinator(api)
+
+    async def setup_during_sync() -> None:
+        async with coordinator._watchdog_lock:
+            await coordinator.async_initial_plan_watch()
+
+    asyncio.run(setup_during_sync())
+    coordinator.plan_watchdog.async_check.assert_not_called()
+    coordinator.async_update_listeners.assert_not_called()
