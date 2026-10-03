@@ -652,6 +652,9 @@ FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS = 2
 # A plan that stops again this soon after its auto-start counts as a failed auto-start; one that
 # ran longer counts as healthy and starts with a clean slate.
 FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC = 600
+# Minimum gap after a refused auto-start before the next attempt: a check can follow within seconds
+# (switch turned on, fast preview polling), which would use up both attempts on a short-lived refusal.
+FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC = 60
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"

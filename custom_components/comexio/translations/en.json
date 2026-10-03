@@ -374,7 +374,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Managed function plan stopped",
-            "description": "The function plan **{plan_name}** (ID {fub_id}) is managed by Home Assistant, but it is not running in Comexio. The markers, IOs, KNX objects or triggers it connects do not reach Home Assistant until it runs again.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (HA plans)** switch on the function plan device."
+            "description": "The function plan **{plan_name}** (ID {fub_id}) is managed by Home Assistant, but it is not running in Comexio. The markers, IOs, KNX objects or triggers it connects do not reach Home Assistant until it runs again.\n\nLast check: {last_check}.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (HA plans)** switch on the function plan device."
           }
         },
         "abort": {
@@ -391,7 +391,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Watched user plan stopped",
-            "description": "The user plan **{plan_name}** (ID {fub_id}) is watched by the function plan watchdog, but it is not running in Comexio.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (user plans)** switch on the function plan device. To stop watching it, remove it from the integration options."
+            "description": "The user plan **{plan_name}** (ID {fub_id}) is watched by the function plan watchdog, but it is not running in Comexio.\n\nLast check: {last_check}.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (user plans)** switch on the function plan device. To stop watching it, remove it from the integration options."
           }
         },
         "abort": {
@@ -408,7 +408,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Function plan keeps stopping",
-            "description": "Plan Auto-Start started the function plan **{plan_name}** (ID {fub_id}) {attempts} times, but it was refused or stopped again shortly after each time. The plan most likely has an error, so Auto-Start stops trying for this plan.\n\nLast failed attempt: {gave_up_at}.\n\nCheck the plan in Comexio Studio. Auto-Start resumes on its own once the plan is seen running again.\n\n**Submit** starts the plan once now."
+            "description": "Plan Auto-Start started the function plan **{plan_name}** (ID {fub_id}) {attempts} times, but it was refused or stopped again shortly after each time. The plan most likely has an error, so Auto-Start stops trying for this plan.\n\nLast failed attempt: {gave_up_at}. Last check: {last_check}.\n\nCheck the plan in Comexio Studio. Auto-Start resumes on its own once the plan is seen running again.\n\n**Submit** starts the plan once now."
           }
         },
         "abort": {

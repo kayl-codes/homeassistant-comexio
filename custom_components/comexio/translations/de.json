@@ -374,7 +374,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Verwalteter Logikplan gestoppt",
-            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (HA-Pläne)** am Logikplan-Gerät ein."
+            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\nLetzte Prüfung: {last_check}.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (HA-Pläne)** am Logikplan-Gerät ein."
           }
         },
         "abort": {
@@ -391,7 +391,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Überwachter Anwender-Logikplan gestoppt",
-            "description": "Der Anwender-Logikplan **{plan_name}** (ID {fub_id}) wird vom Logikplan-Watchdog überwacht, läuft in Comexio aber nicht.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (User-Pläne)** am Logikplan-Gerät ein. Um ihn nicht mehr zu überwachen, entferne ihn in den Optionen der Integration."
+            "description": "Der Anwender-Logikplan **{plan_name}** (ID {fub_id}) wird vom Logikplan-Watchdog überwacht, läuft in Comexio aber nicht.\n\nLetzte Prüfung: {last_check}.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (User-Pläne)** am Logikplan-Gerät ein. Um ihn nicht mehr zu überwachen, entferne ihn in den Optionen der Integration."
           }
         },
         "abort": {
@@ -408,7 +408,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Logikplan stoppt immer wieder",
-            "description": "Plan Auto-Start hat den Logikplan **{plan_name}** (ID {fub_id}) {attempts}-mal gestartet, aber jedes Mal wurde der Start abgelehnt oder der Plan stoppte kurz danach wieder. Vermutlich enthält der Plan einen Fehler, deshalb versucht Auto-Start es für diesen Plan nicht weiter.\n\nLetzter Fehlversuch: {gave_up_at}.\n\nPrüfe den Plan im Comexio Studio. Auto-Start greift von selbst wieder, sobald der Plan wieder als laufend erkannt wird.\n\n**Absenden** startet den Plan jetzt einmalig."
+            "description": "Plan Auto-Start hat den Logikplan **{plan_name}** (ID {fub_id}) {attempts}-mal gestartet, aber jedes Mal wurde der Start abgelehnt oder der Plan stoppte kurz danach wieder. Vermutlich enthält der Plan einen Fehler, deshalb versucht Auto-Start es für diesen Plan nicht weiter.\n\nLetzter Fehlversuch: {gave_up_at}. Letzte Prüfung: {last_check}.\n\nPrüfe den Plan im Comexio Studio. Auto-Start greift von selbst wieder, sobald der Plan wieder als laufend erkannt wird.\n\n**Absenden** startet den Plan jetzt einmalig."
           }
         },
         "abort": {

@@ -374,7 +374,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Plan de fonctions géré arrêté",
-            "description": "Le plan de fonctions **{plan_name}** (ID {fub_id}) est géré par Home Assistant, mais il ne s'exécute pas dans Comexio. Les marqueurs, IO, objets KNX ou déclencheurs qu'il relie n'atteignent plus Home Assistant tant qu'il est arrêté.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans HA)** de l'appareil des plans de fonctions."
+            "description": "Le plan de fonctions **{plan_name}** (ID {fub_id}) est géré par Home Assistant, mais il ne s'exécute pas dans Comexio. Les marqueurs, IO, objets KNX ou déclencheurs qu'il relie n'atteignent plus Home Assistant tant qu'il est arrêté.\n\nDernière vérification : {last_check}.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans HA)** de l'appareil des plans de fonctions."
           }
         },
         "abort": {
@@ -391,7 +391,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Plan utilisateur surveillé arrêté",
-            "description": "Le plan utilisateur **{plan_name}** (ID {fub_id}) est surveillé par le watchdog des plans de fonctions, mais il ne s'exécute pas dans Comexio.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans utilisateur)** de l'appareil des plans de fonctions. Pour ne plus le surveiller, retirez-le des options de l'intégration."
+            "description": "Le plan utilisateur **{plan_name}** (ID {fub_id}) est surveillé par le watchdog des plans de fonctions, mais il ne s'exécute pas dans Comexio.\n\nDernière vérification : {last_check}.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans utilisateur)** de l'appareil des plans de fonctions. Pour ne plus le surveiller, retirez-le des options de l'intégration."
           }
         },
         "abort": {
@@ -408,7 +408,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Le plan de fonctions s'arrête sans cesse",
-            "description": "Plan Auto-Start a démarré le plan de fonctions **{plan_name}** (ID {fub_id}) {attempts} fois, mais à chaque fois le démarrage a été refusé ou le plan s'est de nouveau arrêté peu après. Le plan contient probablement une erreur ; Auto-Start cesse donc de réessayer pour ce plan.\n\nDernière tentative échouée : {gave_up_at}.\n\nVérifiez le plan dans Comexio Studio. Auto-Start reprend de lui-même dès que le plan est de nouveau détecté en cours d'exécution.\n\n**Valider** démarre le plan une fois maintenant."
+            "description": "Plan Auto-Start a démarré le plan de fonctions **{plan_name}** (ID {fub_id}) {attempts} fois, mais à chaque fois le démarrage a été refusé ou le plan s'est de nouveau arrêté peu après. Le plan contient probablement une erreur ; Auto-Start cesse donc de réessayer pour ce plan.\n\nDernière tentative échouée : {gave_up_at}. Dernière vérification : {last_check}.\n\nVérifiez le plan dans Comexio Studio. Auto-Start reprend de lui-même dès que le plan est de nouveau détecté en cours d'exécution.\n\n**Valider** démarre le plan une fois maintenant."
           }
         },
         "abort": {

@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from custom_components.comexio import api as api_module, plan_watchdog
-from custom_components.comexio.const import DOMAIN, FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC
+from custom_components.comexio.const import (
+    DOMAIN,
+    FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
+    FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+)
 from custom_components.comexio.plan_watchdog import (
     ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED,
     ISSUE_FUNCTION_PLAN_STOPPED,
@@ -149,15 +153,27 @@ def test_user_plan_auto_start_is_off_by_default() -> None:
     assert watchdog.auto_restart_user is False
 
 
-def test_refused_auto_start_gives_up_after_two_attempts(ir: MagicMock) -> None:
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Controllable time.monotonic() of the watchdog."""
+    now = [1000.0]
+    monkeypatch.setattr(plan_watchdog, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    return now
+
+
+def test_refused_auto_start_gives_up_after_two_attempts(ir: MagicMock, clock: list[float]) -> None:
     watchdog, started = _watchdog([False, False], targets=["mobile_app_phone"])
     watchdog.auto_restart = True
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
     assert watchdog.suspended == set()
     assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED
-
     assert "gave_up_at" not in ir.async_create_issue.call_args.kwargs["data"]
 
+    clock[0] += FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC - 1
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34]  # too soon after the refusal: no second attempt yet
+
+    clock[0] += 1
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
     assert watchdog.suspended == {34}
     kwargs = ir.async_create_issue.call_args.kwargs
@@ -178,9 +194,20 @@ def test_plan_running_again_without_auto_start_clears_the_failure_count(ir: Magi
     watchdog.auto_restart = True
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # failure 1
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))  # started by hand
-    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # a fresh failure 1
+    # A fresh failure 1, at once: running also cleared the retry gap of the old refusal.
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
     assert started == [34, 34]
     assert watchdog.suspended == set()
+
+
+def test_last_check_is_kept_for_the_repair_dialog(ir: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    watchdog, _ = _watchdog()
+    assert watchdog.last_check_text() == "—"
+    checked = plan_watchdog.dt_util.parse_datetime("2026-10-03T08:14:34+02:00")
+    monkeypatch.setattr(plan_watchdog.dt_util, "now", lambda: checked)
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert watchdog.last_check == checked
+    assert watchdog.last_check_text() == "03.10.2026 08:14:34"  # HA language "de"
 
 
 def test_blocked_or_unanswered_start_is_not_a_failed_attempt(ir: MagicMock) -> None:
@@ -299,9 +326,8 @@ def test_flapping_plan_suspends_auto_start_until_seen_running(ir: MagicMock) -> 
     assert watchdog.suspended == set()
 
 
-def test_plan_running_past_the_window_resets_the_failure_count(ir: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
-    now = [1000.0]
-    monkeypatch.setattr(plan_watchdog, "time", SimpleNamespace(monotonic=lambda: now[0]))
+def test_plan_running_past_the_window_resets_the_failure_count(ir: MagicMock, clock: list[float]) -> None:
+    now = clock
     watchdog, started = _watchdog([True, True, True])
     watchdog.auto_restart = True
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))

@@ -11,6 +11,7 @@ alarm push, until a run-state poll sees the plan running again.
 """
 
 from collections.abc import Awaitable, Callable, Collection, Mapping
+from datetime import datetime
 import logging
 import re
 import time
@@ -23,7 +24,12 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
-from .const import DOMAIN, FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS, FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC
+from .const import (
+    DOMAIN,
+    FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS,
+    FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
+    FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,6 +165,10 @@ class ManagedPlanWatchdog:
         self.suspended: set[int] = set()
         # fub_id → local time Auto-Start gave up on it (the last failed attempt), shown in its repair.
         self._gave_up_at: dict[int, str] = {}
+        # fub_id → time.monotonic() of its last refused auto-start (FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC).
+        self._refused_at: dict[int, float] = {}
+        # Local time of the last check; shown in the repair dialogs and on the problem sensor.
+        self.last_check: datetime | None = None
         self._checking = False
 
     async def async_check(
@@ -176,6 +186,7 @@ class ManagedPlanWatchdog:
             return False
         self._checking = True
         try:
+            self.last_check = dt_util.now()
             self._user_plans = frozenset(user_plans)
             previous = self.stopped or {}
             suspended_before = frozenset(self.suspended)
@@ -194,6 +205,10 @@ class ManagedPlanWatchdog:
             return changed
         finally:
             self._checking = False
+
+    def last_check_text(self) -> str:
+        """The last check as local time in the HA language's format, "—" before the first one."""
+        return "—" if self.last_check is None else self.last_check.strftime(self._texts()["time_format"])
 
     def is_user_plan(self, fub_id: int) -> bool:
         return fub_id in self._user_plans
@@ -270,6 +285,7 @@ class ManagedPlanWatchdog:
         for fub_id in lifted | healthy:
             self._auto_started_at.pop(fub_id, None)
             self._failed_starts.pop(fub_id, None)
+            self._refused_at.pop(fub_id, None)
 
     def _count_failed_start(self, fub_id: int, name: str, reason: str) -> None:
         """One more failed auto-start; at FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS Auto-Start gives up on the plan."""
@@ -303,7 +319,7 @@ class ManagedPlanWatchdog:
             started_at = self._auto_started_at.pop(fub_id, None)
             if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
                 self._count_failed_start(fub_id, name, "stopped again shortly after its start")
-            if fub_id in self.suspended:
+            if fub_id in self.suspended or self._retry_too_soon(fub_id, now):
                 continue
             result = await self._start_plan(fub_id)
             if result:
@@ -311,6 +327,7 @@ class ManagedPlanWatchdog:
                 self._notify_auto_started(fub_id, name)
                 started[fub_id] = name
             elif result is False:
+                self._refused_at[fub_id] = now
                 self._count_failed_start(fub_id, name, "start refused by Comexio")
             else:
                 # Blocked by a running sync/restore, or no answer: says nothing about the plan, retried next poll.
@@ -321,6 +338,10 @@ class ManagedPlanWatchdog:
                     fub_id,
                 )
         return started
+
+    def _retry_too_soon(self, fub_id: int, now: float) -> bool:
+        refused_at = self._refused_at.get(fub_id)
+        return refused_at is not None and now - refused_at < FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC
 
     def _notify_auto_started(self, fub_id: int, name: str) -> None:
         _LOGGER.warning("[%s] Auto-started monitored function plan '%s' (ID %s)", self._server_id, name, fub_id)

@@ -158,6 +158,8 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_translation_key = "managed_plans_problem"
+    # Changes with every check (about once a minute): kept out of the recorder history.
+    _unrecorded_attributes = frozenset({"last_check"})
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         super().__init__(coordinator)
@@ -178,6 +180,7 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
         watchdog = self.coordinator.plan_watchdog
         stopped = watchdog.stopped or {}
         return {
+            "last_check": watchdog.last_check,
             "stopped_plans": [
                 {
                     "fub_id": fub_id,
@@ -186,7 +189,7 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
                     "auto_start_suspended": fub_id in watchdog.suspended,
                 }
                 for fub_id, name in sorted(stopped.items())
-            ]
+            ],
         }
 
     @property
