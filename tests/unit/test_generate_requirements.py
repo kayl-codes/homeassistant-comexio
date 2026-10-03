@@ -66,6 +66,10 @@ def test_real_repository_is_in_sync() -> None:
         STEPS + "      - run: >-\n          pip install --no-deps\n          aiocomexio==0.3.0\n",  # folded YAML block
         # a run: that is no step's script (a defaults mapping) is skipped
         "defaults:\n  run:\n    shell: bash\n" + _run("pip install aiocomexio==0.3.0"),
+        _run("# note \\\npip install aiocomexio==0.3.0"),  # a comment line ending in a backslash continues nothing
+        # non-string values (on: true, null, numbers, booleans) are no text to scan
+        "on:\n  workflow_dispatch:\n" + STEPS + "      - run: pip install aiocomexio==0.3.0\n"
+        "        timeout-minutes: 5\n        continue-on-error: true\n",
     ],
 )
 def test_matching_pin_spellings_pass(repo: Path, ci_text: str) -> None:
@@ -123,6 +127,39 @@ def test_matching_pin_spellings_pass(repo: Path, ci_text: str) -> None:
         (  # a quoted " #" reads as a comment to the raw-text scan, but the parsed install still drifts
             _run('pip install aiocomexio==0.3.0\necho "note #"; pip install aiocomexio==0.2.0'),
             "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (  # ... and in an install spelling the command filter does not recognise
+            _run('pip install aiocomexio==0.3.0\necho "note #"; uv pip install --system aiocomexio==0.2.0'),
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (  # a quoted " #" in a YAML value is no comment either
+            "env:\n  NOTE: 'see #1, aiocomexio==0.2.0'\n" + _run("pip install aiocomexio==0.3.0"),
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (  # shlex reads a mid-word "#" as a comment, the shell does not
+            _run("pip install aiocomexio==0.3.0\necho x#y aiocomexio==0.2.0"),
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (  # ... not even next to a quoted " #" that the comment regex cuts at
+            _run(
+                'pip install aiocomexio==0.3.0\necho "build #1"; VER=${GITHUB_REF#refs/tags/}; '
+                "uv pip install aiocomexio==0.2.0"
+            ),
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (  # a comment line ending in a backslash continues nothing
+            _run('pip install aiocomexio==0.3.0\n# note \\\necho "x #"; uv pip install aiocomexio==0.2.0'),
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (  # a quoted " #" in a value inside the steps list
+            STEPS + "      - run: pip install aiocomexio==0.3.0\n      - uses: x/y@v1\n        with:\n"
+            "          note: 'see #1, aiocomexio==0.2.0'\n",
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (  # only a step's run: script is read as shell: a "#" line in an action input is plain text
+            STEPS + "      - run: pip install aiocomexio==0.3.0\n      - uses: x/y@v1\n        with:\n"
+            "          script: |\n            # was aiocomexio==0.1.0\n            true\n",
+            "ci.yml: aiocomexio==0.1.0 (manifest.json: 0.3.0)",
         ),
     ],
 )

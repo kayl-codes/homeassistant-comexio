@@ -47,8 +47,12 @@ _PIP_INSTALLS = [
 ]
 # Shell control operators (;, &&, |, subshell parentheses, redirects) and line ends end a command.
 _SHELL_OPERATORS = "();<>|&\n"
-# A shell line continuation: the next line belongs to the same command.
+# A shell line continuation: the next line belongs to the same command. A comment line continues nothing.
 _CONTINUATION = re.compile(r"\\\r?\n")
+_COMMENT_LINE = re.compile(r"^[ \t]*#.*$", re.MULTILINE)
+# The shell starts a comment only at a word start; shlex at any "#" (${REF#refs/}, a URL fragment).
+_MID_WORD_HASH = re.compile(r"(?<=[^\s();<>|&])#")
+_HASH_PLACEHOLDER = "\0"
 
 
 def _normalize(name: str) -> str:
@@ -86,7 +90,8 @@ def _run_scripts(workflow: object) -> list[tuple[str, str]]:
 def _shell_commands(step: str, script: str) -> list[list[str]]:
     """The simple commands of a shell script as word lists, quoting resolved and comments dropped."""
     # shlex's comment skip consumes the line end after a comment, so every line end is doubled to keep one.
-    script = _CONTINUATION.sub(" ", script).replace("\n", "\n\n")
+    script = _CONTINUATION.sub(" ", _COMMENT_LINE.sub("", script)).replace("\n", "\n\n")
+    script = _MID_WORD_HASH.sub(_HASH_PLACEHOLDER, script)
     lexer = shlex.shlex(script, posix=True, punctuation_chars=_SHELL_OPERATORS)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
@@ -94,7 +99,7 @@ def _shell_commands(step: str, script: str) -> list[list[str]]:
     try:
         for token in lexer:
             if token.strip(_SHELL_OPERATORS):
-                commands[-1].append(token)
+                commands[-1].append(token.replace(_HASH_PLACEHOLDER, "#"))
             elif commands[-1]:
                 commands.append([])
     except ValueError as err:  # an unclosed quote
@@ -102,19 +107,30 @@ def _shell_commands(step: str, script: str) -> list[list[str]]:
     return commands
 
 
-def _installed_pins(workflow: str) -> dict[str, list[str]]:
-    """The name==version pins that a pip install command in a run: script of the workflow installs."""
+def _scalars(node: object) -> list[str]:
+    """Every string value in a parsed YAML document."""
+    if isinstance(node, dict):
+        return [text for value in node.values() for text in _scalars(value)]
+    if isinstance(node, list):
+        return [text for item in node for text in _scalars(item)]
+    return [node] if isinstance(node, str) else []
+
+
+def _workflow_pins(workflow: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """(every pin in the workflow, the pins a pip install command in a step's run: script installs).
+
+    YAML and shell comments are dropped as the parsers read them, so a quoted " #" hides nothing.
+    """
     try:
         parsed = yaml.safe_load(workflow)
     except yaml.YAMLError as err:
         raise _ParseError(" ".join(str(err).split())) from err
-    installed = [
-        " ".join(command)
-        for step, script in _run_scripts(parsed)
-        for command in _shell_commands(step, script)
-        if any(command[: len(prefix)] == prefix for prefix in _PIP_INSTALLS)
-    ]
-    return _pins_by_name("\n".join(installed))
+    scripts = _run_scripts(parsed)
+    commands = [command for step, script in scripts for command in _shell_commands(step, script)]
+    installs = [command for command in commands if any(command[: len(p)] == p for p in _PIP_INSTALLS)]
+    run_texts = {script for _, script in scripts}
+    texts = [text for text in _scalars(parsed) if text not in run_texts] + [" ".join(c) for c in commands]
+    return _pins_by_name("\n".join(texts)), _pins_by_name("\n".join(" ".join(c) for c in installs))
 
 
 def _file_mismatches(path: Path, pins: dict[str, tuple[str, str]]) -> list[str]:
@@ -125,16 +141,21 @@ def _file_mismatches(path: Path, pins: dict[str, tuple[str, str]]) -> list[str]:
     raw = path.read_text(encoding="utf-8")
     # Comments dropped: a commented-out "# pkg==1.0" is no pin. Asymmetric on purpose: any other version
     # anywhere in the file is a drift (an install spelling the command filter misses must not slip through),
-    # but in a workflow only a recognised pip install counts as the pin. The installs count for the drift too:
-    # the comment regex reads a quoted " #" as a comment and may hide a drifted install behind it.
+    # but in a workflow only a recognised pip install counts as the pin. In a workflow the drift scan also
+    # reads the parsed YAML values and shell words, since the comment regex takes a quoted " #" for a comment.
+    # Only a step's run: script is read as shell: a "#" line in any other block value (an action input, a
+    # multi-line env value) is plain text to YAML, so a version in it is a drift.
     written = _pins_by_name(_COMMENT.sub("", raw))
+    installed = written
     try:
-        installed = _installed_pins(raw) if path.suffix in {".yml", ".yaml"} else written
+        if path.suffix in {".yml", ".yaml"}:
+            parsed, installed = _workflow_pins(raw)
+            written = {key: written.get(key, []) + parsed.get(key, []) for key in written.keys() | parsed.keys()}
     except _ParseError as err:
         return [f"{relative}: cannot be parsed ({err})"]
     mismatches = []
     for key, (name, version) in pins.items():
-        versions = dict.fromkeys(written.get(key, []) + installed.get(key, []))
+        versions = dict.fromkeys(written.get(key, []))
         drifted = [other for other in versions if other != version]
         if not drifted and version not in installed.get(key, []):
             mismatches.append(f"{relative}: no {name}=={version} pin")
