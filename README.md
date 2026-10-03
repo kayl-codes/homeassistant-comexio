@@ -54,7 +54,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `sensor` (diagnostic) | Integration | `Backups` (Function plans device) — total number of stored plan snapshots, per-plan details as state attributes. |
 | `sensor` (diagnostic) | Integration | `Backups (deleted plans)` (Function plans device) — number of stored snapshots whose plan no longer exists in Comexio (deleted or renamed), the plans as a state attribute. |
 | `sensor` | Function Plans | One per plan (`sensor.iosrv1_fub19`, named after the plan) — run state `Running` / `Stopped`, or `Starting…` / `Stopping…` while HA itself starts or stops it. |
-| `binary_sensor` (diagnostic) | Integration | `Managed Plans Problem` (Function plans device) — on while a watched function plan does not run; the stopped plans as a state attribute. See [Function plan watchdog](#function-plan-watchdog). |
+| `binary_sensor` (diagnostic) | Integration | `Managed Plans Problem` (Function plans device) — on while a watched function plan does not run; the stopped plans (with `auto_start_suspended`) and the time of the watchdog's last check (`last_check`) as state attributes. See [Function plan watchdog](#function-plan-watchdog). |
 | `switch` (config) | Integration | `Plan Auto-Start (HA plans)` / `(user plans)` (Function plans device) — start a stopped watched plan again on their own. |
 | `sensor` (diagnostic) | Integration | `Bus Workload` — internal Comexio bus/CPU load in %, polled independently every 10 s. |
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
@@ -286,7 +286,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `sensor` (Diagnose) | Integration | `Backups` (Gerät „Function plans“) — Gesamtzahl der gespeicherten Plan-Snapshots, Details je Plan als State-Attribute. |
 | `sensor` (Diagnose) | Integration | `Backups (gelöschter Pläne)` (Gerät „Function plans“) — Anzahl der Snapshots, deren Plan es in Comexio nicht mehr gibt (gelöscht oder umbenannt), die Pläne als State-Attribut. |
 | `sensor` | Funktionspläne | Je Plan einer (`sensor.iosrv1_fub19`, benannt nach dem Plan) — Laufzustand `Läuft` / `Gestoppt`, bzw. `Startet…` / `Stoppt…`, solange HA den Plan selbst startet oder stoppt. |
-| `binary_sensor` (Diagnose) | Integration | `Problem verwaltete Pläne` (Gerät „Function plans“) — an, solange ein überwachter Logikplan nicht läuft; die gestoppten Pläne als State-Attribut. Siehe [Logikplan-Watchdog](#logikplan-watchdog). |
+| `binary_sensor` (Diagnose) | Integration | `Problem verwaltete Pläne` (Gerät „Function plans“) — an, solange ein überwachter Logikplan nicht läuft; die gestoppten Pläne (mit `auto_start_suspended`) und der Zeitpunkt der letzten Watchdog-Prüfung (`last_check`) als State-Attribute. Siehe [Logikplan-Watchdog](#logikplan-watchdog). |
 | `switch` (Konfiguration) | Integration | `Plan Auto-Start (HA-Pläne)` / `(User-Pläne)` (Gerät „Function plans“) — starten einen gestoppten überwachten Plan selbst wieder. |
 | `sensor` (Diagnose) | Integration | `Bus Workload` — interne Comexio Bus-/CPU-Auslastung in %, unabhängig alle 10 s abgefragt. |
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
