@@ -50,8 +50,14 @@ def test_a_failed_render_is_not_reported_as_armed() -> None:
     assert result == {"success": False, "error": "The plan 'X' (ID 3) could not be loaded from Comexio."}
 
 
+def _follow_coordinator(*, armed: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        preview_armed=armed, server_id="iosrv1", preview_follow_lock=asyncio.Lock(), preview_follow_generation=0
+    )
+
+
 def _run_follow(*, armed: bool, selection: bool, render: AsyncMock) -> None:
-    coordinator = SimpleNamespace(preview_armed=armed, server_id="iosrv1")
+    coordinator = _follow_coordinator(armed=armed)
     with (
         patch.object(plan_preview, "preview_selection_available", return_value=selection),
         patch.object(plan_preview, "async_render_selected_preview", render),
@@ -89,3 +95,36 @@ def test_an_unexpected_follow_error_is_logged_not_raised(caplog: pytest.LogCaptu
         _run_follow(armed=True, selection=True, render=render)
     assert "failed to follow the new selection" in caplog.text
     assert "disk full" in caplog.text
+
+
+def test_rapid_selection_changes_end_on_the_latest_selection() -> None:
+    """Review (Copilot, #132): a slow render of an older selection must not publish after a newer one."""
+    coordinator = _follow_coordinator(armed=True)
+    coordinator.selection = "A"
+    rendered: list[str] = []
+
+    async def scenario() -> None:
+        release = asyncio.Event()
+
+        async def render(c: SimpleNamespace) -> None:
+            selection = c.selection
+            if selection == "A":
+                await release.wait()
+            rendered.append(selection)
+
+        with (
+            patch.object(plan_preview, "preview_selection_available", return_value=True),
+            patch.object(plan_preview, "async_render_selected_preview", render),
+        ):
+            follows = [asyncio.ensure_future(plan_preview.async_follow_selection(coordinator))]  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            for selection in ("B", "C"):
+                coordinator.selection = selection
+                follows.append(asyncio.ensure_future(plan_preview.async_follow_selection(coordinator)))  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(*follows)
+
+    asyncio.run(scenario())
+    # "B" was superseded while it waited; "C" renders after "A" finished.
+    assert rendered == ["A", "C"]

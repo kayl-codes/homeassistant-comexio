@@ -689,6 +689,36 @@ def test_run_fup_unconfirmed_is_no_warning(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+@pytest.mark.parametrize(
+    ("err", "expected"),
+    [
+        (ComexioRequestRejectedError("refused: output used twice"), False),
+        (_connection_error(), None),
+        (HTTP_ERROR, None),
+        (ComexioAuthenticationError("lapsed"), None),
+        (ComexioDataError("no result field"), None),
+        (TypeError("Expected integers"), None),
+        (ValueError("not a number"), None),
+    ],
+    ids=["refused", "connection", "http", "session", "malformed", "type", "value"],
+)
+def test_run_fup_outcome_tells_a_refusal_apart_from_no_answer(
+    comexio_api: ComexioAPI, client: MagicMock, err: Exception, expected: bool | None
+) -> None:
+    # Review (Copilot, #132): only a refusal may count as a failed start of the plan watchdog —
+    # None (no usable answer) must not use up its two attempts before it gives up on a plan.
+    _fail(client, "run_function_plan", err)
+    assert asyncio.run(comexio_api.function_plan_run_fup_outcome(7)) is expected
+    assert "7" not in comexio_api._ha_run_states
+
+
+def test_run_fup_outcome_confirmed_is_true_and_records_the_run(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.run_function_plan = AsyncMock(return_value=None)
+    assert asyncio.run(comexio_api.function_plan_run_fup_outcome(7)) is True
+    client.run_function_plan.assert_awaited_once_with(7, None)
+    assert comexio_api._ha_run_states["7"][0] is True
+
+
 def test_comment_gets_its_width_after_placing(comexio_api: ComexioAPI, client: MagicMock) -> None:
     client.add_function_plan_comment = AsyncMock(return_value=11)
     client.save_function_plan_comment = AsyncMock(side_effect=ComexioRequestRejectedError("not confirmed"))

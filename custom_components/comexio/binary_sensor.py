@@ -26,6 +26,7 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
+    ComexioStableEntityIdMixin,
     function_plan_device_info,
 )
 
@@ -71,8 +72,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             and knx.get("knx_composite") is None
         )
 
-    entities.append(ComexioSdCardSensor(coordinator, coordinator.server_id))
-    entities.append(ComexioManagedPlansProblemSensor(coordinator, coordinator.server_id))
+    entities.extend(
+        (
+            ComexioSdCardSensor(coordinator, coordinator.server_id),
+            ComexioManagedPlansProblemSensor(coordinator, coordinator.server_id),
+        )
+    )
 
     async_add_entities(entities)
 
@@ -146,7 +151,7 @@ class ComexioKnxBinarySensor(ComexioKnxEntity, ComexioMarkerBinarySensor):
         return None if val is None else float(val or 0) >= 1.0
 
 
-class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
+class ComexioManagedPlansProblemSensor(ComexioStableEntityIdMixin, CoordinatorEntity, BinarySensorEntity):
     """On while a watched function plan (HA-managed, or a user plan picked in the options) does not run.
 
     See plan_watchdog.

@@ -104,10 +104,22 @@ async def async_follow_selection(coordinator: ComexioCoordinator) -> None:
     """A 'Plan' or 'Backup' selection changed: show it in an armed preview, else leave the preview idle.
 
     Without an open plan card nothing is rendered, so picking a plan on the device page starts no poll.
+    Follows render one after the other; one superseded by a newer selection while it waited is
+    skipped, so the preview always ends on the latest selection.
     """
-    if not coordinator.preview_armed or not preview_selection_available(coordinator):
-        return
+    coordinator.preview_follow_generation += 1
+    generation = coordinator.preview_follow_generation
+    async with coordinator.preview_follow_lock:
+        if generation != coordinator.preview_follow_generation:
+            _LOGGER.debug("[%s] Plan preview follow skipped: a newer selection follows", coordinator.server_id)
+            return
+        await _async_follow_current_selection(coordinator)
+
+
+async def _async_follow_current_selection(coordinator: ComexioCoordinator) -> None:
     try:
+        if not coordinator.preview_armed or not preview_selection_available(coordinator):
+            return
         await async_render_selected_preview(coordinator)
     except HomeAssistantError as err:
         _LOGGER.warning("[%s] Plan preview not updated to the new selection: %s", coordinator.server_id, err)

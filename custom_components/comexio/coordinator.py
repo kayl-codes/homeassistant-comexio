@@ -639,6 +639,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # a preview that was already told to stop, or a slow render could clobber a newer,
         # concurrently-armed one for a different plan (#77).
         self._preview_cache_generation: int = 0
+        # 'Plan'/'Backup' selection follows (plan_preview.async_follow_selection) render one at a
+        # time, and a follow superseded by a newer selection while it waited is skipped: one
+        # background task per selection would otherwise let an older, slower render publish last.
+        self.preview_follow_lock = asyncio.Lock()
+        self.preview_follow_generation: int = 0
         self._preview_refresh_cancel: Any = None
         # Stufe 2: last fetched {connection_id: value} for the armed live plan (see
         # _async_poll_connection_values) and the timer driving that poll. Cleared/stopped

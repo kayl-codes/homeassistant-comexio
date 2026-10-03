@@ -13,7 +13,13 @@ from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MarkerKind
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity, function_plan_device_info
+from .entity import (
+    ComexioIOEntity,
+    ComexioKnxEntity,
+    ComexioMarkerEntity,
+    ComexioStableEntityIdMixin,
+    function_plan_device_info,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,13 +65,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if io.get("is_binary") and not io.get("is_input", True) and (not io.get("offline") or include_offline)
         )
 
-    entities.append(ComexioPlanAutoStartSwitch(coordinator, coordinator.server_id))
-    entities.append(ComexioUserPlanAutoStartSwitch(coordinator, coordinator.server_id))
+    entities.extend(
+        (
+            ComexioPlanAutoStartSwitch(coordinator, coordinator.server_id),
+            ComexioUserPlanAutoStartSwitch(coordinator, coordinator.server_id),
+        )
+    )
 
     async_add_entities(entities)
 
 
-class ComexioPlanAutoStartSwitch(SwitchEntity, RestoreEntity):
+class ComexioPlanAutoStartSwitch(ComexioStableEntityIdMixin, SwitchEntity, RestoreEntity):
     """Plan Auto-Start (HA plans): the plan watchdog starts a stopped HA-managed plan again on its own.
 
     On by default (HA's plans should run); only HA's own setting, nothing is written to Comexio.
