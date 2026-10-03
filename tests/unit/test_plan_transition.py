@@ -41,8 +41,9 @@ def test_a_failed_action_still_clears_the_transition_and_reads_the_states() -> N
         async with coordinator.async_plan_transition(43, PLAN_TRANSITION_STARTING):
             raise RuntimeError("comexio down")
 
-    with pytest.raises(RuntimeError):
-        asyncio.run(run())
+    action = run()
+    with pytest.raises(RuntimeError, match="comexio down"):
+        asyncio.run(action)
     assert coordinator.plan_transition(43) is None
     coordinator._async_refresh_plan_run_states.assert_awaited_once()
 
