@@ -3346,12 +3346,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 await self._async_refresh_plan_run_states()
             self.async_update_listeners()
 
-    async def _async_watchdog_start_plan(self, fub_id: int, *, refresh: bool = False) -> bool:
-        """Start a stopped managed plan for the watchdog's auto-start; False if it was not started."""
+    async def _async_watchdog_start_plan(self, fub_id: int, *, refresh: bool = False) -> bool | None:
+        """Start a stopped managed plan for the watchdog's auto-start.
+
+        True if started, False if Comexio refused it, None if not attempted (a sync, restore or poll
+        runs) or not answered — the auto-start counts only a refusal as a failed attempt.
+        """
         if self.managed_plan_start_blocked:
-            return False
+            return None
         async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
-            started = await self.api.function_plan_run_fup(fub_id)
+            started = await self.api.function_plan_run_fup_outcome(fub_id)
         if refresh:
             # Outside the watchdog lock: the fetch judges the watched plans again.
             await self._async_refresh_plan_run_states()

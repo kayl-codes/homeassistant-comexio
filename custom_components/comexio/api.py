@@ -3271,6 +3271,14 @@ class ComexioAPI:
         backup snapshot with 'elements' and 'connections') to restore that state instead.
         Returns True only if Comexio confirmed the run.
         """
+        return await self.function_plan_run_fup_outcome(fub_id, plan_data) is True
+
+    async def function_plan_run_fup_outcome(self, fub_id: int, plan_data: dict | None = None) -> bool | None:
+        """function_plan_run_fup telling a refusal apart from no answer.
+
+        True: Comexio confirmed the run. False: Comexio refused it (result=false). None: no usable
+        answer (connection, session or a malformed reply) — says nothing about the plan itself.
+        """
         try:
             await self.client.run_function_plan(int(fub_id), plan_data)
         except ComexioRequestRejectedError as err:
@@ -3281,7 +3289,7 @@ class ComexioAPI:
             return False
         except (ComexioError, TypeError, ValueError) as err:
             _LOGGER.warning("function_plan_run_fup: fub=%s failed: %s", fub_id, err)
-            return False
+            return None
         _LOGGER.info("function_plan_run_fup: fub=%s result=True", fub_id)
         self.set_fub_active(fub_id, True)
         return True

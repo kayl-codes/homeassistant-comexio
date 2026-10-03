@@ -402,6 +402,23 @@
         }
       }
     },
+    "function_plan_auto_start_suspended": {
+      "title": "Vérifier le plan de fonctions {plan_name}",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Le plan de fonctions s'arrête sans cesse",
+            "description": "Plan Auto-Start a démarré le plan de fonctions **{plan_name}** (ID {fub_id}) {attempts} fois, mais à chaque fois le démarrage a été refusé ou le plan s'est de nouveau arrêté peu après. Le plan contient probablement une erreur ; Auto-Start cesse donc de réessayer pour ce plan.\n\nDernière tentative échouée : {gave_up_at}.\n\nVérifiez le plan dans Comexio Studio. Auto-Start reprend de lui-même dès que le plan est de nouveau détecté en cours d'exécution.\n\n**Valider** démarre le plan une fois maintenant."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
+          "busy": "Une synchronisation, une restauration, une interrogation ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
+          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
+        }
+      }
+    },
     "reference_catalog_mismatch": {
       "title": "Bloc fonctionnel Comexio inutilisable ({server_id})",
       "description": "Comexio {version} sur ce serveur ne fournit pas le(s) bloc(s) fonctionnel(s) **{blocks}** sous la forme prévue par cette intégration. Les fonctions qui placent ces blocs dans les plans fonctionnels (marqueurs déclencheurs `[TRIG]`) sont désactivées afin qu'aucun élément défectueux ne soit créé.\n\n**[Signaler sur GitHub]({issue_url})** — ouvre un nouveau ticket avec le diagnostic déjà rempli (uniquement les versions et le catalogue de blocs Comexio, aucune donnée personnelle). Vérifiez-le puis envoyez-le ; un compte GitHub est requis.\n\nSi une entrée indique « not checked », les fichiers de référence de l'intégration elle-même sont absents ou endommagés — réinstallez l'intégration."

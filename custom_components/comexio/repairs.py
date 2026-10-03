@@ -1259,7 +1259,9 @@ class ComexioRepairFlow(RepairsFlow):
 
     async def async_step_function_plan_stopped(self, user_input=None):
         """Start a stopped HA-managed function plan again."""
-        placeholders = {key: str(self.issue_data.get(key, "?")) for key in ("plan_name", "fub_id")}
+        placeholders = {
+            key: str(self.issue_data.get(key, "?")) for key in ("plan_name", "fub_id", "attempts", "gave_up_at")
+        }
         if user_input is None:
             return self.async_show_form(
                 step_id="function_plan_stopped", description_placeholders=placeholders, data_schema=vol.Schema({})

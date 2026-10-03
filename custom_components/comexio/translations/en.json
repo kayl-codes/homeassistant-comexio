@@ -402,6 +402,23 @@
         }
       }
     },
+    "function_plan_auto_start_suspended": {
+      "title": "Check function plan {plan_name}",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Function plan keeps stopping",
+            "description": "Plan Auto-Start started the function plan **{plan_name}** (ID {fub_id}) {attempts} times, but it was refused or stopped again shortly after each time. The plan most likely has an error, so Auto-Start stops trying for this plan.\n\nLast failed attempt: {gave_up_at}.\n\nCheck the plan in Comexio Studio. Auto-Start resumes on its own once the plan is seen running again.\n\n**Submit** starts the plan once now."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
+          "busy": "A sync, restore, poll or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
+          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+        }
+      }
+    },
     "reference_catalog_mismatch": {
       "title": "Comexio function block not usable ({server_id})",
       "description": "Comexio {version} on this server does not provide the function block(s) **{blocks}** in the layout this integration was built for. Features that place these blocks in function plans (trigger markers `[TRIG]`) are disabled so no broken elements are written.\n\n**[Report this on GitHub]({issue_url})** — opens a new issue with the diagnosis already filled in (versions and Comexio block catalog only, no personal data). Please review it and submit; a GitHub account is required.\n\nIf an entry reads \"not checked\", the integration's own reference files are missing or damaged — reinstall the integration."

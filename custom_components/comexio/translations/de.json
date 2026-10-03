@@ -402,6 +402,23 @@
         }
       }
     },
+    "function_plan_auto_start_suspended": {
+      "title": "Logikplan {plan_name} prüfen",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Logikplan stoppt immer wieder",
+            "description": "Plan Auto-Start hat den Logikplan **{plan_name}** (ID {fub_id}) {attempts}-mal gestartet, aber jedes Mal wurde der Start abgelehnt oder der Plan stoppte kurz danach wieder. Vermutlich enthält der Plan einen Fehler, deshalb versucht Auto-Start es für diesen Plan nicht weiter.\n\nLetzter Fehlversuch: {gave_up_at}.\n\nPrüfe den Plan im Comexio Studio. Auto-Start greift von selbst wieder, sobald der Plan wieder als laufend erkannt wird.\n\n**Absenden** startet den Plan jetzt einmalig."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+        }
+      }
+    },
     "reference_catalog_mismatch": {
       "title": "Comexio-Funktionsbaustein nicht nutzbar ({server_id})",
       "description": "Comexio {version} auf diesem Server stellt den/die Funktionsbaustein(e) **{blocks}** nicht in der Form bereit, für die diese Integration gebaut ist. Funktionen, die diese Bausteine in Logikpläne setzen (Trigger-Merker `[TRIG]`), sind deaktiviert, damit keine fehlerhaften Elemente angelegt werden.\n\n**[Auf GitHub melden]({issue_url})** — öffnet ein neues Issue, in dem die Diagnose bereits ausgefüllt ist (nur Versionen und der Comexio-Bausteinkatalog, keine persönlichen Daten). Bitte prüfen und absenden; ein GitHub-Konto ist nötig.\n\nSteht bei einem Eintrag „not checked“, fehlen die Referenzdateien der Integration selbst oder sind beschädigt — bitte die Integration neu installieren."

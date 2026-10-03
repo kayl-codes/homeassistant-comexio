@@ -179,7 +179,12 @@ class ComexioManagedPlansProblemSensor(CoordinatorEntity, BinarySensorEntity):
         stopped = watchdog.stopped or {}
         return {
             "stopped_plans": [
-                {"fub_id": fub_id, "name": name, "user_plan": watchdog.is_user_plan(fub_id)}
+                {
+                    "fub_id": fub_id,
+                    "name": name,
+                    "user_plan": watchdog.is_user_plan(fub_id),
+                    "auto_start_suspended": fub_id in watchdog.suspended,
+                }
                 for fub_id, name in sorted(stopped.items())
             ]
         }

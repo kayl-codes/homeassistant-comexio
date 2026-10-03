@@ -8,8 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from custom_components.comexio import api as api_module, plan_watchdog
-from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.const import DOMAIN, FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC
 from custom_components.comexio.plan_watchdog import (
+    ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED,
     ISSUE_FUNCTION_PLAN_STOPPED,
     ISSUE_FUNCTION_PLAN_STOPPED_USER,
     ManagedPlanWatchdog,
@@ -59,12 +60,12 @@ def ir(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 def _watchdog(
-    start_results: list[bool] | None = None, targets: list[str] | None = None
+    start_results: list[bool | None] | None = None, targets: list[str] | None = None
 ) -> tuple[ManagedPlanWatchdog, list[int]]:
     started: list[int] = []
     results = iter(start_results or [])
 
-    async def start(fub_id: int) -> bool:
+    async def start(fub_id: int) -> bool | None:
         started.append(fub_id)
         return next(results)
 
@@ -95,7 +96,7 @@ def test_stopped_plan_raises_and_clears_its_repair(ir: MagicMock) -> None:
     _, kwargs = ir.async_create_issue.call_args
     assert ir.async_create_issue.call_args.args[1:] == (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
     assert kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED
-    assert kwargs["data"] == {"entry_id": "e1", "plan_name": "HA - Marker 1", "fub_id": "34"}
+    assert kwargs["data"] == {"entry_id": "e1", "plan_name": "HA - Marker 1", "fub_id": "34", "attempts": "2"}
 
     assert asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True))) is True
     assert watchdog.stopped == {}
@@ -148,14 +149,49 @@ def test_user_plan_auto_start_is_off_by_default() -> None:
     assert watchdog.auto_restart_user is False
 
 
-def test_refused_auto_start_keeps_the_repair_and_backs_off(ir: MagicMock) -> None:
-    watchdog, started = _watchdog([False])
+def test_refused_auto_start_gives_up_after_two_attempts(ir: MagicMock) -> None:
+    watchdog, started = _watchdog([False, False], targets=["mobile_app_phone"])
     watchdog.auto_restart = True
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert watchdog.suspended == set()
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED
+
+    assert "gave_up_at" not in ir.async_create_issue.call_args.kwargs["data"]
+
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
-    assert started == [34]  # second check is within FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC
+    assert watchdog.suspended == {34}
+    kwargs = ir.async_create_issue.call_args.kwargs
+    assert kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED
+    assert kwargs["translation_placeholders"]["gave_up_at"] == kwargs["data"]["gave_up_at"] != ""
+
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34, 34]  # suspended: no third attempt
     assert watchdog.stopped == {34: "HA - Marker 1"}
     assert (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34)) in ir.async_get.return_value.issues
+    titles = [data["title"] for _, _, data in _pushes(watchdog)]
+    assert titles == ["Comexio: Logikplan gestoppt", "Comexio: Logikplan prüfen"]
+
+
+def test_plan_running_again_without_auto_start_clears_the_failure_count(ir: MagicMock) -> None:
+    """A refusal long forgotten must not let a single later refusal give up on the plan."""
+    watchdog, started = _watchdog([False, False])
+    watchdog.auto_restart = True
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # failure 1
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))  # started by hand
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # a fresh failure 1
+    assert started == [34, 34]
+    assert watchdog.suspended == set()
+
+
+def test_blocked_or_unanswered_start_is_not_a_failed_attempt(ir: MagicMock) -> None:
+    """None (sync/restore running, connection lost) says nothing about the plan: retried, never counted."""
+    watchdog, started = _watchdog([None, None, None])
+    watchdog.auto_restart = True
+    for _ in range(3):
+        asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34, 34, 34]
+    assert watchdog.suspended == set()
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED
 
 
 def test_plan_started_by_the_repair_clears_it_at_once(ir: MagicMock) -> None:
@@ -232,19 +268,49 @@ def test_clear_notification_goes_to_companion_apps_only(ir: MagicMock) -> None:
     assert clears == ["mobile_app_phone"]
 
 
-def test_plan_stopping_again_after_its_auto_start_is_reported(ir: MagicMock) -> None:
-    """No silent restart loop: a plan that stops right after its auto-start gets the repair and the alarm."""
-    watchdog, started = _watchdog([True, True], targets=["mobile_app_phone"])
+def test_flapping_plan_suspends_auto_start_until_seen_running(ir: MagicMock) -> None:
+    """A plan stopping again right after each auto-start is given up on after two failures, with a
+    "check the plan" repair and alarm; only a poll seeing it running lifts that."""
+    watchdog, started = _watchdog([True, True, True], targets=["mobile_app_phone"])
     watchdog.auto_restart = True
-    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
-    assert started == [34]
-    assert watchdog.stopped == {}
+    for _ in range(2):  # start, stopped again (failure 1) → second start
+        asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+        assert watchdog.stopped == {}
+    assert started == [34, 34]
+
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # stopped again: failure 2
+    assert started == [34, 34]
+    assert watchdog.suspended == {34}
+    assert watchdog.stopped == {34: "HA - Marker 1"}
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED
+    alarm = _pushes(watchdog)[-1][2]
+    assert alarm["title"] == "Comexio: Logikplan prüfen"
+    assert "2 Versuchen" in alarm["message"]
+    assert "actions" in alarm["data"]
+
+    # Started by hand from the repair: the suspension holds until a poll sees the plan running.
+    asyncio.run(watchdog.async_plan_started(34))
+    assert watchdog.suspended == {34}
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert watchdog.suspended == set()
 
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
-    assert started == [34]  # within FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC: not started again
-    assert watchdog.stopped == {34: "HA - Marker 1"}
-    assert (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34)) in ir.async_get.return_value.issues
-    assert "actions" in _pushes(watchdog)[-1][2]["data"]  # alarm with the "Start plan" action
+    assert started == [34, 34, 34]  # Auto-Start works again, with a fresh count
+    assert watchdog.suspended == set()
+
+
+def test_plan_running_past_the_window_resets_the_failure_count(ir: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(plan_watchdog, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    watchdog, started = _watchdog([True, True, True])
+    watchdog.auto_restart = True
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # failure 1, started again
+    now[0] += FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))  # ran past the window
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # a fresh stop, not failure 2
+    assert started == [34, 34, 34]
+    assert watchdog.suspended == set()
 
 
 def test_deleted_watched_plan_is_not_logged_as_running_again(ir: MagicMock, caplog: pytest.LogCaptureFixture) -> None:

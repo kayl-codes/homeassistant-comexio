@@ -645,10 +645,12 @@ PLAN_RUN_STATES = [PLAN_RUN_STATE_RUNNING, PLAN_RUN_STATE_STOPPED, PLAN_TRANSITI
 # A successful function_plan_stop/activate only logs: the run-state sensor already shows the
 # result. True brings back the "OK" notification; a failure always notifies.
 FUNCTION_PLAN_RUN_STOP_SUCCESS_NOTIFICATION = False
-# With auto-start on, a plan Comexio refused to start is tried again no sooner than this.
-FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC = 600
-# A plan that stops again this soon after an auto-start counts as a refused start: it is reported
-# (repair, problem sensor, alarm push) instead of restarted on every run-state poll.
+# Failed auto-starts of one plan (start refused, or stopped again within the window below) after
+# which Plan Auto-Start gives up on it: the plan likely has an error, so a "check the plan" repair
+# and alarm push replace further tries. It resumes once the plan is seen running again.
+FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS = 2
+# A plan that stops again this soon after its auto-start counts as a failed auto-start; one that
+# ran longer counts as healthy and starts with a clean slate.
 FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC = 600
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.

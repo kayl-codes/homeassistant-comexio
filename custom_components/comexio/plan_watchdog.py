@@ -5,7 +5,9 @@ Comexio. After every run-state fetch the coordinator checks them here, together 
 plans picked in the options: a stopped plan raises a fixable repair ("start now"), turns the
 problem sensor on, sends a push with a "Start plan" action to the configured notify services
 and, with the auto-start switch of its kind (HA plans / user plans) on, is started again
-right away.
+right away. After FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS failed auto-starts (refused, or
+stopped again shortly after) Auto-Start gives up on the plan with a "check the plan" repair and
+alarm push, until a run-state poll sees the plan running again.
 """
 
 from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -18,15 +20,18 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
-from .const import DOMAIN, FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC, FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC
+from .const import DOMAIN, FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS, FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC
 
 _LOGGER = logging.getLogger(__name__)
 
 ISSUE_FUNCTION_PLAN_STOPPED = "function_plan_stopped"
 # Translation key of a stopped user plan's repair; same issue id scheme and fix flow.
 ISSUE_FUNCTION_PLAN_STOPPED_USER = "function_plan_stopped_user"
+# Translation key once Plan Auto-Start gave up on a plan ("check the plan"); same issue id and fix flow.
+ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED = "function_plan_auto_start_suspended"
 START_ACTION_PREFIX = "COMEXIO_START_PLAN_"
 NOTIFY_DOMAIN = "notify"
 MOBILE_APP_SERVICE_PREFIX = "mobile_app_"
@@ -44,6 +49,12 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         ),
         "failed_title": "Comexio: start failed",
         "failed": "Comexio did not confirm the start of {name} (ID {fub_id}).",
+        "suspended_title": "Comexio: check function plan",
+        "suspended": (
+            "Plan Auto-Start could not keep {name} (ID {fub_id}) running after {attempts} attempts and "
+            "stopped trying. Please check the plan."
+        ),
+        "time_format": "%Y-%m-%d %H:%M:%S",
     },
     "de": {
         "stopped_title": "Comexio: Logikplan gestoppt",
@@ -54,6 +65,12 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "auto_started": "Der Logikplan {name} (ID {fub_id}) lief nicht und wurde per Plan Auto-Start gestartet.",
         "failed_title": "Comexio: Start fehlgeschlagen",
         "failed": "Comexio hat den Start von {name} (ID {fub_id}) nicht bestätigt.",
+        "suspended_title": "Comexio: Logikplan prüfen",
+        "suspended": (
+            "Plan Auto-Start konnte {name} (ID {fub_id}) nach {attempts} Versuchen nicht am Laufen halten "
+            "und versucht es nicht weiter. Bitte den Plan prüfen."
+        ),
+        "time_format": "%d.%m.%Y %H:%M:%S",
     },
 }
 
@@ -118,7 +135,7 @@ class ManagedPlanWatchdog:
         *,
         entry_id: str,
         server_id: str,
-        start_plan: Callable[[int], Awaitable[bool]],
+        start_plan: Callable[[int], Awaitable[bool | None]],
         notify_targets: Callable[[], list[str]],
     ) -> None:
         self._hass = hass
@@ -134,10 +151,14 @@ class ManagedPlanWatchdog:
         self._user_plans: frozenset[int] = frozenset()
         # fub_id → name of the managed plans not running; None until the first check.
         self.stopped: dict[int, str] | None = None
-        # fub_id → time.monotonic() of the last refused auto-start (retry back-off).
-        self._restart_refused_at: dict[int, float] = {}
+        # fub_id → failed auto-starts in a row (refused, or stopped again within the window).
+        self._failed_starts: dict[int, int] = {}
         # fub_id → time.monotonic() of the last successful auto-start (stopped-again detection).
         self._auto_started_at: dict[int, float] = {}
+        # Plans Auto-Start gave up on (FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS); lifted once seen running.
+        self.suspended: set[int] = set()
+        # fub_id → local time Auto-Start gave up on it (the last failed attempt), shown in its repair.
+        self._gave_up_at: dict[int, str] = {}
         self._checking = False
 
     async def async_check(
@@ -157,6 +178,8 @@ class ManagedPlanWatchdog:
         try:
             self._user_plans = frozenset(user_plans)
             previous = self.stopped or {}
+            suspended_before = frozenset(self.suspended)
+            self._track_running(managed, run_state)
             stopped = next_stopped_plans(managed, run_state, previous)
             self._log_transitions(previous, stopped, managed)
             to_start = {fub_id: name for fub_id, name in stopped.items() if self._auto_start_enabled(fub_id)}
@@ -165,9 +188,9 @@ class ManagedPlanWatchdog:
                 auto_started = await self._async_auto_start(to_start)
                 stopped = {fub_id: name for fub_id, name in stopped.items() if fub_id not in auto_started}
             self._sync_issues(stopped)
-            changed = self.stopped != stopped
+            changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
-            await self._async_push_transitions(previous, stopped, auto_started)
+            await self._async_push_transitions(previous, stopped, auto_started, self.suspended - suspended_before)
             return changed
         finally:
             self._checking = False
@@ -183,7 +206,8 @@ class ManagedPlanWatchdog:
 
         confirm replaces the push with a "runs again" one (started from the phone), else the push is removed.
         """
-        self._restart_refused_at.pop(fub_id, None)
+        # The suspension is not touched here: the run-state fetch right after the start (or the next
+        # poll) lifts it once it sees the plan running.
         self._auto_started_at.pop(fub_id, None)
         ir.async_delete_issue(self._hass, DOMAIN, stopped_plan_issue_id(self._server_id, fub_id))
         name = (self.stopped or {}).get(fub_id, str(fub_id))
@@ -215,52 +239,87 @@ class ManagedPlanWatchdog:
                 "[%s] Monitored function plan '%s' (ID %s) %s", self._server_id, previous[fub_id], fub_id, verdict
             )
 
-    def _stopped_again_after_auto_start(self, fub_id: int, name: str, now: float) -> bool:
-        """A plan that stops again soon after its auto-start is reported, not restarted over and over.
+    def _track_running(self, managed: Mapping[int, str], run_state: Callable[[int], bool | None]) -> None:
+        """Lift the Auto-Start suspension of a plan seen running; forget plans no longer watched.
 
-        Counts as a refused start, so the repair, the problem sensor and the alarm push show it
-        and the next try waits for the retry back-off.
+        A plan seen running starts with a clean slate — unless it is still inside the stopped-again
+        window of its own auto-start, where it has yet to prove it keeps running.
         """
-        started_at = self._auto_started_at.pop(fub_id, None)
-        if started_at is None or now - started_at >= FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
-            return False
+        now = time.monotonic()
+        lifted = {fub_id for fub_id in self.suspended if fub_id not in managed or run_state(fub_id) is True}
+        on_probation = {
+            fub_id
+            for fub_id, started_at in self._auto_started_at.items()
+            if now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC
+        }
+        healthy = {
+            fub_id
+            for fub_id in self._auto_started_at.keys() | self._failed_starts.keys()
+            if fub_id not in managed or (run_state(fub_id) is True and fub_id not in on_probation)
+        }
+        for fub_id in lifted & managed.keys():
+            _LOGGER.info(
+                "[%s] Function plan '%s' (ID %s) runs again; Plan Auto-Start resumes for it",
+                self._server_id,
+                managed[fub_id],
+                fub_id,
+            )
+        self.suspended -= lifted
+        for fub_id in lifted:
+            self._gave_up_at.pop(fub_id, None)
+        for fub_id in lifted | healthy:
+            self._auto_started_at.pop(fub_id, None)
+            self._failed_starts.pop(fub_id, None)
+
+    def _count_failed_start(self, fub_id: int, name: str, reason: str) -> None:
+        """One more failed auto-start; at FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS Auto-Start gives up on the plan."""
+        failed = self._failed_starts.get(fub_id, 0) + 1
+        self._failed_starts[fub_id] = failed
         _LOGGER.warning(
-            "[%s] Monitored function plan '%s' (ID %s) stopped again within %s s of its auto-start; "
-            "not restarting it for %s s",
+            "[%s] Auto-start of monitored function plan '%s' (ID %s) failed (%s), attempt %s of %s",
             self._server_id,
             name,
             fub_id,
-            FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
-            FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC,
+            reason,
+            failed,
+            FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS,
         )
-        self._restart_refused_at[fub_id] = now
-        return True
+        if failed >= FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS:
+            self.suspended.add(fub_id)
+            self._gave_up_at[fub_id] = dt_util.now().strftime(self._texts()["time_format"])
+            _LOGGER.warning(
+                "[%s] Plan Auto-Start gave up on function plan '%s' (ID %s); check the plan in Comexio Studio. "
+                "Auto-Start resumes once the plan is seen running again",
+                self._server_id,
+                name,
+                fub_id,
+            )
 
     async def _async_auto_start(self, stopped: Mapping[int, str]) -> dict[int, str]:
-        """Start the stopped plans; returns the ones started."""
+        """Start the stopped plans Auto-Start has not given up on; returns the ones started."""
         started: dict[int, str] = {}
         now = time.monotonic()
         for fub_id, name in stopped.items():
-            refused_at = self._restart_refused_at.get(fub_id)
-            if refused_at is not None and now - refused_at < FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC:
+            started_at = self._auto_started_at.pop(fub_id, None)
+            if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
+                self._count_failed_start(fub_id, name, "stopped again shortly after its start")
+            if fub_id in self.suspended:
                 continue
-            if self._stopped_again_after_auto_start(fub_id, name, now):
-                continue
-            if await self._start_plan(fub_id):
-                self._restart_refused_at.pop(fub_id, None)
+            result = await self._start_plan(fub_id)
+            if result:
                 self._auto_started_at[fub_id] = now
                 self._notify_auto_started(fub_id, name)
                 started[fub_id] = name
-                continue
-            if refused_at is None:
-                _LOGGER.warning(
-                    "[%s] Auto-start of monitored function plan '%s' (ID %s) failed; retrying every %s s",
+            elif result is False:
+                self._count_failed_start(fub_id, name, "start refused by Comexio")
+            else:
+                # Blocked by a running sync/restore, or no answer: says nothing about the plan, retried next poll.
+                _LOGGER.info(
+                    "[%s] Auto-start of monitored function plan '%s' (ID %s) deferred to the next check",
                     self._server_id,
                     name,
                     fub_id,
-                    FUNCTION_PLAN_WATCHDOG_RESTART_RETRY_SEC,
                 )
-            self._restart_refused_at[fub_id] = now
         return started
 
     def _notify_auto_started(self, fub_id: int, name: str) -> None:
@@ -280,16 +339,20 @@ class ManagedPlanWatchdog:
         for fub_id, name in stopped.items():
             issue_id = stopped_plan_issue_id(self._server_id, fub_id)
             wanted.add(issue_id)
-            details = {"plan_name": name, "fub_id": str(fub_id)}
+            details = {
+                "plan_name": name,
+                "fub_id": str(fub_id),
+                "attempts": str(FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS),
+            }
+            if fub_id in self._gave_up_at:
+                details["gave_up_at"] = self._gave_up_at[fub_id]
             ir.async_create_issue(
                 self._hass,
                 DOMAIN,
                 issue_id,
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
-                translation_key=(
-                    ISSUE_FUNCTION_PLAN_STOPPED_USER if self.is_user_plan(fub_id) else ISSUE_FUNCTION_PLAN_STOPPED
-                ),
+                translation_key=self._issue_translation_key(fub_id),
                 translation_placeholders=details,
                 # The fix flow gets only this data, not the placeholders.
                 data={"entry_id": self._entry_id, **details},
@@ -298,16 +361,33 @@ class ManagedPlanWatchdog:
             if issue_id not in wanted:
                 ir.async_delete_issue(self._hass, DOMAIN, issue_id)
 
+    def _issue_translation_key(self, fub_id: int) -> str:
+        if fub_id in self.suspended:
+            return ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED
+        return ISSUE_FUNCTION_PLAN_STOPPED_USER if self.is_user_plan(fub_id) else ISSUE_FUNCTION_PLAN_STOPPED
+
     async def _async_push_transitions(
-        self, previous: Mapping[int, str], stopped: Mapping[int, str], auto_started: Mapping[int, str]
+        self,
+        previous: Mapping[int, str],
+        stopped: Mapping[int, str],
+        auto_started: Mapping[int, str],
+        newly_suspended: Collection[int],
     ) -> None:
-        """Alarm push for a newly stopped plan; the push of a plan running again is replaced or removed."""
-        for fub_id in sorted(stopped.keys() - previous.keys()):
+        """Alarm push for a newly stopped plan or one Auto-Start gave up on; the push of a plan running
+        again is replaced or removed."""
+        for fub_id in sorted(stopped.keys() - previous.keys() - set(newly_suspended)):
             await self._async_push(fub_id, stopped[fub_id], "stopped_title", "stopped", with_action=True, alarm=True)
+        for fub_id in sorted(set(newly_suspended) & stopped.keys()):
+            await self._async_push(
+                fub_id, stopped[fub_id], "suspended_title", "suspended", with_action=True, alarm=True
+            )
         for fub_id, name in sorted(auto_started.items()):
             await self._async_push(fub_id, name, "started_title", "auto_started")
         for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys()):
             await self._async_clear_push(fub_id)
+
+    def _texts(self) -> dict[str, str]:
+        return PUSH_TEXTS.get(self._hass.config.language, PUSH_TEXTS["en"])
 
     def _push_tag(self, fub_id: int) -> str:
         """One push per plan: a newer one with the same tag replaces it on the phone."""
@@ -323,7 +403,7 @@ class ManagedPlanWatchdog:
         with_action: bool = False,
         alarm: bool = False,
     ) -> None:
-        texts = PUSH_TEXTS.get(self._hass.config.language, PUSH_TEXTS["en"])
+        texts = self._texts()
         data: dict[str, Any] = {"tag": self._push_tag(fub_id), "group": f"{DOMAIN}_{self._server_id}"}
         if with_action:
             data["actions"] = [{"action": start_action_id(self._server_id, fub_id), "title": texts["start"]}]
@@ -333,7 +413,9 @@ class ManagedPlanWatchdog:
         await self._async_send(
             {
                 "title": texts[title_key],
-                "message": texts[message_key].format(name=name, fub_id=fub_id),
+                "message": texts[message_key].format(
+                    name=name, fub_id=fub_id, attempts=FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS
+                ),
                 "data": data,
             }
         )
