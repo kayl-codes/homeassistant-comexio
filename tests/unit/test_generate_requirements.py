@@ -44,6 +44,9 @@ def test_real_repository_is_in_sync() -> None:
         "pip install --no-deps aiocomexio==0.3.0  # was aiocomexio==0.1.0",  # a comment is no (drifted) pin
         "# was aiocomexio==0.1.0\npip install --no-deps aiocomexio==0.3.0",  # comment line before the pin
         "pip install --no-deps aiocomexio==0.3.0 fooaiocomexio==9.9",  # prefixed name is another package
+        "- run: 'pip install --no-deps aiocomexio==0.3.0'",  # quoted YAML run value
+        "run: python -m pip install --no-deps aiocomexio==0.3.0",
+        "pip install -U pip && pip install --no-deps aiocomexio==0.3.0",  # second command on the line
     ],
 )
 def test_matching_pin_spellings_pass(repo: Path, ci_line: str) -> None:
@@ -67,6 +70,21 @@ def test_matching_pin_spellings_pass(repo: Path, ci_line: str) -> None:
         ),
         ('run: echo "aiocomexio==0.3.0"\n', "ci.yml: no aiocomexio==0.3.0 pin"),  # no pip install, no pin
         ("env:\n  PIN: aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
+        # "pip install" not in command position, or the pin in the next command: no install of the pin
+        ('run: echo "pip install aiocomexio==0.3.0"\n', "ci.yml: no aiocomexio==0.3.0 pin"),
+        ('run: pip install other && echo "aiocomexio==0.3.0"\n', "ci.yml: no aiocomexio==0.3.0 pin"),
+        ('run: pip install other; echo "aiocomexio==0.3.0"\n', "ci.yml: no aiocomexio==0.3.0 pin"),
+        ("run: pip install other | tee aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
+        ("run: pip install other\nenv:\n  PIN: aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
+        # A drift counts anywhere, even in an install spelling the command filter does not recognise
+        (
+            "pip install --no-deps aiocomexio==0.3.0\nrun: uv pip install --system aiocomexio==0.2.0\n",
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (
+            "pip install --no-deps aiocomexio==0.3.0\nrun: >-\n  pip install --no-deps\n  aiocomexio==0.2.0\n",
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
         (  # a second, drifted install next to the right one
             "pip install --no-deps aiocomexio==0.3.0\npip3 install --no-deps aiocomexio==0.2.0\n",
             "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",

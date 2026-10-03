@@ -33,7 +33,12 @@ _PIN = re.compile(r"(?<![\w.-])([A-Za-z0-9][\w.-]*)(?:\[[^\]]*\])?\s*==\s*([\w.+
 # A comment as pip and YAML read it: "#" at line start or after whitespace, to the end of the line.
 _COMMENT = re.compile(r"(?:^|(?<=\s))#.*$", re.MULTILINE)
 # In a workflow only a pip install command pins; a name==version elsewhere (an echo, an env value) does not.
-_PIP_INSTALL = re.compile(r"\bpip3?\s+install\b")
+# The command must start a line (optionally after "- run:" and a quote) or follow a shell separator, and it
+# ends at the next separator: "echo pip install x==1" and "pip install a && echo x==1" pin nothing.
+_PIP_INSTALL = re.compile(
+    r"(?:^[ \t-]*(?:run:[ \t]*)?['\"]?|[;&|(][ \t]*)(?:python3?[ \t]+-m[ \t]+)?pip3?[ \t]+install\b[^;&|\n]*",
+    re.MULTILINE,
+)
 # A shell line continuation: the next line belongs to the same command.
 _CONTINUATION = re.compile(r"\\\r?\n")
 
@@ -43,27 +48,34 @@ def _normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _pins_by_name(text: str) -> dict[str, list[str]]:
+    """Every name==version in text, versions grouped by normalised name."""
+    found: dict[str, list[str]] = {}
+    for name, version in _PIN.findall(text):
+        found.setdefault(_normalize(name), []).append(version)
+    return found
+
+
 def _file_mismatches(path: Path, pins: dict[str, tuple[str, str]]) -> list[str]:
     """The manifest pins that path lacks or pins at another version."""
     relative = path.relative_to(ROOT).as_posix()
     if not path.exists():
         return [f"{relative}: file missing"]
-    found: dict[str, list[str]] = {}
     # Comments dropped: a commented-out "# pkg==1.0" is no pin.
     text = _COMMENT.sub("", path.read_text(encoding="utf-8"))
+    # Asymmetric on purpose: any other version anywhere in the file is a drift (an install spelling the
+    # command filter misses must not slip through), but only a recognised pip install counts as the pin.
+    written = _pins_by_name(text)
+    installed = written
     if path.suffix in {".yml", ".yaml"}:
         text = _CONTINUATION.sub(" ", text)
-        text = "\n".join(line for line in text.splitlines() if _PIP_INSTALL.search(line))
-    for name, version in _PIN.findall(text):
-        found.setdefault(_normalize(name), []).append(version)
+        installed = _pins_by_name("\n".join(command[0] for command in _PIP_INSTALL.finditer(text)))
     mismatches = []
     for key, (name, version) in pins.items():
-        versions = found.get(key, [])
-        if not versions:
+        drifted = [other for other in written.get(key, []) if other != version]
+        if not drifted and version not in installed.get(key, []):
             mismatches.append(f"{relative}: no {name}=={version} pin")
-        mismatches.extend(
-            f"{relative}: {name}=={other} (manifest.json: {version})" for other in versions if other != version
-        )
+        mismatches.extend(f"{relative}: {name}=={other} (manifest.json: {version})" for other in drifted)
     return mismatches
 
 
