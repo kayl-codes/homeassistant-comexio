@@ -29,6 +29,8 @@ PINNED_ELSEWHERE = [
 
 # name[extras] == version, as pip reads it (spaces allowed around ==).
 _PIN = re.compile(r"(?<![\w.-])([A-Za-z0-9][\w.-]*)(?:\[[^\]]*\])?\s*==\s*([\w.+!-]*\w)")
+# A comment as pip and YAML read it: "#" at line start or after whitespace, to the end of the line.
+_COMMENT = re.compile(r"(?:^|(?<=\s))#.*$", re.MULTILINE)
 
 
 def _normalize(name: str) -> str:
@@ -42,7 +44,9 @@ def _file_mismatches(path: Path, pins: dict[str, tuple[str, str]]) -> list[str]:
     if not path.exists():
         return [f"{relative}: file missing"]
     found: dict[str, list[str]] = {}
-    for name, version in _PIN.findall(path.read_text(encoding="utf-8")):
+    # Comments dropped: a commented-out "# pkg==1.0" is no pin.
+    text = _COMMENT.sub("", path.read_text(encoding="utf-8"))
+    for name, version in _PIN.findall(text):
         found.setdefault(_normalize(name), []).append(version)
     mismatches = []
     for key, (name, version) in pins.items():

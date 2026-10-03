@@ -49,17 +49,23 @@ def fail_on_logged_exception(request: pytest.FixtureRequest, caplog: pytest.LogC
     yield
     if request.node.get_closest_marker(LOGGED_EXCEPTION_MARKER):
         return
+    # Setup and unload of an entry also run in the fixtures (loaded_entry, hass teardown), not only in the call.
     logged = [
-        f"{record.name}: {record.getMessage()}"
-        for record in caplog.get_records("call")
+        f"{when}: {record.name}: {record.getMessage()}"
+        for when in ("setup", "call", "teardown")
+        for record in caplog.get_records(when)
         if record.exc_info and record.name.startswith("custom_components.comexio")
     ]
     assert not logged, f"integration logged exception(s): {logged}"
 
 
 @pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
-    """Load custom_components/comexio in every test."""
+def auto_enable_custom_integrations(fail_on_logged_exception: None, enable_custom_integrations: None) -> None:
+    """Load custom_components/comexio in every test.
+
+    Requests the guard before hass (enable_custom_integrations pulls it in), so the guard is torn down
+    after hass: it then also sees what the unload of still-loaded entries and hass.async_stop log.
+    """
 
 
 @pytest.fixture(autouse=True)

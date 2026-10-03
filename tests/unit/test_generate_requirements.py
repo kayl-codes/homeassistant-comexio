@@ -41,7 +41,8 @@ def test_real_repository_is_in_sync() -> None:
         "pip install --no-deps aiocomexio==0.3.0",
         "pip install --no-deps AioComexio == 0.3.0",  # PEP 503 name, spaces around ==
         "pip install --no-deps aiocomexio[speedups]==0.3.0",
-        "# keep aiocomexio==0.3.0.",  # trailing full stop in a comment
+        "pip install --no-deps aiocomexio==0.3.0  # was aiocomexio==0.1.0",  # a comment is no (drifted) pin
+        "# was aiocomexio==0.1.0\npip install --no-deps aiocomexio==0.3.0",  # comment line before the pin
         "pip install --no-deps aiocomexio==0.3.0 fooaiocomexio==9.9",  # prefixed name is another package
     ],
 )
@@ -57,6 +58,12 @@ def test_matching_pin_spellings_pass(repo: Path, ci_line: str) -> None:
         ("pip install --no-deps aiocomexio==0.1.0\n", "ci.yml: aiocomexio==0.1.0 (manifest.json: 0.3.0)"),
         ("pip install --no-deps aiocomexio_x==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
         ("pip install --no-deps aiocomexio>=0.2\n", "ci.yml: no aiocomexio==0.3.0 pin"),
+        ("# pip install --no-deps aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
+        ("pip install --no-deps other  # aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
+        (
+            "# pip install --no-deps aiocomexio==0.3.0\npip install --no-deps other\n",
+            "ci.yml: no aiocomexio==0.3.0 pin",
+        ),
     ],
 )
 def test_drifted_or_missing_pin_fails(

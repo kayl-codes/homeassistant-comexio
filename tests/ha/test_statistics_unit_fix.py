@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Generator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
@@ -12,16 +12,23 @@ from custom_components.comexio import _async_fix_statistics_units
 
 from .conftest import SERVER_ID
 
-MISMATCH = (f"sensor.{SERVER_ID}_base_ai1", "V")
-OWN_ISSUE = ("recorder", f"units_changed_sensor.{SERVER_ID}_base_ai1")
-FOREIGN_ISSUE = ("recorder", "units_changed_sensor.other_server_ai1")
+MISMATCHES = [(f"sensor.{SERVER_ID}_base_ai1", "V"), (f"sensor.{SERVER_ID}_base_ai2", "mA")]
+# As HA's sensor recorder platform files them (domain "sensor", "units_changed_{statistic_id}").
+OWN_ISSUES = {("sensor", f"units_changed_{stat_id}") for stat_id, _ in MISMATCHES}
+# Kept: an unfixed statistic of this server, a server whose id starts with ours (iosrv10), and
+# another issue type of a fixed statistic.
+FOREIGN_ISSUES = {
+    ("sensor", f"units_changed_sensor.{SERVER_ID}_base_ai3"),
+    ("sensor", f"units_changed_sensor.{SERVER_ID}0_base_ai1"),
+    ("sensor", f"state_class_removed_{MISMATCHES[0][0]}"),
+}
 
 
 @pytest.fixture
 def update_metadata(hass: HomeAssistant) -> Generator[MagicMock]:
-    """A recorder with one unit mismatch of this server, plus an own and a foreign repair issue."""
+    """A recorder with two unit mismatches of this server, plus their repair issues and foreign ones."""
     hass.config.components.add("recorder")
-    for domain, issue_id in (OWN_ISSUE, FOREIGN_ISSUE):
+    for domain, issue_id in OWN_ISSUES | FOREIGN_ISSUES:
         ir.async_create_issue(
             hass, domain, issue_id, is_fixable=False, severity=ir.IssueSeverity.WARNING, translation_key="units_changed"
         )
@@ -29,7 +36,7 @@ def update_metadata(hass: HomeAssistant) -> Generator[MagicMock]:
     with (
         patch("custom_components.comexio.STATISTICS_UNIT_FIX_START_DELAY_SEC", 0),
         patch("homeassistant.components.recorder.get_instance", return_value=recorder),
-        patch("custom_components.comexio.find_unit_mismatches", return_value=[MISMATCH]),
+        patch("custom_components.comexio.find_unit_mismatches", return_value=MISMATCHES),
         patch("homeassistant.components.recorder.statistics.async_update_statistics_metadata") as update,
     ):
         yield update
@@ -40,12 +47,14 @@ def _issues(hass: HomeAssistant) -> set[tuple[str, str]]:
 
 
 async def test_fix_updates_metadata_and_removes_own_issues(hass: HomeAssistant, update_metadata: MagicMock) -> None:
-    """A mismatch gets a label-only metadata update; only this server's recorder issues go."""
+    """Each mismatch gets a label-only metadata update; only the fixed statistics' unit-change issues go."""
     with patch("custom_components.comexio.STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC", 0):
         await _async_fix_statistics_units(hass, SERVER_ID, "entry")
 
-    update_metadata.assert_called_once_with(hass, MISMATCH[0], new_unit_of_measurement="V", new_unit_class=None)
-    assert _issues(hass) == {FOREIGN_ISSUE}
+    assert update_metadata.call_args_list == [
+        call(hass, stat_id, new_unit_of_measurement=unit, new_unit_class=None) for stat_id, unit in MISMATCHES
+    ]
+    assert _issues(hass) == FOREIGN_ISSUES
 
 
 async def test_cancel_during_commit_wait_still_removes_own_issues(
@@ -57,10 +66,10 @@ async def test_cancel_during_commit_wait_still_removes_own_issues(
         async with asyncio.timeout(5):
             while not update_metadata.called:
                 await asyncio.sleep(0)
-        assert _issues(hass) == {OWN_ISSUE, FOREIGN_ISSUE}
+        assert _issues(hass) == OWN_ISSUES | FOREIGN_ISSUES
 
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    assert _issues(hass) == {FOREIGN_ISSUE}
+    assert _issues(hass) == FOREIGN_ISSUES

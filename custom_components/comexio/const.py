@@ -403,6 +403,10 @@ DEFAULT_NAME = "Comexio"
 # entities' first states before comparing units, then for the recorder to commit the metadata.
 STATISTICS_UNIT_FIX_START_DELAY_SEC = 15
 STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC = 5
+# Repair issue HA's sensor recorder platform files per statistic with a changed unit:
+# domain "sensor", id "units_changed_{statistic_id}" (homeassistant/components/sensor/recorder.py).
+STATISTICS_UNITS_CHANGED_ISSUE_DOMAIN = "sensor"
+STATISTICS_UNITS_CHANGED_ISSUE_PREFIX = "units_changed_"
 
 SCAN_INTERVAL_DEFAULT = 15
 SCAN_INTERVAL_OPTIONS = ["1", "5", "10", "15", "30", "45", "60", "120", "300", "600", "1440"]
