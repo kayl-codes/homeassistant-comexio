@@ -27,7 +27,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Persisted identifiers:** the lowercase `logikplan_*` option keys, `Store` storage keys and the plan-selector
   unique_id are frozen legacy spellings. Flag renames without migration code.
 - **Terminology:** "function plan" is the English term in code, services, logs, notifications and en/fr/es
-  translations; "Logikplan" appears only in `de.json` and the German README section. Never reintroduce `logicplan`.
+  translations; "Logikplan" is the German translation, used in `de.json` and the German sections of the Markdown
+  docs (and as a parenthetical gloss such as "function plan (Logikplan)"), never in English UI text or code. Never
+  reintroduce `logicplan`.
 - **Translations:** `translations/strings.json` is authoritative; every new key must also exist in `en.json`,
   `de.json`, `fr.json` and `es.json`. `persistent_notification` texts are English.
 - **Services:** every service logs its parameters and reports its duration.
