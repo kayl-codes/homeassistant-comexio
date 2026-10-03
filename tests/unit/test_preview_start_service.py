@@ -46,6 +46,23 @@ def test_nothing_to_preview_is_reported() -> None:
     render.assert_not_called()
 
 
+def test_the_open_cards_keepalive_renews_the_following_without_a_render() -> None:
+    """A frozen orphaned-plan render arms nothing: the card keeps its selection changes following."""
+    coordinator = _follow_coordinator(following=False)
+    render = AsyncMock()
+    call = SimpleNamespace(data={"keepalive": True})
+    with (
+        patch.object(misc, "_resolve_coordinator", MagicMock(return_value=coordinator)) as resolve,
+        patch.object(misc, "preview_selection_available", return_value=True),
+        patch.object(plan_preview, "async_render_selected_preview", render),
+    ):
+        result = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+    assert result == {"success": True, "keepalive": True}
+    assert coordinator.preview_following is True
+    render.assert_not_called()
+    assert resolve.call_args.kwargs == {"quiet": True}
+
+
 def test_closing_the_card_ends_the_following() -> None:
     coordinator = _follow_coordinator(following=True)
     coordinator.stop_preview = MagicMock(return_value=False)
@@ -171,6 +188,24 @@ def test_a_selection_changed_during_the_opening_render_is_shown_after_it() -> No
 
     asyncio.run(scenario())
     assert rendered == ["A", "B"]
+
+
+def test_follows_scheduled_in_the_same_tick_render_once() -> None:
+    """Review: a plan change makes the 'Backup' and the 'Plan' selector follow — one render, not two."""
+    coordinator = _follow_coordinator(following=True)
+    render = AsyncMock()
+
+    async def scenario() -> None:
+        with (
+            patch.object(plan_preview, "preview_selection_available", return_value=True),
+            patch.object(plan_preview, "async_render_selected_preview", render),
+        ):
+            backup_follow = asyncio.ensure_future(plan_preview.async_follow_selection(coordinator))  # type: ignore[arg-type]
+            plan_follow = asyncio.ensure_future(plan_preview.async_follow_selection(coordinator))  # type: ignore[arg-type]
+            await asyncio.gather(backup_follow, plan_follow)
+
+    asyncio.run(scenario())
+    render.assert_awaited_once()
 
 
 def test_rapid_selection_changes_end_on_the_latest_selection() -> None:

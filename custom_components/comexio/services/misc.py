@@ -22,7 +22,7 @@ from homeassistant.helpers import entity_registry as er
 from ..const import DOMAIN, MarkerKind, webio_class_name
 from ..coordinator import ComexioCoordinator
 from ..plan_preview import async_render_opened_preview, preview_selection_available
-from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context
+from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -333,7 +333,11 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
     the 'Plan' and 'Backup' selects keep the preview on their selection (plan_preview.async_follow_selection),
     also while nothing is selected yet or a frozen orphaned-plan render leaves the poll off.
     No render while a preview is already armed (a second card, a reattach).
+    With keepalive, the open card only renews that window (no render, no Comexio request), so its
+    selection changes keep following however long it stays open.
     """
+    if call.data.get("keepalive"):
+        return _preview_keepalive(hass, call)
     _LOGGER.info("Function Plan Preview Start: called (config_entry=%s)", call.data.get("config_entry"))
     started = time.monotonic()
     ctx = await _async_get_service_context(hass, call, _TITLE_PREVIEW_START_ERR, resolve_plan=False, do_login=False)
@@ -357,6 +361,25 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
         return {"success": False, "error": str(err)}
     _LOGGER.info("Function Plan Preview Start: preview armed (Duration: %.1fs)", time.monotonic() - started)
     return {"success": True, "already_armed": False}
+
+
+def _preview_keepalive(hass: HomeAssistant, call: ServiceCall) -> dict:
+    """preview_start's keepalive: renew the open card's follow window — no render, no Comexio request.
+
+    Repeats every few minutes per open card, so it logs at debug level and stays quiet (no
+    notification) while no instance is loaded, e.g. with Comexio offline at startup.
+    """
+    started = time.monotonic()
+    coordinator = _resolve_coordinator(hass, call, _TITLE_PREVIEW_START_ERR, quiet=True)
+    if coordinator is None:
+        return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
+    coordinator.start_preview_following()
+    _LOGGER.debug(
+        "Function Plan Preview Start: keepalive (config_entry=%s, Duration: %.3fs)",
+        call.data.get("config_entry"),
+        time.monotonic() - started,
+    )
+    return {"success": True, "keepalive": True}
 
 
 async def _handle_function_plan_preview_stop(hass: HomeAssistant, call: ServiceCall) -> dict:

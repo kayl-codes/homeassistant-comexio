@@ -14,11 +14,11 @@ def _coordinator() -> ComexioCoordinator:
     return ComexioCoordinator.__new__(ComexioCoordinator)
 
 
-def _resolve(domain_data: dict, call_data: dict | None = None) -> tuple[object, MagicMock]:
+def _resolve(domain_data: dict, call_data: dict | None = None, *, quiet: bool = False) -> tuple[object, MagicMock]:
     hass = SimpleNamespace(data={DOMAIN: domain_data})
     call = SimpleNamespace(data=call_data or {})
     with patch.object(_context.persistent_notification, "async_create") as notify:
-        result = _context._resolve_coordinator(hass, call, "Title")  # type: ignore[arg-type]
+        result = _context._resolve_coordinator(hass, call, "Title", quiet=quiet)  # type: ignore[arg-type]
     return result, notify
 
 
@@ -42,6 +42,18 @@ def test_no_unique_instance_is_reported(domain_data: dict, message: str) -> None
     result, notify = _resolve(domain_data)
     assert result is None
     assert notify.call_args.args[1] == message
+
+
+@pytest.mark.parametrize(
+    ("domain_data", "call_data"),
+    [({}, None), ({"a": _coordinator(), "b": _coordinator()}, None), ({"a": _coordinator()}, {"config_entry": "gone"})],
+    ids=["none", "several", "unknown-entry"],
+)
+def test_a_quiet_call_posts_no_notification(domain_data: dict, call_data: dict | None) -> None:
+    """The plan card's keepalive repeats every few minutes: no notification pile-up while Comexio is offline."""
+    result, notify = _resolve(domain_data, call_data, quiet=True)
+    assert result is None
+    notify.assert_not_called()
 
 
 def test_unknown_config_entry_is_reported() -> None:

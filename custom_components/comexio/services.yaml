@@ -613,6 +613,15 @@ function_plan_preview_start:
       selector:
         config_entry:
           integration: comexio
+    keepalive:
+      name: Keepalive
+      description: >
+        Sent periodically by an open plan card: only keeps its 'Plan'/'Backup' selection changes
+        following in the preview, without rendering anything.
+      required: false
+      default: false
+      selector:
+        boolean:
 
 function_plan_preview_stop:
   name: Function Plan Preview Stop

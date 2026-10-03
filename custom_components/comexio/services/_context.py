@@ -77,11 +77,15 @@ def _available_plans_str(fub_data: dict) -> str:
     )
 
 
-def _resolve_coordinator(hass: HomeAssistant, call: ServiceCall, error_title: str) -> ComexioCoordinator | None:
+def _resolve_coordinator(
+    hass: HomeAssistant, call: ServiceCall, error_title: str, *, quiet: bool = False
+) -> ComexioCoordinator | None:
     """The coordinator a service call targets; None after an English error notification.
 
     Without `config_entry` the only loaded instance is used. No loaded instance at all (a call
     during the reload that ends every sync) is reported as such, not as "multiple instances".
+    quiet: a periodic background call (the plan card's keepalive) only logs at debug level —
+    repeated every few minutes, a notification each time would pile up while Comexio is offline.
     """
     domain_data = hass.data.get(DOMAIN, {})
     entry_id = call.data.get("config_entry")
@@ -89,20 +93,37 @@ def _resolve_coordinator(hass: HomeAssistant, call: ServiceCall, error_title: st
         entries = [k for k, v in domain_data.items() if isinstance(v, ComexioCoordinator)]
         if len(entries) != 1:
             if entries:
-                _LOGGER.error("config_entry required when multiple Comexio instances exist: %s", entries)
-                message = _MULTI_INSTANCE_MSG
+                _report_unresolved(
+                    hass,
+                    error_title,
+                    quiet,
+                    _MULTI_INSTANCE_MSG,
+                    "config_entry required when multiple Comexio instances exist: %s",
+                    entries,
+                )
             else:
-                _LOGGER.error("No Comexio instance loaded for the service call")
-                message = _NO_INSTANCE_MSG
-            persistent_notification.async_create(hass, message, title=error_title)
+                _report_unresolved(
+                    hass, error_title, quiet, _NO_INSTANCE_MSG, "No Comexio instance loaded for the service call"
+                )
             return None
         entry_id = entries[0]
     coordinator = domain_data.get(entry_id)
     if not isinstance(coordinator, ComexioCoordinator):
-        _LOGGER.error(_INSTANCE_NOT_FOUND_LOG, entry_id)
-        persistent_notification.async_create(hass, _INSTANCE_NOT_FOUND_MSG.format(entry_id), title=error_title)
+        _report_unresolved(
+            hass, error_title, quiet, _INSTANCE_NOT_FOUND_MSG.format(entry_id), _INSTANCE_NOT_FOUND_LOG, entry_id
+        )
         return None
     return coordinator
+
+
+def _report_unresolved(
+    hass: HomeAssistant, error_title: str, quiet: bool, message: str, log: str, *log_args: Any
+) -> None:
+    if quiet:
+        _LOGGER.debug(log, *log_args)
+        return
+    _LOGGER.error(log, *log_args)
+    persistent_notification.async_create(hass, message, title=error_title)
 
 
 async def _async_get_service_context(

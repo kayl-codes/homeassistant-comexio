@@ -7,7 +7,7 @@ whenever the 'Plan' or 'Backup' selection changes — so the poll only runs whil
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.exceptions import HomeAssistantError
@@ -17,6 +17,8 @@ from .const import DOMAIN
 from .function_plan_backup import format_backup_label
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -111,15 +113,20 @@ async def async_render_opened_preview(coordinator: ComexioCoordinator) -> None:
         await async_render_selected_preview(coordinator)
 
 
-async def async_follow_selection(coordinator: ComexioCoordinator) -> None:
+def async_follow_selection(coordinator: ComexioCoordinator) -> Coroutine[Any, Any, None]:
     """A 'Plan' or 'Backup' selection changed: show it while a plan card is open, else leave the preview idle.
 
     Without an open plan card nothing is rendered, so picking a plan on the device page starts no poll.
     Follows render one after the other; one superseded by a newer selection (or by the card's
     opening render) while it waited is skipped, so the preview always ends on the latest selection.
+    The generation counts at call time, not when the task first runs: follows scheduled in the same
+    tick (a plan change makes the 'Backup' and the 'Plan' selector follow) render once.
     """
     coordinator.preview_follow_generation += 1
-    generation = coordinator.preview_follow_generation
+    return _async_follow_generation(coordinator, coordinator.preview_follow_generation)
+
+
+async def _async_follow_generation(coordinator: ComexioCoordinator, generation: int) -> None:
     async with coordinator.preview_follow_lock:
         if generation != coordinator.preview_follow_generation:
             _LOGGER.debug("[%s] Plan preview follow skipped: a newer selection follows", coordinator.server_id)

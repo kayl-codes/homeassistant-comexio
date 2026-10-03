@@ -34,7 +34,7 @@ import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-pl
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.44";
+const CARD_VERSION = "0.9.45";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -46,6 +46,11 @@ const _BACKUP_LABEL_RE = /^(\w+)\[(\d+)\]/;
 // Lovelace's detach+reattach on a view switch/edit-mode toggle without freezing a preview
 // that's still genuinely being watched (#75).
 const _PREVIEW_STOP_GRACE_MS = 2000;
+
+// While open, the card renews the backend's follow window (coordinator.preview_following, 15 min)
+// with a keepalive well inside it: a frozen orphaned-plan render arms no poll, so without it
+// 'Plan'/'Backup' changes (e.g. the neighbour row after "delete all") stopped reaching the preview.
+const _PREVIEW_KEEPALIVE_MS = 5 * 60 * 1000;
 
 // Backoff for re-fetching a preview image whose fetch failed: first retry after the minimum,
 // doubled per consecutive failure up to the maximum, until a fetch succeeds. Without it a
@@ -352,6 +357,7 @@ class ComexioPlanCard extends HTMLElement {
     this._analysisHighlightIds = new Set(); // element ids highlighted from a clicked finding
     this._stopPreviewTimer = null; // pending function_plan_preview_stop grace timer (#75)
     this._startPreviewPending = false; // function_plan_preview_start owed once hass is known
+    this._keepaliveTimer = null; // periodic function_plan_preview_start keepalive while connected
   }
 
   setConfig(config) {
@@ -1726,6 +1732,9 @@ class ComexioPlanCard extends HTMLElement {
       this._startPreviewPending = true;
       this._startPreviewIfPending();
     }
+    if (!this._minimal && !this._keepaliveTimer) {
+      this._keepaliveTimer = setInterval(() => this._sendPreviewKeepalive(), _PREVIEW_KEEPALIVE_MS);
+    }
     // Mirror disconnectedCallback's _setDebugSession(false): without this, the backend stays on
     // the slow 2s cadence after any detach/reattach cycle instead of resuming the 0.5s debug
     // cadence, until the user manually retoggles the debug button (#75).
@@ -1757,8 +1766,22 @@ class ComexioPlanCard extends HTMLElement {
     });
   }
 
+  _sendPreviewKeepalive() {
+    if (!this._hass || !this.isConnected) {
+      return;
+    }
+    const data = { ...this._previewServiceData(), keepalive: true };
+    this._hass.callService("comexio", "function_plan_preview_start", data).catch((err) => {
+      console.warn("comexio-plan-card: function_plan_preview_start keepalive failed", err);
+    });
+  }
+
   disconnectedCallback() {
     this._startPreviewPending = false;
+    if (this._keepaliveTimer) {
+      clearInterval(this._keepaliveTimer);
+      this._keepaliveTimer = null;
+    }
     if (this._minimal) {
       return; // trigger-only card never armed a plan/debug/preview session to begin with
     }
