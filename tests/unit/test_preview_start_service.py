@@ -1,27 +1,30 @@
-"""Plan preview: the opening card renders the selection, a selection change follows it only while armed."""
+"""Plan preview: the opening card renders the selection, a selection change follows it while a card is open."""
 
 import asyncio
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.exceptions import HomeAssistantError
 import pytest
 
-from custom_components.comexio import plan_preview
+from custom_components.comexio import coordinator as coordinator_module, plan_preview
+from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.services import misc
 
 
 def _run_start(*, armed: bool, selection: bool, render: AsyncMock | None = None) -> tuple[dict, AsyncMock]:
-    coordinator = SimpleNamespace(preview_armed=armed, server_id="iosrv1")
+    coordinator = _follow_coordinator(following=False, preview_armed=armed)
     render = render or AsyncMock()
     call = SimpleNamespace(data={})
     with (
         patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
         patch.object(misc, "preview_selection_available", return_value=selection),
-        patch.object(misc, "async_render_selected_preview", render),
+        patch.object(plan_preview, "async_render_selected_preview", render),
     ):
         result = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+    # Whatever the card finds, its later Plan/Backup picks follow until it closes.
+    assert coordinator.preview_following is True
     return result, render
 
 
@@ -43,6 +46,34 @@ def test_nothing_to_preview_is_reported() -> None:
     render.assert_not_called()
 
 
+def test_closing_the_card_ends_the_following() -> None:
+    coordinator = _follow_coordinator(following=True)
+    coordinator.stop_preview = MagicMock(return_value=False)
+    with patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))):
+        asyncio.run(misc._handle_function_plan_preview_stop(SimpleNamespace(), SimpleNamespace(data={})))  # type: ignore[arg-type]
+    assert coordinator.preview_following is False
+    coordinator.stop_preview.assert_called_once_with()
+
+
+def test_an_opened_card_follows_within_the_auto_stop_window_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed browser tab sends no preview_stop: without an armed preview the following must run out."""
+    now = [1000.0]
+    monkeypatch.setattr(coordinator_module.time, "monotonic", lambda: now[0])
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator._preview_plan_cache = None
+    coordinator._preview_following_until = 0.0
+    assert coordinator.preview_following is False
+    coordinator.start_preview_following()
+    assert coordinator.preview_following is True
+    now[0] += coordinator_module._PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60
+    assert coordinator.preview_following is False
+    coordinator.start_preview_following()
+    coordinator.end_preview_following()
+    assert coordinator.preview_following is False
+    coordinator._preview_plan_cache = {"fub_id": 19}  # an armed preview follows as before
+    assert coordinator.preview_following is True
+
+
 def test_a_failed_render_is_not_reported_as_armed() -> None:
     """E.g. an expired session: the plan does not load, so the card must not be told the poll runs."""
     render = AsyncMock(side_effect=HomeAssistantError("The plan 'X' (ID 3) could not be loaded from Comexio."))
@@ -50,14 +81,27 @@ def test_a_failed_render_is_not_reported_as_armed() -> None:
     assert result == {"success": False, "error": "The plan 'X' (ID 3) could not be loaded from Comexio."}
 
 
-def _follow_coordinator(*, armed: bool) -> SimpleNamespace:
-    return SimpleNamespace(
-        preview_armed=armed, server_id="iosrv1", preview_follow_lock=asyncio.Lock(), preview_follow_generation=0
+class _PreviewCoordinator(SimpleNamespace):
+    def start_preview_following(self) -> None:
+        self.preview_following = True
+
+    def end_preview_following(self) -> None:
+        self.preview_following = False
+
+
+def _follow_coordinator(*, following: bool, preview_armed: bool = False) -> _PreviewCoordinator:
+    return _PreviewCoordinator(
+        preview_armed=preview_armed,
+        preview_following=following,
+        server_id="iosrv1",
+        preview_follow_lock=asyncio.Lock(),
+        preview_follow_generation=0,
     )
 
 
-def _run_follow(*, armed: bool, selection: bool, render: AsyncMock) -> None:
-    coordinator = _follow_coordinator(armed=armed)
+def _run_follow(*, following: bool, selection: bool, render: AsyncMock) -> None:
+    # preview_armed stays off: a frozen orphaned-plan render leaves the poll off while the card shows it.
+    coordinator = _follow_coordinator(following=following)
     with (
         patch.object(plan_preview, "preview_selection_available", return_value=selection),
         patch.object(plan_preview, "async_render_selected_preview", render),
@@ -66,25 +110,26 @@ def _run_follow(*, armed: bool, selection: bool, render: AsyncMock) -> None:
 
 
 def test_a_selection_change_follows_an_open_card() -> None:
+    """Review (Copilot, #132): also after a frozen orphaned-plan render, which arms no poll."""
     render = AsyncMock()
-    _run_follow(armed=True, selection=True, render=render)
+    _run_follow(following=True, selection=True, render=render)
     render.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
-    ("armed", "selection"), [(False, True), (True, False)], ids=["no-card-open", "nothing-selected"]
+    ("following", "selection"), [(False, True), (True, False)], ids=["no-card-open", "nothing-selected"]
 )
-def test_a_selection_change_renders_nothing_without_an_open_card_or_a_plan(armed: bool, selection: bool) -> None:
+def test_a_selection_change_renders_nothing_without_an_open_card_or_a_plan(following: bool, selection: bool) -> None:
     """Picking a plan on the device page must not start the poll."""
     render = AsyncMock()
-    _run_follow(armed=armed, selection=selection, render=render)
+    _run_follow(following=following, selection=selection, render=render)
     render.assert_not_called()
 
 
 def test_a_failed_follow_render_is_logged(caplog: pytest.LogCaptureFixture) -> None:
     render = AsyncMock(side_effect=HomeAssistantError("backup vanished"))
     with caplog.at_level(logging.WARNING):
-        _run_follow(armed=True, selection=True, render=render)
+        _run_follow(following=True, selection=True, render=render)
     assert "backup vanished" in caplog.text
 
 
@@ -92,14 +137,45 @@ def test_an_unexpected_follow_error_is_logged_not_raised(caplog: pytest.LogCaptu
     """The follow runs as a background task: an error must end in our log, not in asyncio's."""
     render = AsyncMock(side_effect=OSError("disk full"))
     with caplog.at_level(logging.ERROR):
-        _run_follow(armed=True, selection=True, render=render)
+        _run_follow(following=True, selection=True, render=render)
     assert "failed to follow the new selection" in caplog.text
     assert "disk full" in caplog.text
 
 
+def test_a_selection_changed_during_the_opening_render_is_shown_after_it() -> None:
+    """Review (Copilot, #132): the card's opening render must not overwrite a selection made meanwhile."""
+    coordinator = _follow_coordinator(following=True)
+    coordinator.selection = "A"
+    rendered: list[str] = []
+
+    async def scenario() -> None:
+        release = asyncio.Event()
+
+        async def render(c: SimpleNamespace) -> None:
+            selection = c.selection
+            if selection == "A":
+                await release.wait()
+            rendered.append(selection)
+
+        with (
+            patch.object(plan_preview, "preview_selection_available", return_value=True),
+            patch.object(plan_preview, "async_render_selected_preview", render),
+        ):
+            opening = asyncio.ensure_future(plan_preview.async_render_opened_preview(coordinator))  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            coordinator.selection = "B"
+            follow = asyncio.ensure_future(plan_preview.async_follow_selection(coordinator))  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(opening, follow)
+
+    asyncio.run(scenario())
+    assert rendered == ["A", "B"]
+
+
 def test_rapid_selection_changes_end_on_the_latest_selection() -> None:
     """Review (Copilot, #132): a slow render of an older selection must not publish after a newer one."""
-    coordinator = _follow_coordinator(armed=True)
+    coordinator = _follow_coordinator(following=True)
     coordinator.selection = "A"
     rendered: list[str] = []
 

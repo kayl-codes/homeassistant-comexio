@@ -25,6 +25,7 @@ from custom_components.comexio.const import (
     plan_watch_signal,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.plan_watchdog import start_action_id
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
 
@@ -180,6 +181,12 @@ class _FakeCoordinator(SimpleNamespace):
     managed_plan_start_blocked = ComexioCoordinator.managed_plan_start_blocked
     async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
     async_initial_plan_watch = ComexioCoordinator.async_initial_plan_watch
+    plan_transition = ComexioCoordinator.plan_transition
+    async_plan_transition = ComexioCoordinator.async_plan_transition
+    _async_watchdog_start_plan = ComexioCoordinator._async_watchdog_start_plan
+    async_start_managed_plan = ComexioCoordinator.async_start_managed_plan
+    _is_watched_plan = ComexioCoordinator._is_watched_plan
+    async_handle_notification_action = ComexioCoordinator.async_handle_notification_action
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
@@ -204,6 +211,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         hass=None,
         async_update_listeners=MagicMock(),
         _watchdog_lock=asyncio.Lock(),
+        _plan_transitions={},
         config_entry=SimpleNamespace(options={}),
         plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=False)),
     )
@@ -720,6 +728,50 @@ def test_setup_judges_the_watched_plans_without_waiting_for_a_poll(api: ComexioA
     assert managed == {19: "Test1"}
     api.client.get_function_plan_run_states.assert_not_called()
     coordinator.async_update_listeners.assert_called_once()
+
+
+def test_a_started_plan_is_cleared_before_the_verification_fetch(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review (Copilot, #132): a plan stopped again at once must keep the verdict that fetch gives it."""
+    order: list[str] = []
+    monkeypatch.setattr(api, "login", AsyncMock(return_value=True))
+    monkeypatch.setattr(api, "function_plan_run_fup_outcome", AsyncMock(return_value=True))
+    coordinator = _coordinator(
+        api,
+        plan_watchdog=SimpleNamespace(
+            async_plan_started=AsyncMock(side_effect=lambda *_a, **_k: order.append("clear"))
+        ),
+        _async_refresh_plan_run_states=AsyncMock(side_effect=lambda: order.append("verify")),
+    )
+    assert asyncio.run(coordinator.async_start_managed_plan(19)) is True
+    assert order == ["clear", "verify"]
+
+
+def _push_action(coordinator: _FakeCoordinator, fub_id: int) -> None:
+    coordinator.async_handle_notification_action(SimpleNamespace(data={"action": start_action_id("iosrv1", fub_id)}))
+
+
+def test_push_action_starts_only_a_watched_plan(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """Review (Copilot, #132): a push from before a plan was unselected or deleted must not start it."""
+    hass = MagicMock()
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}
+    coordinator = _coordinator(
+        api,
+        hass=hass,
+        config_entry=SimpleNamespace(options=options),
+        plan_watchdog=SimpleNamespace(async_dismiss_push=MagicMock(return_value="dismiss")),
+        _async_start_plan_from_push=MagicMock(return_value="start"),
+    )
+    with caplog.at_level(logging.WARNING):
+        _push_action(coordinator, 43)
+    assert "no longer watched" in caplog.text
+    # The stale push is taken off the phone instead of answering every tap with silence.
+    coordinator.plan_watchdog.async_dismiss_push.assert_called_once_with(43)
+    coordinator._async_start_plan_from_push.assert_not_called()
+    _push_action(coordinator, 19)
+    coordinator._async_start_plan_from_push.assert_called_once_with(19)
+    assert [c.args[0] for c in hass.async_create_background_task.call_args_list] == ["dismiss", "start"]
 
 
 def test_setup_judgement_waits_while_a_sync_runs(api: ComexioAPI) -> None:

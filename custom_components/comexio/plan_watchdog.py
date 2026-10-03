@@ -450,6 +450,10 @@ class ManagedPlanWatchdog:
             }
         )
 
+    async def async_dismiss_push(self, fub_id: int) -> None:
+        """Remove a plan's push from the phones, e.g. one whose "Start plan" action is no longer honoured."""
+        await self._async_clear_push(fub_id)
+
     async def _async_clear_push(self, fub_id: int) -> None:
         # A companion-app command: any other notify service would deliver it as the text "clear_notification".
         await self._async_send(

@@ -1,6 +1,6 @@
 """Render the plan the 'Plan' selector shows into the preview — live, or the snapshot the 'Backup' selector names.
 
-Called when the plan card opens (function_plan_preview_start) and, while a preview is armed,
+Called when the plan card opens (function_plan_preview_start) and, while a card is open,
 whenever the 'Plan' or 'Backup' selection changes — so the poll only runs while a card shows it.
 """
 
@@ -100,12 +100,23 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
     )
 
 
+async def async_render_opened_preview(coordinator: ComexioCoordinator) -> None:
+    """The plan card opened: render the current selection, in turn with the selection follows.
+
+    Under the follows' lock, so a selection changed while this render awaits Comexio is rendered
+    after it rather than overwritten by it. Raises HomeAssistantError like async_render_selected_preview.
+    """
+    coordinator.preview_follow_generation += 1
+    async with coordinator.preview_follow_lock:
+        await async_render_selected_preview(coordinator)
+
+
 async def async_follow_selection(coordinator: ComexioCoordinator) -> None:
-    """A 'Plan' or 'Backup' selection changed: show it in an armed preview, else leave the preview idle.
+    """A 'Plan' or 'Backup' selection changed: show it while a plan card is open, else leave the preview idle.
 
     Without an open plan card nothing is rendered, so picking a plan on the device page starts no poll.
-    Follows render one after the other; one superseded by a newer selection while it waited is
-    skipped, so the preview always ends on the latest selection.
+    Follows render one after the other; one superseded by a newer selection (or by the card's
+    opening render) while it waited is skipped, so the preview always ends on the latest selection.
     """
     coordinator.preview_follow_generation += 1
     generation = coordinator.preview_follow_generation
@@ -118,7 +129,7 @@ async def async_follow_selection(coordinator: ComexioCoordinator) -> None:
 
 async def _async_follow_current_selection(coordinator: ComexioCoordinator) -> None:
     try:
-        if not coordinator.preview_armed or not preview_selection_available(coordinator):
+        if not coordinator.preview_following or not preview_selection_available(coordinator):
             return
         await async_render_selected_preview(coordinator)
     except HomeAssistantError as err:

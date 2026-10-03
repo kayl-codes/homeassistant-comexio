@@ -644,6 +644,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # background task per selection would otherwise let an older, slower render publish last.
         self.preview_follow_lock = asyncio.Lock()
         self.preview_follow_generation: int = 0
+        # time.monotonic() until which an opened plan card follows the selection without an armed preview
+        # (see preview_following); 0.0 while no card is open.
+        self._preview_following_until: float = 0.0
         self._preview_refresh_cancel: Any = None
         # Stufe 2: last fetched {connection_id: value} for the armed live plan (see
         # _async_poll_connection_values) and the timer driving that poll. Cleared/stopped
@@ -2622,6 +2625,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             f"Live-Poll nach {self._preview_auto_stop_minutes} Minuten automatisch gestoppt — "
             "Plan erneut öffnen, um ihn fortzusetzen"
         )
+        self.end_preview_following()
         self._disarm_preview_cache()
         self._stop_connection_poll()
 
@@ -2651,6 +2655,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def preview_armed(self) -> bool:
         """True while a plan preview (live or snapshot) is armed and its wire-value poll runs."""
         return self._preview_plan_cache is not None
+
+    @property
+    def preview_following(self) -> bool:
+        """Whether 'Plan'/'Backup' selection changes are shown (plan_preview.async_follow_selection).
+
+        While a preview is armed, and within the auto-stop window after a plan card opened: a frozen
+        orphaned-plan render, an empty selection or a failed opening render arm nothing while the
+        card still shows them. The window bounds that, as a closed browser tab sends no preview_stop.
+        """
+        return self.preview_armed or time.monotonic() < self._preview_following_until
+
+    def start_preview_following(self) -> None:
+        """A plan card opened (function_plan_preview_start): its selection changes follow."""
+        self._preview_following_until = time.monotonic() + _PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60
+
+    def end_preview_following(self) -> None:
+        """The plan card closed (function_plan_preview_stop) or its preview auto-stopped."""
+        self._preview_following_until = 0.0
 
     def stop_preview(self) -> bool:
         """Disarm the currently armed preview immediately (function_plan_preview_stop service).
@@ -3355,7 +3377,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 await self._async_refresh_plan_run_states()
             self.async_update_listeners()
 
-    async def _async_watchdog_start_plan(self, fub_id: int, *, refresh: bool = False) -> bool | None:
+    async def _async_watchdog_start_plan(self, fub_id: int) -> bool | None:
         """Start a stopped managed plan for the watchdog's auto-start.
 
         True if started, False if Comexio refused it, None if not attempted (a sync, restore or poll
@@ -3364,21 +3386,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self.managed_plan_start_blocked:
             return None
         async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
-            started = await self.api.function_plan_run_fup_outcome(fub_id)
-        if refresh:
-            # Outside the watchdog lock: the fetch judges the watched plans again.
-            await self._async_refresh_plan_run_states()
-        return started
+            return await self.api.function_plan_run_fup_outcome(fub_id)
 
     async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool:
         """Start a stopped managed plan from its repair or push; False if Comexio did not confirm it."""
         if not await self.api.login():
             return False
-        if not await self._async_watchdog_start_plan(fub_id, refresh=True):
+        if not await self._async_watchdog_start_plan(fub_id):
             return False
+        # Clear the stopped verdict before the verification fetch: a plan that stopped again
+        # right away gets its repair and push back from that fetch instead of losing them.
         await self.plan_watchdog.async_plan_started(fub_id, confirm=from_push)
+        # Outside the watchdog lock: the fetch judges the watched plans again.
+        await self._async_refresh_plan_run_states()
         self.async_update_listeners()
         return True
+
+    def _is_watched_plan(self, fub_id: int) -> bool:
+        """Whether the watchdog watches this plan right now (HA-managed or a picked user plan)."""
+        return fub_id in self._managed_plan_names() or fub_id in self._watched_user_plan_names()
 
     def _plan_watchdog_notify_targets(self) -> list[str]:
         targets = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or []
@@ -3388,10 +3414,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def async_handle_notification_action(self, event: Event) -> None:
         """The "Start plan" button of a watchdog push was pressed on a phone."""
         fub_id = parse_start_action(self.server_id, event.data.get("action"))
-        if fub_id is not None:
+        if fub_id is None:
+            return
+        if self._is_watched_plan(fub_id):
             self.hass.async_create_background_task(
                 self._async_start_plan_from_push(fub_id), name=f"{DOMAIN}_{self.server_id}_start_plan_{fub_id}"
             )
+            return
+        # A push from before the plan was unselected or deleted in Comexio: starting it is no longer
+        # the watchdog's call, so the stale push is taken off the phone instead.
+        _LOGGER.warning(
+            "[%s] Watchdog push action for function plan %s ignored: the plan is no longer watched",
+            self.server_id,
+            fub_id,
+        )
+        self.hass.async_create_background_task(
+            self.plan_watchdog.async_dismiss_push(fub_id), name=f"{DOMAIN}_{self.server_id}_dismiss_push_{fub_id}"
+        )
 
     async def _async_start_plan_from_push(self, fub_id: int) -> None:
         _LOGGER.info("[%s] Starting function plan %s from the watchdog push", self.server_id, fub_id)
