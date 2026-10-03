@@ -6,8 +6,8 @@ integration's Python dependencies (it's what HA installs at runtime).
 requirements.txt exists only so OSV-Scanner has a lockfile-shaped format it
 can parse; it must never be hand-edited independently of manifest.json.
 
-The test requirements install the same packages on their own lines; their exact
-pins (name==version) are checked against the manifest too, so tests never run
+The test requirement files list their own packages; every exact manifest pin
+(name==version) must appear in them at the same version, so tests never run
 against another library version than HA installs. The CI workflow pins nothing
 itself: it installs from requirements.txt.
 """
