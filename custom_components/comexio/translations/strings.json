@@ -205,7 +205,7 @@
         "name": "Preview info"
       },
       "orphaned_backups": {
-        "name": "Orphaned backups"
+        "name": "Backups (orphaned)"
       },
       "plan_changed": {
         "name": "Plan changes in last interval"
