@@ -33,10 +33,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 class ComexioPlanPreviewImage(ComexioFunctionPlanEntityMixin, CoordinatorEntity, ImageEntity):
     """Serves the last rendered Function Plan preview SVG as an image entity.
 
-    Fed by coordinator.async_generate_plan_preview (Preview button, function_plan_visualize
-    with format=svg, or the debounced live-value refresh) — image_last_updated follows
-    last_plan_preview['generated_at'], so the frontend re-fetches exactly when a new
-    render exists.
+    Fed by coordinator.async_generate_plan_preview (plan card and 'Plan'/'Backup' selection, see
+    plan_preview; function_plan_visualize with format=svg, or the debounced live-value refresh) —
+    image_last_updated follows last_plan_preview['generated_at'], so the frontend re-fetches
+    exactly when a new render exists.
     """
 
     _attr_has_entity_name = True

@@ -1,53 +1,75 @@
-"""function_plan_preview_start: opening the plan card arms the live preview via the Preview button."""
+"""Plan preview: the opening card renders the selection, a selection change follows it only while armed."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 
+from custom_components.comexio import plan_preview
 from custom_components.comexio.services import misc
 
-BUTTON_EID = "button.iosrv1_plan_preview"
 
-
-def _run(*, armed: bool, button_state: str | None) -> tuple[dict, AsyncMock]:
+def _run_start(*, armed: bool, selection: bool) -> tuple[dict, AsyncMock]:
     coordinator = SimpleNamespace(preview_armed=armed, server_id="iosrv1")
-    press = AsyncMock()
-    hass = SimpleNamespace(
-        states=SimpleNamespace(
-            get=lambda eid: SimpleNamespace(state=button_state) if button_state and eid == BUTTON_EID else None
-        ),
-        services=SimpleNamespace(async_call=press),
-    )
-    registry = MagicMock()
-    registry.async_get_entity_id.return_value = BUTTON_EID
+    render = AsyncMock()
     call = SimpleNamespace(data={})
     with (
         patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
-        patch.object(misc.er, "async_get", return_value=registry),
+        patch.object(misc, "preview_selection_available", return_value=selection),
+        patch.object(misc, "async_render_selected_preview", render),
     ):
-        result = asyncio.run(misc._handle_function_plan_preview_start(hass, call))  # type: ignore[arg-type]
-    registry_calls = registry.async_get_entity_id.call_args_list
-    if registry_calls:
-        assert registry_calls[0].args[2] == "comexio_iosrv1_plan_preview_btn"
-    return result, press
+        result = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+    return result, render
 
 
-def test_opening_the_card_presses_the_preview_button() -> None:
-    result, press = _run(armed=False, button_state="unknown")
+def test_opening_the_card_renders_the_selection() -> None:
+    result, render = _run_start(armed=False, selection=True)
     assert result == {"success": True, "already_armed": False}
-    press.assert_awaited_once_with("button", "press", {"entity_id": BUTTON_EID}, blocking=True)
+    render.assert_awaited_once()
 
 
 def test_an_armed_preview_is_left_alone() -> None:
-    result, press = _run(armed=True, button_state="unknown")
+    result, render = _run_start(armed=True, selection=True)
     assert result == {"success": True, "already_armed": True}
-    press.assert_not_called()
+    render.assert_not_called()
 
 
-@pytest.mark.parametrize("button_state", ["unavailable", None], ids=["no-plan-selected", "button-missing"])
-def test_nothing_to_preview_is_reported(button_state: str | None) -> None:
-    result, press = _run(armed=False, button_state=button_state)
+def test_nothing_to_preview_is_reported() -> None:
+    result, render = _run_start(armed=False, selection=False)
     assert result["success"] is False
-    press.assert_not_called()
+    render.assert_not_called()
+
+
+def _run_follow(*, armed: bool, selection: bool, render: AsyncMock) -> None:
+    coordinator = SimpleNamespace(preview_armed=armed, server_id="iosrv1")
+    with (
+        patch.object(plan_preview, "preview_selection_available", return_value=selection),
+        patch.object(plan_preview, "async_render_selected_preview", render),
+    ):
+        asyncio.run(plan_preview.async_follow_selection(coordinator))  # type: ignore[arg-type]
+
+
+def test_a_selection_change_follows_an_open_card() -> None:
+    render = AsyncMock()
+    _run_follow(armed=True, selection=True, render=render)
+    render.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("armed", "selection"), [(False, True), (True, False)], ids=["no-card-open", "nothing-selected"]
+)
+def test_a_selection_change_renders_nothing_without_an_open_card_or_a_plan(armed: bool, selection: bool) -> None:
+    """Picking a plan on the device page must not start the poll."""
+    render = AsyncMock()
+    _run_follow(armed=armed, selection=selection, render=render)
+    render.assert_not_called()
+
+
+def test_a_failed_follow_render_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    render = AsyncMock(side_effect=HomeAssistantError("backup vanished"))
+    with caplog.at_level(logging.WARNING):
+        _run_follow(armed=True, selection=True, render=render)
+    assert "backup vanished" in caplog.text

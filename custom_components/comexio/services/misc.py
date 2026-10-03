@@ -21,6 +21,7 @@ from homeassistant.helpers import entity_registry as er
 
 from ..const import DOMAIN, MarkerKind, webio_class_name
 from ..coordinator import ComexioCoordinator
+from ..plan_preview import async_render_selected_preview, preview_selection_available
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context
 
 _LOGGER = logging.getLogger(__name__)
@@ -326,9 +327,9 @@ async def _handle_function_plan_preview_extend(hass: HomeAssistant, call: Servic
 async def _handle_function_plan_preview_start(hass: HomeAssistant, call: ServiceCall) -> dict:
     """Arm the live plan preview when the plan card is opened — the counterpart of preview_stop.
 
-    The card already shows the last rendered plan, but its wire-value poll only ran after a plan
-    switch or a "Preview" press. Opening the card now presses the Preview button itself, so the
-    selection logic (live plan, chosen backup snapshot, orphaned-plans view) stays in one place.
+    Opening the card renders the current selection (live plan, chosen backup snapshot or the
+    orphaned-plans view, see plan_preview) and so arms the wire-value poll. While armed, the
+    'Plan' and 'Backup' selects keep the preview on their selection (plan_preview.async_follow_selection).
     No-op while a preview is already armed (a second card, a reattach).
     """
     _LOGGER.info("Function Plan Preview Start: called (config_entry=%s)", call.data.get("config_entry"))
@@ -341,15 +342,10 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
     if coordinator.preview_armed:
         _LOGGER.debug("Function Plan Preview Start: a plan preview is already armed")
         return {"success": True, "already_armed": True}
-    button_eid = er.async_get(hass).async_get_entity_id(
-        "button", DOMAIN, f"comexio_{coordinator.server_id}_plan_preview_btn"
-    )
-    button_state = hass.states.get(button_eid) if button_eid else None
-    if button_state is None or button_state.state == STATE_UNAVAILABLE:
-        # No plan selected (or the button is not set up yet) — nothing to show live.
-        _LOGGER.debug("Function Plan Preview Start: preview button %s not available", button_eid)
+    if not preview_selection_available(coordinator):
+        _LOGGER.debug("Function Plan Preview Start: no plan is selected")
         return {"success": False, "error": "No plan is selected for the preview."}
-    await hass.services.async_call("button", "press", {"entity_id": button_eid}, blocking=True)
+    await async_render_selected_preview(coordinator)
     _LOGGER.info("Function Plan Preview Start: preview armed (Dauer: %.1fs)", time.monotonic() - started)
     return {"success": True, "already_armed": False}
 

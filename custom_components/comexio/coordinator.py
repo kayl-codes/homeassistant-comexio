@@ -2187,8 +2187,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Writes to config/www so the frontend can serve it under /local/. One rotating file
         per server_id — each call overwrites the previous preview. Updates last_plan_preview
         so the Plan Preview sensor (entity_picture) reflects whatever was last generated,
-        whether triggered by the Preview button (source='live') or a function_plan_visualize
-        service call with format=svg (source='snapshot:<kind>:<slot>'). Returns the /local/ URL.
+        whether triggered by plan_preview (plan card, 'Plan'/'Backup' selection) or a
+        function_plan_visualize service call with format=svg. Returns the /local/ URL.
 
         A snapshot render's wiring/elements stay frozen at the stored snapshot — see
         select.py's ComexioPlanBackupSelectEntity — but its per-connection VALUES still track
@@ -2558,7 +2558,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # (both synchronous, no I/O, but not provably infallible) must never mask the actual
             # render failure's traceback.
             _LOGGER.exception("[%s] Plan preview refresh failed", self.server_id)
-            # Disable further refreshes; the next preview button press re-arms. Also stop the
+            # Disable further refreshes; the next selection change or card open re-arms. Also stop the
             # Stufe-2 connection-value poll — otherwise its timer keeps firing indefinitely as a
             # no-op against an already-cleared cache (#77).
             self._disarm_preview_cache()

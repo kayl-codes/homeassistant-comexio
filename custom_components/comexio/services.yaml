@@ -603,7 +603,7 @@ function_plan_preview_start:
   name: Function Plan Preview Start
   description: >
     Internal — called by the plan card when it is opened. Arms the live preview of the
-    plan selected in 'Function Plans' (same as pressing the Preview button), so the
+    plan selected in 'Function Plans' (live, or the backup chosen in 'Backup'), so the
     wire-value poll runs right away. No effect while a preview is already armed.
   fields:
     config_entry:

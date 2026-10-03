@@ -168,9 +168,6 @@
       "statistics_cleanup": {
         "name": "Statistiken bereinigen"
       },
-      "plan_preview": {
-        "name": "Vorschau"
-      },
       "uninstall_cleanup": {
         "name": "Deinstallations-Bereinigung"
       }

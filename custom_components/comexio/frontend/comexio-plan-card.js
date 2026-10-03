@@ -1716,13 +1716,13 @@ class ComexioPlanCard extends HTMLElement {
   connectedCallback() {
     // Lovelace detaches+reattaches cards on every view switch and edit-mode toggle — not just on
     // real removal. Cancel a pending stop from disconnectedCallback's grace window so a reattach
-    // within that window doesn't need a fresh "Generate Preview" click to resume live values (#75).
+    // within that window doesn't need a fresh open to resume live values (#75).
     if (this._stopPreviewTimer) {
       clearTimeout(this._stopPreviewTimer);
       this._stopPreviewTimer = null;
     } else if (!this._minimal) {
       // A fresh open, not a reattach: arm the live preview right away — the counterpart of the
-      // stop below — instead of only after a plan switch or a "Preview" press.
+      // stop below — instead of only after a plan switch.
       this._startPreviewPending = true;
       this._startPreviewIfPending();
     }
@@ -1772,8 +1772,8 @@ class ComexioPlanCard extends HTMLElement {
     }
     // Stop the Stufe-2 live-value poll after a short grace period instead of instantly, so a
     // Lovelace DOM move (view switch, edit-mode toggle) — which detaches and immediately
-    // reattaches the card — doesn't freeze the live preview until the user re-triggers
-    // "Generate Preview" by hand. connectedCallback cancels this if we reattach in time (#75).
+    // reattaches the card — doesn't restart the live preview from scratch.
+    // connectedCallback cancels this if we reattach in time (#75).
     const hass = this._hass;
     const data = this._previewServiceData();
     this._stopPreviewTimer = setTimeout(() => {

@@ -164,7 +164,6 @@ def _function_plan_entity_classes() -> list[type]:
         sensor.ComexioPlanChangedSensor,
         sensor.ComexioFunctionPlanCountSensor,
         sensor.ComexioPlanPreviewSensor,
-        button.ComexioPlanPreviewButton,
         button.ComexioPlanToggleButton,
     ]
 
@@ -180,7 +179,6 @@ def _function_plan_entity_classes() -> list[type]:
         ("ComexioPlanChangedSensor", "iosrv1_plan_changed"),
         ("ComexioFunctionPlanCountSensor", "iosrv1_function_plan_count"),
         ("ComexioPlanPreviewSensor", "iosrv1_plan_preview_info"),
-        ("ComexioPlanPreviewButton", "iosrv1_preview"),
         ("ComexioPlanToggleButton", "iosrv1_function_plan_toggle"),
     ],
 )
