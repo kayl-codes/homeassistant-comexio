@@ -380,6 +380,7 @@
         "abort": {
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
           "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
           "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
         }
@@ -397,6 +398,7 @@
         "abort": {
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
           "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
           "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
         }
@@ -414,6 +416,7 @@
         "abort": {
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
           "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
           "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
         }

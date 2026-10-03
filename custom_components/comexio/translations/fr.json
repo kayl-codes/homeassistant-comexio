@@ -380,6 +380,7 @@
         "abort": {
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
           "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
+          "plan_not_watched": "Le plan {plan_name} (ID {fub_id}) n'est plus surveillé (désélectionné, supprimé ou son ID réattribué). Rien n'a été démarré.",
           "busy": "Une synchronisation, une restauration, une interrogation ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
           "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
         }
@@ -397,6 +398,7 @@
         "abort": {
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
           "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
+          "plan_not_watched": "Le plan {plan_name} (ID {fub_id}) n'est plus surveillé (désélectionné, supprimé ou son ID réattribué). Rien n'a été démarré.",
           "busy": "Une synchronisation, une restauration, une interrogation ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
           "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
         }
@@ -414,6 +416,7 @@
         "abort": {
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
           "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
+          "plan_not_watched": "Le plan {plan_name} (ID {fub_id}) n'est plus surveillé (désélectionné, supprimé ou son ID réattribué). Rien n'a été démarré.",
           "busy": "Une synchronisation, une restauration, une interrogation ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
           "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
         }

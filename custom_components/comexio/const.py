@@ -672,7 +672,8 @@ FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC = 60
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
-# User plans (not managed by HA) the watchdog also keeps an eye on: list of fub ids as strings.
+# User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
+# (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
 MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 
@@ -685,6 +686,22 @@ def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
 def function_plan_ids(fub_data: Mapping[str, Any]) -> set[int]:
     """Plan ids in a $Fubs listing (api.fub_data), skipping keys that are no plain number."""
     return {int(fid) for fid in fub_data if str(fid).isdigit()}
+
+
+def watchdog_user_plan_pick(fub_id: int, name: str) -> str:
+    """Saved form of a user plan picked for the watchdog: its ID and its name.
+
+    Comexio reuses the IDs of deleted plans, so the ID alone would hand the pick to a stranger's plan.
+    """
+    return f"{fub_id}:{name}"
+
+
+def parse_watchdog_user_plan_pick(value: object) -> tuple[int, str | None] | None:
+    """(fub_id, name) of a saved pick, name None for a bare ID saved before the name was; None if unreadable."""
+    raw_id, separator, name = str(value).partition(":")
+    if not raw_id.isdigit():
+        return None
+    return int(raw_id), (name if separator else None)
 
 
 # Bus-Load-Watchdog: self-healing reaction to a sustained bus-load rise (observed root cause:

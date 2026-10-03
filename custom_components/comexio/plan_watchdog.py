@@ -248,8 +248,8 @@ class ManagedPlanWatchdog:
                 fub_id,
             )
         for fub_id in previous.keys() - stopped.keys():
-            # A stopped plan deleted in Comexio (or no longer picked) drops out of managed: no recovery.
-            verdict = "runs again" if fub_id in managed else "is no longer watched (deleted or unselected)"
+            # A stopped plan deleted, renamed or unpicked (or its ID reused) drops out of managed: no recovery.
+            verdict = "runs again" if fub_id in managed else "is no longer watched (deleted, renamed or unselected)"
             _LOGGER.info(
                 "[%s] Monitored function plan '%s' (ID %s) %s", self._server_id, previous[fub_id], fub_id, verdict
             )
@@ -439,7 +439,7 @@ class ManagedPlanWatchdog:
             data["actions"] = [{"action": start_action_id(self._server_id, fub_id), "title": texts["start"]}]
         if alarm:
             # Delivered at once and through Do Not Disturb focus (Android: ttl/priority, iOS: interruption-level).
-            data.update({"ttl": 0, "priority": "high", "push": {"interruption-level": "time-sensitive"}})
+            data |= {"ttl": 0, "priority": "high", "push": {"interruption-level": "time-sensitive"}}
         await self._async_send(
             {
                 "title": texts[title_key],

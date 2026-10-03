@@ -178,6 +178,8 @@ class _FakeCoordinator(SimpleNamespace):
     _watched_user_plan_names = ComexioCoordinator._watched_user_plan_names
     watchdog_user_plan_candidates = ComexioCoordinator.watchdog_user_plan_candidates
     _watchdog_run_state = ComexioCoordinator._watchdog_run_state
+    _unresolved_plan_identities = ComexioCoordinator._unresolved_plan_identities
+    _warn_unresolved_watch_picks = ComexioCoordinator._warn_unresolved_watch_picks
     managed_plan_start_blocked = ComexioCoordinator.managed_plan_start_blocked
     async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
     async_initial_plan_watch = ComexioCoordinator.async_initial_plan_watch
@@ -185,7 +187,7 @@ class _FakeCoordinator(SimpleNamespace):
     async_plan_transition = ComexioCoordinator.async_plan_transition
     _async_watchdog_start_plan = ComexioCoordinator._async_watchdog_start_plan
     async_start_managed_plan = ComexioCoordinator.async_start_managed_plan
-    _is_watched_plan = ComexioCoordinator._is_watched_plan
+    is_watched_plan = ComexioCoordinator.is_watched_plan
     async_handle_notification_action = ComexioCoordinator.async_handle_notification_action
 
 
@@ -212,6 +214,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         async_update_listeners=MagicMock(),
         _watchdog_lock=asyncio.Lock(),
         _plan_transitions={},
+        _unresolved_watch_picks=frozenset(),
         config_entry=SimpleNamespace(options={}),
         plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=False)),
     )
@@ -672,7 +675,7 @@ def test_a_plan_left_out_of_every_answer_turns_unavailable_alone(
 def test_poll_hands_the_managed_plans_to_the_watchdog(api: ComexioAPI) -> None:
     """Only plan_map plans Comexio still has are judged; HA's own recent stop reads as unknown."""
     api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
-    plan_map = {"HA - TRIGGER": 19, "HA - Marker 1": "43", "HA - Gone": 99, "broken": "x"}
+    plan_map = {"Test1": 19, "Licht": "43", "HA - Gone": 99, "broken": "x"}
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: plan_map}))
     asyncio.run(coordinator._async_refresh_plan_run_states())
     managed, run_state, user_plans = coordinator.plan_watchdog.async_check.call_args.args
@@ -688,8 +691,8 @@ def test_poll_adds_the_watched_user_plans(api: ComexioAPI) -> None:
     api._fub_data["50"] = {"Id": 50, "Name": "Rollo Logik", "Active": 0}
     api.client.get_function_plan_run_states = AsyncMock(return_value={19: True, 43: True, 50: False})
     options = {
-        CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19},
-        CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["50", "19", "99"],
+        CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19},
+        CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["50:Rollo Logik", "19:Test1", "99:Gone"],
     }
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
     asyncio.run(coordinator._async_refresh_plan_run_states())
@@ -698,8 +701,95 @@ def test_poll_adds_the_watched_user_plans(api: ComexioAPI) -> None:
     assert set(user_plans) == {50}
 
 
+def test_a_mapped_id_comexio_gave_another_plan_is_not_watched(api: ComexioAPI) -> None:
+    """Review (Copilot, #132): Comexio reuses a deleted plan's ID — the watchdog must not start the newcomer."""
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - Marker 1": 19, "Licht": 43}}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    assert coordinator._managed_plan_names() == {43: "Licht"}
+    assert coordinator.is_watched_plan(19) is False
+    # The newcomer is a user plan like any other.
+    assert coordinator.watchdog_user_plan_candidates() == {19: "Test1"}
+
+
+def test_a_user_pick_holds_only_while_its_id_carries_its_name(api: ComexioAPI) -> None:
+    """Review (Copilot, #132): a pick whose ID Comexio gave another plan does not pass to that plan.
+
+    A bare ID saved before picks carried the name is trusted; an unreadable pick is skipped.
+    """
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt", "19", "x:y"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    assert coordinator._watched_user_plan_names() == {19: "Test1"}
+    assert coordinator.is_watched_plan(43) is False
+
+
+def test_a_reused_id_picked_as_user_plan_is_watched_as_one(api: ComexioAPI) -> None:
+    """The newcomer at a stale plan_map ID, once picked, follows the user-plan switch, not the HA-plan one."""
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: True, 43: True})
+    options = {
+        CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - Marker 1": 19},
+        CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["19:Test1"],
+    }
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    managed, _, user_plans = coordinator.plan_watchdog.async_check.call_args.args
+    assert managed == {19: "Test1"}
+    assert set(user_plans) == {19}
+
+
+def test_a_plan_dropping_out_of_the_watchdog_is_warned_once(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """Review (#132): a renamed, deleted or reused pick leaves the watchdog — said once, not with every poll."""
+    options = {
+        CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19, "HA - Gone": 99},
+        CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt", "43", "x"],
+    }
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(coordinator.async_watch_managed_plans())
+        asyncio.run(coordinator.async_watch_managed_plans())
+    warnings = [r.getMessage() for r in caplog.records if "no longer watches" in r.getMessage()]
+    assert len(warnings) == 2
+    assert "'Alt' (ID 43)" in warnings[0]
+    assert "'HA - Gone' (ID 99)" in warnings[1]
+    # Resolved again (picked anew), then lost again: warned anew.
+    options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = ["43:Licht"]
+    asyncio.run(coordinator.async_watch_managed_plans())
+    options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = ["43:Alt"]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(coordinator.async_watch_managed_plans())
+    assert "'Alt' (ID 43)" in caplog.text
+
+
+def test_no_plan_list_warns_of_no_lost_pick(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """A failed plan fetch must not read as every watched plan gone."""
+    api._fub_data.clear()
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Licht"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(coordinator.async_watch_managed_plans())
+    assert "no longer watches" not in caplog.text
+
+
+def test_a_push_for_a_reused_id_starts_nothing(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """Review (Copilot, #132): a push from the deleted plan must not start the plan that got its ID."""
+    hass = MagicMock()
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - Marker 1": 19}}
+    coordinator = _coordinator(
+        api,
+        hass=hass,
+        config_entry=SimpleNamespace(options=options),
+        plan_watchdog=SimpleNamespace(async_dismiss_push=MagicMock(return_value="dismiss")),
+        _async_start_plan_from_push=MagicMock(return_value="start"),
+    )
+    with caplog.at_level(logging.WARNING):
+        _push_action(coordinator, 19)
+    assert "no longer watched" in caplog.text
+    coordinator._async_start_plan_from_push.assert_not_called()
+    coordinator.plan_watchdog.async_dismiss_push.assert_called_once_with(19)
+
+
 def test_user_plan_candidates_leave_out_the_ha_plans(api: ComexioAPI) -> None:
-    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
     assert coordinator.watchdog_user_plan_candidates() == {43: "Licht"}
 
@@ -720,7 +810,7 @@ def test_setup_judges_the_watched_plans_without_waiting_for_a_poll(api: ComexioA
     """The problem sensor gets its first verdict from the run states the first refresh read."""
     coordinator = _coordinator(
         api,
-        config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}),
+        config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}),
         plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=True)),
     )
     asyncio.run(coordinator.async_initial_plan_watch())
@@ -755,7 +845,7 @@ def _push_action(coordinator: _FakeCoordinator, fub_id: int) -> None:
 def test_push_action_starts_only_a_watched_plan(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
     """Review (Copilot, #132): a push from before a plan was unselected or deleted must not start it."""
     hass = MagicMock()
-    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}
     coordinator = _coordinator(
         api,
         hass=hass,

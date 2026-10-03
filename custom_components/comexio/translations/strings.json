@@ -380,6 +380,7 @@
         "abort": {
           "entry_not_found": "The associated config entry could not be found — it may have been removed.",
           "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
+          "plan_not_watched": "The plan {plan_name} (ID {fub_id}) is no longer watched (unselected, deleted or its ID reused). Nothing was started.",
           "busy": "A sync, restore, poll or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
           "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
         }
@@ -397,6 +398,7 @@
         "abort": {
           "entry_not_found": "The associated config entry could not be found — it may have been removed.",
           "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
+          "plan_not_watched": "The plan {plan_name} (ID {fub_id}) is no longer watched (unselected, deleted or its ID reused). Nothing was started.",
           "busy": "A sync, restore, poll or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
           "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
         }
@@ -414,6 +416,7 @@
         "abort": {
           "entry_not_found": "The associated config entry could not be found — it may have been removed.",
           "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
+          "plan_not_watched": "The plan {plan_name} (ID {fub_id}) is no longer watched (unselected, deleted or its ID reused). Nothing was started.",
           "busy": "A sync, restore, poll or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
           "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
         }

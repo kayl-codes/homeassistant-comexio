@@ -148,6 +148,7 @@ from .const import (
     fw_update_signal,
     io_audit_key,
     io_column_rows,
+    parse_watchdog_user_plan_pick,
     plan_watch_signal,
     snap_to_grid,
     source_audit_key,
@@ -699,6 +700,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         # fub_id → PLAN_TRANSITION_* while HA itself starts/stops the plan (async_plan_transition).
         self._plan_transitions: dict[int, str] = {}
+        # Watchdog picks Comexio no longer has under their name, already warned about.
+        self._unresolved_watch_picks: frozenset[tuple[int, str]] = frozenset()
         # Two counters: the fail streak tracks the run-state endpoint itself (logging, reset only
         # by a working fetch); the stale count tracks failures since the last fresh state (sensor
         # availability, also reset by a full poll, whose $Fubs brings every Active flag).
@@ -3300,9 +3303,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return plans
 
     def _managed_plan_names(self) -> dict[int, str]:
-        """fub_id → name of the HA-managed plans (plan_map, trigger plan included) Comexio still has."""
+        """fub_id → name of the HA-managed plans (plan_map, trigger plan included) Comexio still has.
+
+        A mapped ID that now carries another name counts as gone, as in _stale_plan_map_entries:
+        Comexio reuses the IDs of deleted plans, and the watchdog must not start a stranger's plan.
+        """
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-        return self._existing_plan_names(raw_map.values()) if isinstance(raw_map, dict) else {}
+        if not isinstance(raw_map, dict):
+            return {}
+        live = self._existing_plan_names(raw_map.values())
+        return {fub_id: name for fub_id, name in live.items() if str(raw_map.get(name)) == str(fub_id)}
 
     def watchdog_user_plan_candidates(self) -> dict[int, str]:
         """fub_id → name of the plans the options can add to the watchdog: every plan except HA's own."""
@@ -3314,12 +3324,55 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
 
     def _watched_user_plan_names(self) -> dict[int, str]:
-        """fub_id → name of the user plans picked for the watchdog in the options (HA-managed ones left out)."""
-        raw_ids = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
-        if not isinstance(raw_ids, list):
+        """fub_id → name of the user plans picked for the watchdog in the options (HA-managed ones left out).
+
+        A pick whose ID now carries another name is left out (ID reused, or the plan renamed): the
+        options show it as a pick to deselect next to the plan's current name.
+        """
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        if not isinstance(raw_picks, list):
             return {}
+        picks = [pick for value in raw_picks if (pick := parse_watchdog_user_plan_pick(value)) is not None]
+        live = self._existing_plan_names(fub_id for fub_id, _ in picks)
         managed = self._managed_plan_names()
-        return {fub_id: name for fub_id, name in self._existing_plan_names(raw_ids).items() if fub_id not in managed}
+        return {
+            fub_id: live[fub_id]
+            for fub_id, name in picks
+            if fub_id in live and fub_id not in managed and name in (None, live[fub_id])
+        }
+
+    def _unresolved_plan_identities(self) -> frozenset[tuple[int, str]]:
+        """(fub_id, name) of the plan_map entries and named user picks Comexio no longer has under that name.
+
+        Empty without a live plan list: a failed fetch must not read as every plan gone.
+        """
+        fub_data = self.api.fub_data
+        if not fub_data:
+            return frozenset()
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        identities = [(str(fub_id), name) for name, fub_id in raw_map.items()] if isinstance(raw_map, dict) else []
+        if isinstance(raw_picks, list):
+            picks = (parse_watchdog_user_plan_pick(value) for value in raw_picks)
+            identities += [(str(pick[0]), pick[1]) for pick in picks if pick is not None and pick[1] is not None]
+        live = self._existing_plan_names(fub_id for fub_id, _ in identities if fub_id.isdigit())
+        return frozenset(
+            (int(fub_id), name) for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) != name
+        )
+
+    def _warn_unresolved_watch_picks(self) -> None:
+        """Warn once per pick that drops out of the watchdog because its ID no longer carries its name."""
+        unresolved = self._unresolved_plan_identities()
+        for fub_id, name in sorted(unresolved - self._unresolved_watch_picks):
+            _LOGGER.warning(
+                "[%s] The function plan watchdog no longer watches '%s' (ID %s): Comexio has no plan of that name "
+                "under this ID any more (renamed, deleted, or the ID reused for another plan). A renamed user plan "
+                "can be picked again in the options",
+                self.server_id,
+                name,
+                fub_id,
+            )
+        self._unresolved_watch_picks = unresolved
 
     def _watchdog_run_state(self, fub_id: int) -> bool | None:
         """A managed plan's run state for the watchdog; None while unreadable or just stopped by HA itself."""
@@ -3338,6 +3391,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
         if self.managed_plan_start_blocked:
             return False
+        self._warn_unresolved_watch_picks()
         user_plans = self._watched_user_plan_names()
         stopped_changed = await self.plan_watchdog.async_check(
             {**user_plans, **self._managed_plan_names()}, self._watchdog_run_state, user_plans.keys()
@@ -3402,7 +3456,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.async_update_listeners()
         return True
 
-    def _is_watched_plan(self, fub_id: int) -> bool:
+    def is_watched_plan(self, fub_id: int) -> bool:
         """Whether the watchdog watches this plan right now (HA-managed or a picked user plan)."""
         return fub_id in self._managed_plan_names() or fub_id in self._watched_user_plan_names()
 
@@ -3416,7 +3470,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         fub_id = parse_start_action(self.server_id, event.data.get("action"))
         if fub_id is None:
             return
-        if self._is_watched_plan(fub_id):
+        if self.is_watched_plan(fub_id):
             self.hass.async_create_background_task(
                 self._async_start_plan_from_push(fub_id), name=f"{DOMAIN}_{self.server_id}_start_plan_{fub_id}"
             )
