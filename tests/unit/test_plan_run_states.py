@@ -9,19 +9,33 @@ from unittest.mock import AsyncMock, MagicMock
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError
 import pytest
 
-from custom_components.comexio import binary_sensor as binary_sensor_module, coordinator as coordinator_module
+from custom_components.comexio import coordinator as coordinator_module, sensor as sensor_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
+    CONF_FUNCTION_PLAN_PLAN_MAP,
+    CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
+    PLAN_TRANSITION_STARTING,
+    PLAN_TRANSITION_STOPPING,
     function_plan_ids,
     function_plan_run_state_unique_id,
+    plan_watch_signal,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.plan_watchdog import start_action_id
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
+
+
+@pytest.fixture(autouse=True)
+def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Dispatcher signals the coordinator sends (no hass in these tests)."""
+    signals: list[str] = []
+    monkeypatch.setattr(coordinator_module, "async_dispatcher_send", lambda _hass, signal: signals.append(signal))
+    return signals
 
 
 @pytest.fixture
@@ -159,6 +173,20 @@ class _FakeCoordinator(SimpleNamespace):
     _async_refresh_run_states_in_preview = ComexioCoordinator._async_refresh_run_states_in_preview
     _async_plan_run_state_tick = ComexioCoordinator._async_plan_run_state_tick
     _async_plan_run_state_fetch_failed = ComexioCoordinator._async_plan_run_state_fetch_failed
+    _existing_plan_names = ComexioCoordinator._existing_plan_names
+    _managed_plan_names = ComexioCoordinator._managed_plan_names
+    _watched_user_plan_names = ComexioCoordinator._watched_user_plan_names
+    watchdog_user_plan_candidates = ComexioCoordinator.watchdog_user_plan_candidates
+    _watchdog_run_state = ComexioCoordinator._watchdog_run_state
+    managed_plan_start_blocked = ComexioCoordinator.managed_plan_start_blocked
+    async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
+    async_initial_plan_watch = ComexioCoordinator.async_initial_plan_watch
+    plan_transition = ComexioCoordinator.plan_transition
+    async_plan_transition = ComexioCoordinator.async_plan_transition
+    _async_watchdog_start_plan = ComexioCoordinator._async_watchdog_start_plan
+    async_start_managed_plan = ComexioCoordinator.async_start_managed_plan
+    _is_watched_plan = ComexioCoordinator._is_watched_plan
+    async_handle_notification_action = ComexioCoordinator.async_handle_notification_action
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
@@ -180,10 +208,30 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_run_state_relogin_refused=False,
         scraped_plan_ids=None,
         plan_scrape_generation=0,
+        hass=None,
         async_update_listeners=MagicMock(),
+        _watchdog_lock=asyncio.Lock(),
+        _plan_transitions={},
+        config_entry=SimpleNamespace(options={}),
+        plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=False)),
     )
     fake.__dict__.update(overrides)
     return fake
+
+
+def test_every_watchdog_check_signals_the_problem_sensor(api: ComexioAPI, dispatched: list[str]) -> None:
+    """last_check moves with every check, also when nothing changed and no listener update follows."""
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    coordinator = _coordinator(api)
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    coordinator.async_update_listeners.assert_not_called()
+    assert dispatched == [plan_watch_signal("iosrv1")]
+
+
+def test_a_blocked_watchdog_check_does_not_signal(api: ComexioAPI, dispatched: list[str]) -> None:
+    coordinator = _coordinator(api, in_sync=True)
+    assert asyncio.run(coordinator.async_watch_managed_plans()) is False
+    assert dispatched == []
 
 
 def _available(coordinator: _FakeCoordinator) -> bool:
@@ -463,7 +511,8 @@ class _FakeRegistry:
         self.entity_ids = entity_ids
         self.removed: list[str] = []
 
-    def async_get_entity_id(self, _domain: str, _platform: str, unique_id: str) -> str | None:
+    def async_get_entity_id(self, domain: str, _platform: str, unique_id: str) -> str | None:
+        assert domain == "sensor"
         return self.entity_ids.get(unique_id)
 
     def async_remove(self, entity_id: str) -> None:
@@ -472,12 +521,12 @@ class _FakeRegistry:
 
 def _plan_sensor_sync(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, **coordinator_overrides):
     registry = _FakeRegistry(
-        {function_plan_run_state_unique_id("iosrv1", fid): f"binary_sensor.iosrv1_fub{fid}" for fid in (19, 43)}
+        {function_plan_run_state_unique_id("iosrv1", fid): f"sensor.iosrv1_fub{fid}" for fid in (19, 43)}
     )
-    monkeypatch.setattr(binary_sensor_module.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(sensor_module.er, "async_get", lambda _hass: registry)
     coordinator = _coordinator(api, **coordinator_overrides)
     added: list = []
-    sync = binary_sensor_module._PlanRunStateSensorSync(None, coordinator, lambda ents: added.extend(ents))
+    sync = sensor_module._PlanRunStateSensorSync(None, coordinator, lambda ents: added.extend(ents))
     return sync, coordinator, registry, added
 
 
@@ -511,7 +560,7 @@ def test_sensor_of_a_deleted_plan_is_removed_after_a_scraped_poll(
     coordinator.scraped_plan_ids = {43}
     coordinator.plan_scrape_generation = 2
     sync()
-    assert registry.removed == ["binary_sensor.iosrv1_fub19"]
+    assert registry.removed == ["sensor.iosrv1_fub19"]
 
 
 def test_plan_created_by_ha_after_the_scrape_keeps_its_sensor(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -519,7 +568,7 @@ def test_plan_created_by_ha_after_the_scrape_keeps_its_sensor(api: ComexioAPI, m
     sync, coordinator, registry, added = _plan_sensor_sync(
         api, monkeypatch, scraped_plan_ids={19, 43}, plan_scrape_generation=1
     )
-    registry.entity_ids[function_plan_run_state_unique_id("iosrv1", 77)] = "binary_sensor.iosrv1_fub77"
+    registry.entity_ids[function_plan_run_state_unique_id("iosrv1", 77)] = "sensor.iosrv1_fub77"
     sync()
     api._fub_data["77"] = {"Id": 77, "Name": "Neu", "Active": 1}
     sync()
@@ -530,6 +579,25 @@ def test_plan_created_by_ha_after_the_scrape_keeps_its_sensor(api: ComexioAPI, m
     sync()
     assert added[-1].unique_id == "comexio_iosrv1_fub77"
     assert registry.removed == []
+
+
+@pytest.mark.parametrize(
+    ("fub_id", "transition", "expected"),
+    [
+        (43, None, "running"),
+        (19, None, "stopped"),
+        (19, PLAN_TRANSITION_STARTING, "starting"),
+        (43, PLAN_TRANSITION_STOPPING, "stopping"),
+        (99, None, None),
+    ],
+    ids=["running", "stopped", "starting", "stopping", "unknown-plan"],
+)
+def test_run_state_sensor_value(api: ComexioAPI, fub_id: int, transition: str | None, expected: str | None) -> None:
+    coordinator = _coordinator(api)
+    coordinator.plan_transition = {fub_id: transition}.get
+    sensor = sensor_module.ComexioFunctionPlanRunStateSensor(coordinator, "iosrv1", fub_id)
+    assert sensor.native_value == expected
+    assert expected is None or expected in sensor.options
 
 
 def test_no_scraped_plan_list_removes_no_sensor(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -599,3 +667,120 @@ def test_a_plan_left_out_of_every_answer_turns_unavailable_alone(
     assert coordinator.plan_run_state_available(43) is True
     assert coordinator.async_update_listeners.call_count == 2  # back available, without a state change
     assert "function plan 43 readable again" in caplog.text
+
+
+def test_poll_hands_the_managed_plans_to_the_watchdog(api: ComexioAPI) -> None:
+    """Only plan_map plans Comexio still has are judged; HA's own recent stop reads as unknown."""
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    plan_map = {"HA - TRIGGER": 19, "HA - Marker 1": "43", "HA - Gone": 99, "broken": "x"}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: plan_map}))
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    managed, run_state, user_plans = coordinator.plan_watchdog.async_check.call_args.args
+    assert managed == {19: "Test1", 43: "Licht"}
+    assert set(user_plans) == set()
+    assert (run_state(19), run_state(43)) == (False, True)
+    api.set_fub_active(43, False)  # HA itself stopped it, e.g. for a sort
+    assert run_state(43) is None
+
+
+def test_poll_adds_the_watched_user_plans(api: ComexioAPI) -> None:
+    """Picked user plans are judged too; a pick that is HA-managed or gone from Comexio is left out."""
+    api._fub_data["50"] = {"Id": 50, "Name": "Rollo Logik", "Active": 0}
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: True, 43: True, 50: False})
+    options = {
+        CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19},
+        CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["50", "19", "99"],
+    }
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    managed, _, user_plans = coordinator.plan_watchdog.async_check.call_args.args
+    assert managed == {19: "Test1", 50: "Rollo Logik"}
+    assert set(user_plans) == {50}
+
+
+def test_user_plan_candidates_leave_out_the_ha_plans(api: ComexioAPI) -> None:
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    assert coordinator.watchdog_user_plan_candidates() == {43: "Licht"}
+
+
+def test_watchdog_waits_while_a_cascade_or_sync_runs(api: ComexioAPI) -> None:
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    coordinator = _coordinator(api)
+
+    async def poll_during_cascade() -> None:
+        async with coordinator._watchdog_lock:
+            await coordinator._async_refresh_plan_run_states()
+
+    asyncio.run(poll_during_cascade())
+    coordinator.plan_watchdog.async_check.assert_not_called()
+
+
+def test_setup_judges_the_watched_plans_without_waiting_for_a_poll(api: ComexioAPI) -> None:
+    """The problem sensor gets its first verdict from the run states the first refresh read."""
+    coordinator = _coordinator(
+        api,
+        config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}),
+        plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=True)),
+    )
+    asyncio.run(coordinator.async_initial_plan_watch())
+    managed, _, _ = coordinator.plan_watchdog.async_check.call_args.args
+    assert managed == {19: "Test1"}
+    api.client.get_function_plan_run_states.assert_not_called()
+    coordinator.async_update_listeners.assert_called_once()
+
+
+def test_a_started_plan_is_cleared_before_the_verification_fetch(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review (Copilot, #132): a plan stopped again at once must keep the verdict that fetch gives it."""
+    order: list[str] = []
+    monkeypatch.setattr(api, "login", AsyncMock(return_value=True))
+    monkeypatch.setattr(api, "function_plan_run_fup_outcome", AsyncMock(return_value=True))
+    coordinator = _coordinator(
+        api,
+        plan_watchdog=SimpleNamespace(
+            async_plan_started=AsyncMock(side_effect=lambda *_a, **_k: order.append("clear"))
+        ),
+        _async_refresh_plan_run_states=AsyncMock(side_effect=lambda: order.append("verify")),
+    )
+    assert asyncio.run(coordinator.async_start_managed_plan(19)) is True
+    assert order == ["clear", "verify"]
+
+
+def _push_action(coordinator: _FakeCoordinator, fub_id: int) -> None:
+    coordinator.async_handle_notification_action(SimpleNamespace(data={"action": start_action_id("iosrv1", fub_id)}))
+
+
+def test_push_action_starts_only_a_watched_plan(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """Review (Copilot, #132): a push from before a plan was unselected or deleted must not start it."""
+    hass = MagicMock()
+    options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 19}}
+    coordinator = _coordinator(
+        api,
+        hass=hass,
+        config_entry=SimpleNamespace(options=options),
+        plan_watchdog=SimpleNamespace(async_dismiss_push=MagicMock(return_value="dismiss")),
+        _async_start_plan_from_push=MagicMock(return_value="start"),
+    )
+    with caplog.at_level(logging.WARNING):
+        _push_action(coordinator, 43)
+    assert "no longer watched" in caplog.text
+    # The stale push is taken off the phone instead of answering every tap with silence.
+    coordinator.plan_watchdog.async_dismiss_push.assert_called_once_with(43)
+    coordinator._async_start_plan_from_push.assert_not_called()
+    _push_action(coordinator, 19)
+    coordinator._async_start_plan_from_push.assert_called_once_with(19)
+    assert [c.args[0] for c in hass.async_create_background_task.call_args_list] == ["dismiss", "start"]
+
+
+def test_setup_judgement_waits_while_a_sync_runs(api: ComexioAPI) -> None:
+    coordinator = _coordinator(api)
+
+    async def setup_during_sync() -> None:
+        async with coordinator._watchdog_lock:
+            await coordinator.async_initial_plan_watch()
+
+    asyncio.run(setup_during_sync())
+    coordinator.plan_watchdog.async_check.assert_not_called()
+    coordinator.async_update_listeners.assert_not_called()

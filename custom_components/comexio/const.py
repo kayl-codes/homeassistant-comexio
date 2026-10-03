@@ -606,6 +606,11 @@ BUS_LOAD_POLL_INTERVAL_SEC = 10
 BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
 
 
+def plan_watch_signal(server_id: str) -> str:
+    """Dispatcher signal fired after every plan watchdog check (keeps the problem sensor's last_check current)."""
+    return f"{DOMAIN}_{server_id}_plan_watch"
+
+
 def bus_load_signal(server_id: str) -> str:
     """Dispatcher signal fired when a fresh Comexio bus workload reading arrives."""
     return f"{DOMAIN}_{server_id}_bus_load_update"
@@ -631,6 +636,36 @@ FUNCTION_PLAN_LIST_UNREAD_THRESHOLD = 2
 # path that writes a fetched plan list into the cache keeps HA's newer run states. More than this
 # many fetches in flight at once never happens (Comexio serializes requests).
 FUNCTION_PLAN_FETCH_MARK_SLOTS = 8
+# Watchdog of the HA-managed plans (plan_map, trigger plan included), see plan_watchdog.py.
+# A plan HA itself stopped this recently is not judged: sort, connect and restore stop a plan
+# and start it again, and the bus-load cascade does the same, without holding the poll back.
+FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC = 300
+# States of the function plan run-state sensor (enum); starting/stopping while HA itself
+# starts or stops the plan (coordinator.async_plan_transition).
+PLAN_RUN_STATE_RUNNING = "running"
+PLAN_RUN_STATE_STOPPED = "stopped"
+PLAN_TRANSITION_STARTING = "starting"
+PLAN_TRANSITION_STOPPING = "stopping"
+PLAN_RUN_STATES = [PLAN_RUN_STATE_RUNNING, PLAN_RUN_STATE_STOPPED, PLAN_TRANSITION_STARTING, PLAN_TRANSITION_STOPPING]
+# A successful function_plan_stop/activate only logs: the run-state sensor already shows the
+# result. True brings back the "OK" notification; a failure always notifies.
+FUNCTION_PLAN_RUN_STOP_SUCCESS_NOTIFICATION = False
+# Failed auto-starts of one plan (start refused, or stopped again within the window below) after
+# which Plan Auto-Start gives up on it: the plan likely has an error, so a "check the plan" repair
+# and alarm push replace further tries. It resumes once the plan is seen running again.
+FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS = 2
+# A plan that stops again this soon after its auto-start counts as a failed auto-start; one that
+# ran longer counts as healthy and starts with a clean slate.
+FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC = 600
+# Minimum gap after a refused auto-start before the next attempt: a check can follow within seconds
+# (switch turned on, fast preview polling), which would use up both attempts on a short-lived refusal.
+FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC = 60
+# notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
+# managed plan stops; the action comes back as a mobile_app_notification_action event.
+CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
+# User plans (not managed by HA) the watchdog also keeps an eye on: list of fub ids as strings.
+CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
+MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 
 
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:

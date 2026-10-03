@@ -519,6 +519,8 @@ class ComexioAPI:
         # write it back over HA's own — same idea as the webhook guard R1 in the coordinator.
         self._run_state_mark = 0
         self._ha_run_states: dict[str, tuple[bool, int]] = {}
+        # fub_id_str → time.monotonic() of HA's own last stop of the plan (ha_stopped_within).
+        self._ha_stopped_at: dict[str, float] = {}
         # (fetched $Fubs dict, run_state_mark taken before its get_raw_config fetch): lets every
         # path that writes a fetched plan list or plan into the cache apply that guard on its own.
         self._fetch_marks: deque[tuple[dict[str, Any], int]] = deque(maxlen=FUNCTION_PLAN_FETCH_MARK_SLOTS)
@@ -686,8 +688,17 @@ class ComexioAPI:
         """Record a run state HA itself just caused (run_fup / stop_fup) and tell the listener."""
         self._run_state_mark += 1
         self._ha_run_states[str(fub_id)] = (running, self._run_state_mark)
+        if running:
+            self._ha_stopped_at.pop(str(fub_id), None)
+        else:
+            self._ha_stopped_at[str(fub_id)] = time.monotonic()
         if self.apply_fub_run_states({int(fub_id): running}) and self.run_state_listener is not None:
             self.run_state_listener()
+
+    def ha_stopped_within(self, fub_id: int, seconds: float) -> bool:
+        """Whether HA itself stopped the plan less than `seconds` ago and has not started it since."""
+        stopped_at = self._ha_stopped_at.get(str(fub_id))
+        return stopped_at is not None and time.monotonic() - stopped_at < seconds
 
     async def login(self) -> bool:
         """Make sure the main session is logged in; a full RSA login only if it is not.
@@ -3260,6 +3271,14 @@ class ComexioAPI:
         backup snapshot with 'elements' and 'connections') to restore that state instead.
         Returns True only if Comexio confirmed the run.
         """
+        return await self.function_plan_run_fup_outcome(fub_id, plan_data) is True
+
+    async def function_plan_run_fup_outcome(self, fub_id: int, plan_data: dict | None = None) -> bool | None:
+        """function_plan_run_fup telling a refusal apart from no answer.
+
+        True: Comexio confirmed the run. False: Comexio refused it (result=false). None: no usable
+        answer (connection, session or a malformed reply) — says nothing about the plan itself.
+        """
         try:
             await self.client.run_function_plan(int(fub_id), plan_data)
         except ComexioRequestRejectedError as err:
@@ -3270,7 +3289,7 @@ class ComexioAPI:
             return False
         except (ComexioError, TypeError, ValueError) as err:
             _LOGGER.warning("function_plan_run_fup: fub=%s failed: %s", fub_id, err)
-            return False
+            return None
         _LOGGER.info("function_plan_run_fup: fub=%s result=True", fub_id)
         self.set_fub_active(fub_id, True)
         return True

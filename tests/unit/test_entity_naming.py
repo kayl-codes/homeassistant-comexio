@@ -32,11 +32,33 @@ from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, Com
         ("comexio_iosrv1_k5", "iosrv1_k5"),
         ("comexio_iosrv1_k1_k2", "iosrv1_k1_k2"),
         ("comexio_iosrv1_fub19", "iosrv1_fub19"),
+        ("comexio_iosrv1_orphaned_backups", "iosrv1_orphaned_backups"),
+        ("comexio_iosrv1_managed_plans_problem", "iosrv1_managed_plans_problem"),
+        ("comexio_iosrv1_function_plan_auto_start", "iosrv1_function_plan_auto_start"),
+        ("comexio_iosrv1_function_plan_auto_start_user", "iosrv1_function_plan_auto_start_user"),
         ("comexio_io-srv_ext 2_ei1_win", "io_srv_ext_2_ei1_win"),
     ],
 )
 def test_stable_object_id_is_the_unique_id_address(unique_id: str, expected: str) -> None:
     assert stable_object_id(unique_id) == expected
+
+
+def _stable_id_entity_classes() -> list[type]:
+    from custom_components.comexio import binary_sensor, sensor, switch
+
+    return [
+        sensor.ComexioOrphanedBackupsSensor,
+        sensor.ComexioFunctionPlanRunStateSensor,
+        binary_sensor.ComexioManagedPlansProblemSensor,
+        switch.ComexioPlanAutoStartSwitch,
+        switch.ComexioUserPlanAutoStartSwitch,
+    ]
+
+
+@pytest.mark.parametrize("cls", _stable_id_entity_classes(), ids=lambda cls: cls.__name__)
+def test_function_plan_entities_without_hub_era_request_a_stable_entity_id(cls: type) -> None:
+    """Review (Copilot, #132): without the mixin the entity_id follows the translated name and language."""
+    assert issubclass(cls, ComexioStableEntityIdMixin)
 
 
 class _FakeEntity:
@@ -164,7 +186,6 @@ def _function_plan_entity_classes() -> list[type]:
         sensor.ComexioPlanChangedSensor,
         sensor.ComexioFunctionPlanCountSensor,
         sensor.ComexioPlanPreviewSensor,
-        button.ComexioPlanPreviewButton,
         button.ComexioPlanToggleButton,
     ]
 
@@ -180,7 +201,6 @@ def _function_plan_entity_classes() -> list[type]:
         ("ComexioPlanChangedSensor", "iosrv1_plan_changed"),
         ("ComexioFunctionPlanCountSensor", "iosrv1_function_plan_count"),
         ("ComexioPlanPreviewSensor", "iosrv1_plan_preview_info"),
-        ("ComexioPlanPreviewButton", "iosrv1_preview"),
         ("ComexioPlanToggleButton", "iosrv1_function_plan_toggle"),
     ],
 )

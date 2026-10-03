@@ -21,6 +21,7 @@ from .const import (
     CONF_USERNAME,
     CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
+    MOBILE_APP_NOTIFICATION_ACTION_EVENT,
     SOURCE_CATEGORIES,
     MarkerKind,
     WebioClass,
@@ -158,6 +159,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     entry.async_on_unload(coordinator.async_start_bus_load_poll())
     # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
     entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
+    # After the platforms: the auto-start switches have restored the user's choice by now.
+    entry.async_create_background_task(
+        hass, coordinator.async_initial_plan_watch(), f"comexio_{server_id}_initial_plan_watch"
+    )
+    # "Start plan" button of the managed-plan watchdog's phone push (see plan_watchdog).
+    entry.async_on_unload(
+        hass.bus.async_listen(MOBILE_APP_NOTIFICATION_ACTION_EVENT, coordinator.async_handle_notification_action)
+    )
 
     # Set up services
     await async_setup_services(hass)
@@ -281,17 +290,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids.add(f"comexio_{server_id}_offline_extensions_sensor")
     active_unique_ids.add(f"comexio_{server_id}_logikplan_plan_selector")
     active_unique_ids.add(f"comexio_{server_id}_function_plan_backups_sensor")
+    active_unique_ids.add(f"comexio_{server_id}_orphaned_backups")
     active_unique_ids.add(f"comexio_{server_id}_version_sensor")
     active_unique_ids.add(f"comexio_{server_id}_plan_changed_sensor")
     active_unique_ids.add(f"comexio_{server_id}_plan_backup_selector")
     active_unique_ids.add(f"comexio_{server_id}_bus_load_sensor")
     active_unique_ids.add(f"comexio_{server_id}_sd_card_sensor")
     active_unique_ids.add(f"comexio_{server_id}_plan_preview_sensor")
-    active_unique_ids.add(f"comexio_{server_id}_plan_preview_btn")
     active_unique_ids.add(f"comexio_{server_id}_plan_preview_image")
     active_unique_ids.add(f"comexio_{server_id}_function_plan_toggle_btn")
+    active_unique_ids.add(f"comexio_{server_id}_managed_plans_problem")
+    active_unique_ids.add(f"comexio_{server_id}_function_plan_auto_start")
+    active_unique_ids.add(f"comexio_{server_id}_function_plan_auto_start_user")
 
-    # Function plan run-state sensors (binary_sensor.py), one per plan in $Fubs. Without a
+    # Function plan run-state sensors (sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
     # while running, the ones of plans deleted while HA was down go with the next scraped setup.
     # Like the platform, keep the plans in the cache too: a plan HA created after the scrape
@@ -356,6 +368,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 expected_platform[uid] = "binary_sensor" if is_input else "switch"
             else:
                 expected_platform[uid] = "sensor" if is_input else "number"
+    # The run-state sensors were binary sensors before they became enum sensors.
+    expected_platform.update(dict.fromkeys(plan_uids, "sensor"))
 
     # Before removing offline IO entities from the registry, snapshot their entity_ids.
     # async_detect_orphaned_statistics uses this set to exclude "temporarily orphaned"

@@ -18,6 +18,7 @@ from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN, FUNCTION_PLAN_ORPHANED_VIE
 from .coordinator import ComexioCoordinator
 from .entity import ComexioFunctionPlanEntityMixin
 from .function_plan_backup import format_backup_label
+from .plan_preview import async_follow_selection
 from .services import format_plan_label
 
 _LOGGER = logging.getLogger(__name__)
@@ -121,6 +122,7 @@ class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
     async def async_select_option(self, option: str) -> None:
         self._selected = option
         self.async_write_ha_state()
+        _follow_in_preview(self.coordinator)
         if option == FUNCTION_PLAN_ORPHANED_VIEW_OPTION:
             # A view choice only: the managed plan stays the persisted one (see
             # coordinator.get_managed_function_plan_fub_id).
@@ -144,10 +146,20 @@ class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         return _plan_option_label(fub_id, fub)
 
 
+def _follow_in_preview(coordinator: ComexioCoordinator) -> None:
+    """Show the new selection in an open plan card's preview — in the background, the select stays snappy.
+
+    Runs after the state write, so the 'Backup' selector has already reset on a plan change.
+    """
+    coordinator.config_entry.async_create_background_task(
+        coordinator.hass, async_follow_selection(coordinator), f"comexio_{coordinator.server_id}_preview_follow"
+    )
+
+
 class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SelectEntity):
     """Select entity listing stored backup snapshots for the plan chosen in the 'Plan' selector.
 
-    Lets the Plan Preview button (button.py) render a historical snapshot instead of the
+    Lets the plan preview (plan_preview.py) render a historical snapshot instead of the
     live plan, so a backup can be visually sighted before deciding whether to restore it.
     Purely an in-memory preview/targeting control — no entry.options persistence, since it is
     an ephemeral viewing choice, not a lasting configuration value. Without an explicit user
@@ -155,7 +167,7 @@ class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorE
     the explicit choice and falls back to that same default, so a stale backup choice can never
     be silently applied to a newly-selected, unrelated plan.
     Picking a stored snapshot freezes the preview's wiring/elements at that snapshot while its
-    per-connection values keep following the live plan (see button.py's _active_backup_choice
+    per-connection values keep following the live plan (see plan_preview._active_backup_choice
     and coordinator.prime_snapshot_preview_cache) — it does NOT silently drift back to the live
     plan's wiring on the next webhook push. LIVE_BACKUP_OPTION is the only way back to the fully
     live view.
@@ -168,7 +180,8 @@ class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorE
     _attr_name = "Backup"
     _hub_era_name = "Function Plan Backup"
     _attr_icon = "mdi:backup-restore"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Next to the 'Plan' select whose backups it lists.
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: ComexioCoordinator) -> None:
         super().__init__(coordinator)
@@ -277,3 +290,4 @@ class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorE
         ):
             self._last_orphan = (choice["fub_id"], choice["plan_name"])
         self.async_write_ha_state()
+        _follow_in_preview(self.coordinator)

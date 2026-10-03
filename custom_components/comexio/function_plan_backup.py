@@ -237,6 +237,19 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
     return rows
 
 
+def summarize_orphaned_backups(orphans: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]]:
+    """(snapshot count, one {fub_id, plan_name, kept, backups} per deleted plan) of the orphaned-plans view.
+
+    Counts the same snapshots the backup selector's orphaned-plans view lists (see
+    FunctionPlanBackupManager.orphaned_plans_sync), auto and change alike.
+    """
+    plans = [
+        {"fub_id": o["fub_id"], "plan_name": o["plan_name"], "kept": o["kept"], "backups": len(o["backups"])}
+        for o in orphans
+    ]
+    return sum(plan["backups"] for plan in plans), plans
+
+
 class FunctionPlanBackupManager:
     """Manage rotating auto and pre-change snapshots of function plans."""
 

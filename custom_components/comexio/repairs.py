@@ -59,6 +59,7 @@ from .const import (
 )
 from .function_plan_backup import is_orphaned_identity
 from .orphaned_backups import ISSUE_ORPHANED_PLAN_BACKUPS, repair_placeholders
+from .plan_watchdog import ISSUE_FUNCTION_PLAN_STOPPED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -332,6 +333,8 @@ class ComexioRepairFlow(RepairsFlow):
             return await self.async_step_knx_dpt_suffix()
         if self.issue_id.startswith(f"{ISSUE_ORPHANED_PLAN_BACKUPS}_"):
             return await self.async_step_orphaned_backups()
+        if self.issue_id.startswith(f"{ISSUE_FUNCTION_PLAN_STOPPED}_"):
+            return await self.async_step_function_plan_stopped()
 
         _LOGGER.debug("Routing to fallback async_step_select_action")
         return await self.async_step_select_action()
@@ -1252,6 +1255,33 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_abort(reason="already_deleted")
         coordinator.async_update_listeners()  # backup-summary diagnostic sensor
         await coordinator._async_refresh_service_descriptions()
+        return self.async_create_entry(title=title, data={})
+
+    async def async_step_function_plan_stopped(self, user_input=None):
+        """Start a stopped HA-managed function plan again."""
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
+        if coordinator is None:
+            return self.async_abort(reason="entry_not_found")
+        placeholders = {
+            key: str(self.issue_data.get(key, "?")) for key in ("plan_name", "fub_id", "attempts", "gave_up_at")
+        }
+        # Read when the dialog opens, so it is current without rewriting the issue on every check.
+        placeholders["last_check"] = coordinator.plan_watchdog.last_check_text()
+        if user_input is None:
+            return self.async_show_form(
+                step_id="function_plan_stopped", description_placeholders=placeholders, data_schema=vol.Schema({})
+            )
+        fub_id = int(self.issue_data["fub_id"])
+        if coordinator.api.get_fub_active(fub_id):
+            # Started meanwhile (in Comexio, by the auto-start or another repair).
+            await coordinator.plan_watchdog.async_plan_started(fub_id)
+            coordinator.async_update_listeners()
+            return self.async_abort(reason="already_running", description_placeholders=placeholders)
+        if coordinator.managed_plan_start_blocked:
+            return self.async_abort(reason="busy")
+        if not await coordinator.async_start_managed_plan(fub_id):
+            return self.async_abort(reason="start_failed", description_placeholders=placeholders)
+        title = "Plan gestartet" if self.hass.config.language == "de" else "Plan started"
         return self.async_create_entry(title=title, data={})
 
     async def _async_apply_orphaned_backups_action(

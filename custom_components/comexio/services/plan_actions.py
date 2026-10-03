@@ -15,7 +15,14 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 
-from ..const import FUNCTION_PLAN_KNX_LAYOUT_Y_STEP, FUNCTION_PLAN_LAYOUT_Y_STEP, FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
+from ..const import (
+    FUNCTION_PLAN_KNX_LAYOUT_Y_STEP,
+    FUNCTION_PLAN_LAYOUT_Y_STEP,
+    FUNCTION_PLAN_RUN_STOP_SUCCESS_NOTIFICATION,
+    FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
+    PLAN_TRANSITION_STARTING,
+    PLAN_TRANSITION_STOPPING,
+)
 from ..coordinator import ComexioCoordinator
 from ._context import (
     _async_get_service_context,
@@ -456,19 +463,20 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
     ctx = await _resolve_function_plan_context(hass, call, error_title)
     if ctx is None:
         return
-    _coordinator, api, fub_id = ctx
+    coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
-    success = await api.function_plan_stop_fup(fub_id)
+    async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STOPPING):
+        success = await api.function_plan_stop_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
         f"Plan '{plan_name}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
         if success
         else f"Stop failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
-    persistent_notification.async_create(hass, msg, title=f"Function Plan Stop — {'OK' if success else 'Error'}")
+    _report_run_stop_result(hass, msg, success=success, action="Stop")
 
 
 async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -477,16 +485,28 @@ async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) 
     ctx = await _resolve_function_plan_context(hass, call, error_title)
     if ctx is None:
         return
-    _coordinator, api, fub_id = ctx
+    coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
-    success = await api.function_plan_run_fup(fub_id)
+    async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING):
+        success = await api.function_plan_run_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
         f"Plan '{plan_name}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"
         if success
         else f"Activation failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
-    persistent_notification.async_create(hass, msg, title=f"Function Plan Activate — {'OK' if success else 'Error'}")
+    _report_run_stop_result(hass, msg, success=success, action="Activate")
+
+
+def _report_run_stop_result(hass: HomeAssistant, msg: str, *, success: bool, action: str) -> None:
+    """Log the result of a plan stop/activate; notify on failure, on success only if enabled in const.py."""
+    if success:
+        _LOGGER.info("Function Plan %s: %s", action, msg.replace("\n", ", "))
+        if not FUNCTION_PLAN_RUN_STOP_SUCCESS_NOTIFICATION:
+            return
+    else:
+        _LOGGER.warning("Function Plan %s: %s", action, msg.replace("\n", ", "))
+    persistent_notification.async_create(hass, msg, title=f"Function Plan {action} — {'OK' if success else 'Error'}")

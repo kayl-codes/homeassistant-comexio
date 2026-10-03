@@ -121,7 +121,9 @@
           "cover_keywords": "Keywords for cover detection",
           "function_plan_backup_retention_months": "Orphaned backup retention",
           "bus_watchdog_enabled": "Enable Bus-Load Watchdog",
-          "bus_watchdog_auto_reboot": "Allow automatic Comexio reboot on emergency bus load"
+          "bus_watchdog_auto_reboot": "Allow automatic Comexio reboot on emergency bus load",
+          "function_plan_watchdog_notify": "Function plan watchdog: push to",
+          "function_plan_watchdog_user_plans": "Function plan watchdog: also watch user plans"
         },
         "data_description": {
           "schema_marker": "Available variables: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -135,7 +137,9 @@
           "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)",
           "function_plan_backup_retention_months": "Once the newest backup of a plan that was deleted directly in Comexio is older than this, a repair asks whether to delete or keep that plan's backups — nothing is deleted without your confirmation. A live plan's backups are never affected. The 'Function Plan Purge Orphaned Backups' action deletes all expired ones at once.",
           "bus_watchdog_enabled": "On a sustained bus-load rise, automatically restart the HA-managed cluster function plans (back to front) to try to relieve it. Non-destructive to the Comexio system itself.",
-          "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog."
+          "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog.",
+          "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when a watched function plan stops (HA-managed, or a user plan picked below). The push has a 'Start plan' button, and is removed again once the plan runs. Leave empty for no push; the repair is raised either way.",
+          "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. Leave plans you stop on purpose (tests) out."
         }
       }
     },
@@ -164,9 +168,6 @@
       "statistics_cleanup": {
         "name": "Clean Up Statistics"
       },
-      "plan_preview": {
-        "name": "Preview"
-      },
       "uninstall_cleanup": {
         "name": "Uninstall Cleanup"
       }
@@ -177,6 +178,14 @@
       }
     },
     "sensor": {
+      "function_plan_run_state": {
+        "state": {
+          "running": "Running",
+          "stopped": "Stopped",
+          "starting": "Starting…",
+          "stopping": "Stopping…"
+        }
+      },
       "sync_status": {
         "name": "WebIO Sync State",
         "state": {
@@ -195,8 +204,11 @@
       "plan_preview": {
         "name": "Preview info"
       },
+      "orphaned_backups": {
+        "name": "Backups (deleted plans)"
+      },
       "plan_changed": {
-        "name": "Plan Changed"
+        "name": "Plan changes in last interval"
       },
       "extension_count": {
         "name": "Extension Count"
@@ -212,6 +224,19 @@
       },
       "watchdog_event": {
         "name": "Last Watchdog Event"
+      }
+    },
+    "binary_sensor": {
+      "managed_plans_problem": {
+        "name": "Managed Plans Problem"
+      }
+    },
+    "switch": {
+      "function_plan_auto_start": {
+        "name": "Plan Auto-Start (HA plans)"
+      },
+      "function_plan_auto_start_user": {
+        "name": "Plan Auto-Start (user plans)"
       }
     }
   },
@@ -340,6 +365,57 @@
           "already_deleted": "These backups were already deleted. Nothing was changed.",
           "loaded_in_preview": "The plan's newest backup is now shown in the plan card (Plan → Orphaned plans). This repair stays open until you keep or delete the backups.",
           "preview_failed": "The backups could not be loaded into the plan preview — they may have been deleted meanwhile, or the plan selectors are disabled. The backups were not changed."
+        }
+      }
+    },
+    "function_plan_stopped": {
+      "title": "Function plan {plan_name} is not running",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Managed function plan stopped",
+            "description": "The function plan **{plan_name}** (ID {fub_id}) is managed by Home Assistant, but it is not running in Comexio. The markers, IOs, KNX objects or triggers it connects do not reach Home Assistant until it runs again.\n\nLast check: {last_check}.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (HA plans)** switch on the function plan device."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
+          "busy": "A sync, restore, poll or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
+          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+        }
+      }
+    },
+    "function_plan_stopped_user": {
+      "title": "Function plan {plan_name} is not running",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Watched user plan stopped",
+            "description": "The user plan **{plan_name}** (ID {fub_id}) is watched by the function plan watchdog, but it is not running in Comexio.\n\nLast check: {last_check}.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (user plans)** switch on the function plan device. To stop watching it, remove it from the integration options."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
+          "busy": "A sync, restore, poll or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
+          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+        }
+      }
+    },
+    "function_plan_auto_start_suspended": {
+      "title": "Check function plan {plan_name}",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Function plan keeps stopping",
+            "description": "Plan Auto-Start started the function plan **{plan_name}** (ID {fub_id}) {attempts} times, but it was refused or stopped again shortly after each time. The plan most likely has an error, so Auto-Start stops trying for this plan.\n\nLast failed attempt: {gave_up_at}. Last check: {last_check}.\n\nCheck the plan in Comexio Studio. Auto-Start resumes on its own once the plan is seen running again.\n\n**Submit** starts the plan once now."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
+          "busy": "A sync, restore, poll or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
+          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
         }
       }
     },

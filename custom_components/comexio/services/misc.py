@@ -21,6 +21,7 @@ from homeassistant.helpers import entity_registry as er
 
 from ..const import DOMAIN, MarkerKind, webio_class_name
 from ..coordinator import ComexioCoordinator
+from ..plan_preview import async_render_opened_preview, preview_selection_available
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ _LOGGER = logging.getLogger(__name__)
 _TITLE_SET_VALUE_ERR = "Set Value — Error"
 _TITLE_DEBUG_SESSION_ERR = "Function Plan Debug Session — Error"
 _TITLE_PREVIEW_EXTEND_ERR = "Function Plan Preview Extend — Error"
+_TITLE_PREVIEW_START_ERR = "Function Plan Preview Start — Error"
 _TITLE_PREVIEW_STOP_ERR = "Function Plan Preview Stop — Error"
 _TITLE_SEARCH_ERR = "Function Plan Search — Error"
 _INSTANCE_NOT_RESOLVED_ERR = "Comexio instance not resolved."
@@ -322,6 +324,41 @@ async def _handle_function_plan_preview_extend(hass: HomeAssistant, call: Servic
     return {"success": True, "minutes": minutes}
 
 
+async def _handle_function_plan_preview_start(hass: HomeAssistant, call: ServiceCall) -> dict:
+    """Arm the live plan preview when the plan card is opened — the counterpart of preview_stop.
+
+    Opening the card renders the current selection (live plan, chosen backup snapshot or the
+    orphaned-plans view, see plan_preview) and so arms the wire-value poll. Until preview_stop (at most
+    for the auto-stop window while nothing is armed, see coordinator.preview_following),
+    the 'Plan' and 'Backup' selects keep the preview on their selection (plan_preview.async_follow_selection),
+    also while nothing is selected yet or a frozen orphaned-plan render leaves the poll off.
+    No render while a preview is already armed (a second card, a reattach).
+    """
+    _LOGGER.info("Function Plan Preview Start: called (config_entry=%s)", call.data.get("config_entry"))
+    started = time.monotonic()
+    ctx = await _async_get_service_context(hass, call, _TITLE_PREVIEW_START_ERR, resolve_plan=False, do_login=False)
+    if ctx is None:
+        return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
+    coordinator, _api, _fub_id = ctx
+
+    coordinator.start_preview_following()
+    if coordinator.preview_armed:
+        _LOGGER.debug("Function Plan Preview Start: a plan preview is already armed")
+        return {"success": True, "already_armed": True}
+    if not preview_selection_available(coordinator):
+        _LOGGER.debug("Function Plan Preview Start: no plan is selected")
+        return {"success": False, "error": "No plan is selected for the preview."}
+    try:
+        await async_render_opened_preview(coordinator)
+    except HomeAssistantError as err:
+        _LOGGER.warning(
+            "Function Plan Preview Start: preview not armed (Duration: %.1fs): %s", time.monotonic() - started, err
+        )
+        return {"success": False, "error": str(err)}
+    _LOGGER.info("Function Plan Preview Start: preview armed (Duration: %.1fs)", time.monotonic() - started)
+    return {"success": True, "already_armed": False}
+
+
 async def _handle_function_plan_preview_stop(hass: HomeAssistant, call: ServiceCall) -> dict:
     """Immediately disarm the currently armed live plan preview (#75).
 
@@ -335,6 +372,7 @@ async def _handle_function_plan_preview_stop(hass: HomeAssistant, call: ServiceC
         return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
     coordinator, _api, _fub_id = ctx
 
+    coordinator.end_preview_following()
     stopped = coordinator.stop_preview()
     if not stopped:
         # Expected/frequent: the card's disconnectedCallback grace timer fires after the preview

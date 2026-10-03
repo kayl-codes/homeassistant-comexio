@@ -121,7 +121,9 @@
           "cover_keywords": "Palabras clave para detectar persianas",
           "function_plan_backup_retention_months": "Retención de backups huérfanos",
           "bus_watchdog_enabled": "Activar el Bus-Load Watchdog",
-          "bus_watchdog_auto_reboot": "Permitir el reinicio automático de Comexio ante una carga de bus de emergencia"
+          "bus_watchdog_auto_reboot": "Permitir el reinicio automático de Comexio ante una carga de bus de emergencia",
+          "function_plan_watchdog_notify": "Watchdog de planes de funciones: push a",
+          "function_plan_watchdog_user_plans": "Watchdog de planes de funciones: vigilar también planes de usuario"
         },
         "data_description": {
           "schema_marker": "Variables disponibles: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -135,7 +137,9 @@
           "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)",
           "function_plan_backup_retention_months": "Cuando la copia más reciente de un plan eliminado directamente en Comexio supera este plazo, una reparación pregunta si eliminar o conservar sus copias — no se elimina nada sin tu confirmación. Las copias de un plan que sigue existiendo nunca se ven afectadas. La acción 'Function Plan Purge Orphaned Backups' elimina de una vez todas las vencidas.",
           "bus_watchdog_enabled": "Ante una subida sostenida de la carga del bus, reinicia automáticamente los planes de función de clúster gestionados por HA (de atrás hacia adelante) para intentar aliviarla. No es destructivo para el propio sistema Comexio.",
-          "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo."
+          "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo.",
+          "function_plan_watchdog_notify": "Servicios de notificación (p. ej. notify.mobile_app_tu_telefono) que reciben un push cuando se detiene un plan de funciones vigilado (gestionado por HA, o un plan de usuario elegido abajo). El push tiene un botón «Iniciar plan» y desaparece en cuanto el plan vuelve a ejecutarse. Déjalo vacío para no enviar push; la reparación se crea en cualquier caso.",
+          "function_plan_watchdog_user_plans": "Planes de usuario (no gestionados por Home Assistant) que deben ejecutarse siempre. El watchdog los trata como los planes HA: reparación, sensor de problema y push cuando uno se detiene. El interruptor Inicio automático de planes (planes de usuario) los vuelve a iniciar por sí mismo. No incluyas los planes que detienes a propósito (pruebas)."
         }
       }
     },
@@ -164,9 +168,6 @@
       "statistics_cleanup": {
         "name": "Limpiar estadísticas"
       },
-      "plan_preview": {
-        "name": "Vista previa"
-      },
       "uninstall_cleanup": {
         "name": "Limpieza de desinstalación"
       }
@@ -177,6 +178,14 @@
       }
     },
     "sensor": {
+      "function_plan_run_state": {
+        "state": {
+          "running": "En ejecución",
+          "stopped": "Detenido",
+          "starting": "Iniciando…",
+          "stopping": "Deteniendo…"
+        }
+      },
       "sync_status": {
         "name": "Estado de la Sincronización WebIO",
         "state": {
@@ -195,8 +204,11 @@
       "plan_preview": {
         "name": "Info de vista previa"
       },
+      "orphaned_backups": {
+        "name": "Backups (planes eliminados)"
+      },
       "plan_changed": {
-        "name": "Plan modificado"
+        "name": "Planes modificados (último intervalo)"
       },
       "extension_count": {
         "name": "Número de extensiones"
@@ -212,6 +224,19 @@
       },
       "watchdog_event": {
         "name": "Último evento del Watchdog"
+      }
+    },
+    "binary_sensor": {
+      "managed_plans_problem": {
+        "name": "Problema planes gestionados"
+      }
+    },
+    "switch": {
+      "function_plan_auto_start": {
+        "name": "Inicio automático de planes (planes HA)"
+      },
+      "function_plan_auto_start_user": {
+        "name": "Inicio automático de planes (planes de usuario)"
       }
     }
   },
@@ -340,6 +365,57 @@
           "already_deleted": "Estas copias ya se eliminaron. No se ha cambiado nada.",
           "loaded_in_preview": "La copia más reciente del plan se muestra ahora en la tarjeta del plan (Plan → Orphaned plans). Esta reparación sigue abierta hasta que conserves o elimines las copias.",
           "preview_failed": "No se pudieron cargar las copias en la vista previa del plan — puede que se hayan eliminado entretanto o que los selectores de plan estén desactivados. Las copias no se han modificado."
+        }
+      }
+    },
+    "function_plan_stopped": {
+      "title": "El plan de funciones {plan_name} no se está ejecutando",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Plan de funciones gestionado detenido",
+            "description": "El plan de funciones **{plan_name}** (ID {fub_id}) lo gestiona Home Assistant, pero no se está ejecutando en Comexio. Los marcadores, IO, objetos KNX o disparadores que conecta no llegan a Home Assistant hasta que vuelva a ejecutarse.\n\nÚltima comprobación: {last_check}.\n\n**Enviar** inicia el plan ahora. Para que la integración inicie ese plan por sí misma, activa el interruptor **Inicio automático de planes (planes HA)** del dispositivo de planes de funciones."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
+          "already_running": "El plan {plan_name} (ID {fub_id}) vuelve a ejecutarse. No se cambió nada.",
+          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
+          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
+        }
+      }
+    },
+    "function_plan_stopped_user": {
+      "title": "El plan de funciones {plan_name} no se está ejecutando",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Plan de usuario vigilado detenido",
+            "description": "El plan de usuario **{plan_name}** (ID {fub_id}) lo vigila el watchdog de planes de funciones, pero no se está ejecutando en Comexio.\n\nÚltima comprobación: {last_check}.\n\n**Enviar** inicia el plan ahora. Para que la integración inicie ese plan por sí misma, activa el interruptor **Inicio automático de planes (planes de usuario)** del dispositivo de planes de funciones. Para dejar de vigilarlo, quítalo de las opciones de la integración."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
+          "already_running": "El plan {plan_name} (ID {fub_id}) vuelve a ejecutarse. No se cambió nada.",
+          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
+          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
+        }
+      }
+    },
+    "function_plan_auto_start_suspended": {
+      "title": "Revisar el plan de funciones {plan_name}",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "El plan de funciones se detiene una y otra vez",
+            "description": "Plan Auto-Start inició el plan de funciones **{plan_name}** (ID {fub_id}) {attempts} veces, pero cada vez el inicio fue rechazado o el plan se detuvo de nuevo poco después. Lo más probable es que el plan tenga un error, por lo que Auto-Start deja de intentarlo para este plan.\n\nÚltimo intento fallido: {gave_up_at}. Última comprobación: {last_check}.\n\nRevisa el plan en Comexio Studio. Auto-Start se reanuda por sí solo en cuanto el plan vuelve a detectarse en ejecución.\n\n**Enviar** inicia el plan una vez ahora."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
+          "already_running": "El plan {plan_name} (ID {fub_id}) vuelve a ejecutarse. No se cambió nada.",
+          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
+          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
         }
       }
     },
