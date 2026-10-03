@@ -65,6 +65,16 @@ def test_matching_pin_spellings_pass(repo: Path, ci_line: str) -> None:
             "# pip install --no-deps aiocomexio==0.3.0\npip install --no-deps other\n",
             "ci.yml: no aiocomexio==0.3.0 pin",
         ),
+        ('run: echo "aiocomexio==0.3.0"\n', "ci.yml: no aiocomexio==0.3.0 pin"),  # no pip install, no pin
+        ("env:\n  PIN: aiocomexio==0.3.0\n", "ci.yml: no aiocomexio==0.3.0 pin"),
+        (  # a second, drifted install next to the right one
+            "pip install --no-deps aiocomexio==0.3.0\npip3 install --no-deps aiocomexio==0.2.0\n",
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
+        (
+            "pip install --no-deps aiocomexio==0.3.0\npip install --no-deps \\\n  aiocomexio==0.2.0\n",
+            "ci.yml: aiocomexio==0.2.0 (manifest.json: 0.3.0)",
+        ),
     ],
 )
 def test_drifted_or_missing_pin_fails(
