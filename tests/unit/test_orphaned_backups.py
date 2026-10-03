@@ -414,3 +414,54 @@ def test_orphaned_backup_options_keep_labels_unique_across_plans() -> None:
         snapshot + " · Pumps (ID 5)",
     ]
     assert [rows[3][1]["fub_id"], rows[5][1]["fub_id"]] == [2, 5]
+
+
+def test_summarize_orphaned_backups_counts_every_snapshot_per_plan() -> None:
+    orphans = [_orphan(3, "Garage", [{}], kept=True), _orphan(2, "Pumps", [{}, {}, {}])]
+
+    count, plans = backup_module.summarize_orphaned_backups(orphans)
+
+    assert count == 4
+    assert plans == [
+        {"fub_id": 3, "plan_name": "Garage", "kept": True, "backups": 1},
+        {"fub_id": 2, "plan_name": "Pumps", "kept": False, "backups": 3},
+    ]
+
+
+def _orphaned_sensor(manager: FunctionPlanBackupManager, fub_data: dict[str, Any]) -> Any:
+    from types import SimpleNamespace
+
+    from custom_components.comexio.sensor import ComexioOrphanedBackupsSensor
+
+    asyncio.run(manager.async_load())
+    sensor = ComexioOrphanedBackupsSensor.__new__(ComexioOrphanedBackupsSensor)
+    sensor.coordinator = SimpleNamespace(api=SimpleNamespace(fub_data=fub_data), function_plan_backup=manager)
+    return sensor
+
+
+def test_orphaned_backups_sensor_counts_what_the_orphaned_plans_view_lists(
+    manager: FunctionPlanBackupManager,
+) -> None:
+    sensor = _orphaned_sensor(manager, LIVE_FUBS)
+
+    # The reused ID 2 ("Pumps": 2 auto + 1 change) and the gone ID 3 ("Garage": 1); "Lights" is live.
+    assert sensor.native_value == 4
+    assert [(p["plan_name"], p["backups"]) for p in sensor.extra_state_attributes["plans"]] == [
+        ("Garage", 1),
+        ("Pumps", 3),
+    ]
+
+
+def test_orphaned_backups_sensor_is_zero_when_every_plan_is_live(manager: FunctionPlanBackupManager) -> None:
+    sensor = _orphaned_sensor(manager, {"1": {"Name": "Lights"}, "2": {"Name": "Pumps"}, "3": {"Name": "Garage"}})
+
+    assert sensor.native_value == 0
+    assert sensor.extra_state_attributes == {"plans": []}
+
+
+def test_orphaned_backups_sensor_is_unknown_without_live_plans(manager: FunctionPlanBackupManager) -> None:
+    """A failed $Fubs fetch is no reason to report 0 — nor every plan as deleted."""
+    sensor = _orphaned_sensor(manager, {})
+
+    assert sensor.native_value is None
+    assert sensor.extra_state_attributes == {"plans": []}

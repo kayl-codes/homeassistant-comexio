@@ -32,6 +32,7 @@ from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, Com
         ("comexio_iosrv1_k5", "iosrv1_k5"),
         ("comexio_iosrv1_k1_k2", "iosrv1_k1_k2"),
         ("comexio_iosrv1_fub19", "iosrv1_fub19"),
+        ("comexio_iosrv1_orphaned_backups", "iosrv1_orphaned_backups"),
         ("comexio_io-srv_ext 2_ei1_win", "io_srv_ext_2_ei1_win"),
     ],
 )

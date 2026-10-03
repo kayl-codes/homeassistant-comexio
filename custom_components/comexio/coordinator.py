@@ -2287,7 +2287,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Used by the orphaned_plan_backups repair: sets the 'Plan' selector to the
         orphaned-plans view and the backup selector to this plan's row, then renders it
-        directly, since re-rendering on selector changes is left to a user automation. False
+        directly — the selectors only re-render an already armed preview (plan_preview). False
         when the plan has no backups left or the selectors are not set up.
         """
         label = next(

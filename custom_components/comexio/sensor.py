@@ -52,6 +52,7 @@ from .entity import (
     ComexioStableEntityIdMixin,
     function_plan_device_info,
 )
+from .function_plan_backup import summarize_orphaned_backups
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,6 +114,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioSyncStatusSensor(coordinator, coordinator.server_id),
             ComexioOfflineExtensionsSensor(coordinator, coordinator.server_id),
             ComexioFunctionPlanBackupSensor(coordinator, coordinator.server_id),
+            ComexioOrphanedBackupsSensor(coordinator, coordinator.server_id),
             ComexioVersionSensor(coordinator, coordinator.server_id),
             ComexioPlanChangedSensor(coordinator, coordinator.server_id),
             ComexioBusLoadSensor(coordinator, coordinator.server_id),
@@ -374,6 +376,50 @@ class ComexioFunctionPlanBackupSensor(ComexioFunctionPlanEntityMixin, Coordinato
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return self.coordinator.function_plan_backup.summary()
+
+
+class ComexioOrphanedBackupsSensor(ComexioStableEntityIdMixin, CoordinatorEntity, SensorEntity):
+    """Diagnostic count of the stored snapshots of deleted function plans — next to 'Backups'.
+
+    Above 0 there is something to restore or delete in the 'Plan' selector's orphaned-plans view;
+    counted from the same source, so the two never disagree. Unknown without a live plan list
+    (a failed $Fubs fetch), where every plan would look deleted. The total stays in 'Backups'.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:file-question-outline"
+    _attr_translation_key = "orphaned_backups"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"comexio_{server_id}_orphaned_backups"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return function_plan_device_info(self.coordinator)
+
+    async def async_added_to_hass(self) -> None:
+        """Load the backup stores so the count is available right after startup."""
+        await super().async_added_to_hass()
+        await self.coordinator.function_plan_backup.async_load()
+        self.async_write_ha_state()
+
+    def _summary(self) -> tuple[int, list[dict[str, Any]]] | None:
+        fub_data = self.coordinator.api.fub_data
+        if not fub_data:
+            return None
+        return summarize_orphaned_backups(self.coordinator.function_plan_backup.orphaned_plans_sync(fub_data))
+
+    @property
+    def native_value(self) -> int | None:
+        summary = self._summary()
+        return None if summary is None else summary[0]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        summary = self._summary()
+        return {"plans": [] if summary is None else summary[1]}
 
 
 class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):

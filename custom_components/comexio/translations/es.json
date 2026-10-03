@@ -204,6 +204,9 @@
       "plan_preview": {
         "name": "Info de vista previa"
       },
+      "orphaned_backups": {
+        "name": "Copias huérfanas"
+      },
       "plan_changed": {
         "name": "Planes modificados (último intervalo)"
       },
