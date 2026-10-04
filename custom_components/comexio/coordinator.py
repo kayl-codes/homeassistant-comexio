@@ -1542,6 +1542,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 )
                 # The orphaned-backup repairs need no plan wirings; with no plan left in Comexio
                 # every backup is orphaned, so they must not wait for a bulk load that has nothing.
+                # They judge by live_plan_list() (the poll's $Fubs), not by this {}: a failed bulk
+                # load while plans exist cannot make their backups look orphaned.
                 await self._async_audit_orphaned_backups()
                 self.async_update_listeners()
                 return
