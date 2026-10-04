@@ -34,17 +34,17 @@ It can also render a **stored backup snapshot** completely offline (no live Come
 connection needed) — handy to check "is this the version I want" before running
 `function_plan_restore`.
 
-The feature is made up of three integration entities (select, button, image) plus one
+The feature is made up of three integration entities (two selects, an image) plus one
 optional custom dashboard card (`comexio-plan-card`) that turns the plain image into an
 interactive diagram with search, hover, and a debug console.
 
 > **Known limitation:** the live Stufe-2 poll is scoped per config entry, not per
 > viewer/browser tab. If two dashboards (or two browser tabs) have the plan card open at
 > once, closing one of them stops the live poll for both — the other tab's preview just
-> stops updating until "Generate Preview" is clicked again there. Not an issue for a
-> single-viewer setup. The same "Generate Preview" click is also needed if you switch away
-> from the card's dashboard view for more than a couple of seconds and back — the card only
-> bridges a near-instant Lovelace view switch, not a longer absence.
+> stops updating until that card is reopened (reload the dashboard). Not an issue for a
+> single-viewer setup. Leaving the card's dashboard view for more than a couple of seconds
+> stops the poll too; coming back reopens the card and so resumes it — the card only
+> bridges a near-instant Lovelace view switch without a restart.
 
 ---
 
@@ -78,13 +78,14 @@ interact with it).
 
 ## 3. Adding the Card to a Dashboard
 
-Three entities work together (replace `iosrv1` with your instance name):
+These entities work together (replace `iosrv1` with your instance name):
 
 | Entity | Role |
 |---|---|
 | `select.iosrv1_function_plans` | Choose which plan to preview. |
-| `button.iosrv1_preview` | Render the selected plan (creates/updates the SVG). |
+| `select.iosrv1_function_plan_backup` | Live plan (default) or one of its stored backups. |
 | `image.iosrv1_plan_preview` | Holds the last rendered SVG — the picture source for the card. |
+| `sensor.iosrv1_plan_preview_info` | Name of the plan last rendered, its source (live or backup) and render time as attributes (diagnostic, optional). |
 
 Example dashboard section:
 
@@ -94,7 +95,7 @@ cards:
   - type: tile
     entity: select.iosrv1_function_plans
   - type: tile
-    entity: button.iosrv1_preview
+    entity: select.iosrv1_function_plan_backup
   - type: custom:comexio-plan-card
     entity: image.iosrv1_plan_preview
 ```
@@ -103,16 +104,20 @@ cards:
 
 ## 4. Selecting and Rendering a Plan
 
-- Pick a plan in the **Plan** select entity, then press the **Preview**
-  button once to render it.
+- Opening the card renders the plan picked in the **Plan** select. While the card is
+  open, picking another plan (or a backup in the **Backup** select) re-renders it
+  right away — no button, no automation needed.
+- Without an open card, changing the selection renders nothing and starts no poll.
 - If no plan is selected, actions default to whatever the integration is currently
   tracking (the last plan used).
-- **Structural** changes (elements or wires added/removed in Comexio) need a fresh
-  button press. **Live wire colors**, however, update themselves automatically
-  afterwards — no further presses needed while values just change.
-- To preview a **stored backup** instead of the live plan, use the
-  `function_plan_visualize` action with its `snapshot` field and `format: svg` — this
-  works fully offline.
+- **Structural** changes (elements or wires added/removed in Comexio) show up after
+  re-selecting the plan or reopening the card. **Live wire colors**, however, update
+  themselves automatically while values just change.
+- After a Home Assistant restart, the preview image and **Preview info** keep showing the
+  last render until the card is opened again — no `unknown` state in between.
+- To preview a **stored backup** instead of the live plan, pick it in the **Backup**
+  select, or use the `function_plan_visualize` action with its `snapshot` field and
+  `format: svg` — both work fully offline.
 
 ---
 
@@ -856,18 +861,18 @@ Zusätzlich kann ein **gespeicherter Backup-Snapshot** komplett offline dargeste
 werden (keine Live-Verbindung zu Comexio nötig) — praktisch, um vor einem
 `function_plan_restore` zu prüfen, ob es wirklich der gewünschte Stand ist.
 
-Das Feature besteht aus drei Integrations-Entitäten (Auswahl, Taster, Bild) sowie einer
+Das Feature besteht aus drei Integrations-Entitäten (zwei Auswahlen, ein Bild) sowie einer
 optionalen Custom-Dashboard-Karte (`comexio-plan-card`), die aus dem reinen Bild ein
 interaktives Diagramm mit Suche, Hover und Debug-Konsole macht.
 
 > **Bekannte Einschränkung:** Der Live-Stufe-2-Poll ist pro Config-Entry verdrahtet, nicht
 > pro Betrachter/Browser-Tab. Sind zwei Dashboards (oder zwei Browser-Tabs) gleichzeitig mit
 > geöffneter Plan-Karte aktiv, stoppt das Schließen eines davon den Live-Poll für beide — die
-> andere Vorschau aktualisiert sich dann erst wieder nach erneutem Klick auf
-> „Generate Preview“. Bei nur einem Betrachter kein Thema. Derselbe „Generate Preview“-Klick
-> ist auch nötig, wenn man länger als ein paar Sekunden zu einer anderen Dashboard-Ansicht
-> wechselt und zurück — die Karte überbrückt nur einen nahezu sofortigen Lovelace-Ansichtswechsel,
-> keine längere Abwesenheit.
+> andere Vorschau aktualisiert sich dann erst wieder, wenn die Karte neu geöffnet wird
+> (Dashboard neu laden). Bei nur einem Betrachter kein Thema. Wer länger als ein paar Sekunden
+> zu einer anderen Dashboard-Ansicht wechselt, stoppt den Poll ebenfalls; beim Zurückkehren
+> öffnet sich die Karte neu und startet ihn wieder — ohne Neustart überbrückt die Karte nur
+> einen nahezu sofortigen Lovelace-Ansichtswechsel.
 
 ---
 
@@ -903,14 +908,15 @@ Bild-Entität-Karte kann nur nicht damit interagieren).
 
 ## 3. Karte zum Dashboard hinzufügen
 
-Drei Entitäten arbeiten zusammen (Instanzname `iosrv1` durch die eigene Instanz
+Diese Entitäten arbeiten zusammen (Instanzname `iosrv1` durch die eigene Instanz
 ersetzen):
 
 | Entität | Rolle |
 |---|---|
 | `select.iosrv1_function_plans` | Plan für die Vorschau auswählen. |
-| `button.iosrv1_preview` | Ausgewählten Plan rendern (erzeugt/aktualisiert das SVG). |
+| `select.iosrv1_function_plan_backup` | Live-Plan (Standard) oder eines seiner gespeicherten Backups. |
 | `image.iosrv1_plan_preview` | Enthält das zuletzt gerenderte SVG — Bildquelle für die Karte. |
+| `sensor.iosrv1_plan_preview_info` | Name des zuletzt gerenderten Plans, Quelle (live oder Backup) und Renderzeit als Attribute (Diagnose, optional). |
 
 Beispiel-Dashboard-Abschnitt:
 
@@ -920,7 +926,7 @@ cards:
   - type: tile
     entity: select.iosrv1_function_plans
   - type: tile
-    entity: button.iosrv1_preview
+    entity: select.iosrv1_function_plan_backup
   - type: custom:comexio-plan-card
     entity: image.iosrv1_plan_preview
 ```
@@ -932,16 +938,20 @@ cards:
 
 ## 4. Plan auswählen und rendern
 
-- Plan in der **Plan**-Auswahl wählen, dann einmal den **Vorschau**-Taster
-  drücken.
+- Beim Öffnen rendert die Karte den in der **Plan**-Auswahl gewählten Plan. Solange die
+  Karte offen ist, wird ein anderer Plan (oder ein Backup in der **Backup**-Auswahl)
+  sofort neu gerendert — ohne Taster, ohne Automation.
+- Ohne offene Karte rendert ein Auswahlwechsel nichts und startet keinen Poll.
 - Ist nichts ausgewählt, verwenden Aktionen den zuletzt von der Integration
   verwendeten Plan.
 - **Strukturelle** Änderungen (Elemente/Drähte in Comexio hinzugefügt/entfernt)
-  benötigen einen erneuten Tasterdruck. **Live-Drahtfarben** hingegen aktualisieren
-  sich danach von selbst — kein weiterer Druck nötig, solange sich nur Werte ändern.
-- Um stattdessen ein **gespeichertes Backup** anzuzeigen, die Aktion
-  `function_plan_visualize` mit dem Feld `snapshot` und `format: svg` verwenden — das
-  funktioniert vollständig offline.
+  erscheinen nach erneuter Planauswahl oder erneutem Öffnen der Karte. **Live-Drahtfarben**
+  hingegen aktualisieren sich von selbst, solange sich nur Werte ändern.
+- Nach einem Home-Assistant-Neustart zeigen Vorschaubild und **Vorschau-Info** weiter den
+  letzten Stand, bis die Karte wieder geöffnet wird — kein `unknown` zwischendurch.
+- Um stattdessen ein **gespeichertes Backup** anzuzeigen, es in der **Backup**-Auswahl
+  wählen oder die Aktion `function_plan_visualize` mit dem Feld `snapshot` und
+  `format: svg` verwenden — beides funktioniert vollständig offline.
 
 ---
 

@@ -1,8 +1,14 @@
 # Version: 0.8.0
 import logging
+from typing import Any
 
 from homeassistant import config_entries
-from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 import voluptuous as vol
 
 from .const import (
@@ -14,6 +20,8 @@ from .const import (
     CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
+    CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
+    CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
@@ -32,6 +40,8 @@ from .const import (
     ignore_list_categories,
     is_valid_entity_name_schema,
     parse_ignored_marker_tokens,
+    parse_watchdog_user_plan_pick,
+    watchdog_user_plan_pick,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,6 +91,48 @@ def _ignored_marker_sort_key(item: int | tuple[int, int]) -> int:
 
 def _format_ignored_marker_item(item: int | tuple[int, int]) -> str:
     return f"{item[0]}-{item[1]}" if isinstance(item, tuple) else str(item)
+
+
+def _saved_user_plan_pick(value: Any, candidates: dict[int, str]) -> str:
+    """A saved user-plan pick; a bare ID saved before the name was takes the plan's current name."""
+    pick = parse_watchdog_user_plan_pick(value)
+    if pick is not None and pick[1] is None and pick[0] in candidates:
+        return watchdog_user_plan_pick(pick[0], candidates[pick[0]])
+    return str(value)
+
+
+def _user_plan_pick_label(value: str) -> str:
+    pick = parse_watchdog_user_plan_pick(value)
+    if pick is None:
+        return value
+    fub_id, name = pick
+    return f"ID {fub_id}" if name is None else f"{name} (ID {fub_id})"
+
+
+def _watchdog_user_plan_field(coordinator: Any, conf: dict[str, Any]) -> tuple[list[str], SelectSelector]:
+    """Saved picks and selector of the user plans the watchdog also watches.
+
+    Offers every plan except HA's own, by name; a pick is the plan's ID and name, so a deleted
+    plan's reused ID does not pass the pick on. Saved picks Comexio no longer has under that ID
+    and name stay choosable so they can be deselected.
+    """
+    candidates = coordinator.watchdog_user_plan_candidates() if coordinator is not None else {}
+    # dict.fromkeys: an upgraded bare ID may equal a pick saved next to it.
+    saved = list(
+        dict.fromkeys(
+            _saved_user_plan_pick(value, candidates) for value in conf.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        )
+    )
+    options = [
+        SelectOptionDict(value=watchdog_user_plan_pick(fub_id, name), label=f"{name} (ID {fub_id})")
+        for fub_id, name in sorted(candidates.items(), key=lambda item: (item[1].casefold(), item[0]))
+    ]
+    known = {option["value"] for option in options}
+    options.extend(
+        SelectOptionDict(value=pick, label=_user_plan_pick_label(pick)) for pick in saved if pick not in known
+    )
+    # No translation_key: the options are this server's plan names.
+    return saved, SelectSelector(SelectSelectorConfig(options=options, multiple=True, mode=SelectSelectorMode.DROPDOWN))
 
 
 class ComexioOptionsFlow(config_entries.OptionsFlow):
@@ -235,6 +287,22 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 translation_key="function_plan_backup_retention_months",
             )
         )
+        schema_dict[
+            vol.Optional(
+                CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
+                default=list(conf.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY, [])),
+            )
+        ] = SelectSelector(
+            # No translation_key: the options are this instance's notify service names.
+            SelectSelectorConfig(
+                options=sorted(self.hass.services.async_services_for_domain("notify")),
+                multiple=True,
+                custom_value=True,
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+        saved_user_plans, user_plan_selector = _watchdog_user_plan_field(coordinator, conf)
+        schema_dict[vol.Optional(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS, default=saved_user_plans)] = user_plan_selector
 
         return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_dict), errors=errors)
 

@@ -1,7 +1,8 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+import contextlib
 from datetime import datetime, timedelta
 import logging
 import pathlib
@@ -15,7 +16,7 @@ from aiocomexio.function_plan import build_source_id_translation, render_plan_sv
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -65,6 +66,8 @@ from .const import (
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
+    CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
+    CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_HOST,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_KNX_PRERELEASE_CLEANUP_PENDING,
@@ -100,6 +103,7 @@ from .const import (
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC,
     ICON_ADD,
     ICON_DELETE,
     ICON_FIX,
@@ -110,6 +114,7 @@ from .const import (
     ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     MARKER_READ_ONLY_SUFFIX,
+    PLAN_TRANSITION_STARTING,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -143,6 +148,8 @@ from .const import (
     fw_update_signal,
     io_audit_key,
     io_column_rows,
+    parse_watchdog_user_plan_pick,
+    plan_watch_signal,
     snap_to_grid,
     source_audit_key,
     source_category,
@@ -159,6 +166,7 @@ from .orphaned_statistics import (
     legacy_statistic_prefixes,
     stable_statistic_id_pattern,
 )
+from .plan_watchdog import ManagedPlanWatchdog, parse_start_action
 from .reference_monitor import ReferenceCatalogMonitor
 
 _LOGGER = logging.getLogger(__name__)
@@ -632,6 +640,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # a preview that was already told to stop, or a slow render could clobber a newer,
         # concurrently-armed one for a different plan (#77).
         self._preview_cache_generation: int = 0
+        # 'Plan'/'Backup' selection follows (plan_preview.async_follow_selection) render one at a
+        # time, and a follow superseded by a newer selection while it waited is skipped: one
+        # background task per selection would otherwise let an older, slower render publish last.
+        # The armed preview's re-renders (webhook, connection-value poll) take it too.
+        self.preview_follow_lock = asyncio.Lock()
+        self.preview_follow_generation: int = 0
+        # time.monotonic() until which an opened plan card follows the selection without an armed preview
+        # (see preview_following); 0.0 while no card is open.
+        self._preview_following_until: float = 0.0
         self._preview_refresh_cancel: Any = None
         # Stufe 2: last fetched {connection_id: value} for the armed live plan (see
         # _async_poll_connection_values) and the timer driving that poll. Cleared/stopped
@@ -674,6 +691,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
         # sensors follow right away instead of on the next poll.
         self.api.run_state_listener = self.async_update_listeners
+        # Watchdog of the HA-managed plans, judged after every run-state fetch (async_watch_managed_plans).
+        self.plan_watchdog = ManagedPlanWatchdog(
+            hass,
+            entry_id=entry.entry_id,
+            server_id=self.server_id,
+            start_plan=self._async_watchdog_start_plan,
+            notify_targets=self._plan_watchdog_notify_targets,
+        )
+        # fub_id → PLAN_TRANSITION_* while HA itself starts/stops the plan (async_plan_transition).
+        self._plan_transitions: dict[int, str] = {}
+        # Watchdog picks Comexio no longer has under their name, already warned about.
+        self._unresolved_watch_picks: frozenset[tuple[int, str]] = frozenset()
         # Two counters: the fail streak tracks the run-state endpoint itself (logging, reset only
         # by a working fetch); the stale count tracks failures since the last fresh state (sensor
         # availability, also reset by a full poll, whose $Fubs brings every Active flag).
@@ -2171,8 +2200,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Writes to config/www so the frontend can serve it under /local/. One rotating file
         per server_id — each call overwrites the previous preview. Updates last_plan_preview
         so the Plan Preview sensor (entity_picture) reflects whatever was last generated,
-        whether triggered by the Preview button (source='live') or a function_plan_visualize
-        service call with format=svg (source='snapshot:<kind>:<slot>'). Returns the /local/ URL.
+        whether triggered by plan_preview (plan card, 'Plan'/'Backup' selection) or a
+        function_plan_visualize service call with format=svg. Returns the /local/ URL.
 
         A snapshot render's wiring/elements stay frozen at the stored snapshot — see
         select.py's ComexioPlanBackupSelectEntity — but its per-connection VALUES still track
@@ -2271,7 +2300,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Used by the orphaned_plan_backups repair: sets the 'Plan' selector to the
         orphaned-plans view and the backup selector to this plan's row, then renders it
-        directly, since re-rendering on selector changes is left to a user automation. False
+        directly — the selectors only re-render an already armed preview (plan_preview). False
         when the plan has no backups left or the selectors are not set up.
         """
         label = next(
@@ -2513,36 +2542,43 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.hass, _PREVIEW_LIVE_REFRESH_DELAY, self._async_refresh_plan_preview
         )
 
-    async def _render_armed_preview(self) -> None:
+    async def _render_armed_preview(
+        self, expected: dict[str, Any] | None, connection_values: dict[str, Any] | None = None
+    ) -> None:
         """Re-render whatever is currently armed — the live plan or a frozen backup snapshot.
 
-        Shared by the webhook-driven debounce and the Stufe-2 connection-value poll.
+        Shared by the webhook-driven debounce and the Stufe-2 connection-value poll. Under the
+        selection renders' lock (plan_preview), and only while `expected` is still the armed cache
+        once it is held: a re-render of the old plan that waited for a newer selection must neither
+        publish over it nor hand it the old plan's wire values (connection_values, from the poll).
         """
-        cache = self._preview_plan_cache
-        if cache is None:
-            return
-        source = cache["snapshot_source"] or "live"
-        await self.async_generate_plan_preview(
-            cache["fub_id"],
-            cache["plan_name"],
-            cache["elements"],
-            cache["connections"],
-            source,
-            cache["label_metadata"],
-        )
+        async with self.preview_follow_lock:
+            cache = self._preview_plan_cache
+            if cache is None or cache is not expected:
+                return
+            if connection_values is not None:
+                self._connection_values = connection_values
+            await self.async_generate_plan_preview(
+                cache["fub_id"],
+                cache["plan_name"],
+                cache["elements"],
+                cache["connections"],
+                cache["snapshot_source"] or "live",
+                cache["label_metadata"],
+            )
 
     async def _async_refresh_plan_preview(self, _now: Any) -> None:
         self._preview_refresh_cancel = None
-        if self._preview_plan_cache is None:
+        if (cache := self._preview_plan_cache) is None:
             return
         try:
-            await self._render_armed_preview()
+            await self._render_armed_preview(cache)
         except Exception:
             # Log before cleanup: a failure inside _disarm_preview_cache()/_stop_connection_poll()
             # (both synchronous, no I/O, but not provably infallible) must never mask the actual
             # render failure's traceback.
             _LOGGER.exception("[%s] Plan preview refresh failed", self.server_id)
-            # Disable further refreshes; the next preview button press re-arms. Also stop the
+            # Disable further refreshes; the next selection change or card open re-arms. Also stop the
             # Stufe-2 connection-value poll — otherwise its timer keeps firing indefinitely as a
             # no-op against an already-cleared cache (#77).
             self._disarm_preview_cache()
@@ -2600,6 +2636,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             f"Live-Poll nach {self._preview_auto_stop_minutes} Minuten automatisch gestoppt — "
             "Plan erneut öffnen, um ihn fortzusetzen"
         )
+        self.end_preview_following()
         self._disarm_preview_cache()
         self._stop_connection_poll()
 
@@ -2624,6 +2661,29 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         self._preview_plan_cache = None
         self._preview_cache_generation += 1
+
+    @property
+    def preview_armed(self) -> bool:
+        """True while a plan preview (live or snapshot) is armed and its wire-value poll runs."""
+        return self._preview_plan_cache is not None
+
+    @property
+    def preview_following(self) -> bool:
+        """Whether 'Plan'/'Backup' selection changes are shown (plan_preview.async_follow_selection).
+
+        While a preview is armed, and within the auto-stop window after a plan card opened: a frozen
+        orphaned-plan render, an empty selection or a failed opening render arm nothing while the
+        card still shows them. The window bounds that, as a closed browser tab sends no preview_stop.
+        """
+        return self.preview_armed or time.monotonic() < self._preview_following_until
+
+    def start_preview_following(self) -> None:
+        """A plan card opened (function_plan_preview_start): its selection changes follow."""
+        self._preview_following_until = time.monotonic() + _PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60
+
+    def end_preview_following(self) -> None:
+        """The plan card closed (function_plan_preview_stop) or its preview auto-stopped."""
+        self._preview_following_until = 0.0
 
     def stop_preview(self) -> bool:
         """Disarm the currently armed preview immediately (function_plan_preview_stop service).
@@ -2704,17 +2764,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # cache being reassigned wholesale on every (re-)arm, never mutated in place
             # (see _preview_plan_cache's definition).
             return
-        self._connection_values = connection_values
         self._connection_poll_fail_count = 0
         _LOGGER.debug(
             "[%s] Connection-value poll fub=%s plan=%s -> %s",
             self.server_id,
             cache["fub_id"],
             cache["plan_name"],
-            self._connection_values,
+            connection_values,
         )
         try:
-            await self._render_armed_preview()
+            # Stored only once the lock is held and the cache is still this plan's (see there).
+            await self._render_armed_preview(cache, connection_values)
         except Exception:
             _LOGGER.exception("[%s] Connection-value plan preview refresh failed", self.server_id)
         # After the render, so the plan view never waits for it; a failure here is counted
@@ -3233,8 +3293,217 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # A dropped answer counts no misses either: its omissions may predate the plan list written meanwhile.
         state_changed = self._apply_fetched_run_states(states, run_state_mark, cache_epoch)
         missed_out = self.api.fub_cache_epoch() == cache_epoch and self._count_missed_plan_run_states(fub_ids, states)
-        if state_changed or was_unavailable or missed_out:
+        changed = state_changed or was_unavailable or missed_out
+        if await self.async_watch_managed_plans() or changed:
             self.async_update_listeners()
+
+    def _existing_plan_names(self, raw_ids: Iterable[Any]) -> dict[int, str]:
+        """fub_id → name of those of raw_ids (ints or digit strings) Comexio still has."""
+        plans: dict[int, str] = {}
+        for value in raw_ids:
+            try:
+                fub_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            fub = self.api.fub_data.get(str(fub_id))
+            if isinstance(fub, dict):
+                plans[fub_id] = str(fub.get("Name") or fub_id)
+        return plans
+
+    def _managed_plan_names(self) -> dict[int, str]:
+        """fub_id → name of the HA-managed plans (plan_map, trigger plan included) Comexio still has.
+
+        A mapped ID that now carries another name counts as gone, as in _stale_plan_map_entries:
+        Comexio reuses the IDs of deleted plans, and the watchdog must not start a stranger's plan.
+        """
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(raw_map, dict):
+            return {}
+        live = self._existing_plan_names(raw_map.values())
+        return {fub_id: name for fub_id, name in live.items() if str(raw_map.get(name)) == str(fub_id)}
+
+    def watchdog_user_plan_candidates(self) -> dict[int, str]:
+        """fub_id → name of the plans the options can add to the watchdog: every plan except HA's own."""
+        managed = self._managed_plan_names()
+        return {
+            fub_id: name
+            for fub_id, name in self._existing_plan_names(self.api.fub_data).items()
+            if fub_id not in managed
+        }
+
+    def _watched_user_plan_names(self) -> dict[int, str]:
+        """fub_id → name of the user plans picked for the watchdog in the options (HA-managed ones left out).
+
+        A pick whose ID now carries another name is left out (ID reused, or the plan renamed): the
+        options show it as a pick to deselect next to the plan's current name.
+        """
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        if not isinstance(raw_picks, list):
+            return {}
+        picks = [pick for value in raw_picks if (pick := parse_watchdog_user_plan_pick(value)) is not None]
+        live = self._existing_plan_names(fub_id for fub_id, _ in picks)
+        managed = self._managed_plan_names()
+        return {
+            fub_id: live[fub_id]
+            for fub_id, name in picks
+            if fub_id in live and fub_id not in managed and name in (None, live[fub_id])
+        }
+
+    def _unresolved_plan_identities(self) -> frozenset[tuple[int, str]]:
+        """(fub_id, name) of the plan_map entries and named user picks Comexio no longer has under that name.
+
+        Empty without a live plan list: a failed fetch must not read as every plan gone.
+        """
+        fub_data = self.api.fub_data
+        if not fub_data:
+            return frozenset()
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        identities = [(str(fub_id), name) for name, fub_id in raw_map.items()] if isinstance(raw_map, dict) else []
+        if isinstance(raw_picks, list):
+            picks = (parse_watchdog_user_plan_pick(value) for value in raw_picks)
+            identities += [(str(pick[0]), pick[1]) for pick in picks if pick is not None and pick[1] is not None]
+        live = self._existing_plan_names(fub_id for fub_id, _ in identities if fub_id.isdigit())
+        return frozenset(
+            (int(fub_id), name) for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) != name
+        )
+
+    def _warn_unresolved_watch_picks(self) -> None:
+        """Warn once per pick that drops out of the watchdog because its ID no longer carries its name."""
+        unresolved = self._unresolved_plan_identities()
+        for fub_id, name in sorted(unresolved - self._unresolved_watch_picks):
+            _LOGGER.warning(
+                "[%s] The function plan watchdog no longer watches '%s' (ID %s): Comexio has no plan of that name "
+                "under this ID any more (renamed, deleted, or the ID reused for another plan). A renamed user plan "
+                "can be picked again in the options",
+                self.server_id,
+                name,
+                fub_id,
+            )
+        self._unresolved_watch_picks = unresolved
+
+    def _watchdog_run_state(self, fub_id: int) -> bool | None:
+        """A managed plan's run state for the watchdog; None while unreadable or just stopped by HA itself."""
+        if not self.plan_run_state_available(fub_id) or self.api.ha_stopped_within(
+            fub_id, FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC
+        ):
+            return None
+        return self.api.get_fub_active(fub_id)
+
+    @property
+    def managed_plan_start_blocked(self) -> bool:
+        """Whether a sync, repair, restore, full poll or bus-load cascade runs — no plan is started meanwhile."""
+        return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
+
+    async def async_watch_managed_plans(self) -> bool:
+        """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
+        if self.managed_plan_start_blocked:
+            return False
+        self._warn_unresolved_watch_picks()
+        user_plans = self._watched_user_plan_names()
+        stopped_changed = await self.plan_watchdog.async_check(
+            {**user_plans, **self._managed_plan_names()}, self._watchdog_run_state, user_plans.keys()
+        )
+        # The problem sensor's last_check moves with every check, not only when a listener update follows.
+        async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
+        return stopped_changed
+
+    async def async_initial_plan_watch(self) -> None:
+        """First watchdog judgement right after setup, not only with the first run-state poll.
+
+        The first refresh has just read every plan's Active flag, so the problem sensor and the
+        repairs need not stay unknown for a poll interval.
+        """
+        if await self.async_watch_managed_plans():
+            self.async_update_listeners()
+
+    def plan_transition(self, fub_id: int) -> str | None:
+        """PLAN_TRANSITION_STARTING/STOPPING while HA itself starts or stops the plan, else None."""
+        return self._plan_transitions.get(fub_id)
+
+    @contextlib.asynccontextmanager
+    async def async_plan_transition(self, fub_id: int, transition: str, *, refresh: bool = True) -> AsyncIterator[None]:
+        """Mark a plan as starting/stopping on its run-state sensor for the duration of HA's own action.
+
+        With `refresh`, the run states are read from Comexio right after the action, so the sensors,
+        the plan selector and the watchdog show the real result instead of waiting for the next poll.
+        The watchdog's auto-start runs inside that very fetch and passes refresh=False.
+        """
+        self._plan_transitions[fub_id] = transition
+        self.async_update_listeners()
+        try:
+            yield
+        finally:
+            self._plan_transitions.pop(fub_id, None)
+            if refresh:
+                await self._async_refresh_plan_run_states()
+            self.async_update_listeners()
+
+    async def _async_watchdog_start_plan(self, fub_id: int) -> bool | None:
+        """Start a stopped managed plan for the watchdog's auto-start.
+
+        True if started, False if Comexio refused it, None if not attempted (a sync, restore or poll
+        runs) or not answered — the auto-start counts only a refusal as a failed attempt.
+        """
+        if self.managed_plan_start_blocked:
+            return None
+        async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
+            return await self.api.function_plan_run_fup_outcome(fub_id)
+
+    async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool:
+        """Start a stopped managed plan from its repair or push; False if Comexio did not confirm it."""
+        if not await self.api.login():
+            return False
+        if not await self._async_watchdog_start_plan(fub_id):
+            return False
+        # Clear the stopped verdict before the verification fetch: a plan that stopped again
+        # right away gets its repair and push back from that fetch instead of losing them.
+        await self.plan_watchdog.async_plan_started(fub_id, confirm=from_push)
+        # Outside the watchdog lock: the fetch judges the watched plans again.
+        await self._async_refresh_plan_run_states()
+        self.async_update_listeners()
+        return True
+
+    def is_watched_plan(self, fub_id: int) -> bool:
+        """Whether the watchdog watches this plan right now (HA-managed or a picked user plan)."""
+        return fub_id in self._managed_plan_names() or fub_id in self._watched_user_plan_names()
+
+    def _plan_watchdog_notify_targets(self) -> list[str]:
+        targets = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or []
+        return [str(target) for target in targets] if isinstance(targets, list) else []
+
+    @callback
+    def async_handle_notification_action(self, event: Event) -> None:
+        """The "Start plan" button of a watchdog push was pressed on a phone."""
+        fub_id = parse_start_action(self.server_id, event.data.get("action"))
+        if fub_id is None:
+            return
+        if self.is_watched_plan(fub_id):
+            self.hass.async_create_background_task(
+                self._async_start_plan_from_push(fub_id), name=f"{DOMAIN}_{self.server_id}_start_plan_{fub_id}"
+            )
+            return
+        # A push from before the plan was unselected or deleted in Comexio: starting it is no longer
+        # the watchdog's call, so the stale push is taken off the phone instead.
+        _LOGGER.warning(
+            "[%s] Watchdog push action for function plan %s ignored: the plan is no longer watched",
+            self.server_id,
+            fub_id,
+        )
+        self.hass.async_create_background_task(
+            self.plan_watchdog.async_dismiss_push(fub_id), name=f"{DOMAIN}_{self.server_id}_dismiss_push_{fub_id}"
+        )
+
+    async def _async_start_plan_from_push(self, fub_id: int) -> None:
+        _LOGGER.info("[%s] Starting function plan %s from the watchdog push", self.server_id, fub_id)
+        if self.api.get_fub_active(fub_id):
+            await self.plan_watchdog.async_plan_started(fub_id, confirm=True)
+            self.async_update_listeners()
+            return
+        if not self.managed_plan_start_blocked and await self.async_start_managed_plan(fub_id, from_push=True):
+            return
+        _LOGGER.warning("[%s] Function plan %s could not be started from the watchdog push", self.server_id, fub_id)
+        await self.plan_watchdog.async_push_start_failed(fub_id, self.api.function_plan_name(fub_id))
 
     def _apply_fetched_run_states(self, states: dict[int, bool], run_state_mark: int, cache_epoch: int) -> bool:
         """Write a run-state answer into the cache unless a newer plan list arrived meanwhile; True if changed.

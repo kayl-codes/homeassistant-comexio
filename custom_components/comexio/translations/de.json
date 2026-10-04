@@ -121,7 +121,9 @@
           "ignored_knx": "KNX-Objekt-IDs von der Logikplan-Verbindung ausschließen",
           "function_plan_backup_retention_months": "Aufbewahrung verwaister Backups",
           "bus_watchdog_enabled": "Bus-Auslastungs-Watchdog aktivieren",
-          "bus_watchdog_auto_reboot": "Automatischen Comexio-Neustart bei Notfall-Busauslastung erlauben"
+          "bus_watchdog_auto_reboot": "Automatischen Comexio-Neustart bei Notfall-Busauslastung erlauben",
+          "function_plan_watchdog_notify": "Logikplan-Watchdog: Push an",
+          "function_plan_watchdog_user_plans": "Logikplan-Watchdog: zusätzlich überwachte Pläne"
         },
         "data_description": {
           "schema_marker": "Verfügbare Variablen: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -135,7 +137,9 @@
           "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden.",
           "function_plan_backup_retention_months": "Ist das neueste Backup eines direkt in Comexio gelöschten Plans älter als diese Frist, fragt eine Reparaturmeldung, ob seine Backups gelöscht oder behalten werden — ohne deine Bestätigung wird nichts gelöscht. Backups eines noch existierenden Plans sind davon nie betroffen. Die Action 'Function Plan Purge Orphaned Backups' löscht alle abgelaufenen auf einmal.",
           "bus_watchdog_enabled": "Bei anhaltendem Anstieg der Busauslastung werden die von HA verwalteten Cluster-Logikpläne automatisch (von hinten nach vorne) neu gestartet, um die Auslastung zu entlasten. Greift nicht destruktiv in die Comexio-Anlage selbst ein.",
-          "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust."
+          "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust.",
+          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
+          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Absichtlich gestoppte Pläne (Tests) hier nicht auswählen."
         }
       }
     },
@@ -164,9 +168,6 @@
       "statistics_cleanup": {
         "name": "Statistiken bereinigen"
       },
-      "plan_preview": {
-        "name": "Vorschau"
-      },
       "uninstall_cleanup": {
         "name": "Deinstallations-Bereinigung"
       }
@@ -177,6 +178,14 @@
       }
     },
     "sensor": {
+      "function_plan_run_state": {
+        "state": {
+          "running": "Läuft",
+          "stopped": "Gestoppt",
+          "starting": "Startet…",
+          "stopping": "Stoppt…"
+        }
+      },
       "sync_status": {
         "name": "WebIO Sync Status",
         "state": {
@@ -195,8 +204,11 @@
       "plan_preview": {
         "name": "Vorschau-Info"
       },
+      "orphaned_backups": {
+        "name": "Backups (gelöschter Pläne)"
+      },
       "plan_changed": {
-        "name": "Plan geändert"
+        "name": "Plan-Änderungen im letzten Intervall"
       },
       "extension_count": {
         "name": "Anzahl Erweiterungen"
@@ -212,6 +224,19 @@
       },
       "watchdog_event": {
         "name": "Letztes Watchdog-Ereignis"
+      }
+    },
+    "binary_sensor": {
+      "managed_plans_problem": {
+        "name": "Problem verwaltete Pläne"
+      }
+    },
+    "switch": {
+      "function_plan_auto_start": {
+        "name": "Plan Auto-Start (HA-Pläne)"
+      },
+      "function_plan_auto_start_user": {
+        "name": "Plan Auto-Start (User-Pläne)"
       }
     }
   },
@@ -340,6 +365,60 @@
           "already_deleted": "Diese Backups wurden bereits gelöscht. Es wurde nichts geändert.",
           "loaded_in_preview": "Das neueste Backup des Plans wird jetzt in der Plan-Karte angezeigt (Plan → Orphaned plans). Diese Reparatur bleibt offen, bis du die Backups behältst oder löschst.",
           "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert."
+        }
+      }
+    },
+    "function_plan_stopped": {
+      "title": "Logikplan {plan_name} läuft nicht",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Verwalteter Logikplan gestoppt",
+            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\nLetzte Prüfung: {last_check}.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (HA-Pläne)** am Logikplan-Gerät ein."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+        }
+      }
+    },
+    "function_plan_stopped_user": {
+      "title": "Logikplan {plan_name} läuft nicht",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Überwachter Anwender-Logikplan gestoppt",
+            "description": "Der Anwender-Logikplan **{plan_name}** (ID {fub_id}) wird vom Logikplan-Watchdog überwacht, läuft in Comexio aber nicht.\n\nLetzte Prüfung: {last_check}.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (User-Pläne)** am Logikplan-Gerät ein. Um ihn nicht mehr zu überwachen, entferne ihn in den Optionen der Integration."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+        }
+      }
+    },
+    "function_plan_auto_start_suspended": {
+      "title": "Logikplan {plan_name} prüfen",
+      "fix_flow": {
+        "step": {
+          "function_plan_stopped": {
+            "title": "Logikplan stoppt immer wieder",
+            "description": "Plan Auto-Start hat den Logikplan **{plan_name}** (ID {fub_id}) {attempts}-mal gestartet, aber jedes Mal wurde der Start abgelehnt oder der Plan stoppte kurz danach wieder. Vermutlich enthält der Plan einen Fehler, deshalb versucht Auto-Start es für diesen Plan nicht weiter.\n\nLetzter Fehlversuch: {gave_up_at}. Letzte Prüfung: {last_check}.\n\nPrüfe den Plan im Comexio Studio. Auto-Start greift von selbst wieder, sobald der Plan wieder als laufend erkannt wird.\n\n**Absenden** startet den Plan jetzt einmalig."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
+          "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
         }
       }
     },

@@ -114,6 +114,7 @@ To delete backups without waiting for a repair:
 | `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans. |
 | `comexio.function_plan_keep_backups` | Keep a deleted plan's backups for good, or take that back (`keep: false`). |
 | `sensor` **Backups** (diagnostic) | Number of stored snapshots, details per plan as attributes. |
+| `sensor` **Backups (deleted plans)** (diagnostic) | Number of snapshots of deleted or renamed plans, the plans as attributes. |
 | `select` **Backup** | Picks the snapshot the plan preview shows; in the **Orphaned plans** view, a deleted plan's backup. |
 
 ---
@@ -243,4 +244,5 @@ Backups löschen, ohne auf eine Meldung zu warten:
 | `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen. |
 | `comexio.function_plan_keep_backups` | Die Backups eines gelöschten Plans dauerhaft behalten oder das zurücknehmen (`keep: false`). |
 | `sensor` **Backups** (Diagnose) | Anzahl gespeicherter Snapshots, Details je Plan als Attribute. |
+| `sensor` **Backups (gelöschter Pläne)** (Diagnose) | Anzahl der Snapshots gelöschter oder umbenannter Pläne, die Pläne als Attribute. |
 | `select` **Backup** | Wählt den Snapshot, den die Plan-Vorschau zeigt; in der Ansicht **Orphaned plans** ein Backup eines gelöschten Plans. |

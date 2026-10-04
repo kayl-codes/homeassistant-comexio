@@ -34,8 +34,8 @@ import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-pl
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.43";
-console.info(`comexio-plan-card v${CARD_VERSION} (Version in der Hilfe rechtsbündig) loaded`);
+const CARD_VERSION = "0.9.46";
+console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
 // function_plan_backup.py) so the card can parse kind+slot back out of the select's state
@@ -46,6 +46,11 @@ const _BACKUP_LABEL_RE = /^(\w+)\[(\d+)\]/;
 // Lovelace's detach+reattach on a view switch/edit-mode toggle without freezing a preview
 // that's still genuinely being watched (#75).
 const _PREVIEW_STOP_GRACE_MS = 2000;
+
+// While open, the card renews the backend's follow window (coordinator.preview_following, 15 min)
+// with a keepalive well inside it: a frozen orphaned-plan render arms no poll, so without it
+// 'Plan'/'Backup' changes (e.g. the neighbour row after "delete all") stopped reaching the preview.
+const _PREVIEW_KEEPALIVE_MS = 5 * 60 * 1000;
 
 // Backoff for re-fetching a preview image whose fetch failed: first retry after the minimum,
 // doubled per consecutive failure up to the maximum, until a fetch succeeds. Without it a
@@ -351,6 +356,9 @@ class ComexioPlanCard extends HTMLElement {
     this._logPaused = false; // pause button: drop incoming events (deliberately NOT persisted)
     this._analysisHighlightIds = new Set(); // element ids highlighted from a clicked finding
     this._stopPreviewTimer = null; // pending function_plan_preview_stop grace timer (#75)
+    this._startPreviewPending = false; // function_plan_preview_start owed once hass is known
+    this._previewStarted = false; // the backend answered the open's preview_start with success
+    this._keepaliveTimer = null; // periodic function_plan_preview_start keepalive while connected
   }
 
   setConfig(config) {
@@ -1114,6 +1122,7 @@ class ComexioPlanCard extends HTMLElement {
     if (this._minimal) {
       return; // trigger-only card: no plan/debug state to drive
     }
+    this._startPreviewIfPending(); // first attach may come before hass
     if (this._debugOn) {
       void this._ensureDebugSubscription(); // deferred until hass exists (also re-arms after reconnect)
     }
@@ -1714,10 +1723,19 @@ class ComexioPlanCard extends HTMLElement {
   connectedCallback() {
     // Lovelace detaches+reattaches cards on every view switch and edit-mode toggle — not just on
     // real removal. Cancel a pending stop from disconnectedCallback's grace window so a reattach
-    // within that window doesn't need a fresh "Generate Preview" click to resume live values (#75).
+    // within that window doesn't need a fresh open to resume live values (#75).
     if (this._stopPreviewTimer) {
       clearTimeout(this._stopPreviewTimer);
       this._stopPreviewTimer = null;
+    } else if (!this._minimal) {
+      // A fresh open, not a reattach: arm the live preview right away — the counterpart of the
+      // stop below — instead of only after a plan switch.
+      this._previewStarted = false;
+      this._startPreviewPending = true;
+      this._startPreviewIfPending();
+    }
+    if (!this._minimal && !this._keepaliveTimer) {
+      this._keepaliveTimer = setInterval(() => this._sendPreviewKeepalive(), _PREVIEW_KEEPALIVE_MS);
     }
     // Mirror disconnectedCallback's _setDebugSession(false): without this, the backend stays on
     // the slow 2s cadence after any detach/reattach cycle instead of resuming the 0.5s debug
@@ -1732,7 +1750,57 @@ class ComexioPlanCard extends HTMLElement {
     }
   }
 
+  _previewServiceData() {
+    // Multiple Comexio config entries make config_entry required by the service — resolve it the
+    // same way the backup-restore call does, so a routine open/close doesn't hit the
+    // ambiguous-instance path and post a spurious "ERROR" notification (#75).
+    const configEntryId = this._hass?.entities?.[this._config.entity]?.config_entry_id;
+    return configEntryId ? { config_entry: configEntryId } : {};
+  }
+
+  _startPreviewIfPending() {
+    if (!this._startPreviewPending || !this._hass || !this.isConnected) {
+      return;
+    }
+    this._startPreviewPending = false;
+    this._hass
+      .callService("comexio", "function_plan_preview_start", this._previewServiceData(), undefined, false, true)
+      .then((result) => {
+        this._previewStarted = result?.response?.success === true;
+      })
+      .catch((err) => {
+        console.warn("comexio-plan-card: function_plan_preview_start failed", err);
+      });
+  }
+
+  _sendPreviewKeepalive() {
+    if (!this._hass || !this.isConnected) {
+      return;
+    }
+    const data = { ...this._previewServiceData(), keepalive: true };
+    // The open's start failed (entry reloading, Comexio offline at startup): a keepalive never
+    // renders or arms, so once the quiet keepalive finds the instance loaded again, the full start
+    // is retried — not before, as that start notifies about a missing instance every time.
+    const retryStart = !this._previewStarted;
+    this._hass
+      .callService("comexio", "function_plan_preview_start", data, undefined, false, retryStart)
+      .then((result) => {
+        if (retryStart && result?.response?.success === true && this.isConnected) {
+          this._startPreviewPending = true;
+          this._startPreviewIfPending();
+        }
+      })
+      .catch((err) => {
+        console.warn("comexio-plan-card: function_plan_preview_start keepalive failed", err);
+      });
+  }
+
   disconnectedCallback() {
+    this._startPreviewPending = false;
+    if (this._keepaliveTimer) {
+      clearInterval(this._keepaliveTimer);
+      this._keepaliveTimer = null;
+    }
     if (this._minimal) {
       return; // trigger-only card never armed a plan/debug/preview session to begin with
     }
@@ -1746,14 +1814,10 @@ class ComexioPlanCard extends HTMLElement {
     }
     // Stop the Stufe-2 live-value poll after a short grace period instead of instantly, so a
     // Lovelace DOM move (view switch, edit-mode toggle) — which detaches and immediately
-    // reattaches the card — doesn't freeze the live preview until the user re-triggers
-    // "Generate Preview" by hand. connectedCallback cancels this if we reattach in time (#75).
+    // reattaches the card — doesn't restart the live preview from scratch.
+    // connectedCallback cancels this if we reattach in time (#75).
     const hass = this._hass;
-    // Multiple Comexio config entries make config_entry required by the service — resolve it the
-    // same way the backup-restore call does, so a routine detach doesn't hit the ambiguous-instance
-    // path and post a spurious "ERROR" notification on every ordinary view switch (#75).
-    const configEntryId = hass?.entities?.[this._config.entity]?.config_entry_id;
-    const data = configEntryId ? { config_entry: configEntryId } : {};
+    const data = this._previewServiceData();
     this._stopPreviewTimer = setTimeout(() => {
       this._stopPreviewTimer = null;
       if (!hass) {
