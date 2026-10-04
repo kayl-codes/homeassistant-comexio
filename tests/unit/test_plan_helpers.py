@@ -52,12 +52,14 @@ def test_io_plan_members_from_the_plan_name(name: str, members: list[str] | None
 @pytest.mark.parametrize(
     ("fub_data", "scraped", "expected"),
     [
-        ({"1": {"Name": "A"}}, None, {"1": {"Name": "A"}}),
+        ({"1": {"Name": "A"}}, {1}, {"1": {"Name": "A"}}),
         ({}, None, None),  # no plan list read yet: never "every plan deleted"
+        # Only a plan HA created (create_fup) before the first poll: not the whole list.
+        ({"42": {"Name": "New"}}, None, None),
         ({}, set(), {}),  # a full poll really read an empty $Fubs: no plan left
-        ({}, {4}, None),
+        ({}, {4}, {}),  # the last plan deleted by HA after the poll
     ],
-    ids=["cached", "not-read-yet", "none-left", "inconsistent"],
+    ids=["read", "not-read-yet", "only-created-by-ha", "none-left", "last-deleted-by-ha"],
 )
 def test_live_plan_list(fub_data: dict, scraped: set[int] | None, expected: dict | None) -> None:
     coordinator = _coordinator(api=SimpleNamespace(fub_data=fub_data), scraped_plan_ids=scraped)

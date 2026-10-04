@@ -498,3 +498,38 @@ def test_orphaned_backups_sensor_counts_every_backup_once_no_plan_is_left(manage
     sensor = _orphaned_sensor(manager, {})
 
     assert sensor.native_value == 5  # Lights 1, Pumps 3, Garage 1
+
+
+def test_audit_with_no_plan_left_raises_a_repair_per_old_plan(
+    manager: FunctionPlanBackupManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ir = _registry(monkeypatch, [])
+
+    asyncio.run(
+        async_audit_orphaned_backups(
+            MagicMock(),
+            entry_id="entry1",
+            server_id=SERVER_ID,
+            manager=manager,
+            fub_data={},
+            cutoff=CUTOFF,
+            retention_months=6,
+        )
+    )
+
+    # "Garage" is orphaned too, but still within the retention.
+    created = [call.args[2] for call in ir.async_create_issue.call_args_list]
+    assert created == [
+        orphaned_backup_issue_id(SERVER_ID, 1, "Lights"),
+        orphaned_backup_issue_id(SERVER_ID, 2, "Pumps"),
+    ]
+    assert {
+        call.kwargs["translation_placeholders"]["current_plan"] for call in ir.async_create_issue.call_args_list
+    } == {orphaned_backups.NO_CURRENT_PLAN}
+
+
+def test_purge_with_no_plan_left_deletes_every_expired_plan(manager: FunctionPlanBackupManager) -> None:
+    purged = asyncio.run(manager.async_purge_orphaned({}, CUTOFF))
+
+    assert [(p["fub_id"], p["plan_name"]) for p in purged] == [(1, "Lights"), (2, "Pumps")]
+    assert FakeStore.saved[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"] == {"3": {"Garage": [_snap(RECENT)]}}

@@ -1539,6 +1539,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "[%s] Function Plan backup cycle: bulk load returned no plans — skipping this cycle",
                     self.server_id,
                 )
+                # The orphaned-backup repairs need no plan wirings; with no plan left in Comexio
+                # every backup is orphaned, so they must not wait for a bulk load that has nothing.
+                await self._async_audit_orphaned_backups()
                 return
             self.function_plan_plans = plans
             self.reference_monitor.check_plans(plans)
@@ -1582,27 +1585,31 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
             except Exception:
                 _LOGGER.exception("[%s] Function Plan paper/DPI backfill failed", self.server_id)
-            try:
-                # Backups of deleted plans are never purged silently: past retention, each
-                # one gets a repair where the user deletes or keeps them.
-                retention_months = int(
-                    self.config_entry.options.get(
-                        CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
-                    )
-                )
-                await async_audit_orphaned_backups(
-                    self.hass,
-                    entry_id=self.config_entry.entry_id,
-                    server_id=self.server_id,
-                    manager=self.function_plan_backup,
-                    fub_data=self.live_plan_list(),
-                    cutoff=retention_cutoff(retention_months),
-                    retention_months=retention_months,
-                )
-            except Exception:
-                _LOGGER.exception("[%s] Function Plan orphaned-backup audit failed", self.server_id)
+            await self._async_audit_orphaned_backups()
             # Refresh diagnostic entities (backup summary sensor) without a full data update
             self.async_update_listeners()
+
+    async def _async_audit_orphaned_backups(self) -> None:
+        """Raise or clear the repairs of deleted plans' backups (failures are logged, never raised)."""
+        try:
+            # Backups of deleted plans are never purged silently: past retention, each
+            # one gets a repair where the user deletes or keeps them.
+            retention_months = int(
+                self.config_entry.options.get(
+                    CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
+                )
+            )
+            await async_audit_orphaned_backups(
+                self.hass,
+                entry_id=self.config_entry.entry_id,
+                server_id=self.server_id,
+                manager=self.function_plan_backup,
+                fub_data=self.live_plan_list(),
+                cutoff=retention_cutoff(retention_months),
+                retention_months=retention_months,
+            )
+        except Exception:
+            _LOGGER.exception("[%s] Function Plan orphaned-backup audit failed", self.server_id)
 
     async def _async_refresh_service_descriptions(self) -> None:
         """Refresh services.yaml's dynamic dropdowns after a new backup was just captured.
@@ -2287,14 +2294,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return f"/local/{filename}"
 
     def live_plan_list(self) -> dict[str, Any] | None:
-        """The cached plan list ($Fubs) to judge deleted plans by, None while there is none.
+        """The cached plan list ($Fubs) to judge deleted plans by, None until a full poll read one.
 
-        An empty cache only counts once a full poll really read an empty $Fubs (no plan left in
-        Comexio, see scraped_plan_ids); before that it means no plan list was read yet, which
-        must never show every backed-up plan as deleted.
+        Only a poll's $Fubs read is complete (see scraped_plan_ids): before it the cache is empty
+        or holds just plans HA itself created or looked up, and judging by it would show every
+        other backed-up plan as deleted. After it an empty cache means no plan is left in Comexio.
         """
-        fub_data = self.api.fub_data
-        return fub_data if fub_data or self.scraped_plan_ids == set() else None
+        return None if self.scraped_plan_ids is None else self.api.fub_data
 
     def orphaned_backup_options(self) -> list[tuple[str, dict[str, Any]]]:
         """(label, choice) rows of the backup selector's orphaned-plans view (cache-only)."""
