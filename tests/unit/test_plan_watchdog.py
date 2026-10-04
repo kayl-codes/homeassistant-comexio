@@ -105,7 +105,7 @@ def test_stopped_plan_raises_and_clears_its_repair(ir: MagicMock) -> None:
     assert asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True))) is True
     assert watchdog.stopped == {}
     assert ir.async_get.return_value.issues == {}
-    assert started == []  # auto-start is off by default
+    assert started == []  # _watchdog() switches Plan Auto-Start off (its default is on)
 
 
 def test_other_servers_repairs_are_left_alone(ir: MagicMock) -> None:
