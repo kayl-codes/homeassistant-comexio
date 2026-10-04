@@ -178,6 +178,38 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return now
 
 
+@pytest.mark.parametrize(
+    ("result", "check_after", "window"),
+    [
+        (False, FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC, "retry gap"),
+        (True, FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC, "stopped-again window"),
+    ],
+    ids=["refused", "started"],
+)
+def test_auto_start_times_count_from_comexios_answer(
+    ir: MagicMock, clock: list[float], result: bool, check_after: float, window: str
+) -> None:
+    """A slow start answer must not shorten the retry gap or the stopped-again window."""
+    answer_delay = 30.0
+    watchdog, started = _watchdog([result])
+
+    async def slow_start(fub_id: int) -> bool:
+        started.append(fub_id)
+        clock[0] += answer_delay
+        return result
+
+    watchdog._start_plan = slow_start
+    watchdog.auto_restart = True
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+
+    clock[0] += check_after - 1  # still inside the window counted from the answer
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    if result:
+        assert watchdog._failed_starts == {34: 1}, f"stopped again inside the {window}"
+    else:
+        assert started == [34], f"no second attempt inside the {window}"
+
+
 def test_refused_auto_start_gives_up_after_two_attempts(ir: MagicMock, clock: list[float]) -> None:
     watchdog, started = _watchdog([False, False], targets=["mobile_app_phone"])
     watchdog.auto_restart = True

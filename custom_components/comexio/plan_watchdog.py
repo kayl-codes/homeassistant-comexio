@@ -314,8 +314,10 @@ class ManagedPlanWatchdog:
     async def _async_auto_start(self, stopped: Mapping[int, str]) -> dict[int, str]:
         """Start the stopped plans Auto-Start has not given up on; returns the ones started."""
         started: dict[int, str] = {}
-        now = time.monotonic()
         for fub_id, name in stopped.items():
+            # Read per plan: each start awaits Comexio, which serializes requests, so a time taken
+            # once before the loop would date the later plans' starts and refusals too early.
+            now = time.monotonic()
             started_at = self._auto_started_at.pop(fub_id, None)
             if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
                 self._count_failed_start(fub_id, name, "stopped again shortly after its start")
@@ -332,6 +334,7 @@ class ManagedPlanWatchdog:
                 )
                 continue
             result = await self._start_plan(fub_id)
+            now = time.monotonic()  # the answer's time: the stopped-again window and the retry gap start here
             if result:
                 self._auto_started_at[fub_id] = now
                 self._notify_auto_started(fub_id, name)
