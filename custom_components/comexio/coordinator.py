@@ -1533,6 +1533,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 plans = await self.api.function_plan_load_all_plans()
             except Exception:
                 _LOGGER.exception("[%s] Function Plan bulk load failed — keeping previous snapshot", self.server_id)
+                self.async_update_listeners()  # show the reset last_changed_plans now
                 return
             if not plans:
                 _LOGGER.warning(
@@ -1542,6 +1543,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # The orphaned-backup repairs need no plan wirings; with no plan left in Comexio
                 # every backup is orphaned, so they must not wait for a bulk load that has nothing.
                 await self._async_audit_orphaned_backups()
+                self.async_update_listeners()
                 return
             self.function_plan_plans = plans
             self.reference_monitor.check_plans(plans)

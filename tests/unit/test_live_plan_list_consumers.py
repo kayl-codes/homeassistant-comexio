@@ -18,7 +18,7 @@ LIVE_LISTS = pytest.mark.parametrize("live_plans", [None, {}], ids=["no-plan-lis
 
 def _manager(**methods: Any) -> SimpleNamespace:
     defaults: dict[str, Any] = {"async_load": AsyncMock(), "plan_backups_for_identity_sync": lambda *_: [{"slot": 0}]}
-    return SimpleNamespace(**{**defaults, **methods})
+    return SimpleNamespace(**(defaults | methods))
 
 
 @LIVE_LISTS
@@ -102,7 +102,24 @@ def test_a_backup_cycle_without_plans_still_audits_the_orphaned_backups() -> Non
     coordinator.api = SimpleNamespace(function_plan_load_all_plans=AsyncMock(return_value={}))
     audit = AsyncMock()
     coordinator._async_audit_orphaned_backups = audit  # type: ignore[method-assign]
+    coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
 
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
     audit.assert_awaited_once()
+    # The orphaned-backups sensor and select show the audit's result right away, not at the next poll.
+    coordinator.async_update_listeners.assert_called_once()
+
+
+def test_a_failed_bulk_load_shows_the_reset_changed_plans_at_once() -> None:
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = "cx1"
+    coordinator._function_plan_backup_lock = asyncio.Lock()
+    coordinator.last_changed_plans = [{"fub_id": 2}]
+    coordinator.api = SimpleNamespace(function_plan_load_all_plans=AsyncMock(side_effect=OSError("timeout")))
+    coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.last_changed_plans == []
+    coordinator.async_update_listeners.assert_called_once()
