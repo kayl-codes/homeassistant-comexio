@@ -1227,8 +1227,8 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_abort(reason="entry_not_found")
         fub_id = int(self.issue_data["fub_id"])
         plan_name = str(self.issue_data["plan_name"])
-        fub_data = coordinator.api.fub_data
-        if not fub_data:
+        fub_data = coordinator.live_plan_list()
+        if fub_data is None:
             # Without the live plan list a plan that exists again can't be told apart.
             return self.async_abort(reason="plans_unavailable")
         if not is_orphaned_identity(fub_data, fub_id, plan_name):

@@ -410,8 +410,8 @@ class ComexioOrphanedBackupsSensor(ComexioStableEntityIdMixin, CoordinatorEntity
         self.async_write_ha_state()
 
     def _summary(self) -> tuple[int, list[dict[str, Any]]] | None:
-        fub_data = self.coordinator.api.fub_data
-        if not fub_data:
+        fub_data = self.coordinator.live_plan_list()
+        if fub_data is None:
             return None
         return summarize_orphaned_backups(self.coordinator.function_plan_backup.orphaned_plans_sync(fub_data))
 
