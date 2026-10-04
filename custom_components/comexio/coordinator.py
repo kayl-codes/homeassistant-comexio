@@ -1536,7 +1536,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 return
             if not plans:
                 _LOGGER.warning(
-                    "[%s] Function Plan backup cycle: bulk load returned no plans — skipping this cycle",
+                    "[%s] Function Plan backup cycle: no plans loaded — only auditing orphaned backups",
                     self.server_id,
                 )
                 # The orphaned-backup repairs need no plan wirings; with no plan left in Comexio
