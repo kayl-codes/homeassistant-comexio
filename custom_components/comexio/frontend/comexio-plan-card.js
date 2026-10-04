@@ -34,7 +34,7 @@ import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-pl
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.45";
+const CARD_VERSION = "0.9.46";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -357,6 +357,7 @@ class ComexioPlanCard extends HTMLElement {
     this._analysisHighlightIds = new Set(); // element ids highlighted from a clicked finding
     this._stopPreviewTimer = null; // pending function_plan_preview_stop grace timer (#75)
     this._startPreviewPending = false; // function_plan_preview_start owed once hass is known
+    this._previewStarted = false; // the backend answered the open's preview_start with success
     this._keepaliveTimer = null; // periodic function_plan_preview_start keepalive while connected
   }
 
@@ -1729,6 +1730,7 @@ class ComexioPlanCard extends HTMLElement {
     } else if (!this._minimal) {
       // A fresh open, not a reattach: arm the live preview right away — the counterpart of the
       // stop below — instead of only after a plan switch.
+      this._previewStarted = false;
       this._startPreviewPending = true;
       this._startPreviewIfPending();
     }
@@ -1761,9 +1763,14 @@ class ComexioPlanCard extends HTMLElement {
       return;
     }
     this._startPreviewPending = false;
-    this._hass.callService("comexio", "function_plan_preview_start", this._previewServiceData()).catch((err) => {
-      console.warn("comexio-plan-card: function_plan_preview_start failed", err);
-    });
+    this._hass
+      .callService("comexio", "function_plan_preview_start", this._previewServiceData(), undefined, false, true)
+      .then((result) => {
+        this._previewStarted = result?.response?.success === true;
+      })
+      .catch((err) => {
+        console.warn("comexio-plan-card: function_plan_preview_start failed", err);
+      });
   }
 
   _sendPreviewKeepalive() {
@@ -1771,9 +1778,21 @@ class ComexioPlanCard extends HTMLElement {
       return;
     }
     const data = { ...this._previewServiceData(), keepalive: true };
-    this._hass.callService("comexio", "function_plan_preview_start", data).catch((err) => {
-      console.warn("comexio-plan-card: function_plan_preview_start keepalive failed", err);
-    });
+    // The open's start failed (entry reloading, Comexio offline at startup): a keepalive never
+    // renders or arms, so once the quiet keepalive finds the instance loaded again, the full start
+    // is retried — not before, as that start notifies about a missing instance every time.
+    const retryStart = !this._previewStarted;
+    this._hass
+      .callService("comexio", "function_plan_preview_start", data, undefined, false, retryStart)
+      .then((result) => {
+        if (retryStart && result?.response?.success === true && this.isConnected) {
+          this._startPreviewPending = true;
+          this._startPreviewIfPending();
+        }
+      })
+      .catch((err) => {
+        console.warn("comexio-plan-card: function_plan_preview_start keepalive failed", err);
+      });
   }
 
   disconnectedCallback() {

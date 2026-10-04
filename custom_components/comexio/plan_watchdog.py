@@ -319,7 +319,8 @@ class ManagedPlanWatchdog:
             started_at = self._auto_started_at.pop(fub_id, None)
             if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
                 self._count_failed_start(fub_id, name, "stopped again shortly after its start")
-            if fub_id in self.suspended:
+            # Re-checked per plan: the switch can be turned off while an earlier start awaits Comexio.
+            if fub_id in self.suspended or not self._auto_start_enabled(fub_id):
                 continue
             if self._retry_too_soon(fub_id, now):
                 _LOGGER.debug(

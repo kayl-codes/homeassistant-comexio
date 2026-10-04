@@ -146,6 +146,23 @@ def test_user_plan_auto_start_starts_only_the_user_plan(ir: MagicMock) -> None:
     assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED
 
 
+def test_auto_start_turned_off_during_a_start_starts_no_further_plan(ir: MagicMock) -> None:
+    """Review (Copilot, #132): the switch turned off while the first start awaits Comexio stops the rest."""
+    watchdog, started = _watchdog()
+    watchdog.auto_restart = True
+
+    async def start(fub_id: int) -> bool:
+        started.append(fub_id)
+        watchdog.auto_restart = False  # the user turns Auto-Start off meanwhile
+        return True
+
+    watchdog._start_plan = start
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=False)))
+    assert started == [34]
+    assert watchdog.stopped == {42: "HA - TRIGGER"}
+    assert ir.async_create_issue.call_args.args[2] == stopped_plan_issue_id(SERVER_ID, 42)
+
+
 def test_user_plan_auto_start_is_off_by_default() -> None:
     watchdog = ManagedPlanWatchdog(
         MagicMock(), entry_id="e1", server_id=SERVER_ID, start_plan=AsyncMock(), notify_targets=list

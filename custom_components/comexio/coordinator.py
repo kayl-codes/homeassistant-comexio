@@ -643,6 +643,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # 'Plan'/'Backup' selection follows (plan_preview.async_follow_selection) render one at a
         # time, and a follow superseded by a newer selection while it waited is skipped: one
         # background task per selection would otherwise let an older, slower render publish last.
+        # The armed preview's re-renders (webhook, connection-value poll) take it too.
         self.preview_follow_lock = asyncio.Lock()
         self.preview_follow_generation: int = 0
         # time.monotonic() until which an opened plan card follows the selection without an armed preview
@@ -2541,30 +2542,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.hass, _PREVIEW_LIVE_REFRESH_DELAY, self._async_refresh_plan_preview
         )
 
-    async def _render_armed_preview(self) -> None:
+    async def _render_armed_preview(
+        self, expected: dict[str, Any] | None, connection_values: dict[str, Any] | None = None
+    ) -> None:
         """Re-render whatever is currently armed — the live plan or a frozen backup snapshot.
 
-        Shared by the webhook-driven debounce and the Stufe-2 connection-value poll.
+        Shared by the webhook-driven debounce and the Stufe-2 connection-value poll. Under the
+        selection renders' lock (plan_preview), and only while `expected` is still the armed cache
+        once it is held: a re-render of the old plan that waited for a newer selection must neither
+        publish over it nor hand it the old plan's wire values (connection_values, from the poll).
         """
-        cache = self._preview_plan_cache
-        if cache is None:
-            return
-        source = cache["snapshot_source"] or "live"
-        await self.async_generate_plan_preview(
-            cache["fub_id"],
-            cache["plan_name"],
-            cache["elements"],
-            cache["connections"],
-            source,
-            cache["label_metadata"],
-        )
+        async with self.preview_follow_lock:
+            cache = self._preview_plan_cache
+            if cache is None or cache is not expected:
+                return
+            if connection_values is not None:
+                self._connection_values = connection_values
+            await self.async_generate_plan_preview(
+                cache["fub_id"],
+                cache["plan_name"],
+                cache["elements"],
+                cache["connections"],
+                cache["snapshot_source"] or "live",
+                cache["label_metadata"],
+            )
 
     async def _async_refresh_plan_preview(self, _now: Any) -> None:
         self._preview_refresh_cancel = None
-        if self._preview_plan_cache is None:
+        if (cache := self._preview_plan_cache) is None:
             return
         try:
-            await self._render_armed_preview()
+            await self._render_armed_preview(cache)
         except Exception:
             # Log before cleanup: a failure inside _disarm_preview_cache()/_stop_connection_poll()
             # (both synchronous, no I/O, but not provably infallible) must never mask the actual
@@ -2756,17 +2764,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # cache being reassigned wholesale on every (re-)arm, never mutated in place
             # (see _preview_plan_cache's definition).
             return
-        self._connection_values = connection_values
         self._connection_poll_fail_count = 0
         _LOGGER.debug(
             "[%s] Connection-value poll fub=%s plan=%s -> %s",
             self.server_id,
             cache["fub_id"],
             cache["plan_name"],
-            self._connection_values,
+            connection_values,
         )
         try:
-            await self._render_armed_preview()
+            # Stored only once the lock is held and the cache is still this plan's (see there).
+            await self._render_armed_preview(cache, connection_values)
         except Exception:
             _LOGGER.exception("[%s] Connection-value plan preview refresh failed", self.server_id)
         # After the render, so the plan view never waits for it; a failure here is counted

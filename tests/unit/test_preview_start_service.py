@@ -239,3 +239,66 @@ def test_rapid_selection_changes_end_on_the_latest_selection() -> None:
     asyncio.run(scenario())
     # "B" was superseded while it waited; "C" renders after "A" finished.
     assert rendered == ["A", "C"]
+
+
+def _armed_cache(fub_id: int) -> dict:
+    return {
+        "fub_id": fub_id,
+        "plan_name": f"P{fub_id}",
+        "elements": {},
+        "connections": {},
+        "snapshot_source": None,
+        "label_metadata": None,
+    }
+
+
+def test_an_armed_re_render_never_publishes_over_a_newer_selection() -> None:
+    """Review (Copilot, #132): a poll/webhook re-render of the old plan waits for the selection render.
+
+    Once the lock is held the old plan is no longer armed: the re-render publishes nothing and
+    does not hand the new plan the old plan's wire values.
+    """
+    published: list[int] = []
+
+    async def generate(fub_id: int, *_args: object) -> None:
+        published.append(fub_id)
+
+    old_cache = _armed_cache(1)
+    coordinator = SimpleNamespace(
+        preview_follow_lock=asyncio.Lock(),
+        _preview_plan_cache=old_cache,
+        _connection_values={},
+        async_generate_plan_preview=generate,
+    )
+
+    async def scenario() -> None:
+        async with coordinator.preview_follow_lock:  # the selection render of plan 2 is under way
+            re_render = asyncio.create_task(
+                ComexioCoordinator._render_armed_preview(coordinator, old_cache, {"c1": 1})  # type: ignore[arg-type]
+            )
+            await asyncio.sleep(0)
+            coordinator._preview_plan_cache = _armed_cache(2)
+            published.append(2)
+        await re_render
+
+    asyncio.run(scenario())
+    assert published == [2]
+    assert coordinator._connection_values == {}
+
+
+def test_an_armed_re_render_takes_the_poll_values_of_its_own_plan() -> None:
+    published: list[int] = []
+
+    async def generate(fub_id: int, *_args: object) -> None:
+        published.append(fub_id)
+
+    cache = _armed_cache(1)
+    coordinator = SimpleNamespace(
+        preview_follow_lock=asyncio.Lock(),
+        _preview_plan_cache=cache,
+        _connection_values={},
+        async_generate_plan_preview=generate,
+    )
+    asyncio.run(ComexioCoordinator._render_armed_preview(coordinator, cache, {"c1": 1}))  # type: ignore[arg-type]
+    assert published == [1]
+    assert coordinator._connection_values == {"c1": 1}
