@@ -3,6 +3,11 @@ version: "1"
 rule_settings:
   enable:
     - default
+  disable:
+    # The int()/float()/str() calls normalise ids and coordinates from Comexio JSON, backup
+    # snapshots and service data before they reach aiocomexio. Those values are often strings
+    # at runtime even where the annotation says int, so the casts are not redundant.
+    - remove-unnecessary-cast
 
 ignore:
   - ".github/"

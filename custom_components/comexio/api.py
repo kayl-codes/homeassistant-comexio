@@ -615,7 +615,8 @@ class ComexioAPI:
     @property
     def _base_url(self) -> str:
         """Return the base URL for the Comexio IO-Server."""
-        return f"http://{self.host}"
+        # The IO-Server is reached on the local network over plain HTTP; HTTPS would be a new feature.
+        return f"http://{self.host}"  # NOSONAR
 
     @property
     def fub_data(self) -> dict[str, Any]:
@@ -1072,9 +1073,7 @@ class ComexioAPI:
     def get_fub_active(self, fub_id: int) -> bool | None:
         """Return a function plan's active flag, or None if the plan is not known live."""
         fub = self._fub_data.get(str(fub_id))
-        if fub is None:
-            return None
-        return bool(int(fub.get("Active") or 0))
+        return None if fub is None else bool(int(fub.get("Active") or 0))
 
     def get_fub_canvas_bounds(
         self, fub_id: int, paper_name: str | None = None, orientation: str | None = None
@@ -2672,8 +2671,8 @@ class ComexioAPI:
             loopback_elem = await self.function_plan_add_element(
                 fub_id=fub_id, ref_id=loopback_web_ref_id, element_type=10, x=x_webio, y=y
             )
-            if loopback_elem is None:
-                return f"{label}: add_element (Loopback Web-IO, webIoId={loopback_web_ref_id}) failed"
+        if loopback_elem is None:
+            return f"{label}: add_element (Loopback Web-IO, webIoId={loopback_web_ref_id}) failed"
 
         outputs = [*existing_outputs, (int(loopback_elem), 0, False)]
         input_pos, input_inverted = self._connection_input_pin(conn)
@@ -3047,7 +3046,7 @@ class ComexioAPI:
                 and cmd_name not in bulk_embedded
             )
 
-        to_save = sum(1 for k_id, marker_id, _ in bridges if _needs_save(knx_loopback_command_name(k_id, marker_id)))
+        to_save = sum(_needs_save(knx_loopback_command_name(k_id, marker_id)) for k_id, marker_id, _ in bridges)
         n_saved = 0
         for k_id, marker_id, binary in bridges:
             cmd_name = knx_loopback_command_name(k_id, marker_id)
@@ -3499,9 +3498,7 @@ class ComexioAPI:
         if existing_elem is not None:
             return int(existing_elem)
         elem = await self.function_plan_add_element(fub_id=fub_id, ref_id=ref_id, element_type=element_type, x=x, y=y)
-        if elem is None:
-            return f"{label}: add_element ({kind}) failed"
-        return int(elem)
+        return f"{label}: add_element ({kind}) failed" if elem is None else int(elem)
 
     @staticmethod
     def _function_plan_union_sink(
@@ -4077,13 +4074,13 @@ class ComexioAPI:
         existing_marker_elem = existing_by_ref.get((ref_type, source_id))
         existing_flanke_elem: int | None = None
         already_complete = False
-        if existing_marker_elem:
-            paired_flanke_ids = self._function_plan_paired_flanke_ids(plan_data, [existing_marker_elem], flanke_ref_id)
-            if paired_flanke_ids:
-                existing_flanke_elem = paired_flanke_ids[0]
-                already_complete = self._function_plan_flanke_wires_back(
-                    plan_data, existing_flanke_elem, existing_marker_elem
-                )
+        if existing_marker_elem and (
+            paired_flanke_ids := self._function_plan_paired_flanke_ids(plan_data, [existing_marker_elem], flanke_ref_id)
+        ):
+            existing_flanke_elem = paired_flanke_ids[0]
+            already_complete = self._function_plan_flanke_wires_back(
+                plan_data, existing_flanke_elem, existing_marker_elem
+            )
         if already_complete:
             _LOGGER.info("trigger pair %s already wired in plan fub=%s, skipping", label, fub_id)
             return ""
@@ -4179,7 +4176,7 @@ class ComexioAPI:
                 outputs = list(outputs.values())
             dst_ids = [ComexioAPI._function_plan_elem_id(sink.get("FubElementId")) for sink in outputs]
             endpoint_ids = [src_id, *dst_ids]
-            if not any(eid in marker_elem_id_set for eid in endpoint_ids):
+            if all(eid not in marker_elem_id_set for eid in endpoint_ids):
                 continue
             other_ids = [eid for eid in endpoint_ids if eid is not None and eid not in marker_elem_id_set]
             flanke_elem_ids.update(eid for eid in other_ids if _is_flanke(eid))
