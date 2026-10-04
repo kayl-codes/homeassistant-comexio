@@ -107,7 +107,7 @@ class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         # The orphaned-plans view comes last and only while there is something to show.
         fub_data = self.coordinator.api.fub_data
         options = sorted((_plan_option_label(fid, fub) for fid, fub in fub_data.items()), key=str.lower)
-        if self.coordinator.function_plan_backup.orphaned_plans_sync(fub_data):
+        if self.coordinator.function_plan_backup.orphaned_plans_sync(self.coordinator.live_plan_list()):
             options.append(FUNCTION_PLAN_ORPHANED_VIEW_OPTION)
         return options
 
@@ -131,10 +131,10 @@ class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
     def _handle_coordinator_update(self) -> None:
         # Leave the orphaned-plans view once its last plan's backups are gone, so the persisted
         # plan shows again and the view does not silently come back with the next deleted plan.
-        # Not on a failed plan fetch (empty fub_data): the view only looks empty then.
+        # Not without a plan list (coordinator.live_plan_list): the view only looks empty then.
         leaving = (
             self._selected == FUNCTION_PLAN_ORPHANED_VIEW_OPTION
-            and bool(self.coordinator.api.fub_data)
+            and self.coordinator.live_plan_list() is not None
             and self._selected not in self.options
         )
         if leaving:

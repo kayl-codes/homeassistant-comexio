@@ -257,27 +257,32 @@ def test_another_plan_resets_the_backup_choice_and_follows() -> None:
 
 
 @pytest.mark.parametrize(
-    ("fub_data", "orphans_left"),
-    [({"3": {"Name": "Managed"}}, False), ({"3": {"Name": "Managed"}}, True), ({}, False)],
-    ids=["view-emptied", "view-kept", "fetch-failed"],
+    ("live_plans", "orphans_left"),
+    [({"3": {"Name": "Managed"}}, False), ({"3": {"Name": "Managed"}}, True), ({}, False), (None, False)],
+    ids=["view-emptied", "view-kept", "no-plan-left", "fetch-failed"],
 )
-def test_the_plan_selector_leaving_the_emptied_view_moves_the_preview(fub_data: dict, orphans_left: bool) -> None:
+def test_the_plan_selector_leaving_the_emptied_view_moves_the_preview(
+    live_plans: dict | None, orphans_left: bool
+) -> None:
     """Last deleted plan emptied: back to the managed plan, and an open card shows it.
 
-    No plan data (failed fetch) proves nothing about the view: it stays.
+    No plan list (failed fetch, live_plan_list None) proves nothing about the view: it stays.
     """
     entity = select.ComexioPlanSelectEntity.__new__(select.ComexioPlanSelectEntity)
     entity._selected = FUNCTION_PLAN_ORPHANED_VIEW_OPTION
     entity.coordinator = SimpleNamespace(
-        api=SimpleNamespace(fub_data=fub_data),
-        function_plan_backup=SimpleNamespace(orphaned_plans_sync=lambda _fub_data: [object()] if orphans_left else []),
+        api=SimpleNamespace(fub_data=live_plans or {}),
+        live_plan_list=lambda: live_plans,
+        function_plan_backup=SimpleNamespace(
+            orphaned_plans_sync=lambda plans: [object()] if orphans_left and plans is not None else []
+        ),
     )
     with (
         patch.object(select.CoordinatorEntity, "_handle_coordinator_update"),
         patch.object(select, "_follow_in_preview") as follow,
     ):
         entity._handle_coordinator_update()
-    if orphans_left or not fub_data:
+    if orphans_left or live_plans is None:
         assert entity._selected == FUNCTION_PLAN_ORPHANED_VIEW_OPTION
         follow.assert_not_called()
     else:

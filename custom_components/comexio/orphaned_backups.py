@@ -79,17 +79,18 @@ async def async_audit_orphaned_backups(
     entry_id: str,
     server_id: str,
     manager: FunctionPlanBackupManager,
-    fub_data: dict[str, Any],
+    fub_data: dict[str, Any] | None,
     cutoff: datetime,
     retention_months: int,
 ) -> None:
     """Raise a repair per orphaned identity past retention; clear the ones that no longer apply.
 
     A repair disappears once its plan is live again, its snapshots are gone or the user kept
-    them. Without a live plan list nothing is raised or cleared (see async_expired_orphans).
+    them. Without a live plan list (fub_data None) nothing is raised or cleared (see
+    async_expired_orphans).
     """
     expired = await manager.async_expired_orphans(fub_data, cutoff)
-    if expired is None:
+    if expired is None or fub_data is None:
         return
     wanted: set[str] = set()
     for item in expired:

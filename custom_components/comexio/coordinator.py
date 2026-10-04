@@ -1595,7 +1595,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     entry_id=self.config_entry.entry_id,
                     server_id=self.server_id,
                     manager=self.function_plan_backup,
-                    fub_data=fub_data,
+                    fub_data=self.live_plan_list(),
                     cutoff=retention_cutoff(retention_months),
                     retention_months=retention_months,
                 )
@@ -2286,9 +2286,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         return f"/local/{filename}"
 
+    def live_plan_list(self) -> dict[str, Any] | None:
+        """The cached plan list ($Fubs) to judge deleted plans by, None while there is none.
+
+        An empty cache only counts once a full poll really read an empty $Fubs (no plan left in
+        Comexio, see scraped_plan_ids); before that it means no plan list was read yet, which
+        must never show every backed-up plan as deleted.
+        """
+        fub_data = self.api.fub_data
+        return fub_data if fub_data or self.scraped_plan_ids == set() else None
+
     def orphaned_backup_options(self) -> list[tuple[str, dict[str, Any]]]:
         """(label, choice) rows of the backup selector's orphaned-plans view (cache-only)."""
-        return build_orphaned_backup_options(self.function_plan_backup.orphaned_plans_sync(self.api.fub_data))
+        return build_orphaned_backup_options(self.function_plan_backup.orphaned_plans_sync(self.live_plan_list()))
 
     def orphaned_backup_choice(self, label: str) -> dict[str, Any] | None:
         """The orphaned-plans view row behind a backup selector label, or None."""

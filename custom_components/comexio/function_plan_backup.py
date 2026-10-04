@@ -101,17 +101,19 @@ def _newer_timestamp(a: str | None, b: str | None) -> str | None:
     return a if a > b else b
 
 
-def is_orphaned_identity(fub_data: dict[str, Any], fub_id: int, plan_name: str) -> bool:
+def is_orphaned_identity(fub_data: dict[str, Any] | None, fub_id: int, plan_name: str) -> bool:
     """Whether a backed-up (fub_id, plan_name) identity no longer exists live in Comexio.
 
-    False without a live $Fubs snapshot: a failed plan fetch must never make every plan look
-    deleted. A fub_id that now carries a different name counts as orphaned (ID reused).
+    fub_data is the live plan list (coordinator.live_plan_list): None without one, so a failed
+    plan fetch never makes every plan look deleted, while an empty one (no plan left in Comexio)
+    makes every identity orphaned. A fub_id that now carries a different name counts as
+    orphaned (ID reused).
     """
-    return bool(fub_data) and fub_data.get(str(fub_id), {}).get("Name") != plan_name
+    return fub_data is not None and fub_data.get(str(fub_id), {}).get("Name") != plan_name
 
 
 def _newest_orphaned_in_store(
-    data: dict[str, dict[str, list[dict[str, Any]]]] | None, fub_data: dict[str, Any]
+    data: dict[str, dict[str, list[dict[str, Any]]]] | None, fub_data: dict[str, Any] | None
 ) -> dict[tuple[int, str], str | None]:
     """Newest captured_at per orphaned (no-longer-live) (fub_id, plan_name) identity in one store."""
     newest: dict[tuple[int, str], str | None] = {}
@@ -709,7 +711,7 @@ class FunctionPlanBackupManager:
                     counts[(int(key), plan_name)] = counts.get((int(key), plan_name), 0) + len(history)
         return sorted((fub_id, name, count) for (fub_id, name), count in counts.items())
 
-    def _orphaned_identities(self, fub_data: dict[str, Any]) -> list[tuple[int, str, str | None]]:
+    def _orphaned_identities(self, fub_data: dict[str, Any] | None) -> list[tuple[int, str, str | None]]:
         """(fub_id, plan_name, newest_captured_at) for every backed-up identity no longer live.
 
         "Live" uses the same check as coordinator._stale_plan_map_entries — fub_id missing
@@ -730,7 +732,7 @@ class FunctionPlanBackupManager:
         key = str(fub_id)
         return sum(len(data.get(key, {}).get(plan_name, [])) for data in (self._auto_data, self._change_data))
 
-    def _expired_orphans(self, fub_data: dict[str, Any], cutoff: datetime) -> list[tuple[int, str, str | None]]:
+    def _expired_orphans(self, fub_data: dict[str, Any] | None, cutoff: datetime) -> list[tuple[int, str, str | None]]:
         """Orphaned identities whose newest snapshot is older than cutoff, kept ones excluded.
 
         An identity without a readable timestamp is never treated as expired.
@@ -742,7 +744,9 @@ class FunctionPlanBackupManager:
                 expired.append((fub_id, plan_name, newest))
         return expired
 
-    async def async_expired_orphans(self, fub_data: dict[str, Any], cutoff: datetime) -> list[dict[str, Any]] | None:
+    async def async_expired_orphans(
+        self, fub_data: dict[str, Any] | None, cutoff: datetime
+    ) -> list[dict[str, Any]] | None:
         """Orphaned identities past the retention period that still need a decision.
 
         One {fub_id, plan_name, count, captured_at} entry each; kept identities are left out.
@@ -751,7 +755,7 @@ class FunctionPlanBackupManager:
         have no snapshots left, so a plan deleted a second time gets asked about again.
         """
         await self._async_ensure_loaded()
-        if not fub_data:
+        if fub_data is None:
             return None
         stale = {
             (fub_id, name)
@@ -803,7 +807,7 @@ class FunctionPlanBackupManager:
         )
         return True
 
-    def orphaned_plans_sync(self, fub_data: dict[str, Any]) -> list[dict[str, Any]]:
+    def orphaned_plans_sync(self, fub_data: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Every orphaned identity that still has snapshots, sorted by plan name, then fub_id.
 
         One {fub_id, plan_name, kept, backups} entry each, backups as in
@@ -819,7 +823,7 @@ class FunctionPlanBackupManager:
         orphans.sort(key=lambda orphan: (orphan["plan_name"].lower(), orphan["fub_id"]))
         return orphans
 
-    async def async_purge_orphaned(self, fub_data: dict[str, Any], cutoff: datetime) -> list[dict[str, Any]]:
+    async def async_purge_orphaned(self, fub_data: dict[str, Any] | None, cutoff: datetime) -> list[dict[str, Any]]:
         """Delete all snapshots (auto + change) of every orphaned identity older than cutoff.
 
         Only the manual function_plan_purge_orphaned_backups service calls this; the periodic
@@ -828,7 +832,7 @@ class FunctionPlanBackupManager:
         Returns one {fub_id, plan_name, removed, captured_at} entry per identity actually purged.
         """
         await self._async_ensure_loaded()
-        if not fub_data:
+        if fub_data is None:
             # No live $Fubs snapshot to compare against — treating that as "everything is
             # orphaned" would wipe every backup on a transient fetch hiccup.
             return []

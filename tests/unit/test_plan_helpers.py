@@ -49,6 +49,22 @@ def test_io_plan_members_from_the_plan_name(name: str, members: list[str] | None
     assert ComexioCoordinator._io_plan_members(name, PREFIX) == members
 
 
+@pytest.mark.parametrize(
+    ("fub_data", "scraped", "expected"),
+    [
+        ({"1": {"Name": "A"}}, None, {"1": {"Name": "A"}}),
+        ({}, None, None),  # no plan list read yet: never "every plan deleted"
+        ({}, set(), {}),  # a full poll really read an empty $Fubs: no plan left
+        ({}, {4}, None),
+    ],
+    ids=["cached", "not-read-yet", "none-left", "inconsistent"],
+)
+def test_live_plan_list(fub_data: dict, scraped: set[int] | None, expected: dict | None) -> None:
+    coordinator = _coordinator(api=SimpleNamespace(fub_data=fub_data), scraped_plan_ids=scraped)
+
+    assert coordinator.live_plan_list() == expected
+
+
 def test_io_plan_membership_skips_distrusted_and_foreign_plans() -> None:
     fub_data = {
         "4": {"Name": "HA - IO [A]"},

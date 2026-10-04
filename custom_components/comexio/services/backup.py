@@ -51,6 +51,9 @@ _TITLE_LIST_BACKUPS_ERR = "Function Plan Backups — Error"
 _TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
 _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
 _TITLE_KEEP_BACKUPS_ERR = "Function Plan Keep Backups — Error"
+_PLAN_LIST_UNAVAILABLE = (
+    "The plan list could not be read from Comexio right now — nothing changed, try again in a few minutes."
+)
 
 _AGE_KEYS = ("days", "hours", "minutes", "seconds")
 
@@ -1246,19 +1249,22 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     )
     if ctx is None:
         return
-    coordinator, api, _unused_fub_id = ctx
+    coordinator, _api, _unused_fub_id = ctx
 
     if not bool(call.data.get("confirm", False)):
         persistent_notification.async_create(
             hass, "Nothing purged — 'confirm' must be enabled.", title=_TITLE_PURGE_ORPHANED_BACKUPS_ERR
         )
         return
+    if (live_plans := coordinator.live_plan_list()) is None:
+        persistent_notification.async_create(hass, _PLAN_LIST_UNAVAILABLE, title=_TITLE_PURGE_ORPHANED_BACKUPS_ERR)
+        return
 
     retention_months = coordinator.config_entry.options.get(
         CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
     )
     purged = await coordinator.function_plan_backup.async_purge_orphaned(
-        api.fub_data, cutoff=retention_cutoff(int(retention_months))
+        live_plans, cutoff=retention_cutoff(int(retention_months))
     )
     for plan in purged:
         delete_orphaned_backup_issue(hass, coordinator.server_id, plan["fub_id"], plan["plan_name"])
@@ -1286,7 +1292,7 @@ async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceC
     ctx = await _async_get_service_context(hass, call, _TITLE_KEEP_BACKUPS_ERR, resolve_plan=False, do_login=False)
     if ctx is None:
         return
-    coordinator, api, _unused_fub_id = ctx
+    coordinator, _api, _unused_fub_id = ctx
 
     fub_id_raw = call.data.get("fub_id")
     split = _split_plan_field(str(fub_id_raw)) if fub_id_raw not in (None, "") else None
@@ -1300,12 +1306,8 @@ async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceC
     if plan_name is None:  # exactly when identity_err is set
         persistent_notification.async_create(hass, str(identity_err), title=_TITLE_KEEP_BACKUPS_ERR)
         return
-    if not api.fub_data:
-        persistent_notification.async_create(
-            hass,
-            "The plan list could not be read from Comexio right now — nothing changed, try again in a few minutes.",
-            title=_TITLE_KEEP_BACKUPS_ERR,
-        )
+    if (live_plans := coordinator.live_plan_list()) is None:
+        persistent_notification.async_create(hass, _PLAN_LIST_UNAVAILABLE, title=_TITLE_KEEP_BACKUPS_ERR)
         return
     manager = coordinator.function_plan_backup
     await manager.async_load()
@@ -1314,7 +1316,7 @@ async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceC
             hass, f"No stored backups for plan '{plan_name}' (fub {fub_id}).", title=_TITLE_KEEP_BACKUPS_ERR
         )
         return
-    if not is_orphaned_identity(api.fub_data, fub_id, plan_name):
+    if not is_orphaned_identity(live_plans, fub_id, plan_name):
         persistent_notification.async_create(
             hass,
             f"Plan '{plan_name}' (fub {fub_id}) still exists in Comexio — only a deleted plan's backups can be kept.",
