@@ -634,9 +634,7 @@ class ComexioRepairFlow(RepairsFlow):
             def format_time(sec):
                 if sec == 0:
                     return ""
-                if sec < 60:
-                    return f" ~{sec}s"
-                return f" ~{sec // 60}:{sec % 60:02d} min"
+                return f" ~{sec}s" if sec < 60 else f" ~{sec // 60}:{sec % 60:02d} min"
 
             def get_time_for_count(c, is_delete=False):
                 return format_time(c * (SYNC_DURATION_DELETE if is_delete else SYNC_DURATION_WRITE))

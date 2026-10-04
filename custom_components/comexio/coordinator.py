@@ -964,9 +964,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         finding, review 2026-09-21).
         """
         for k in knx_items:
-            if k["id"] in self._webhook_updated_knx_ids:
-                k["value"] = self.knx_states.get(k["id"], k["value"])
-            elif k["id"] in knx_live_states:
+            if k["id"] not in self._webhook_updated_knx_ids and k["id"] in knx_live_states:
                 self.knx_states[k["id"]] = k["value"]
             else:
                 k["value"] = self.knx_states.get(k["id"], k["value"])
@@ -1267,8 +1265,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 mismatches.add(f"type_{key}")
             # Function Plan gap: command exists but is not wired directly to its
             # marker (M-keys) / IO (IO_-keys of managed extensions)
-            gap_item = self._function_plan_gap_item(key, ha["name"], best_match, wired_pairs, io_meta, managed_io_exts)
-            if gap_item:
+            if gap_item := self._function_plan_gap_item(
+                key, ha["name"], best_match, wired_pairs, io_meta, managed_io_exts
+            ):
                 found["function_plan_missing"].append(gap_item)
                 mismatches.add(f"function_plan_missing_{key}")
 
@@ -3000,10 +2999,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 ent_reg.async_update_entity(entity_entry.entity_id, new_unique_id=new_uid)
 
         dev_reg = dr.async_get(self.hass)
-        old_device = dev_reg.async_get_device_by_identifier(
+        if old_device := dev_reg.async_get_device_by_identifier(
             (DOMAIN, f"{server_slug}_{old_name}".lower()), self.config_entry.entry_id
-        )
-        if old_device:
+        ):
             dev_reg.async_update_device(
                 old_device.id,
                 new_identifiers={(DOMAIN, f"{server_slug}_{new_name}".lower())},
@@ -4000,10 +3998,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         conf_key = cat.ignored_conf_key
         if conf_key is None:
             return set()
-        ignored_raw = self.config_entry.options.get(conf_key, "").strip()
-        if not ignored_raw:
-            return set()
-        return expand_ignored_marker_ids(ignored_raw, cat.audit_key_prefix + cat.audit_key_prefix.lower())
+        if ignored_raw := self.config_entry.options.get(conf_key, "").strip():
+            return expand_ignored_marker_ids(ignored_raw, cat.audit_key_prefix + cat.audit_key_prefix.lower())
+        return set()
 
     @property
     def ignored_marker_ids(self) -> set[int]:
@@ -4600,10 +4597,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
     @staticmethod
     def _io_plan_members(plan_name: str, prefix: str) -> list[str] | None:
         """Extension names encoded in a managed IO plan name '{prefix} - IO [A,B]', else None."""
-        m = re.fullmatch(re.escape(prefix) + r" - IO \[(.+)\]", plan_name)
-        if not m:
-            return None
-        return [p.strip() for p in m.group(1).split(",") if p.strip()]
+        if m := re.fullmatch(re.escape(prefix) + r" - IO \[(.+)\]", plan_name):
+            return [p.strip() for p in m[1].split(",") if p.strip()]
+        return None
 
     @staticmethod
     def _io_plan_name(prefix: str, members: list[str]) -> str:
@@ -4625,8 +4621,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fid = int(fid_str) if fid_str.lstrip("-").isdigit() else None
             if fid is None or fid in self._distrusted_fub_ids:
                 continue
-            members = self._io_plan_members(str(fub_info.get("Name", "")), prefix)
-            if members:
+            if members := self._io_plan_members(str(fub_info.get("Name", "")), prefix):
                 result[fid] = members
         return result
 
@@ -4750,9 +4745,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         landscape_rows = self._io_plan_rows_per_col(_ORIENT_LANDSCAPE)
         orientation = _ORIENT_PORTRAIT if self._io_rows_needed(ext) > landscape_rows else _ORIENT_LANDSCAPE
         fub_id = await self._create_managed_plan(self._io_plan_name(prefix, [ext]), orientation=orientation)
-        if fub_id is None:
-            return None
-        return fub_id, 0
+        return None if fub_id is None else (fub_id, 0)
 
     def _io_plan_rows_per_col(self, orientation: str) -> int:
         """Row slots one column offers on a fresh A3 plan of the given orientation."""
@@ -5118,10 +5111,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Returns the fub_id of the first plan in which the source element has a
         WebIO connection, else None.
         """
-        for fub_id, plan_data in plans.items():
-            if self._source_wired_in_plan(source_id, plan_data, ref_type):
-                return fub_id
-        return None
+        return next(
+            (
+                fub_id
+                for fub_id, plan_data in plans.items()
+                if self._source_wired_in_plan(source_id, plan_data, ref_type)
+            ),
+            None,
+        )
 
     @staticmethod
     def _source_wired_in_plan(source_id: int, plan_data: dict, ref_type: int = 2) -> bool:
@@ -5206,7 +5203,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for elem_id, elem in (plan_data.get("elements") or {}).items():
             ref = elem.get("reference") or {}
             ref_type = str(ref.get("type"))
-            if ref_type in ("2", "11"):
+            if ref_type in {"2", "11"}:
                 elem_refs[str(elem_id)] = (ref_type, str(ref.get("ref_id")))
         pairs: set[tuple[str, str]] = set()
         for conn in (plan_data.get("connections") or {}).values():
@@ -5976,10 +5973,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _range_cluster_plan_name_for_key(self, key: str, prefix: str, cluster_size: int) -> str | None:
         """Cluster-plan name for an audit-map key ("M<id>"/"K<id>"), or None for an IO key."""
-        for cat in (c for c in SOURCE_CATEGORIES.values() if c.range_clustered):
-            if key.startswith(cat.audit_key_prefix):
-                return self._cluster_plan_name(int(key[len(cat.audit_key_prefix) :]), prefix, cluster_size, cat.label)
-        return None
+        return next(
+            (
+                self._cluster_plan_name(int(key[len(cat.audit_key_prefix) :]), prefix, cluster_size, cat.label)
+                for cat in SOURCE_CATEGORIES.values()
+                if cat.range_clustered and key.startswith(cat.audit_key_prefix)
+            ),
+            None,
+        )
 
     def _function_plan_missing_detail(
         self, missing_items: list[dict], ha_map: dict, io_meta_by_key: dict
