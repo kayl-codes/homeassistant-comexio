@@ -207,6 +207,19 @@ function_plan_restore:
       default: false
       selector:
         boolean:
+    accept_unverified_blocks:
+      name: Accept unverified logic blocks
+      description: >
+        Restore a backup anyway whose logic blocks cannot be checked against Comexio's
+        logic-block IDs, which shift after an app install or firmware update: the backup
+        predates such a change and its wiring does not fit today's blocks, a block was unknown
+        when the backup was taken, or the check is not possible right now. Some blocks may then
+        be different ones — check the preview first. A backup with a block that no longer
+        exists is never restored.
+      default: false
+      advanced: true
+      selector:
+        boolean:
     as_copy:
       name: Restore as copy
       description: >

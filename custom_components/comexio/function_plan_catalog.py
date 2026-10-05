@@ -32,12 +32,14 @@ import copy
 import logging
 from typing import Any
 
+from aiocomexio.reference_catalog import fub_base_key
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
+from .function_plan_block_keys import block_ids_changed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -80,6 +82,8 @@ def _extract_fub_base_catalog(fub_modules: dict[str, Any], fub_base_i18n: dict[s
             continue
         catalog[ref_id] = {
             "name": name,
+            # Stable across id shifts — backups freeze it per block id (function_plan_block_keys).
+            "key": fub_base_key(entry),
             "short_name": i18n.get("short_name"),
             "display_name": i18n.get("name"),
             "description": i18n.get("description"),
@@ -197,6 +201,9 @@ class FunctionPlanCatalogManager:
         self._shrink_warned = False
         # Same throttle idea for the missing-Fub*-vars debug log below.
         self._missing_vars_logged = False
+        # True only while the last poll's fubBase passed every guard below: a kept (skipped or
+        # shrink-guarded) catalog may name shifted block ids, so backups must not trust it.
+        self._fub_base_verified = False
 
     async def _async_ensure_loaded(self) -> None:
         if self._loaded:
@@ -325,6 +332,7 @@ class FunctionPlanCatalogManager:
         on which assumption it violates — no fixed exception tuple would be exhaustive here,
         and this boundary exists specifically to keep any of them from reaching the poll loop.
         """
+        self._fub_base_verified = False
         try:
             await self._async_update_from_raw_config(raw_config, comexio_version)
         except Exception:
@@ -390,6 +398,8 @@ class FunctionPlanCatalogManager:
         # Past the shrink-guard check — reset the throttle so a genuine future episode
         # is reported at WARNING again instead of staying silently downgraded to DEBUG.
         self._shrink_warned = False
+        # The live fubBase is accepted from here on, whether or not anything changed.
+        self._fub_base_verified = True
 
         if (
             fub_types == old_types
@@ -400,8 +410,10 @@ class FunctionPlanCatalogManager:
         ):
             return
 
+        now = dt_util.utcnow().isoformat()
         self._data = {
-            "fetched_at": dt_util.utcnow().isoformat(),
+            "fetched_at": now,
+            "fub_base_changed_at": self._fub_base_changed_at(old_base, fub_base, now),
             "comexio_version": comexio_version,
             "fub_types": fub_types,
             "fub_base": fub_base,
@@ -426,6 +438,32 @@ class FunctionPlanCatalogManager:
             len(time_modules),
             len(calendar_functions),
         )
+
+    def _fub_base_changed_at(self, old_base: dict[str, Any], fub_base: dict[str, Any], now: str) -> str:
+        """When a block id last started naming a different block — not every catalog save.
+
+        fetched_at also moves with time modules, calendar functions or the UI language; backups
+        need the moment block ids shifted (function_plan_block_keys.backfill_block_keys). A
+        catalog cached before this stamp existed falls back to its fetched_at, which is never
+        earlier than the real change.
+        """
+        if not old_base or block_ids_changed(old_base, fub_base):
+            return now
+        return self._data.get("fub_base_changed_at") or self._data.get("fetched_at") or now
+
+    async def async_get_fub_base(self) -> tuple[dict[str, Any], str | None]:
+        """(fub_base, when its block ids last changed) — the cache itself, callers must not mutate it.
+
+        For the backup manager, which reads it on every snapshot use; async_get_catalog's deep
+        copy of the whole catalog would be wasted there. ({}, None) unless the last poll verified
+        the block catalog against Comexio (see _fub_base_verified).
+        """
+        if not self._fub_base_verified:
+            return {}, None
+        await self._async_ensure_loaded()
+        fub_base = self._data.get("fub_base")
+        changed_at = self._data.get("fub_base_changed_at") or self._data.get("fetched_at")
+        return (fub_base if isinstance(fub_base, dict) else {}), changed_at
 
     async def async_get_catalog(self) -> dict[str, Any]:
         """Return a copy of the cached catalog (for future consumers: analyses, rebuild).

@@ -504,7 +504,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
         self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id)
-        self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id)
+        self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
         self.ha_address = HaAddressResolver(hass)
@@ -1589,6 +1589,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
             except Exception:
                 _LOGGER.exception("[%s] Function Plan paper/DPI backfill failed", self.server_id)
+            try:
+                await self.function_plan_backup.async_backfill_block_keys()
+            except Exception:
+                _LOGGER.exception("[%s] Function Plan block-key backfill failed", self.server_id)
             await self._async_audit_orphaned_backups()
             # Refresh diagnostic entities (backup summary sensor) without a full data update
             self.async_update_listeners()
