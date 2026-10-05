@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from homeassistant.exceptions import HomeAssistantError
 import pytest
 
+from custom_components.comexio import button as button_module
+from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.button import ComexioSyncButton, _failed_writes_note
 from custom_components.comexio.const import SOURCE_CATEGORIES, WebioClass
 from custom_components.comexio.coordinator import (
@@ -254,9 +256,126 @@ def test_cleanup_plan_that_could_not_be_loaded_is_a_failed_step() -> None:
     )
     ctx = _ctx(_api(function_plan_load_elements=AsyncMock(return_value=None)))
     category = SOURCE_CATEGORIES[WebioClass.MARKER]
-    result = asyncio.run(button._cleanup_function_plan_plans(ctx, [7], None, category))
-    assert result == (0, [], [], [])
+    result = asyncio.run(button._cleanup_function_plan_plans(ctx, [7], category))
+    assert result == (0, [], [], [], [])
     assert ctx.failed_writes == [f"function plan '{PLAN}': {PLAN_LOAD_FAILED}"]
+    # A degenerate payload must count as a failed load, not as a plan the source left.
+    ctx.api.function_plan_load_elements.assert_awaited_once_with(5, strict=True)
+
+
+def test_cleanup_reports_a_plan_the_scan_could_not_load() -> None:
+    # (u)/(bi): with the cable pulled the scan finds no plan at all — that must not read as clean.
+    async def _resolve(_ids: list[int], _ref_type: int, load_failures: list[int]) -> dict[int, list[int]]:
+        load_failures.append(5)
+        return {}
+
+    button = _button(
+        resolve_source_cleanup_plans=_resolve,
+        plan_load_failures=lambda ids: [(PLAN, PLAN_LOAD_FAILED)] if ids == [5] else [],
+    )
+    ctx = _ctx()
+    result = asyncio.run(button._cleanup_function_plan_plans(ctx, [7], SOURCE_CATEGORIES[WebioClass.MARKER]))
+    assert result == (0, [], [], [], [])
+    assert ctx.failed_writes == [f"function plan '{PLAN}': {PLAN_LOAD_FAILED}"]
+
+
+def _marker_element(marker_id: int) -> dict[str, Any]:
+    return {"reference": {"type": 2, "ref_id": marker_id}}
+
+
+def test_cleanup_finds_every_managed_plan_holding_the_source() -> None:
+    # (bi): the cleanup took the plan selector's plan instead of the plan the marker sits in,
+    # found nothing there and still reported success. Here the marker sits in its cluster
+    # plan 36, in a stray duplicate in plan 37 and in the user's own plan 5 (never touched).
+    plans = {
+        5: {"elements": {"1": _marker_element(253)}},
+        36: {"elements": {"1460": _marker_element(253), "1470": _marker_element(254)}},
+        37: {"elements": {"2": _marker_element(253)}},
+        42: {"elements": {"3": _marker_element(7)}},
+    }
+
+    async def _load(load_failures: list[int] | None = None) -> dict[int, Any]:
+        if load_failures is not None:
+            load_failures.append(38)  # a managed plan that could not be loaded
+        return plans
+
+    coordinator = _coordinator(_api(_find_source_element_id=ComexioAPI._find_source_element_id))
+    coordinator._load_function_plan_check_data = _load  # type: ignore[method-assign]
+    load_failures: list[int] = []
+    with patch.object(ComexioCoordinator, "_is_managed_function_plan", lambda _self, fub_id: fub_id != 5):
+        result = asyncio.run(coordinator.resolve_source_cleanup_plans([253, 254], load_failures=load_failures))
+    assert result == {36: [253, 254], 37: [253]}
+    assert load_failures == [38]
+
+
+def _plan_cleanup_button(**api: Any) -> tuple[ComexioSyncButton, SimpleNamespace]:
+    button = _button(
+        resolve_source_cleanup_plans=AsyncMock(return_value={5: [7]}),
+        plan_load_failures=MagicMock(return_value=[]),
+        async_function_plan_change_backup=AsyncMock(),
+    )
+    ctx = _ctx(_api(function_plan_load_elements=AsyncMock(return_value={"elements": {}, "connections": {}}), **api))
+    return button, ctx
+
+
+KEPT_LINE = (
+    f"⚠️ M7 stays in Function Plan '{PLAN}' (ID 5) — it is wired to other plan logic there, "
+    "which the cleanup leaves in place"
+)
+GONE_LINE = f"💡 M7 is no longer in Function Plan '{PLAN}' (ID 5) — nothing to remove there"
+
+
+@pytest.mark.parametrize(
+    ("other_wiring", "line"),
+    [(True, KEPT_LINE), (False, GONE_LINE)],
+    ids=["kept-for-other-logic", "gone-from-plan"],
+)
+def test_cleanup_reports_what_a_plan_kept_or_no_longer_holds(other_wiring: bool, line: str) -> None:
+    # Neither is a failure (gone: the scan may read the cached snapshot), but neither is a silent 0.
+    button, ctx = _plan_cleanup_button(
+        _find_source_element_id=MagicMock(return_value="11" if other_wiring else None),
+        _find_wired_webio_ids_for_marker=MagicMock(return_value=[]),
+        _element_has_any_wiring=MagicMock(return_value=True),
+    )
+    result = asyncio.run(button._cleanup_function_plan_plans(ctx, [7], SOURCE_CATEGORIES[WebioClass.MARKER]))
+    assert result == (0, [], [], [], [line])
+    assert not ctx.failed_writes
+
+
+def _run_cleanup_action(button: ComexioSyncButton, plan_result: Any) -> tuple[SimpleNamespace, MagicMock]:
+    ctx = _ctx()
+    with (
+        patch.object(ComexioSyncButton, "_delete_source_entities", MagicMock(return_value=0)),
+        patch.object(ComexioSyncButton, "_cleanup_function_plan_plans", plan_result),
+        patch.object(ComexioSyncButton, "_delete_webio_commands", AsyncMock(return_value=(0, 0))),
+        patch.object(button_module, "_post_result_notification") as notify,
+    ):
+        asyncio.run(button._handle_cleanup_entities(ctx, [("marker", 7)], {}, "n1", True))
+    return ctx, notify
+
+
+def test_cleanup_result_names_a_plan_it_could_not_load() -> None:
+    # (u)/(bi): with the cable pulled the result read "Nothing to clean up" under an "Incomplete" title.
+    async def _plan_load_fails(_self: Any, ctx: SimpleNamespace, *_args: Any) -> tuple:
+        ctx.failed_writes.append(f"function plan '{PLAN}': {PLAN_LOAD_FAILED}")
+        return 0, [], [], [], []
+
+    button = _button(ignored_ids_for=MagicMock(return_value={7}), sync_failed_writes=[], sync_progress_text="")
+    _ctx_, notify = _run_cleanup_action(button, _plan_load_fails)
+    msg, title = notify.call_args.args[2:4]
+    assert "Incomplete" in title
+    assert f"function plan '{PLAN}': {PLAN_LOAD_FAILED}" in msg
+    assert "Nothing to clean up" not in msg
+
+
+def test_cleanup_result_shows_a_kept_source() -> None:
+    button = _button(ignored_ids_for=MagicMock(return_value={7}), sync_failed_writes=[], sync_progress_text="")
+    ctx, notify = _run_cleanup_action(button, AsyncMock(return_value=(0, [], [], [], [KEPT_LINE])))
+    msg, title = notify.call_args.args[2:4]
+    assert "Incomplete" not in title
+    assert KEPT_LINE in msg.split("\n")
+    assert "Nothing to clean up" not in msg
+    assert not ctx.failed_writes
 
 
 def test_visualize_text_returns_a_response() -> None:
