@@ -1,7 +1,9 @@
 name: CI
 
 on:
+  # Branch pushes are covered by the pull_request run; on master the paths filter skips docs-only merges.
   push:
+    branches: [master]
     paths:
       - 'custom_components/**'
       - '.github/workflows/**'
@@ -11,17 +13,11 @@ on:
       - 'tests/**'
       - 'tests/requirements.txt'
       - '.gitattributes'
+  # No paths filter on pull requests: the master ruleset requires jobs of this workflow, and a required
+  # check that never starts blocks the merge (e.g. a docs-only PR). Keep "Type check - mypy" out of the
+  # required checks while it is non-blocking (continue-on-error), it always reports success.
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - 'custom_components/**'
-      - '.github/workflows/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'scripts/generate_requirements.py'
-      - 'tests/**'
-      - 'tests/requirements.txt'
-      - '.gitattributes'
   workflow_dispatch:
 
 permissions:
