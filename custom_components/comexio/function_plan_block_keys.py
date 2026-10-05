@@ -183,17 +183,46 @@ def _sink_problems(
     return problems
 
 
+def _wired_element_ids(connections: Mapping[str, Any]) -> set[str]:
+    wired: set[str] = set()
+    for conn in connections.values():
+        if not isinstance(conn, Mapping):
+            continue
+        sinks = conn.get("output")
+        for port in [conn.get("input"), *(sinks if isinstance(sinks, list) else [])]:
+            if (endpoint := _endpoint(port)) is not None:
+                wired.add(endpoint[0])
+    return wired
+
+
+def _uncheckable_blocks(
+    elements: Mapping[str, Any], connections: Mapping[str, Any], fub_base: Mapping[str, Any]
+) -> list[str]:
+    """Blocks the wiring check can say nothing about: unknown to today's catalog, or not wired at all."""
+    wired = _wired_element_ids(connections)
+    problems: list[str] = []
+    for elem_id, elem in elements.items():
+        if (reference := _block_reference(elem)) is None:
+            continue
+        if str(reference.get("ref_id")) not in fub_base:
+            problems.append(f"element {elem_id}: block id {reference.get('ref_id')} unknown today")
+        elif str(elem_id) not in wired:
+            problems.append(f"element {elem_id}: no wire to check the block against")
+    return problems
+
+
 def implausible_block_wiring(
     elements: Mapping[str, Any], connections: Mapping[str, Any], fub_base: Mapping[str, Any]
 ) -> list[str]:
-    """Wires of a snapshot that don't fit today's blocks, read with today's ids.
+    """Blocks and wires of a snapshot that don't fit today's blocks, read with today's ids.
 
     Checks every wire end at a block: the port must exist (inputs up to the autogrow limit), and a
     wire between two blocks must join ports of the same data type (digital/analog). A shifted id
-    usually names a block with other ports, which this catches; an empty result is a plausibility
-    hint, not a proof.
+    usually names a block with other ports, which this catches. A block without any wire, or whose
+    id today's catalog lacks, cannot be checked and counts as a problem too. An empty result is a
+    plausibility hint, not a proof.
     """
-    problems: list[str] = []
+    problems = _uncheckable_blocks(elements, connections, fub_base)
     for conn in connections.values():
         if not isinstance(conn, Mapping):
             continue

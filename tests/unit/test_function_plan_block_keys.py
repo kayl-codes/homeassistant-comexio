@@ -218,6 +218,22 @@ def test_the_captured_wiring_fits_its_own_catalog(snapshot: dict[str, Any]) -> N
     assert implausible_block_wiring(snapshot["elements"], snapshot["connections"], FUB_BASE) == []
 
 
+@pytest.mark.parametrize(
+    ("fub_base", "problem"),
+    [
+        (FUB_BASE, "element 7: no wire to check the block against"),
+        ({"5": OR}, "element 7: block id 23 unknown today"),
+    ],
+)
+def test_a_block_the_wiring_cannot_vouch_for_is_reported(
+    snapshot: dict[str, Any], fub_base: dict, problem: str
+) -> None:
+    """Regression: an unwired block passed as plausible although nothing about it was checked."""
+    del snapshot["connections"]["13"]  # the Nicht's only wire
+
+    assert problem in implausible_block_wiring(snapshot["elements"], snapshot["connections"], fub_base)
+
+
 def test_inputs_up_to_the_autogrow_limit_fit(snapshot: dict[str, Any]) -> None:
     snapshot["connections"]["90"] = _wire((2, 0), (4, 5))  # Oder grown to 6 inputs
 
@@ -319,6 +335,16 @@ async def _update(manager: FunctionPlanCatalogManager, raw: dict[str, Any], day:
     return changed_at, (await manager.async_get_catalog())["fetched_at"]
 
 
+def _legacy_catalog() -> dict[str, Any]:
+    """A catalog cached before keys and the block-id stamp existed."""
+    return {
+        "fetched_at": _at(1).isoformat(),
+        "comexio_version": "11.1.4",
+        "fub_types": {"5": "fubBase"},
+        "fub_base": {"5": {**OR, "key": None}, "23": {**NOT, "key": None}},
+    }
+
+
 @pytest.fixture
 def catalog_manager(monkeypatch: pytest.MonkeyPatch) -> FunctionPlanCatalogManager:
     FakeStore.saved = {}
@@ -346,9 +372,7 @@ def test_catalog_stamps_only_block_id_changes(catalog_manager: FunctionPlanCatal
 def test_catalog_cached_before_the_stamp_falls_back_to_its_fetched_at(
     catalog_manager: FunctionPlanCatalogManager,
 ) -> None:
-    legacy = {"fetched_at": _at(1).isoformat(), "comexio_version": "11.1.4", "fub_types": {"5": "fubBase"}}
-    legacy["fub_base"] = {"5": {**OR, "key": None}, "23": {**NOT, "key": None}}
-    FakeStore.saved[f"{DOMAIN}_logikplan_catalog_{SERVER_ID}"] = legacy
+    FakeStore.saved[f"{DOMAIN}_logikplan_catalog_{SERVER_ID}"] = _legacy_catalog()
 
     changed_at, fetched_at = asyncio.run(_update(catalog_manager, _raw_config({"or": "5", "not": "23"}), 5))
 
@@ -357,9 +381,7 @@ def test_catalog_cached_before_the_stamp_falls_back_to_its_fetched_at(
 
 
 def test_catalog_cached_before_the_stamp_sees_a_real_shift(catalog_manager: FunctionPlanCatalogManager) -> None:
-    legacy = {"fetched_at": _at(1).isoformat(), "comexio_version": "11.1.4", "fub_types": {"5": "fubBase"}}
-    legacy["fub_base"] = {"5": {**OR, "key": None}, "23": {**NOT, "key": None}}
-    FakeStore.saved[f"{DOMAIN}_logikplan_catalog_{SERVER_ID}"] = legacy
+    FakeStore.saved[f"{DOMAIN}_logikplan_catalog_{SERVER_ID}"] = _legacy_catalog()
 
     changed_at, _fetched_at = asyncio.run(_update(catalog_manager, _raw_config({"or": "6", "not": "24"}), 5))
 
