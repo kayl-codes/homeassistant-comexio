@@ -424,7 +424,11 @@
     },
     "reference_catalog_mismatch": {
       "title": "Bloque funcional de Comexio no utilizable ({server_id})",
-      "description": "Comexio {version} en este servidor no proporciona el/los bloque(s) funcional(es) **{blocks}** en la forma para la que se creó esta integración. Las funciones que colocan estos bloques en los planes funcionales (marcadores disparadores `[TRIG]`) están desactivadas para que no se creen elementos defectuosos.\n\n**[Informar en GitHub]({issue_url})**: abre una nueva incidencia con el diagnóstico ya rellenado (solo versiones y el catálogo de bloques de Comexio, sin datos personales). Revísela y envíela; se necesita una cuenta de GitHub.\n\nSi una entrada indica «not checked», faltan los archivos de referencia de la propia integración o están dañados: reinstale la integración."
+      "description": "Comexio {version} en este servidor no proporciona el/los bloque(s) funcional(es) **{blocks}** en la forma para la que se creó esta integración. Las funciones que colocan estos bloques en los planes funcionales (marcadores disparadores `[TRIG]`) están desactivadas para que no se creen elementos defectuosos.\n\n**[Informar en GitHub]({issue_url})**: abre una nueva incidencia con el diagnóstico ya rellenado (solo versiones y el catálogo de bloques de Comexio, sin datos personales). Revísela y envíela; se necesita una cuenta de GitHub.\n\nSi una entrada indica «reference file unusable», faltan los archivos de referencia de la biblioteca aiocomexio o están dañados: por favor, infórmelo."
+    },
+    "reference_catalog_unchecked": {
+      "title": "No se ejecutó la comprobación de bloques funcionales de Comexio ({server_id})",
+      "description": "La integración no pudo comprobar qué bloques funcionales proporciona Comexio {version} en este servidor ({reason}). Hasta que la comprobación tenga éxito, las funciones que colocan el/los bloque(s) **{blocks}** en los planes funcionales (marcadores disparadores `[TRIG]`) están desactivadas para que no se creen elementos defectuosos.\n\nEsto no indica un firmware incompatible. La comprobación se repite en cada consulta y esta reparación desaparece en cuanto tenga éxito. Si persiste, revise el registro de Home Assistant e **[infórmelo en GitHub]({issue_url})**."
     }
   }
 }

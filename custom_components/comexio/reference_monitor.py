@@ -1,48 +1,57 @@
 """Runs the reference catalog check each poll and reports it (log + Repair issue).
 
-The pure reconciliation lives in reference_catalog.py; this module adds the Home Assistant side:
+The pure reconciliation lives in aiocomexio.reference_catalog; this module adds the Home Assistant side:
 loading the reference files off the event loop, publishing the result to the API (which resolves
 block-type ids from it), logging only on change, and a Repair issue while a block the
 integration writes is not usable on this server. The Repair carries a link that opens a GitHub
-issue pre-filled with the diagnosis (reference_catalog.build_issue_report), so the user can
-report it with one click.
+issue pre-filled with the diagnosis (build_issue_report below), so the user can report it with
+one click. A check that could not run at all (exception, no live block catalog) raises the same
+Repair with a text that says so, instead of claiming a firmware incompatibility.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 import logging
 from typing import Any
+from urllib.parse import urlencode
 
+from aiocomexio.reference_catalog import (
+    KIND_FUB_BASE,
+    REASON_CHECK_FAILED,
+    REASON_NO_LIVE_CATALOG,
+    REASON_NOT_CHECKED,
+    ReferenceCatalog,
+    ReferenceCheck,
+    find_unknown_fub_base_refs,
+    format_deviations,
+    key_family,
+    load_reference_catalogs,
+    reconcile,
+    unresolved,
+)
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.loader import IntegrationNotFound, async_get_integration
 
 from .api import ComexioAPI
-from .const import DOMAIN, FUB_BASE_KEY_FLANKE, ISSUE_TRACKER_URL
-from .reference_catalog import (
-    KIND_FUB_BASE,
-    REASON_CHECK_FAILED,
-    REASON_NO_LIVE_CATALOG,
-    IssueContext,
-    ReferenceCatalog,
-    ReferenceCheck,
-    build_issue_report,
-    find_unknown_fub_base_refs,
-    format_deviations,
-    github_issue_url,
-    load_reference_catalogs,
-    reconcile,
-    unresolved,
-)
+from .const import DOMAIN, FUB_BASE_KEY_FLANKE, ISSUE_TRACKER_URL, REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE
 
 _LOGGER = logging.getLogger(__name__)
 
 # (kind, key) of every catalog entry the integration writes into plans — unusable ones raise a Repair.
 REFERENCE_REQUIRED: tuple[tuple[str, str], ...] = ((KIND_FUB_BASE, FUB_BASE_KEY_FLANKE),)
 ISSUE_TRANSLATION_KEY = "reference_catalog_mismatch"
+# Same issue id, other text: the check did not run, so nothing is known about the firmware.
+ISSUE_TRANSLATION_KEY_UNCHECKED = "reference_catalog_unchecked"
 UNKNOWN_REFS_LOG_LIMIT = 20
+
+# GitHub rejects new-issue URLs much beyond ~8 KB; stay well below so every browser opens it.
+ISSUE_URL_MAX_CHARS = 7000
+ISSUE_LIST_LIMIT = 30
+ISSUE_TRUNCATED_LINE = "_… truncated — please attach the Home Assistant log._"
 
 
 class ReferenceCatalogMonitor:
@@ -58,6 +67,7 @@ class ReferenceCatalogMonitor:
         self._blocked: list[str] = []
         self._integration_version: str | None = None
         self._unknown_refs: list[tuple[str, str, str]] | None = None
+        self._missing_catalog_polls = 0
 
     @property
     def _issue_id(self) -> str:
@@ -77,6 +87,8 @@ class ReferenceCatalogMonitor:
         try:
             if self._references is None:
                 self._references = await self._hass.async_add_executor_job(load_reference_catalogs)
+            if self._integration_version is None:
+                # Own guard: a failed lookup is retried next poll instead of leaving "?" in the report.
                 self._integration_version = await self._async_integration_version()
             check = reconcile(self._references, raw_config, self._api.comexio_version)
             if not check.fub_base_ids:
@@ -88,13 +100,18 @@ class ReferenceCatalogMonitor:
         except Exception:
             _LOGGER.exception("[%s] Reference catalog check failed — dependent features blocked", self._server_id)
             self._api.reference_check = None
-            self._update_issue(unresolved(None, REFERENCE_REQUIRED, REASON_CHECK_FAILED))
+            self._update_issue(unresolved(None, REFERENCE_REQUIRED, REASON_CHECK_FAILED), REASON_CHECK_FAILED)
 
     def _handle_missing_live_catalog(self) -> None:
         """No block catalog in this poll: keep the last result only if it is for the same firmware.
 
         Block ids can move with a firmware update, so a result from another version (or none yet,
-        right after setup) must not be trusted — that fails closed and is reported, not silent.
+        right after setup) must not be trusted — that fails closed and is reported, not silent. The
+        features are blocked at once. The Repair follows at once too once a check has succeeded
+        since setup (e.g. a firmware update); before that it waits for
+        REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE polls without a catalog, so a partial first
+        fetch right after setup doesn't flash a Repair that the next poll removes again. Counted in
+        polls, not time: the scan interval can be up to a day, which only this setup case waits for.
         """
         previous = self._api.reference_check
         if previous is not None and previous.comexio_version == self._api.comexio_version:
@@ -102,13 +119,16 @@ class ReferenceCatalogMonitor:
                 "[%s] Reference catalogs: no block catalog in this poll — keeping last result", self._server_id
             )
             return
+        self._missing_catalog_polls += 1
         _LOGGER.warning(
             "[%s] Reference catalogs: Comexio %s sent no block catalog — dependent features blocked until it does",
             self._server_id,
             self._api.comexio_version,
         )
         self._api.reference_check = None
-        self._update_issue(unresolved(None, REFERENCE_REQUIRED, REASON_NO_LIVE_CATALOG))
+        checked_before = self._fingerprint is not None  # set by _log on every successful check
+        if checked_before or self._missing_catalog_polls >= REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE:
+            self._update_issue(unresolved(None, REFERENCE_REQUIRED, REASON_NO_LIVE_CATALOG), REASON_NO_LIVE_CATALOG)
 
     def _log(self, check: ReferenceCheck) -> None:
         fingerprint = check.fingerprint()
@@ -145,7 +165,8 @@ class ReferenceCatalogMonitor:
         title, body = build_issue_report(self._api.reference_check, REFERENCE_REQUIRED, context)
         return github_issue_url(ISSUE_TRACKER_URL, title, body)
 
-    def _update_issue(self, blocked: list[str]) -> None:
+    def _update_issue(self, blocked: list[str], check_not_run: str | None = None) -> None:
+        """Raise/refresh or clear the Repair; check_not_run is the reason when the check itself didn't run."""
         self._blocked = blocked
         if blocked:
             issue_url = self._issue_url()
@@ -157,13 +178,14 @@ class ReferenceCatalogMonitor:
                 self._issue_id,
                 is_fixable=False,
                 severity=ir.IssueSeverity.ERROR,
-                translation_key=ISSUE_TRANSLATION_KEY,
+                translation_key=ISSUE_TRANSLATION_KEY_UNCHECKED if check_not_run else ISSUE_TRANSLATION_KEY,
                 learn_more_url=issue_url,
                 translation_placeholders={
                     "server_id": self._server_id,
                     "version": self._api.comexio_version or "?",
                     "blocks": ", ".join(blocked),
                     "issue_url": issue_url,
+                    "reason": check_not_run or "",
                 },
             )
             if not self._issue_active:
@@ -175,6 +197,12 @@ class ReferenceCatalogMonitor:
                 )
             self._issue_active = True
         else:
+            if self._issue_active:
+                _LOGGER.info(
+                    "[%s] Blocks usable again on this Comexio (%s), dependent features enabled",
+                    self._server_id,
+                    self._api.comexio_version,
+                )
             # Unconditional (a no-op without an issue): an issue raised before an entry reload
             # must also be cleared by the fresh monitor, whose flag starts out False.
             ir.async_delete_issue(self._hass, DOMAIN, self._issue_id)
@@ -205,3 +233,114 @@ class ReferenceCatalogMonitor:
             self._api.comexio_version,
             ", ".join(shown),
         )
+
+
+# ---------------------------------------------------------------------------
+# Pre-filled GitHub issue for a blocked required entry
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IssueContext:
+    """Everything the issue report needs besides the check itself."""
+
+    integration_version: str | None
+    ha_version: str | None
+    blocked: tuple[str, ...]
+    unknown_plan_refs: tuple[tuple[str, str, str], ...] = ()
+
+
+def _ref_id_owner(check: ReferenceCheck, kind: str, ref_id: int | None) -> str:
+    """What the reference id points at on this server: a key, an installed app, or nothing."""
+    if ref_id is None:
+        return "-"
+    if owners := [key for key, ids in (check.live_ids.get(kind) or {}).items() if ref_id in ids]:
+        return ", ".join(owners)
+    if kind == KIND_FUB_BASE and ref_id in check.fub_base_ids:
+        return "installed app"
+    return "free"
+
+
+def _required_detail_lines(check: ReferenceCheck, required: Iterable[tuple[str, str]]) -> list[str]:
+    lines = []
+    for kind, key in required:
+        catalog = check.catalogs.get(kind)
+        entry = catalog.entries.get(key) if catalog else None
+        ref_id = entry.ref_id if entry else None
+        same_family = sorted(
+            f"{live_key} = {ids}"
+            for live_key, ids in (check.live_ids.get(kind) or {}).items()
+            if key_family(live_key) == key_family(key)
+        )
+        lines += [
+            f"- `{kind}:{key}`: status `{entry.status if entry else REASON_NOT_CHECKED}`, reference id {ref_id}, "
+            f"live id {entry.live_id if entry else None}",
+            f"  - reference id {ref_id} on this server: {_ref_id_owner(check, kind, ref_id)}",
+            f"  - live blocks named `{key_family(key)}`: {', '.join(same_family) or 'none'}",
+        ]
+    return lines
+
+
+def _capped(items: list[str], limit: int = ISSUE_LIST_LIMIT) -> list[str]:
+    return items if len(items) <= limit else [*items[:limit], f"… {len(items) - limit} more"]
+
+
+def build_issue_report(
+    check: ReferenceCheck | None, required: Iterable[tuple[str, str]], context: IssueContext
+) -> tuple[str, str]:
+    """(title, markdown body) of a GitHub issue describing why required blocks are unusable.
+
+    Contains only versions and Comexio's firmware catalog keys/ids — no host, credentials,
+    entity or marker names — so the user can submit it as-is after reviewing.
+    """
+    title = f"Comexio block not usable: {', '.join(context.blocked)}"
+    lines = [
+        '_Created from the Home Assistant repair "Comexio function block not usable"._',
+        "",
+        "### Versions",
+        f"- Integration: {context.integration_version or '?'}",
+        f"- Home Assistant: {context.ha_version or '?'}",
+        f"- Comexio: {(check.comexio_version if check else None) or '?'}",
+        "",
+        "### Blocked",
+        *[f"- `{label}`" for label in context.blocked],
+    ]
+    if check is None:
+        lines += ["", "Reference check did not run — see the Home Assistant log."]
+        return title, "\n".join(lines)
+    lines += [
+        "",
+        "### Required blocks",
+        *_required_detail_lines(check, required),
+        "",
+        "### Summary",
+        check.summary(include_duration=False),
+        "",
+        "### Deviations",
+        "```",
+        *(format_deviations(check, ISSUE_LIST_LIMIT) or ["none"]),
+        "```",
+        "",
+        "### Live blocks not in the reference",
+        "```",
+        *(_capped([key for c in check.catalogs.values() for key in c.new_keys]) or ["none"]),
+        "```",
+    ]
+    if context.unknown_plan_refs:
+        refs = [f"{fub}/{elem}: 5 {ref}" for fub, elem, ref in context.unknown_plan_refs]
+        lines += ["", "### Plan elements with unknown block types", "```", *_capped(refs), "```"]
+    return title, "\n".join(lines)
+
+
+def github_issue_url(issues_url: str, title: str, body: str, max_chars: int = ISSUE_URL_MAX_CHARS) -> str:
+    """New-issue URL with title/body pre-filled, the body cut line by line to fit max_chars.
+
+    Ends at a body of only the truncation marker, so even a single over-long line is dropped.
+    """
+    lines = body.split("\n")
+    while True:
+        query = urlencode({"title": title, "body": "\n".join(lines), "labels": "bug"})
+        url = f"{issues_url}/new?{query}"
+        if len(url) <= max_chars or lines == [ISSUE_TRUNCATED_LINE]:
+            return url
+        lines = [*lines[: -2 if lines[-1] == ISSUE_TRUNCATED_LINE else -1], ISSUE_TRUNCATED_LINE]

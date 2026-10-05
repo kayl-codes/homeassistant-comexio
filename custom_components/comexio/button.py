@@ -83,6 +83,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Sync line when the Flanke block can't be resolved on this server (reference_catalog_mismatch Repair).
 _FLANKE_UNUSABLE_LINE = f"{ICON_WARNING} Trigger pairs: Flanke block not usable on this Comexio — skipped, see Repairs."
+_FLANKE_SKIPPED_DETAIL = "trigger pairs skipped, Flanke block not usable"
 
 # Progress percentages of the function plan wiring pass, which runs after the Web-IO sync
 # has already consumed the SYNC_PROGRESS_START_PCT..SYNC_PROGRESS_END_PCT span.
@@ -129,6 +130,13 @@ def _failed_writes_note(failed_writes: list[str], retry: str = "run the sync aga
 def _plan_failure(plan_name: str, detail: str) -> str:
     """failed_writes entry for a function plan step that did not complete."""
     return f"function plan '{plan_name}': {detail}"
+
+
+def _flanke_unusable(ctx: "_SyncContext") -> str:
+    """Record the skipped trigger pairs as a failed write (sync ends partial) and return the sync line."""
+    # Add and remove can both hit the guard in one sync; _unique_failures drops the repeat.
+    ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, _FLANKE_SKIPPED_DETAIL))
+    return _FLANKE_UNUSABLE_LINE
 
 
 def _record_plan_cleanup_failures(
@@ -1953,7 +1961,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             return []
         if self.coordinator.trigger_pairs_blocked():
             # The audit reports no trigger pairs while the Flanke is unusable — say so here.
-            return [_FLANKE_UNUSABLE_LINE]
+            return [_flanke_unusable(ctx)]
         if refresh_audit:
             # One-shot: the snapshot is only valid right after the KNX step that left it.
             snapshot, ctx.unchanged_config_snapshot = ctx.unchanged_config_snapshot, None
@@ -2048,7 +2056,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if api.flanke_ref_id() is None:
             # Checked before the plan is resolved/created, backed up or stopped: none of that may
             # happen for pairs that can't be written (see reference_catalog_mismatch Repair).
-            return _FLANKE_UNUSABLE_LINE
+            return _flanke_unusable(ctx)
         fub_id, is_fresh = await self.coordinator.resolve_trigger_plan()
         if fub_id is None:
             ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, _FAILURE_NOT_RESOLVED))
@@ -2107,7 +2115,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """
         if ctx.api.flanke_ref_id() is None:
             # The paired Flanken can't be identified — deleting only the sources would strand them.
-            return _FLANKE_UNUSABLE_LINE
+            return _flanke_unusable(ctx)
         raw_fub_id = self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {}).get(
             FUNCTION_PLAN_TRIGGER_PLAN_NAME
         )

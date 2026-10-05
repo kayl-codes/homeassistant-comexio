@@ -846,7 +846,11 @@ FUNCTION_PLAN_PAIR_RELOAD_INITIAL_DELAY = 1.0  # seconds, doubles every attempt
 # HA switch on made M6 fall back to off immediately, exactly as intended — the marker's plan
 # input behaves as a toggle, not a level-set, so each incoming edge (from any plan) flips it.
 FUNCTION_PLAN_TRIGGER_PLAN_NAME = "HA - TRIGGER"
-# Stable reference catalog key of the Flanke block (reference/fub_base.json): internal Name plus
+# Polls without a block catalog before the reference check raises its Repair — only until the first
+# successful check since setup, later it is raised at once. Features are blocked from the first
+# such poll (reference_monitor._handle_missing_live_catalog).
+REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE = 2
+# Stable reference catalog key of the Flanke block (aiocomexio reference/fub_base.json): internal Name plus
 # port types (In digital, two analog delays / outputs ~ + - digital). Its database id (113 on the
 # reference servers) is resolved per server at runtime — api.ComexioAPI.flanke_ref_id.
 FUB_BASE_KEY_FLANKE = "flankenerkenner/daa/ddd"

@@ -424,7 +424,11 @@
     },
     "reference_catalog_mismatch": {
       "title": "Bloc fonctionnel Comexio inutilisable ({server_id})",
-      "description": "Comexio {version} sur ce serveur ne fournit pas le(s) bloc(s) fonctionnel(s) **{blocks}** sous la forme prévue par cette intégration. Les fonctions qui placent ces blocs dans les plans fonctionnels (marqueurs déclencheurs `[TRIG]`) sont désactivées afin qu'aucun élément défectueux ne soit créé.\n\n**[Signaler sur GitHub]({issue_url})** — ouvre un nouveau ticket avec le diagnostic déjà rempli (uniquement les versions et le catalogue de blocs Comexio, aucune donnée personnelle). Vérifiez-le puis envoyez-le ; un compte GitHub est requis.\n\nSi une entrée indique « not checked », les fichiers de référence de l'intégration elle-même sont absents ou endommagés — réinstallez l'intégration."
+      "description": "Comexio {version} sur ce serveur ne fournit pas le(s) bloc(s) fonctionnel(s) **{blocks}** sous la forme prévue par cette intégration. Les fonctions qui placent ces blocs dans les plans fonctionnels (marqueurs déclencheurs `[TRIG]`) sont désactivées afin qu'aucun élément défectueux ne soit créé.\n\n**[Signaler sur GitHub]({issue_url})** — ouvre un nouveau ticket avec le diagnostic déjà rempli (uniquement les versions et le catalogue de blocs Comexio, aucune donnée personnelle). Vérifiez-le puis envoyez-le ; un compte GitHub est requis.\n\nSi une entrée indique « reference file unusable », les fichiers de référence de la bibliothèque aiocomexio sont absents ou endommagés — merci de le signaler."
+    },
+    "reference_catalog_unchecked": {
+      "title": "Vérification des blocs fonctionnels Comexio non effectuée ({server_id})",
+      "description": "L'intégration n'a pas pu vérifier quels blocs fonctionnels Comexio {version} fournit sur ce serveur ({reason}). Tant que la vérification n'aboutit pas, les fonctions qui placent le(s) bloc(s) **{blocks}** dans les plans fonctionnels (marqueurs déclencheurs `[TRIG]`) sont désactivées afin qu'aucun élément défectueux ne soit créé.\n\nCe n'est pas le signe d'un firmware incompatible. La vérification est relancée à chaque interrogation et cette réparation disparaît dès qu'elle aboutit. Si elle persiste, consultez le journal de Home Assistant et **[signalez-le sur GitHub]({issue_url})**."
     }
   }
 }

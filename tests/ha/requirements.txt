@@ -5,5 +5,5 @@
 # Runs on Linux only (CI, WSL): pytest tests/ha -o asyncio_mode=auto
 pytest-homeassistant-custom-component==0.13.357
 # The integration's own runtime requirements (manifest.json), at the same pins.
-aiocomexio==0.3.0
+aiocomexio==0.4.0
 idna>=3.15

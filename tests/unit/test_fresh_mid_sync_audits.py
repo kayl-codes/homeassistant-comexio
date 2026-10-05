@@ -2,10 +2,16 @@
 
 import asyncio
 import datetime
+from types import SimpleNamespace
 from typing import Any
 
-from custom_components.comexio.button import _FLANKE_UNUSABLE_LINE, ComexioSyncButton, _SyncContext
-from custom_components.comexio.const import WebioClass
+from custom_components.comexio.button import (
+    _FLANKE_UNUSABLE_LINE,
+    ComexioSyncButton,
+    _SyncContext,
+    _unique_failures,
+)
+from custom_components.comexio.const import FUNCTION_PLAN_TRIGGER_PLAN_NAME, WebioClass
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 _PARSED = {
@@ -15,6 +21,9 @@ _PARSED = {
     ],
     "markers": [{"id": 7, "title": "Bridge K1"}],
 }
+_FLANKE_SKIPPED_FAILURE = (
+    f"function plan '{FUNCTION_PLAN_TRIGGER_PLAN_NAME}': trigger pairs skipped, Flanke block not usable"
+)
 
 
 class _FakeApi:
@@ -229,6 +238,18 @@ def test_trigger_step_reports_a_blocked_flanke_instead_of_staying_silent() -> No
 
     assert asyncio.run(button._wire_trigger_pairs(ctx)) == [_FLANKE_UNUSABLE_LINE]
     assert coordinator.trigger_snapshots == []  # no audit, no writes
+    assert ctx.failed_writes == [_FLANKE_SKIPPED_FAILURE]  # the sync ends "partial", not as a full success
+
+
+def test_add_and_remove_guards_record_the_skipped_trigger_pairs() -> None:
+    button, ctx = _sync_button(_FakeSyncCoordinator(bridge=[]))
+    ctx.api = SimpleNamespace(flanke_ref_id=lambda: None)
+
+    async def _run() -> list[str]:
+        return [await button._add_trigger_pairs(ctx, [50]), await button._remove_trigger_pairs(ctx, [51])]
+
+    assert asyncio.run(_run()) == [_FLANKE_UNUSABLE_LINE, _FLANKE_UNUSABLE_LINE]
+    assert _unique_failures(ctx.failed_writes) == [_FLANKE_SKIPPED_FAILURE]
 
 
 def test_trigger_step_fetches_itself_when_the_knx_step_had_work() -> None:
