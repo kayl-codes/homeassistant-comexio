@@ -162,6 +162,21 @@ def test_missing_live_catalog_repairs_only_after_repeated_polls(raw: dict[str, A
     assert kwargs["translation_placeholders"]["reason"] == REASON_NO_LIVE_CATALOG
 
 
+def test_missing_catalog_on_the_same_firmware_keeps_the_last_result(
+    raw: dict[str, Any], issue_registry: MagicMock
+) -> None:
+    """Block ids only move with a firmware update — a partial fetch must not flap the features or the Repair."""
+    monitor = _monitor(_references(raw))
+    empty = {**raw, "FubModules": {**raw["FubModules"], "5": []}}
+    asyncio.run(monitor.async_check(raw))
+    check = monitor._api.reference_check
+
+    for _ in range(REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE + 1):
+        asyncio.run(monitor.async_check(empty))
+    assert monitor._api.reference_check is check
+    issue_registry.async_create_issue.assert_not_called()
+
+
 def test_after_a_successful_check_a_missing_catalog_repairs_at_once(
     raw: dict[str, Any], issue_registry: MagicMock
 ) -> None:
