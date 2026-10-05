@@ -8,14 +8,15 @@ Two independent stores per server:
           operation label (FUNCTION_PLAN_CHANGE_BACKUP_SLOTS per plan)
 
 Comexio provides no modification timestamps for plans, so every snapshot carries
-the capture timestamp instead. Snapshots live under .storage/ and are therefore
-included in Home Assistant's own backups.
+the capture timestamp instead. Every snapshot also freezes the stable keys of the block ids it
+uses, so it stays readable after Comexio shifted those ids (function_plan_block_keys).
+Snapshots live under .storage/ and are therefore included in Home Assistant's own backups.
 """
 
 from datetime import datetime, timedelta
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiocomexio.function_plan import plan_hash, referenced_label_metadata
 from homeassistant.core import HomeAssistant
@@ -23,6 +24,18 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, FUNCTION_PLAN_AUTO_BACKUP_SLOTS, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS, TIMESTAMP_DISPLAY_FORMAT
+from .function_plan_block_keys import (
+    SNAPSHOT_KEYS,
+    SNAPSHOT_KEYS_SOURCE,
+    SOURCE_CAPTURED,
+    backfill_block_keys,
+    capture_block_keys,
+    resolve_block_ids,
+    uses_unknown_block_ids,
+)
+
+if TYPE_CHECKING:
+    from .function_plan_catalog import FunctionPlanCatalogManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -149,6 +162,18 @@ def _latest_capture(*stores: dict[str, dict[str, list[dict[str, Any]]]] | None) 
     return max(timestamps, default=None)
 
 
+def _freeze_block_keys(snapshot: dict[str, Any], fub_base: dict[str, Any]) -> None:
+    """Store the keys of the snapshot's block ids.
+
+    Without a verified catalog, or when the plan uses a block id the catalog does not know yet (an
+    app installed since the last poll), the keys are left to the backfill of the next backup cycle,
+    which runs after that poll's catalog update. A block id still unknown then gets no key.
+    """
+    if fub_base and not uses_unknown_block_ids(snapshot.get("elements") or {}, fub_base):
+        snapshot[SNAPSHOT_KEYS] = capture_block_keys(snapshot.get("elements") or {}, fub_base)
+        snapshot[SNAPSHOT_KEYS_SOURCE] = SOURCE_CAPTURED
+
+
 def retention_cutoff(months: int) -> datetime:
     """UTC cutoff timestamp for a retention window expressed in whole months (~30 days each).
 
@@ -255,8 +280,13 @@ def summarize_orphaned_backups(orphans: list[dict[str, Any]]) -> tuple[int, list
 class FunctionPlanBackupManager:
     """Manage rotating auto and pre-change snapshots of function plans."""
 
-    def __init__(self, hass: HomeAssistant, server_id: str) -> None:
+    def __init__(
+        self, hass: HomeAssistant, server_id: str, catalog: "FunctionPlanCatalogManager | None" = None
+    ) -> None:
         self._server_id = server_id
+        # Block catalog for the block keys (function_plan_block_keys); without one, snapshots
+        # carry no keys and are used with their stored block ids.
+        self._catalog = catalog
         # Storage keys keep the legacy "logikplan" spelling — renaming them would orphan
         # every snapshot already persisted under .storage/.
         self._auto_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_logikplan_auto_{server_id}")
@@ -396,6 +426,7 @@ class FunctionPlanBackupManager:
         expected and no others.
         """
         await self._async_ensure_loaded()
+        fub_base = await self._async_fub_base()
         changed_identities: list[dict[str, Any]] = []
         for fub_id, plan_data in plans.items():
             key = str(fub_id)
@@ -417,6 +448,7 @@ class FunctionPlanBackupManager:
                 comexio_version=comexio_version,
                 label_metadata=label_metadata,
             )
+            _freeze_block_keys(snapshot, fub_base)
             history.insert(0, snapshot)
             del history[FUNCTION_PLAN_AUTO_BACKUP_SLOTS:]
             changed_identities.append(
@@ -459,6 +491,7 @@ class FunctionPlanBackupManager:
         snapshot = self._build_snapshot(
             plan_data, plan_name, operation, paper, dpi, orientation, comexio_version, label_metadata
         )
+        _freeze_block_keys(snapshot, await self._async_fub_base())
         history.insert(0, snapshot)
         del history[FUNCTION_PLAN_CHANGE_BACKUP_SLOTS:]
         await self._change_store.async_save(self._change_data)
@@ -500,6 +533,43 @@ class FunctionPlanBackupManager:
         if filled:
             _LOGGER.info(
                 "[%s] Function Plan backup: backfilled paper/DPI metadata on %d snapshot(s)", self._server_id, filled
+            )
+        return filled
+
+    async def _async_catalog_state(self) -> tuple[dict[str, Any], str | None]:
+        if self._catalog is None:
+            return {}, None
+        return await self._catalog.async_get_fub_base()
+
+    async def _async_fub_base(self) -> dict[str, Any]:
+        fub_base, _changed_at = await self._async_catalog_state()
+        return fub_base
+
+    async def async_backfill_block_keys(self) -> dict[str, int]:
+        """Add block keys to snapshots stored before they were captured (idempotent).
+
+        Needs the block catalog; without one nothing is filled and the next cycle tries again.
+        Returns {source: count} of the snapshots filled in (see backfill_block_keys).
+        """
+        await self._async_ensure_loaded()
+        fub_base, changed_at = await self._async_catalog_state()
+        filled: dict[str, int] = {}
+        if not fub_base:
+            return filled
+        for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
+            sources = [backfill_block_keys(snap, fub_base, changed_at) for snap in _iter_snapshots(data)]
+            if not any(sources):
+                continue
+            await store.async_save(data)
+            for source in filter(None, sources):
+                filled[source] = filled.get(source, 0) + 1
+        if filled:
+            _LOGGER.info(
+                "[%s] Function Plan backup: backfilled block keys on %d snapshot(s) %s (block ids last changed %s)",
+                self._server_id,
+                sum(filled.values()),
+                filled,
+                changed_at,
             )
         return filled
 
@@ -897,11 +967,15 @@ class FunctionPlanBackupManager:
     async def async_get_snapshot(self, kind: str, fub_id: int, plan_name: str, slot: int = 0) -> dict[str, Any] | None:
         """Return the full snapshot (incl. elements/connections) for a plan identity, or None.
 
-        kind: "auto" or "change"; slot: 0 = newest.
+        kind: "auto" or "change"; slot: 0 = newest. Block ids come translated to today's
+        (function_plan_block_keys.resolve_block_ids): blocks without a live counterpart are
+        marked and listed under UNRESOLVED_BLOCKS. Read-only — the stored snapshot itself is
+        never rewritten.
         """
         await self._async_ensure_loaded()
         data = self._auto_data if kind == "auto" else self._change_data
         history = data.get(str(fub_id), {}).get(plan_name, [])
-        if 0 <= slot < len(history):
-            return history[slot]
-        return None
+        if not 0 <= slot < len(history):
+            return None
+        fub_base, _changed_at = await self._async_catalog_state()
+        return resolve_block_ids(history[slot], fub_base)
