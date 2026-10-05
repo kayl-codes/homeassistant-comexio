@@ -424,7 +424,11 @@
     },
     "reference_catalog_mismatch": {
       "title": "Comexio function block not usable ({server_id})",
-      "description": "Comexio {version} on this server does not provide the function block(s) **{blocks}** in the layout this integration was built for. Features that place these blocks in function plans (trigger markers `[TRIG]`) are disabled so no broken elements are written.\n\n**[Report this on GitHub]({issue_url})** — opens a new issue with the diagnosis already filled in (versions and Comexio block catalog only, no personal data). Please review it and submit; a GitHub account is required.\n\nIf an entry reads \"not checked\", the integration's own reference files are missing or damaged — reinstall the integration."
+      "description": "Comexio {version} on this server does not provide the function block(s) **{blocks}** in the layout this integration was built for. Features that place these blocks in function plans (trigger markers `[TRIG]`) are disabled so no broken elements are written.\n\n**[Report this on GitHub]({issue_url})** — opens a new issue with the diagnosis already filled in (versions and Comexio block catalog only, no personal data). Please review it and submit; a GitHub account is required.\n\nIf an entry reads \"reference file unusable\", the reference files of the aiocomexio library are missing or damaged — please report it."
+    },
+    "reference_catalog_unchecked": {
+      "title": "Comexio function block check did not run ({server_id})",
+      "description": "The integration could not check which function blocks Comexio {version} on this server provides ({reason}). Until the check succeeds, features that place the block(s) **{blocks}** in function plans (trigger markers `[TRIG]`) are disabled so no broken elements are written.\n\nThis is not a sign of an incompatible firmware. The check runs again on every poll and this repair disappears once it succeeds. If it stays, check the Home Assistant log and **[report it on GitHub]({issue_url})**."
     }
   }
 }

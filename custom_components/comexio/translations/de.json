@@ -424,7 +424,11 @@
     },
     "reference_catalog_mismatch": {
       "title": "Comexio-Funktionsbaustein nicht nutzbar ({server_id})",
-      "description": "Comexio {version} auf diesem Server stellt den/die Funktionsbaustein(e) **{blocks}** nicht in der Form bereit, für die diese Integration gebaut ist. Funktionen, die diese Bausteine in Logikpläne setzen (Trigger-Merker `[TRIG]`), sind deaktiviert, damit keine fehlerhaften Elemente angelegt werden.\n\n**[Auf GitHub melden]({issue_url})** — öffnet ein neues Issue, in dem die Diagnose bereits ausgefüllt ist (nur Versionen und der Comexio-Bausteinkatalog, keine persönlichen Daten). Bitte prüfen und absenden; ein GitHub-Konto ist nötig.\n\nSteht bei einem Eintrag „not checked“, fehlen die Referenzdateien der Integration selbst oder sind beschädigt — bitte die Integration neu installieren."
+      "description": "Comexio {version} auf diesem Server stellt den/die Funktionsbaustein(e) **{blocks}** nicht in der Form bereit, für die diese Integration gebaut ist. Funktionen, die diese Bausteine in Logikpläne setzen (Trigger-Merker `[TRIG]`), sind deaktiviert, damit keine fehlerhaften Elemente angelegt werden.\n\n**[Auf GitHub melden]({issue_url})** — öffnet ein neues Issue, in dem die Diagnose bereits ausgefüllt ist (nur Versionen und der Comexio-Bausteinkatalog, keine persönlichen Daten). Bitte prüfen und absenden; ein GitHub-Konto ist nötig.\n\nSteht bei einem Eintrag „reference file unusable“, fehlen die Referenzdateien der Bibliothek aiocomexio oder sind beschädigt — bitte melden."
+    },
+    "reference_catalog_unchecked": {
+      "title": "Prüfung der Comexio-Funktionsbausteine nicht gelaufen ({server_id})",
+      "description": "Die Integration konnte nicht prüfen, welche Funktionsbausteine Comexio {version} auf diesem Server bereitstellt ({reason}). Bis die Prüfung gelingt, sind Funktionen deaktiviert, die den/die Baustein(e) **{blocks}** in Logikpläne setzen (Trigger-Merker `[TRIG]`), damit keine fehlerhaften Elemente angelegt werden.\n\nDas ist kein Hinweis auf eine inkompatible Firmware. Die Prüfung läuft bei jeder Abfrage erneut, und diese Reparatur verschwindet, sobald sie gelingt. Bleibt sie bestehen, bitte das Home-Assistant-Protokoll prüfen und **[auf GitHub melden]({issue_url})**."
     }
   }
 }

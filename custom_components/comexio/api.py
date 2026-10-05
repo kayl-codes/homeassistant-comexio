@@ -22,6 +22,7 @@ from aiocomexio import (
 )
 from aiocomexio.config import ParseOptions, iter_group
 from aiocomexio.const import WebioClass
+from aiocomexio.reference_catalog import KIND_FUB_BASE, ReferenceCheck
 from aiocomexio.session import session_kwargs
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -64,7 +65,6 @@ from .const import (
     is_valid_entity_name_schema,
     knx_loopback_command_name,
 )
-from .reference_catalog import KIND_FUB_BASE, ReferenceCheck
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14

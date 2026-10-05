@@ -6090,6 +6090,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         try:
             return any(self._trigger_ids_by_ref(self.data).values())
         except (KeyError, TypeError):  # partial data right after setup — no sources known yet
+            _LOGGER.debug("Trigger sources not readable yet — trigger pairs not reported as blocked", exc_info=True)
             return False
 
     def _audit_all_trigger_pairs(
