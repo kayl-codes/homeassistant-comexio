@@ -79,12 +79,12 @@ def test_cleanup_failures_are_failed_steps() -> None:
         patch.object(
             ComexioSyncButton,
             "_cleanup_function_plan_plans",
-            AsyncMock(return_value=(2, ["c1"], [("Plan A", 3)], [("Plan B", 4)])),
+            AsyncMock(return_value=(2, ["c1"], [("Plan A", 3)], [("Plan B", 4)], [])),
         ),
         patch.object(ComexioSyncButton, "_delete_webio_commands", AsyncMock(return_value=(0, 1))),
         patch.object(ComexioSyncButton, "_notify_stopped_plans", MagicMock(return_value=[])),
     ):
-        asyncio.run(button._cleanup_entities_for_category(ctx, MARKER, [7], "12", None))
+        asyncio.run(button._cleanup_entities_for_category(ctx, MARKER, [7], "12"))
     assert ctx.failed_writes == [
         f"cleanup {MARKER.label}: 1 Web-IO command deletion(s)",
         "function plan 'Plan A': left stopped after cleanup",

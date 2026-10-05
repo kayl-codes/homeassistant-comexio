@@ -39,6 +39,7 @@ from .const import (
     ICON_ERROR,
     ICON_FIX,
     ICON_FLAG,
+    ICON_INFO,
     ICON_NETWORK,
     ICON_RENAME,
     ICON_ROCKET,
@@ -96,6 +97,7 @@ _FAILURE_NOT_RESOLVED = "not resolved/created"
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
 _STEP_CHECKING_PLAN = "Checking function plan wiring"
+_RETRY_CLEANUP = "run the cleanup again from Repairs"
 _DELTA_RESULT_KEYS = {"rename": "renamed", "delete": "removed", "type": "updated", "create": "added"}
 _FAILED_WRITES_SHOWN = 10  # failed Web-IO writes named in the result message; the rest are counted
 
@@ -110,7 +112,7 @@ def _unique_failures(failed_writes: list[str]) -> list[str]:
     return list(dict.fromkeys(failed_writes))
 
 
-def _failed_writes_note(failed_writes: list[str]) -> str:
+def _failed_writes_note(failed_writes: list[str], retry: str = "run the sync again") -> str:
     """Result-message block naming the sync steps that failed, or "" when none did."""
     failed_writes = _unique_failures(failed_writes)
     if not failed_writes:
@@ -120,7 +122,7 @@ def _failed_writes_note(failed_writes: list[str]) -> str:
     more = f" (+{hidden} more)" if hidden > 0 else ""
     return (
         f"{ICON_WARNING} {len(failed_writes)} sync step(s) failed: {shown}{more}. "
-        "See the log for the reason, then run the sync again.\n\n"
+        f"See the log for the reason, then {retry}.\n\n"
     )
 
 
@@ -599,14 +601,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
             gap_items = audit_data.get("function_plan_missing", [])
             cleanup_entity_ids: list[tuple[str, int]] = audit_data.get("cleanup_entities", [])
-            lp_fub_id = self.coordinator.get_managed_function_plan_fub_id()
 
             if action == "cleanup_entities":
                 # Standalone action: remove HA entities + Function Plan wiring + WebIO commands
                 # for ignored markers/KNX objects that still have legacy remnants.
-                await self._handle_cleanup_entities(
-                    ctx, cleanup_entity_ids, dev_ids, notif_id, notify_enabled, lp_fub_id
-                )
+                await self._handle_cleanup_entities(ctx, cleanup_entity_ids, dev_ids, notif_id, notify_enabled)
                 return
 
             if action == "function_plan_add_missing":
@@ -880,7 +879,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         dev_ids: dict[str, str | None],
         notif_id: str,
         notify_enabled: bool,
-        lp_fub_id: int | None = None,
     ) -> None:
         """Remove HA entities, Function Plan elements and WebIO commands for ignored markers/KNX objects.
 
@@ -922,9 +920,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             still_ignored = [eid for eid in ids if eid in ignored_ids]
             if not still_ignored:
                 continue
-            all_lines.extend(
-                await self._cleanup_entities_for_category(ctx, category, still_ignored, dev_ids.get(cls), lp_fub_id)
-            )
+            all_lines.extend(await self._cleanup_entities_for_category(ctx, category, still_ignored, dev_ids.get(cls)))
 
         if not all_lines:
             _notify("Nothing to clean up — the markers/KNX objects flagged by the last audit are no longer ignored.")
@@ -935,18 +931,21 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self.coordinator.sync_failed_writes = _unique_failures(ctx.failed_writes)
         if ctx.failed_writes:
             self.coordinator.sync_progress_text = "\n".join(all_lines)
-        _notify("\n".join(all_lines))
+        # Name the failed steps (e.g. a plan that could not be loaded) in the result itself.
+        _notify(_failed_writes_note(ctx.failed_writes, _RETRY_CLEANUP) + "\n".join(all_lines))
         _LOGGER.info("[%s] cleanup_entities done: %s", self.server_id, ", ".join(all_lines))
 
     async def _cleanup_entities_for_category(
-        self, ctx: _SyncContext, category: SourceCategory, ids: list[int], dev_id: str | None, lp_fub_id: int | None
+        self, ctx: _SyncContext, category: SourceCategory, ids: list[int], dev_id: str | None
     ) -> list[str]:
         """Run the entity/Function-Plan/WebIO cleanup for one source category; return summary lines."""
         api = ctx.api
         deleted_entities = self._delete_source_entities(ids, category)
-        lp_count, webio_cmd_ids, stopped_plans, stop_failures = await self._cleanup_function_plan_plans(
-            ctx, ids, lp_fub_id, category
+        failures_before = len(ctx.failed_writes)
+        lp_count, webio_cmd_ids, stopped_plans, stop_failures, notes = await self._cleanup_function_plan_plans(
+            ctx, ids, category
         )
+        plan_failed = len(ctx.failed_writes) > failures_before
         webio_removed, webio_failed = await self._delete_webio_commands(api, dev_id, webio_cmd_ids, category)
 
         lines = self._build_cleanup_summary_lines(
@@ -956,8 +955,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             webio_removed,
             webio_failed,
             category,
-            has_stop_failures=bool(stop_failures),
+            has_plan_findings=bool(stop_failures or notes) or plan_failed,
         )
+        lines.extend(notes)
         lines.extend(self._notify_stopped_plans(stopped_plans))
         lines.extend(self._build_stop_failure_lines(stop_failures))
         if webio_failed:
@@ -1027,16 +1027,20 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         webio_removed: int,
         webio_failed: int,
         category: SourceCategory,
-        has_stop_failures: bool = False,
+        has_plan_findings: bool = False,
     ) -> list[str]:
-        """Build the base result lines for the cleanup-entities summary notification."""
+        """Build the base result lines for the cleanup-entities summary notification.
+
+        has_plan_findings: a plan step failed or a plan reported a source it kept or no
+        longer holds — the result is then never "nothing to clean up".
+        """
         ids_str = ", ".join(f"{category.audit_key_prefix}{eid}" for eid in ids)
         if (
             deleted_entities == 0
             and lp_count == 0
             and webio_removed == 0
             and webio_failed == 0
-            and not has_stop_failures
+            and not has_plan_findings
         ):
             return [f"Nothing to clean up for {ids_str} — no entities, Function Plan elements or WebIO commands found."]
         lines = [
@@ -1068,6 +1072,25 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return extra_lines
 
     @staticmethod
+    def _plan_note_lines(
+        plan_name: str, fub_id: int, kept_ids: list[int], gone_ids: list[int], category: SourceCategory
+    ) -> list[str]:
+        """Build summary lines for sources a plan kept on purpose or no longer holds."""
+        plan = f"Function Plan '{plan_name}' (ID {fub_id})"
+        prefix = category.audit_key_prefix
+        return [
+            *(
+                f"{ICON_WARNING} {prefix}{source_id} stays in {plan} — it is wired to other plan logic there, "
+                "which the cleanup leaves in place"
+                for source_id in kept_ids
+            ),
+            *(
+                f"{ICON_INFO} {prefix}{source_id} is no longer in {plan} — nothing to remove there"
+                for source_id in gone_ids
+            ),
+        ]
+
+    @staticmethod
     def _build_stop_failure_lines(stop_failures: list[tuple[str, int]]) -> list[str]:
         """Build summary lines for plans that couldn't be stopped, so the failure isn't
         silently indistinguishable from "nothing to clean up" (deleted_elem_count also 0)."""
@@ -1080,7 +1103,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     @staticmethod
     def _resolve_plan_webio_and_unwired(
         api: Any, plan_data: dict, cleanup_ids: list[int], ref_type: int = 2
-    ) -> tuple[list[int], list[int]]:
+    ) -> tuple[list[int], list[int], list[int], list[int]]:
         """For each marker in cleanup_ids, collect its wired WebIO ids in this plan — or,
         if it has no wiring at all, its element id for direct deletion (see
         _delete_unwired_marker_elements). A marker wired to something OTHER than a WebIO
@@ -1088,19 +1111,29 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         plan logic unrelated to this ignored-marker Web-IO cleanup, so it's neither queued
         for unwiring (nothing WebIO-related to unwire) nor for deletion (would break that
         other wiring).
+
+        Returns (webio ids, unwired element ids, kept marker ids, gone marker ids). A kept
+        marker is the untouched case above; a gone one was found by the plan scan (which may
+        read the cached plan snapshot), but this live load no longer holds it — both get
+        reported, neither is a failure.
         """
         webio_ids: list[int] = []
         unwired_marker_elem_ids: list[int] = []
+        kept: list[int] = []
+        gone: list[int] = []
         for marker_id in cleanup_ids:
             marker_elem_id = api._find_source_element_id(plan_data.get("elements", {}), marker_id, ref_type)
             if not marker_elem_id:
+                gone.append(marker_id)
                 continue
             marker_webio_ids = api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data)
             if marker_webio_ids:
                 webio_ids.extend(marker_webio_ids)
-            elif not api._element_has_any_wiring(marker_elem_id, plan_data):
+            elif api._element_has_any_wiring(marker_elem_id, plan_data):
+                kept.append(marker_id)
+            else:
                 unwired_marker_elem_ids.append(int(marker_elem_id))
-        return webio_ids, unwired_marker_elem_ids
+        return webio_ids, unwired_marker_elem_ids, kept, gone
 
     @staticmethod
     async def _delete_unwired_marker_elements(
@@ -1131,20 +1164,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return result.get("deleted_elem_count", 0)
 
     async def _cleanup_function_plan_plans(
-        self, ctx: _SyncContext, source_ids: list[int], lp_fub_id: int | None, category: SourceCategory
-    ) -> tuple[int, list[int], list[tuple[str, int]], list[tuple[str, int]]]:
-        """Run the Function Plan cleanup for every managed plan the markers/KNX objects are wired in.
+        self, ctx: _SyncContext, source_ids: list[int], category: SourceCategory
+    ) -> tuple[int, list[int], list[tuple[str, int]], list[tuple[str, int]], list[str]]:
+        """Run the Function Plan cleanup for every managed plan that holds the markers/KNX objects.
 
-        Returns (deleted element count, WebIO command ids to delete, stopped plans, stop
-        failures — the latter two as (name, fub_id) tuples). Plans that could not be loaded
-        and element deletions that failed go straight to ctx.failed_writes.
+        Returns (deleted element count, WebIO command ids to delete, stopped plans and stop
+        failures as (name, fub_id) tuples, summary lines for sources a plan kept or no longer
+        holds). Plans that could not be loaded and element deletions that failed go straight
+        to ctx.failed_writes.
         """
         api = ctx.api
         ref_type = int(category.fub_module_type)
         load_failures: list[int] = []
-        plan_to_ids = await self.coordinator.resolve_source_cleanup_plans(
-            source_ids, lp_fub_id, ref_type, load_failures
-        )
+        plan_to_ids = await self.coordinator.resolve_source_cleanup_plans(source_ids, ref_type, load_failures)
         ctx.failed_writes.extend(
             _plan_failure(name, detail) for name, detail in self.coordinator.plan_load_failures(load_failures)
         )
@@ -1152,6 +1184,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         webio_cmd_ids: list[int] = []
         stopped_plans: list[tuple[str, int]] = []
         stop_failures: list[tuple[str, int]] = []
+        notes: list[str] = []
         for fub_id, cleanup_ids in plan_to_ids.items():
             await self.coordinator.async_function_plan_change_backup(
                 fub_id, f"cleanup_ignored {[f'{category.audit_key_prefix}{m}' for m in cleanup_ids]}"
@@ -1160,15 +1193,15 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             # plan, then hand off to the same unwire mechanism the orphan-delete sync path uses —
             # it owns the webIoId -> real cmdId resolution, so callers never have to guess it
             # out of a plan element's ref_id (that field IS the webIoId, not the WebCommandId).
-            plan_data = await api.function_plan_load_elements(fub_id)
-            webio_ids: list[int] = []
-            unwired_marker_elem_ids: list[int] = []
+            plan_data = await api.function_plan_load_elements(fub_id, strict=True)
+            plan_name = api.function_plan_name(fub_id)
             if not plan_data:
-                ctx.failed_writes.append(_plan_failure(api.function_plan_name(fub_id), PLAN_LOAD_FAILED))
+                ctx.failed_writes.append(_plan_failure(plan_name, PLAN_LOAD_FAILED))
                 continue
-            webio_ids, unwired_marker_elem_ids = self._resolve_plan_webio_and_unwired(
+            webio_ids, unwired_marker_elem_ids, kept_ids, gone_ids = self._resolve_plan_webio_and_unwired(
                 api, plan_data, cleanup_ids, ref_type
             )
+            notes.extend(self._plan_note_lines(plan_name, fub_id, kept_ids, gone_ids, category))
             if unwired_marker_elem_ids:
                 lp_count += await self._delete_unwired_marker_elements(
                     ctx, fub_id, unwired_marker_elem_ids, stopped_plans, stop_failures
@@ -1184,7 +1217,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # A WebIO command could in principle be collected from more than one plan (e.g. a
         # marker anomalously wired into multiple managed plans); dedupe before deletion so
         # the same command isn't attempted twice.
-        return lp_count, list(dict.fromkeys(webio_cmd_ids)), stopped_plans, stop_failures
+        return lp_count, list(dict.fromkeys(webio_cmd_ids)), stopped_plans, stop_failures, notes
 
     def _build_sync_result_message(
         self,

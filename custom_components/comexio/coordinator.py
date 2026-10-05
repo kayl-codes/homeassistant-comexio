@@ -4083,7 +4083,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         all_ignored_ids = expand_ignored_marker_ids(
             ignored_raw, category.audit_key_prefix + category.audit_key_prefix.lower()
         )
-        lp_plans = await self._load_function_plan_check_data()
+        # Only managed plans: the cleanup never touches a user's own plan (e.g. the one the
+        # plan selector shows), so wiring there must not raise a repair it cannot resolve.
+        lp_plans = await self._load_managed_plan_check_data()
         ref_type = int(category.fub_module_type)
         ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids), category.unique_id_infix).keys())
         _LOGGER.debug(
@@ -4934,29 +4936,35 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("[%s] No function plans available for link check", self.server_id)
         return plans
 
+    async def _load_managed_plan_check_data(self, load_failures: list[int] | None = None) -> dict[int, dict]:
+        """_load_function_plan_check_data without the plans outside HA's naming.
+
+        The ignored-source audit and its cleanup share this set, so the audit never flags
+        wiring in a plan the cleanup may not touch (see _is_managed_function_plan).
+        """
+        plans = await self._load_function_plan_check_data(load_failures)
+        return {fub_id: plan_data for fub_id, plan_data in plans.items() if self._is_managed_function_plan(fub_id)}
+
     async def resolve_source_cleanup_plans(
         self,
         source_ids: list[int],
-        preferred_fub_id: int | None = None,
         ref_type: int = 2,
         load_failures: list[int] | None = None,
     ) -> dict[int, list[int]]:
-        """Group markers/KNX objects by the managed plan they are wired in, for per-plan cleanup.
+        """Group markers/KNX objects by every managed plan holding them, for per-plan cleanup.
 
-        A user-selected plan (preferred_fub_id) keeps the single-plan behaviour: all supplied
-        ids are grouped under it as-is, without an upfront wiring check — the per-id cleanup
-        call itself is a no-op for any id not actually wired there. Otherwise each id is
-        looked up in all managed plans and unwired ones are omitted here instead. ref_type
-        selects the source category's plan-element type (marker=2, KNX=11 — blind guess).
+        Every managed plan is searched and every match counts, wired or not: the plan
+        selector only picks the plan shown in HA, while a marker lives in its range-cluster
+        plan (and a stray duplicate can sit in a second one). Plans outside HA's naming are
+        never touched (see _is_managed_function_plan). ref_type selects the source
+        category's plan-element type (marker=2, KNX=11 — blind guess).
         """
-        if preferred_fub_id is not None:
-            return {preferred_fub_id: list(source_ids)}
-        plans = await self._load_function_plan_check_data(load_failures)
+        plans = await self._load_managed_plan_check_data(load_failures)
         plan_to_ids: dict[int, list[int]] = {}
-        for source_id in source_ids:
-            fub_id = self._check_source_function_plan_link(source_id, plans, ref_type)
-            if fub_id is not None and self._is_managed_function_plan(fub_id):
-                plan_to_ids.setdefault(fub_id, []).append(source_id)
+        for fub_id, plan_data in plans.items():
+            elements = plan_data.get("elements", {})
+            if found := [sid for sid in source_ids if self.api._find_source_element_id(elements, sid, ref_type)]:
+                plan_to_ids[fub_id] = found
         return plan_to_ids
 
     async def _resolve_unwire_plan_targets(
