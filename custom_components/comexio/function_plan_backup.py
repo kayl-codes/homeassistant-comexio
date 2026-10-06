@@ -29,6 +29,7 @@ from .function_plan_block_keys import (
     SNAPSHOT_KEYS_SOURCE,
     SOURCE_CAPTURED,
     backfill_block_keys,
+    block_check,
     capture_block_keys,
     resolve_block_ids,
     uses_unknown_block_ids,
@@ -287,6 +288,8 @@ class FunctionPlanBackupManager:
         # Block catalog for the block keys (function_plan_block_keys); without one, snapshots
         # carry no keys and are used with their stored block ids.
         self._catalog = catalog
+        # block_check_sync's last (snapshot, fub_base, key source, result).
+        self._block_check_memo: tuple[dict[str, Any], dict[str, Any], Any, dict[str, Any] | None] | None = None
         # Storage keys keep the legacy "logikplan" spelling — renaming them would orphan
         # every snapshot already persisted under .storage/.
         self._auto_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_logikplan_auto_{server_id}")
@@ -973,9 +976,31 @@ class FunctionPlanBackupManager:
         never rewritten.
         """
         await self._async_ensure_loaded()
-        data = self._auto_data if kind == "auto" else self._change_data
-        history = data.get(str(fub_id), {}).get(plan_name, [])
-        if not 0 <= slot < len(history):
+        if (stored := self._stored_snapshot(kind, fub_id, plan_name, slot)) is None:
             return None
         fub_base, _changed_at = await self._async_catalog_state()
-        return resolve_block_ids(history[slot], fub_base)
+        return resolve_block_ids(stored, fub_base)
+
+    def _stored_snapshot(self, kind: str, fub_id: int, plan_name: str, slot: int) -> dict[str, Any] | None:
+        data = self._auto_data if kind == "auto" else self._change_data
+        history = data.get(str(fub_id), {}).get(plan_name, [])
+        return history[slot] if 0 <= slot < len(history) else None
+
+    def block_check_sync(self, kind: str, fub_id: int, plan_name: str, slot: int) -> dict[str, Any] | None:
+        """function_plan_block_keys.block_check of a stored snapshot, from the caches (for the backup selector).
+
+        None when the snapshot's block ids are exact, or when it is not cached. The selector's
+        attributes are read on every state write — each webhook push — so the last result is kept
+        while the snapshot, its key source and the catalog object are the same (a catalog update
+        replaces the fub_base dict; holding both references keeps their identity unambiguous).
+        """
+        if (stored := self._stored_snapshot(kind, fub_id, plan_name, slot)) is None:
+            return None
+        fub_base = self._catalog.fub_base_sync() if self._catalog is not None else {}
+        source = stored.get(SNAPSHOT_KEYS_SOURCE)
+        memo = self._block_check_memo
+        if memo is not None and memo[0] is stored and memo[1] is fub_base and memo[2] == source:
+            return memo[3]
+        check = block_check(resolve_block_ids(stored, fub_base))
+        self._block_check_memo = (stored, fub_base, source, check)
+        return check

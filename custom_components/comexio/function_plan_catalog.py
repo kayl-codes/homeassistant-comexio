@@ -465,6 +465,14 @@ class FunctionPlanCatalogManager:
         changed_at = self._data.get("fub_base_changed_at") or self._data.get("fetched_at")
         return (fub_base if isinstance(fub_base, dict) else {}), changed_at
 
+    def fub_base_sync(self) -> dict[str, Any]:
+        """async_get_fub_base's fub_base from the cache, for state attributes that cannot await.
+
+        A verified poll has loaded the cache, so nothing is lost by not awaiting the load here.
+        """
+        fub_base = self._data.get("fub_base") if self._fub_base_verified else None
+        return fub_base if isinstance(fub_base, dict) else {}
+
     async def async_get_catalog(self) -> dict[str, Any]:
         """Return a copy of the cached catalog (for future consumers: analyses, rebuild).
 

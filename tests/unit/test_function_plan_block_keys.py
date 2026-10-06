@@ -11,11 +11,18 @@ from aiocomexio.function_plan import plan_hash
 from aiocomexio.reference_catalog import fub_base_key
 import pytest
 
-from custom_components.comexio import function_plan_backup as backup_module, function_plan_catalog as catalog_module
+from custom_components.comexio import (
+    function_plan_backup as backup_module,
+    function_plan_catalog as catalog_module,
+    select as select_module,
+)
 from custom_components.comexio.const import DOMAIN
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
 from custom_components.comexio.function_plan_block_keys import (
     BLOCK_IDS_UNCHECKED,
+    CHECK_PLAUSIBLE,
+    CHECK_UNRESOLVED,
+    CHECK_UNVERIFIED,
     REASON_AMBIGUOUS,
     REASON_MISSING,
     REASON_NO_KEY,
@@ -29,7 +36,9 @@ from custom_components.comexio.function_plan_block_keys import (
     UNCHECKED_NO_KEYS,
     UNRESOLVED_BLOCKS,
     UNRESOLVED_REF_PREFIX,
+    UNVERIFIED_BLOCK_PROBLEMS,
     backfill_block_keys,
+    block_check,
     block_ids_changed,
     capture_block_keys,
     catalog_entry_key,
@@ -405,20 +414,23 @@ def test_catalog_stores_the_library_key(catalog_manager: FunctionPlanCatalogMana
 def test_a_catalog_not_verified_in_the_last_poll_is_not_offered(catalog_manager: FunctionPlanCatalogManager) -> None:
     """A kept catalog may name shifted ids: backups must neither freeze nor translate with it."""
 
-    async def run() -> list[tuple[dict[str, Any], str | None]]:
-        states = [await catalog_manager.async_get_fub_base()]  # loaded from disk, not compared yet
+    async def state() -> tuple[tuple[dict[str, Any], str | None], dict[str, Any]]:
+        return await catalog_manager.async_get_fub_base(), catalog_manager.fub_base_sync()
+
+    async def run() -> list[tuple[tuple[dict[str, Any], str | None], dict[str, Any]]]:
+        states = [await state()]  # loaded from disk, not compared yet
         await _update(catalog_manager, _raw_config({"or": "5", "not": "23"}), 1)
-        states.append(await catalog_manager.async_get_fub_base())
+        states.append(await state())
         await _update(catalog_manager, _raw_config({"or": "5"}), 2)  # shrink-guarded: catalog kept
-        states.append(await catalog_manager.async_get_fub_base())
+        states.append(await state())
         await _update(catalog_manager, {}, 3)  # admin page without the Fub* vars
-        states.append(await catalog_manager.async_get_fub_base())
+        states.append(await state())
         return states
 
     before, verified, shrunk, missing = asyncio.run(run())
 
-    assert before == shrunk == missing == ({}, None)
-    assert set(verified[0]) == {"5", "23"}
+    assert before == shrunk == missing == (({}, None), {})
+    assert set(verified[0][0]) == set(verified[1]) == {"5", "23"}
 
 
 # ---------------------------------------------------------------------------
@@ -589,3 +601,246 @@ def test_the_service_reads_the_opt_in(accept: bool, proceeds: bool) -> None:
 
     # login is mocked to fail, so a restore that passed the block check stops right there.
     assert api.login.await_count == int(proceeds)
+
+
+def test_an_unverified_restore_names_the_blocks() -> None:
+    unverified = {
+        SNAPSHOT_KEYS_SOURCE: SOURCE_BACKFILLED_UNVERIFIED,
+        UNVERIFIED_BLOCK_PROBLEMS: ["element 7: no wire to check the block against"],
+    }
+
+    error = backup_service._block_ids_restore_error(unverified, False)
+
+    assert error is not None
+    assert "- element 7: no wire to check the block against" in error
+    assert "accept_unverified_blocks: true" in error
+
+
+# ---------------------------------------------------------------------------
+# block_check: what the plan card's restore dialog explains
+# ---------------------------------------------------------------------------
+
+
+def test_an_unverified_snapshot_is_read_with_its_problems(snapshot: dict[str, Any]) -> None:
+    del snapshot["connections"]["13"]  # the Nicht's only wire
+    snapshot[SNAPSHOT_KEYS_SOURCE] = SOURCE_BACKFILLED_UNVERIFIED
+
+    resolved = resolve_block_ids(snapshot, FUB_BASE)
+
+    check = block_check(resolved)
+    assert check is not None
+    assert check["status"] == CHECK_UNVERIFIED
+    assert "element 7: no wire to check the block against" in check["problems"]
+    assert UNVERIFIED_BLOCK_PROBLEMS not in snapshot  # the stored snapshot stays untouched
+    assert resolved["hash"] == snapshot["hash"]  # no id moved
+
+
+def test_an_unverified_snapshot_is_checked_with_todays_ids(snapshot: dict[str, Any]) -> None:
+    snapshot[SNAPSHOT_KEYS_SOURCE] = SOURCE_BACKFILLED_UNVERIFIED
+    snapshot["connections"]["90"] = _wire((2, 0), (7, 1))  # one input too many for the Nicht
+
+    resolved = resolve_block_ids(snapshot, SHIFTED)
+
+    assert _ref_id(resolved, "7") == 24
+    assert resolved[UNVERIFIED_BLOCK_PROBLEMS] == implausible_block_wiring(
+        resolved["elements"], snapshot["connections"], SHIFTED
+    )
+    assert any("input 1 beyond the not block's inputs" in p for p in resolved[UNVERIFIED_BLOCK_PROBLEMS])
+    assert resolved["hash"] == plan_hash(resolved)
+
+
+@pytest.mark.parametrize(
+    ("snapshot_fields", "expected"),
+    [
+        ({SNAPSHOT_KEYS_SOURCE: SOURCE_CAPTURED}, None),
+        ({SNAPSHOT_KEYS_SOURCE: SOURCE_BACKFILLED}, None),
+        ({SNAPSHOT_KEYS_SOURCE: SOURCE_BACKFILLED_PLAUSIBLE}, {"status": CHECK_PLAUSIBLE, "problems": []}),
+        (
+            {UNRESOLVED_BLOCKS: [MISSING_BLOCK, NO_KEY_BLOCK]},
+            {
+                "status": CHECK_UNRESOLVED,
+                "problems": [
+                    "element 7: block id 23 (not/d/d): no block of this kind exists on Comexio today "
+                    "(app or firmware removed it?)"
+                ],
+            },
+        ),
+        (
+            {UNRESOLVED_BLOCKS: [NO_KEY_BLOCK]},
+            {
+                "status": CHECK_UNVERIFIED,
+                "problems": [
+                    "element 7: block id 23 (no key): the block was unknown to the block catalog when the "
+                    "backup was taken"
+                ],
+            },
+        ),
+        (
+            {BLOCK_IDS_UNCHECKED: UNCHECKED_NO_CATALOG},
+            {
+                "status": CHECK_UNVERIFIED,
+                "problems": ["Comexio's block catalog could not be verified in the last poll"],
+            },
+        ),
+        (
+            # A plausible backup is unverified while it cannot be checked at all.
+            {SNAPSHOT_KEYS_SOURCE: SOURCE_BACKFILLED_PLAUSIBLE, BLOCK_IDS_UNCHECKED: UNCHECKED_NO_KEYS},
+            {
+                "status": CHECK_UNVERIFIED,
+                "problems": ["the block ids of this backup have not been checked yet (wait for the next backup cycle)"],
+            },
+        ),
+        (
+            {UNRESOLVED_BLOCKS: [{**MISSING_BLOCK, "reason": REASON_AMBIGUOUS}]},
+            {
+                "status": CHECK_UNRESOLVED,
+                "problems": ["element 7: block id 23 (not/d/d): several blocks on Comexio today match it"],
+            },
+        ),
+        (
+            # Today's catalog finds nothing wrong any more: the backfill verdict still needs a reason.
+            {SNAPSHOT_KEYS_SOURCE: SOURCE_BACKFILLED_UNVERIFIED, UNVERIFIED_BLOCK_PROBLEMS: []},
+            {
+                "status": CHECK_UNVERIFIED,
+                "problems": ["the wiring of this backup did not fit the blocks when its block ids were derived"],
+            },
+        ),
+    ],
+    ids=[
+        "captured",
+        "backfilled",
+        "plausible",
+        "unresolved",
+        "no key",
+        "no catalog",
+        "plausible but unchecked",
+        "ambiguous",
+        "unverified without problems",
+    ],
+)
+def test_block_check_tells_how_far_the_block_ids_can_be_trusted(
+    snapshot_fields: dict[str, Any], expected: dict[str, Any] | None
+) -> None:
+    assert block_check({"elements": {}, **snapshot_fields}) == expected
+
+
+def test_the_backup_selector_reads_the_check_from_the_caches(stores: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    unverified = {**copy.deepcopy(snapshot), SNAPSHOT_KEYS_SOURCE: SOURCE_BACKFILLED_UNVERIFIED}
+    del unverified["connections"]["13"]
+    stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"] = {"1": {"Lights": [unverified, snapshot]}}
+    catalog = SimpleNamespace(fub_base_sync=MagicMock(return_value=FUB_BASE))
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, catalog)
+    asyncio.run(manager._async_ensure_loaded())
+
+    check = manager.block_check_sync("auto", 1, "Lights", 0)
+
+    assert check is not None
+    assert check["status"] == CHECK_UNVERIFIED
+    assert manager.block_check_sync("auto", 1, "Lights", 1) is None  # captured: exact
+    assert manager.block_check_sync("auto", 1, "Lights", 2) is None  # no such slot
+    catalog.fub_base_sync.return_value = {}  # no verified catalog right now
+    assert manager.block_check_sync("auto", 1, "Lights", 1) == {
+        "status": CHECK_UNVERIFIED,
+        "problems": ["Comexio's block catalog could not be verified in the last poll"],
+    }
+
+
+def test_the_backup_selector_check_is_computed_once_per_state(stores: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """The selector's attributes are read on every webhook push: the check must not be redone each time."""
+    legacy = {k: v for k, v in snapshot.items() if k not in (SNAPSHOT_KEYS, SNAPSHOT_KEYS_SOURCE)}
+    stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"] = {"1": {"Lights": [legacy]}}
+    catalog = SimpleNamespace(fub_base_sync=MagicMock(return_value=FUB_BASE))
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, catalog)
+    asyncio.run(manager._async_ensure_loaded())
+    stored = manager._stored_snapshot("auto", 1, "Lights", 0)
+    assert stored is not None
+
+    with patch.object(backup_module, "resolve_block_ids", wraps=resolve_block_ids) as resolve:
+        before_backfill = [manager.block_check_sync("auto", 1, "Lights", 0) for _ in range(3)]
+        backfill_block_keys(stored, FUB_BASE, CHANGED_AT)  # the backup cycle fills the keys in place
+        after_backfill = manager.block_check_sync("auto", 1, "Lights", 0)
+        catalog.fub_base_sync.return_value = dict(FUB_BASE)  # a catalog update replaces the dict
+        manager.block_check_sync("auto", 1, "Lights", 0)
+
+    assert resolve.call_count == 3
+    assert before_backfill[0] is not None
+    assert before_backfill == [before_backfill[0]] * 3
+    assert before_backfill[0]["status"] == CHECK_UNVERIFIED  # not backfilled yet
+    assert after_backfill is None  # captured after the last id change: exact
+
+
+@pytest.mark.parametrize(
+    ("snapshot_fields", "accept", "warning"),
+    [
+        ({SNAPSHOT_KEYS_SOURCE: SOURCE_BACKFILLED_UNVERIFIED}, True, "restoring unverified block ids (accepted)"),
+        ({SNAPSHOT_KEYS_SOURCE: SOURCE_BACKFILLED_PLAUSIBLE}, False, "block ids derived from today's catalog"),
+        ({SNAPSHOT_KEYS_SOURCE: SOURCE_CAPTURED}, True, None),
+    ],
+    ids=["accepted unverified", "plausible", "captured"],
+)
+def test_a_restore_on_inexact_block_ids_leaves_a_warning(
+    caplog: pytest.LogCaptureFixture, snapshot_fields: dict[str, Any], accept: bool, warning: str | None
+) -> None:
+    with caplog.at_level("WARNING", logger=backup_service.__name__):
+        backup_service._log_block_ids_trust({"elements": {}, **snapshot_fields}, "Kitch", accept)
+
+    messages = [record.getMessage() for record in caplog.records]
+    if warning is None:
+        assert messages == []
+    else:
+        assert len(messages) == 1
+        assert warning in messages[0]
+
+
+AUTO_ENTRY = {"kind": "auto", "slot": 1, "captured_at": "2026-09-10T08:00:00+00:00"}
+CHANGE_ENTRY = {"kind": "change", "slot": 1, "captured_at": "2026-09-11T08:00:00+00:00", "operation": "sort"}
+
+
+def _backup_selector(selected: str, orphan_view: bool, block_check_sync: MagicMock) -> Any:
+    entity = select_module.ComexioPlanBackupSelectEntity.__new__(select_module.ComexioPlanBackupSelectEntity)
+    entity._selected = selected
+    entity._last_orphan = None
+    entity._orphan_plans = []
+    orphan_row = ("Old (ID 9) — 1 backups", {"fub_id": 9, "plan_name": "Old", "kind": "change", "slot": 0})
+    entity.coordinator = SimpleNamespace(
+        _restore_lock=asyncio.Lock(),
+        orphaned_plans_view_active=lambda: orphan_view,
+        orphaned_backup_options=lambda: [orphan_row] if selected != "none" else [],
+        orphaned_backup_choice=lambda label: orphan_row[1] if label == orphan_row[0] else None,
+        get_active_function_plan_fub_id=lambda: 1,
+        api=SimpleNamespace(fub_data={"1": {"Name": "Lights"}}),
+        function_plan_backup=SimpleNamespace(
+            plan_backups_for_identity_sync=lambda _fub_id, _name: [AUTO_ENTRY, CHANGE_ENTRY],
+            block_check_sync=block_check_sync,
+        ),
+    )
+    return entity
+
+
+@pytest.mark.parametrize(
+    ("orphan_view", "pick_backup", "expected_call"),
+    [
+        (False, True, ("change", 1, "Lights", 1)),
+        (False, False, None),  # Live: nothing to restore
+        (True, True, ("change", 9, "Old", 0)),
+        (True, False, None),  # deleted-plans view without a chosen row
+    ],
+    ids=["plan backup", "live", "deleted plan", "deleted plans view, nothing chosen"],
+)
+def test_the_backup_selector_shows_the_chosen_backups_check(
+    orphan_view: bool, pick_backup: bool, expected_call: tuple | None
+) -> None:
+    check = {"status": CHECK_UNVERIFIED, "problems": []}
+    block_check_sync = MagicMock(return_value=check)
+    label = "Old (ID 9) — 1 backups" if orphan_view else backup_module.format_backup_label(CHANGE_ENTRY)
+    unpicked = "none" if orphan_view else select_module.LIVE_BACKUP_OPTION
+    entity = _backup_selector(label if pick_backup else unpicked, orphan_view, block_check_sync)
+
+    attrs = entity.extra_state_attributes
+
+    if expected_call is None:
+        assert attrs["block_check"] is None
+        block_check_sync.assert_not_called()
+    else:
+        assert attrs["block_check"] == check
+        block_check_sync.assert_called_once_with(*expected_call)

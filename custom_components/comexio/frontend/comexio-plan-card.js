@@ -34,7 +34,7 @@ import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-pl
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.46";
+const CARD_VERSION = "0.9.47";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -600,6 +600,18 @@ class ComexioPlanCard extends HTMLElement {
           background: var(--card-background-color, #fff); color: var(--primary-text-color, inherit); font: inherit;
         }
         .restore-dialog .restore-copy-name[hidden] { display: none; }
+        .restore-dialog .restore-block-hint {
+          margin: 0 0 12px 0; padding: 8px 10px; border-radius: 6px; line-height: 1.4;
+          border-left: 4px solid var(--warning-color, #ffa600);
+          background: rgba(255, 166, 0, 0.12);
+        }
+        .restore-dialog .restore-block-hint.blocked {
+          border-left-color: var(--error-color, #c62828); background: rgba(198, 40, 40, 0.12);
+        }
+        .restore-dialog .restore-block-hint[hidden] { display: none; }
+        .restore-dialog .restore-block-hint details { margin-top: 6px; font-size: 0.9em; }
+        .restore-dialog .restore-block-hint ul { margin: 4px 0 0 0; padding-left: 18px; }
+        .restore-dialog .restore-confirm:disabled { opacity: 0.4; cursor: default; }
         .restore-dialog .restore-actions { display: flex; justify-content: flex-end; gap: 8px; }
         .restore-dialog button {
           padding: 6px 14px; border-radius: 6px; border: 1px solid var(--divider-color, #888);
@@ -686,6 +698,7 @@ class ComexioPlanCard extends HTMLElement {
       <dialog class="restore-dialog">
         <h3>Backup wiederherstellen?</h3>
         <p class="restore-text"></p>
+        <div class="restore-block-hint" hidden></div>
         <label class="restore-option">
           <input type="checkbox" class="restore-as-copy">
           <span class="restore-as-copy-text"></span>
@@ -726,6 +739,8 @@ class ComexioPlanCard extends HTMLElement {
     this._restoreAsCopyTextEl = root.querySelector(".restore-as-copy-text");
     this._restoreCopyNameEl = root.querySelector(".restore-copy-name");
     this._restoreAutoStartEl = root.querySelector(".restore-auto-start");
+    this._restoreBlockHintEl = root.querySelector(".restore-block-hint");
+    this._restoreConfirmBtn = this._restoreDialog.querySelector(".restore-confirm");
     this._restoreAsCopyEl.addEventListener("change", () => {
       this._restoreCopyNameEl.hidden = !this._restoreAsCopyEl.checked;
       if (this._restoreAsCopyEl.checked) {
@@ -733,7 +748,7 @@ class ComexioPlanCard extends HTMLElement {
       }
     });
     root.querySelector(".restore-cancel").addEventListener("click", () => this._restoreDialog.close());
-    this._restoreDialog.querySelector(".restore-confirm").addEventListener("click", () => this._confirmRestore());
+    this._restoreConfirmBtn.addEventListener("click", () => this._confirmRestore());
     this._restoreDialog.addEventListener("click", (ev) => {
       if (ev.target === this._restoreDialog) {
         this._restoreDialog.close();
@@ -1493,7 +1508,66 @@ class ComexioPlanCard extends HTMLElement {
     // A deleted plan comes back stopped unless the user ticks auto-start; a live plan's restore
     // keeps starting it by default.
     this._restoreAutoStartEl.checked = !this._restoreOrphan;
+    this._restoreOpenedLabel = this._restoreLabel;
+    this._showBlockCheck(this._currentBlockCheck());
     this._restoreDialog.showModal();
+  }
+
+  _currentBlockCheck() {
+    return this._hass.states[this._config.backup_entity]?.attributes?.block_check ?? null;
+  }
+
+  // Explains in the restore dialog how far the chosen backup's logic blocks can be trusted
+  // (backup selector attribute block_check, see function_plan_block_keys.block_check). Comexio
+  // numbers its logic blocks in installation order, so an app install or a firmware update can
+  // shift them. Only "unresolved" stops the restore; the others are restored with a hint, the
+  // service's accept_unverified_blocks opt-in is sent by _confirmRestore.
+  _showBlockCheck(check) {
+    const texts = {
+      unresolved:
+        "Dieses Backup enthält Logikbausteine, die es auf dem Comexio heute nicht mehr eindeutig gibt " +
+        "(z. B. nach dem Entfernen einer App oder einem Firmware-Update). Ein Restore würde falsche " +
+        "Bausteine einsetzen und ist deshalb nicht möglich.",
+      unverified:
+        "Einige Logikbausteine dieses Backups lassen sich nicht sicher gegen die heutigen Bausteine des " +
+        "Comexio prüfen (deren Nummern können sich durch App-Installationen oder Firmware-Updates " +
+        "verschieben). Sie werden so übernommen, wie sie gespeichert sind — bitte den wiederhergestellten " +
+        "Plan danach kurz prüfen.",
+      plausible:
+        "Die Logikbausteine dieses älteren Backups wurden anhand ihrer Verdrahtung den heutigen Bausteinen " +
+        "zugeordnet — bitte den wiederhergestellten Plan danach kurz prüfen.",
+    };
+    let text = texts[check?.status];
+    if (check && !text) {
+      // A status this card version does not know: warn rather than restore without a word.
+      console.warn("comexio-plan-card: unknown block_check status", check.status);
+      text = texts.unverified;
+    }
+    this._restoreShownCheck = check;
+    const blocked = check?.status === "unresolved";
+    this._restoreBlockHintEl.hidden = !text;
+    this._restoreBlockHintEl.classList.toggle("blocked", blocked);
+    this._restoreConfirmBtn.disabled = blocked;
+    // textContent only — the problem lines name elements and blocks from the backup.
+    const parts = [];
+    if (text) {
+      parts.push(document.createTextNode(text));
+    }
+    const problems = Array.isArray(check?.problems) ? check.problems : [];
+    if (text && problems.length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = `Betroffene Elemente (${problems.length})`;
+      const list = document.createElement("ul");
+      for (const line of problems) {
+        const item = document.createElement("li");
+        item.textContent = line;
+        list.append(item);
+      }
+      details.append(summary, list);
+      parts.push(details);
+    }
+    this._restoreBlockHintEl.replaceChildren(...parts);
   }
 
   async _confirmRestore() {
@@ -1506,6 +1580,18 @@ class ComexioPlanCard extends HTMLElement {
       this._restoreCopyNameEl.focus();
       return;
     }
+    // The dialog explains the backup it was opened for. Should a poll have changed the chosen
+    // backup (slots rotate) or its block check meanwhile, show the current state instead of
+    // restoring something the user was not told about.
+    if (
+      this._restoreLabel !== this._restoreOpenedLabel ||
+      JSON.stringify(this._currentBlockCheck()) !== JSON.stringify(this._restoreShownCheck)
+    ) {
+      this._restoreDialog.close();
+      this._openRestoreDialog();
+      return;
+    }
+    const acceptUnverified = this._restoreShownCheck?.status === "unverified";
     this._restoreDialog.close();
     this._restoreBtn.disabled = true;
     const orphan = this._restoreOrphan;
@@ -1533,6 +1619,11 @@ class ComexioPlanCard extends HTMLElement {
     if (asCopy) {
       data.as_copy = true;
       data.new_plan_name = newPlanName;
+    }
+    // The user has this backup in the preview and the dialog named its unverifiable blocks:
+    // confirming is the opt-in. Blocks without a unique counterpart are still refused.
+    if (acceptUnverified) {
+      data.accept_unverified_blocks = true;
     }
     try {
       await this._hass.callService("comexio", "function_plan_restore", data);
