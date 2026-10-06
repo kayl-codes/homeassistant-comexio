@@ -2295,7 +2295,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "[%s] Plan preview cache commit skipped: cache generation changed while rendering",
                 self.server_id,
             )
-        self.async_set_updated_data(self.data)
+        # Not async_set_updated_data: a live preview re-renders every few seconds and would keep
+        # postponing the periodic poll, like the webhook pushes (see _async_publish_pushed_value).
+        self.async_update_listeners()
         return url
 
     def snapshot_block_settings_for_source(
@@ -2444,7 +2446,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("[%s] Orphaned plan preview skipped: a newer preview was armed meanwhile", self.server_id)
             return None
         url = await self._async_publish_plan_preview(fub_id, plan_name, f"orphan:{kind}:{slot}", svg_content)
-        self.async_set_updated_data(self.data)
+        self.async_update_listeners()
         return url
 
     def _armed_snapshot_live_id_map(self, fub_id: int, source: str) -> dict[str, str] | None:
@@ -2886,6 +2888,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             },
         )
 
+    @callback
+    def _async_publish_pushed_value(self) -> None:
+        """Notify listeners of a pushed value already merged into self.data in place (#122).
+
+        Pushed means a webhook push or an optimistic update after a confirmed api.set_value —
+        both prove the server reachable, so no unconfirmed path may call this.
+
+        Deliberately does NOT call async_set_updated_data: that cancels and reschedules the
+        update_interval refresh (and drops a pending debounced refresh) on every call, so at a
+        webhook cadence below scan_interval the periodic poll — the safety net for missed pushes
+        and the audits — would never run. last_update_success = True keeps what
+        async_set_updated_data did: a push makes the entities available again after a failed poll.
+        """
+        self.last_update_success = True
+        self.async_update_listeners()
+
     def update_marker(self, marker_id: str | int, value: float | int | str) -> None:
         marker_id_str = str(marker_id)
         previous = self.marker_states.get(marker_id_str)
@@ -2899,7 +2917,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     label = m.get("name") or label
                     break
         _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "marker", label, value, previous)
-        self.async_set_updated_data(self.data)
+        self._async_publish_pushed_value()
         self._fire_plan_event("marker", marker_id_str, label, value)
         self.schedule_plan_preview_refresh()
 
@@ -2916,7 +2934,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     label = k.get("name") or label
                     break
         _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "knx", label, value, previous)
-        self.async_set_updated_data(self.data)
+        self._async_publish_pushed_value()
         self._fire_plan_event("knx", knx_id_str, label, value)
         self.schedule_plan_preview_refresh()
 
@@ -2940,7 +2958,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._fire_plan_event("io", str(io["id"]), label, value)
         else:
             _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, ext_name, identifier, value)
-        self.async_set_updated_data(self.data)
+        self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
     async def async_load_extension_firmware(self) -> None:
