@@ -648,25 +648,41 @@ async def _restore_block_settings(
         "unmapped": [],
         "live_only": {},
     }
-    if wanted is None or (not wanted and id_map is not None):
+    if wanted is None:
         return result
     if id_map is None:
-        if not live_plan:
-            if not wanted:
-                return result
-            result["error"] = "the plan could not be reloaded to match its elements"
-            _LOGGER.warning(
-                "Function Plan Restore: block settings of plan %s not restored — %s", fub_id, result["error"]
-            )
-            return result
-        id_map = map_restored_elements(snapshot.get("elements") or {}, live_plan.get("elements") or {})
-        result["live_only"] = live_only_settings(wanted, id_map, api.block_settings or {})
+        id_map = _match_in_place(api, fub_id, snapshot, wanted, live_plan, result)
+    if id_map is None:
+        return result
     writes, result["unmapped"] = settings_to_write(wanted, id_map)
     for elem_id, settings in writes.items():
         if await api.function_plan_save_block_settings(elem_id, settings):
             result["written"] += len(settings)
         else:
             result["failed"].append(elem_id)
+    _log_block_settings_gaps(fub_id, result)
+    return result
+
+
+def _match_in_place(
+    api, fub_id: int, snapshot: dict, wanted: Mapping[str, Any], live_plan: Mapping[str, Any] | None, result: dict
+) -> dict[str, str] | None:
+    """{snapshot element id: live element id} for a restore onto an existing plan; fills result's
+    live_only, or error when there is no reloaded plan for settings that need one (then None)."""
+    if not live_plan:
+        if wanted:
+            result["error"] = "the plan could not be reloaded to match its elements"
+            _LOGGER.warning(
+                "Function Plan Restore: block settings of plan %s not restored — %s", fub_id, result["error"]
+            )
+        return None
+    id_map = map_restored_elements(snapshot.get("elements") or {}, live_plan.get("elements") or {})
+    result["live_only"] = live_only_settings(wanted, id_map, api.block_settings or {})
+    return id_map
+
+
+def _log_block_settings_gaps(fub_id: int, result: dict[str, Any]) -> None:
+    """Log the stored settings that found no element and the live ones the restore could not remove."""
     if result["unmapped"]:
         _LOGGER.warning(
             "Function Plan Restore: block settings of snapshot element(s) %s of plan %s have no restored element",
@@ -679,7 +695,6 @@ async def _restore_block_settings(
             fub_id,
             result["live_only"],
         )
-    return result
 
 
 def _block_settings_line(result: dict[str, Any]) -> str:
