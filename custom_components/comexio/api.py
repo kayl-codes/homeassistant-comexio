@@ -65,6 +65,7 @@ from .const import (
     is_valid_entity_name_schema,
     knx_loopback_command_name,
 )
+from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
@@ -74,6 +75,8 @@ _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
 _PLAN_PAPER_FALLBACK = "A4"
 # Comexio's answer (as quoted in aiocomexio's refusal message) for a plan that is not running.
 _PLAN_NOT_RUNNING_ANSWER = "0:not_found"
+# Comexio's editor action that stores block settings ($FubBaseConfig rows) of one element.
+_BLOCK_SETTINGS_SAVE_PATH = "/admin/function_function_module/savefubbaseconfig/"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -494,6 +497,10 @@ class ComexioAPI:
 
         # Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
         self.comexio_version: str | None = None
+        # Block settings of every plan element ($FubBaseConfig, see function_plan_block_settings)
+        # from the last config fetch; None when that fetch did not carry a readable table, so a
+        # backup then stores none rather than an ever older copy.
+        self.block_settings: BlockSettings | None = None
         # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
         # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
         self.reference_check: ReferenceCheck | None = None
@@ -806,6 +813,10 @@ class ComexioAPI:
         self.io_input_types = raw.io_input_types
         if raw.comexio_version:
             self.comexio_version = raw.comexio_version
+        block_settings = parse_block_settings(raw.variables.get("FubBaseConfig"))
+        if block_settings is None and self.block_settings is not None:
+            _LOGGER.warning("Comexio's config page no longer carries $FubBaseConfig — block settings are not backed up")
+        self.block_settings = block_settings
         if isinstance(fubs := raw.variables.get("Fubs"), dict):
             self._fetch_marks.append((fubs, run_state_mark))
         return raw.variables
@@ -1584,6 +1595,24 @@ class ComexioAPI:
             ),
             transport_raises=True,
         )
+
+    async def function_plan_save_block_settings(self, element_id: int | str, settings: Mapping[str, str]) -> bool:
+        """Write block settings of one element ($FubBaseConfig) the way Comexio's editor saves them.
+
+        True once Comexio answers {"saved": 1}; False (after a warning) for a refusal or any
+        other answer. A transport failure raises aiohttp.ClientError / TimeoutError.
+        """
+        what = f"Saving block settings {sorted(settings)} of function plan element {element_id}"
+
+        async def save() -> None:
+            form = block_settings_form(element_id, settings, time.strftime("%a %b %d %Y %H:%M:%S GMT%z"))
+            # aiocomexio 0.4.0 has no request for this editor action yet; _plan_json is its
+            # generic editor POST (XHR headers, JSON object answer, ComexioError mapping).
+            answer = await self.client._plan_json(_BLOCK_SETTINGS_SAVE_PATH, form, what=what)
+            if str(answer.get("saved")) != "1":
+                raise ComexioRequestRejectedError(f"{what} was not confirmed: {answer!r:.200}")
+
+        return await _succeeded(what, save, transport_raises=True)
 
     async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:
         """Delete elements from a function plan (removes elements + their connections).
@@ -4349,7 +4378,7 @@ class ComexioAPI:
 
     async def function_plan_rebuild_plan_from_snapshot(
         self, fub_id: int, snapshot: dict[str, Any]
-    ) -> tuple[int, int, list[str]]:
+    ) -> tuple[dict[str, int], int, list[str]]:
         """Recreate every element and connection from a snapshot on a freshly created (empty) plan.
 
         Snapshot element IDs are plan-local and meaningless on a new plan: pass 1 (re)creates
@@ -4359,7 +4388,8 @@ class ComexioAPI:
         function_plan_catalog.py for why Constants need special handling: their value lives
         in the element's own "name" field, ref_id is always 0).
 
-        Returns (elements_created, connections_created, warnings).
+        Returns ({snapshot element id: new element id} of every re-created element,
+        connections_created, warnings).
         """
         elements = snapshot.get("elements", {})
         connections = snapshot.get("connections", {})
@@ -4378,7 +4408,7 @@ class ComexioAPI:
             connections_created,
             len(warnings),
         )
-        return len(id_map), connections_created, warnings
+        return id_map, connections_created, warnings
 
     async def _rebuild_all_elements(self, fub_id: int, elements: dict[str, Any]) -> tuple[dict[str, int], list[str]]:
         """(Re)create every snapshot element on a fresh plan. Returns ({old_id: new_id}, warnings)."""

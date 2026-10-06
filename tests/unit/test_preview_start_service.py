@@ -249,6 +249,7 @@ def _armed_cache(fub_id: int) -> dict:
         "connections": {},
         "snapshot_source": None,
         "label_metadata": None,
+        "block_settings": None,
     }
 
 

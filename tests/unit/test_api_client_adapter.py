@@ -267,6 +267,51 @@ def test_get_raw_config_keeps_io_types_and_version(comexio_api: ComexioAPI, clie
     )
 
 
+def test_get_raw_config_keeps_block_settings_only_as_fresh_as_the_last_fetch(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    row = {"FubElementId": 4, "Name": "autohide", "Value": "1"}
+    fetches = [{"FubBaseConfig": {"1": row}}, {"FubBaseConfig": []}, {"FubBaseConfig": {"1": row}}, {}]
+    client.get_raw_config = AsyncMock(side_effect=[RawConfig(v, {}, {}, None) for v in fetches])
+
+    seen = []
+    for _ in fetches:
+        asyncio.run(comexio_api.get_raw_config())
+        seen.append(comexio_api.block_settings)
+
+    # An empty table is "no settings"; a page without it must not leave an ever older copy behind.
+    assert seen == [{"4": {"autohide": "1"}}, {}, {"4": {"autohide": "1"}}, None]
+    assert "no longer carries $FubBaseConfig" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("answer", "saved"), [({"saved": 1}, True), ({"saved": "1"}, True), ({"saved": 0}, False), ({}, False)]
+)
+def test_save_block_settings_needs_the_saved_confirmation(
+    comexio_api: ComexioAPI, client: MagicMock, answer: dict[str, Any], saved: bool
+) -> None:
+    client._plan_json = AsyncMock(return_value=answer)
+
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is saved
+    path, form = client._plan_json.await_args.args
+    assert path == "/admin/function_function_module/savefubbaseconfig/"
+    assert (form["id"], form["element_in_0"]) == ("104", "26")
+    assert form["timestamp"]
+
+
+def test_save_block_settings_maps_a_refusal_but_raises_a_transport_error(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    _fail(client, "_plan_json", ComexioRequestRejectedError("no"))
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is False
+
+    # The restores catch transport errors to replace their "in progress" notification.
+    _fail(client, "_plan_json", _connection_error())
+    save = comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})
+    with pytest.raises(aiohttp.ClientError):
+        asyncio.run(save)
+
+
 def test_get_live_states_failure_is_none_not_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
     _fail(client, "get_live_states", _connection_error())
     assert asyncio.run(comexio_api.get_live_states(5, 2)) == (None, None)

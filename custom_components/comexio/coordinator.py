@@ -158,6 +158,7 @@ from .const import (
     webio_class_name,
 )
 from .function_plan_backup import FunctionPlanBackupManager, build_orphaned_backup_options, retention_cutoff
+from .function_plan_block_settings import expand_autohide_blocks, snapshot_block_settings
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .ha_address import HaAddressResolver, webio_device_hint
 from .orphaned_backups import async_audit_orphaned_backups
@@ -1581,6 +1582,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     markers_by_id,
                     webio_by_id,
                     ios_by_id,
+                    self.api.block_settings,
                 )
                 await self._async_refresh_service_descriptions()
             except Exception:
@@ -1667,6 +1669,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 markers_by_id,
                 webio_by_id,
                 ios_by_id,
+                self.api.block_settings,
             )
             await self._async_refresh_service_descriptions()
         except Exception:
@@ -2208,6 +2211,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         connections: dict[str, Any],
         source: str,
         label_metadata: dict[str, dict[str, str]] | None = None,
+        block_settings: Mapping[str, Mapping[str, str]] | None = None,
     ) -> str:
         """Render elements/connections (live plan or backup snapshot) to a preview SVG file.
 
@@ -2226,6 +2230,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         aiocomexio.function_plan.referenced_label_metadata) — when given, overlaid onto the live
         label maps so a historical snapshot shows the names it had at capture time rather
         than today's (possibly since-renamed) live names. None for a live render.
+
+        block_settings: a snapshot's stored block settings (snapshot_block_settings), whose
+        extended views the render shows; a live render always uses the last polled ones.
+        Kept in the preview cache with the frozen elements, so a re-render never picks up
+        another backup's settings after the slots rotated.
         """
         cache_generation_before = self._preview_cache_generation
         markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(label_metadata)
@@ -2242,10 +2251,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if plan_switched:
             self._connection_values = {}
         connection_values, live_id_map = await self._resolve_preview_connection_values(fub_id, elements, source)
+        if source == "live":
+            block_settings = self.api.block_settings
+        render_elements, render_catalog = expand_autohide_blocks(elements, catalog, block_settings)
         svg_content = render_plan_svg(
-            elements,
+            render_elements,
             connections,
-            catalog,
+            render_catalog,
             markers_by_id,
             webio_by_id,
             ios_by_id,
@@ -2276,7 +2288,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 kind, slot = _parse_snapshot_source(source)
                 self._update_snapshot_preview_cache(
-                    fub_id, plan_name, elements, connections, kind, slot, label_metadata, live_id_map
+                    fub_id, plan_name, elements, connections, kind, slot, label_metadata, block_settings, live_id_map
                 )
         else:
             _LOGGER.debug(
@@ -2285,6 +2297,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         self.async_set_updated_data(self.data)
         return url
+
+    def snapshot_block_settings_for_source(
+        self, fub_id: int, plan_name: str, source: str
+    ) -> Mapping[str, Mapping[str, str]] | None:
+        """The stored block settings of a 'snapshot:<kind>:<slot>' preview source; None for "live".
+
+        Only for a caller that just read that snapshot by the same slot: slots rotate with every
+        new backup, which is why a rendered preview keeps its settings in the cache instead.
+        """
+        if source == "live":
+            return None
+        kind, slot = _parse_snapshot_source(source)
+        return self.function_plan_backup.block_settings_sync(kind, fub_id, plan_name, slot)
 
     async def _async_publish_plan_preview(self, fub_id: int, plan_name: str, source: str, svg_content: str) -> str:
         """Write a rendered preview to config/www and record it as the last preview; returns its /local/ URL."""
@@ -2396,10 +2421,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(snapshot.get("labels"))
         catalog = await self.function_plan_catalog.async_get_catalog()
+        render_elements, render_catalog = expand_autohide_blocks(
+            snapshot.get("elements") or {}, catalog, snapshot_block_settings(snapshot)
+        )
         svg_content = render_plan_svg(
-            snapshot.get("elements") or {},
+            render_elements,
             snapshot.get("connections") or {},
-            catalog,
+            render_catalog,
             markers_by_id,
             webio_by_id,
             ios_by_id,
@@ -2501,6 +2529,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "knx_ids": knx_ids,
             "snapshot_source": None,
             "label_metadata": None,
+            "block_settings": None,
             "live_id_map": None,
         }
         self._preview_cache_generation += 1
@@ -2518,9 +2547,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         kind: str,
         slot: int,
         label_metadata: dict[str, dict[str, str]] | None,
+        block_settings: Mapping[str, Mapping[str, str]] | None,
         live_id_map: dict[str, str] | None,
     ) -> None:
         """Arm the preview cache for a frozen backup snapshot (wiring stays put, values stay live).
+
+        label_metadata / block_settings: the snapshot's own, frozen with its wiring.
 
         live_id_map: this snapshot's element-id -> live-plan element-id translation (see
         build_source_id_translation), reused as-is by subsequent refreshes of the SAME
@@ -2540,6 +2572,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "knx_ids": knx_ids,
             "snapshot_source": source,
             "label_metadata": label_metadata,
+            "block_settings": block_settings,
             "live_id_map": live_id_map,
         }
         self._preview_cache_generation += 1
@@ -2588,6 +2621,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 cache["connections"],
                 cache["snapshot_source"] or "live",
                 cache["label_metadata"],
+                cache["block_settings"],
             )
 
     async def _async_refresh_plan_preview(self, _now: Any) -> None:

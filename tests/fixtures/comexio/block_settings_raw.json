@@ -1,0 +1,9 @@
+{
+  "11": {"Id": 11, "FubElementId": 4, "Name": "autohide", "Value": "1"},
+  "12": {"Id": 12, "FubElementId": 4, "Name": "in_0", "Value": 26},
+  "13": {"Id": 13, "FubElementId": 7, "Name": "time_up", "Value": "45"},
+  "14": {"Id": 14, "FubElementId": 7, "Name": "time_down", "Value": "40"},
+  "15": {"Id": 15, "FubElementId": 900, "Name": "dimming_time", "Value": "3"},
+  "16": {"Id": 16, "FubElementId": 7, "Name": "mode"},
+  "17": {"Id": 17, "Name": "kelvin_min", "Value": "2700"}
+}

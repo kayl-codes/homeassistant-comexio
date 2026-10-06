@@ -33,6 +33,12 @@ from ..const import (
 from ..coordinator import ComexioCoordinator
 from ..function_plan_backup import is_orphaned_identity, retention_cutoff
 from ..function_plan_block_keys import CHECK_PLAUSIBLE, CHECK_UNRESOLVED, CHECK_UNVERIFIED, block_check
+from ..function_plan_block_settings import (
+    block_settings_diff,
+    map_restored_elements,
+    settings_to_write,
+    snapshot_block_settings,
+)
 from ..orphaned_backups import delete_all_orphaned_backup_issues, delete_orphaned_backup_issue
 from ._context import (
     _LOGIN_FAILED_MSG,
@@ -60,6 +66,8 @@ _AGE_KEYS = ("days", "hours", "minutes", "seconds")
 
 # (markers_by_id, webio_by_id, ios_by_id) as snapshot_label_maps returns them.
 _LabelMaps = tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]
+# A block setting one side of a backup diff does not have.
+_MISSING_VALUE = "—"
 
 
 def _coerce_int(value) -> int | None:
@@ -229,6 +237,23 @@ async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[di
             "ios": _label_diff_group(raw_diff["ios"], catalog, newer_maps, older_maps),
             "connections": _label_connection_diff(raw_diff["connections"], catalog, newer_maps, older_maps),
         }
+        if (settings_diff := block_settings_diff(newer, older)) is not None:
+            entry["diff"]["block_settings"] = _label_block_settings_diff(settings_diff, newer, catalog, newer_maps)
+
+
+def _label_block_settings_diff(
+    changes: list[tuple[str, str, str | None, str | None]], newer: dict, catalog: dict, newer_maps: _LabelMaps
+) -> list[str]:
+    """'<element> (#<id>): <setting> <old> → <new>' per changed block setting (— for one that was not set).
+
+    The element id tells apart two blocks of the same type, which share their label.
+    """
+    elements = newer.get("elements") or {}
+    return [
+        f"{resolve_element_label(elements[elem_id], catalog, *newer_maps)} (#{elem_id}): {name} "
+        f"{_MISSING_VALUE if old is None else old} → {_MISSING_VALUE if new is None else new}"
+        for elem_id, name, old, new in changes
+    ]
 
 
 def _split_plan_field(raw: str) -> tuple[int, str | None] | None:
@@ -360,6 +385,10 @@ async def _restore_plan_in_place(
 
         apply = await _restore_apply_snapshot(api, fub_id, snapshot, live_name, plan_name, was_active, auto_start)
         verify = await _restore_verify(api, fub_id, snapshot, plan_hash)
+        # After run_fup, on the plan the verify just reloaded: onto a different plan
+        # (force_override) run_fup reassigns the element ids, so the snapshot's elements can
+        # only be matched to the live ones now. Saving settings changes no element id.
+        apply["block_settings"] = await _restore_block_settings(api, fub_id, snapshot, live_plan=verify["plan"])
         duration = time.monotonic() - t_start
 
         # identity_was_mismatched (force_override onto a DIFFERENT plan): that plan's elements
@@ -401,7 +430,7 @@ async def _restore_plan_in_place(
         )
         _LOGGER.info(
             "Function Plan Restore result: fub=%s status=%s identity_was_mismatched=%s hash_match=%s "
-            "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s duration=%.1fs",
+            "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s block_settings=%s duration=%.1fs",
             fub_id,
             status,
             identity_was_mismatched,
@@ -411,6 +440,7 @@ async def _restore_plan_in_place(
             apply["run_ok"],
             apply["properties_changed"],
             apply["paper_ok"],
+            apply["block_settings"],
             duration,
         )
     except (aiohttp.ClientError, TimeoutError) as exc:
@@ -577,6 +607,7 @@ async def _restore_verify(api, fub_id: int, snapshot: dict, plan_hash) -> dict:
         # False when function_plan_load_elements failed post-restore (fresh is None) — a restore
         # we can't verify must never be reported as OK/PARTIAL.
         "reload_ok": fresh is not None,
+        "plan": fresh,
     }
 
 
@@ -584,11 +615,76 @@ def _restore_status(content_ok: bool, apply: dict, verify: dict) -> str:
     """Overall OK/PARTIAL/FAILED verdict for a restore (see _restore_plan_in_place)."""
     if not verify["reload_ok"]:
         return "FAILED"
-    if content_ok and apply["paper_ok"]:
+    if content_ok and apply["paper_ok"] and _block_settings_ok(apply["block_settings"]):
         return "OK"
     if apply["run_ok"] or apply["pos_ok"] or apply["paper_ok"] or verify["counts_match"]:
         return "PARTIAL"
     return "FAILED"
+
+
+async def _restore_block_settings(
+    api,
+    fub_id: int,
+    snapshot: dict,
+    id_map: Mapping[str, Any] | None = None,
+    live_plan: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write the snapshot's block settings ($FubBaseConfig) onto the restored plan's elements.
+
+    id_map: {snapshot element id: new element id} of a plan the restore rebuilt. Without it
+    (a restore onto an existing plan) the elements are matched against live_plan, the plan as
+    reloaded after the restore, by map_restored_elements. The result feeds _block_settings_line
+    / _block_settings_ok: included False for a snapshot stored before settings were captured,
+    error when there was no reloaded plan to match against, otherwise the new element ids
+    whose save failed and the snapshot element ids without a restored element.
+    """
+    wanted = snapshot_block_settings(snapshot)
+    result: dict[str, Any] = {"included": wanted is not None, "written": 0, "failed": [], "unmapped": []}
+    if not wanted:
+        return result
+    if id_map is None:
+        if not live_plan:
+            result["error"] = "the plan could not be reloaded to match its elements"
+            _LOGGER.warning(
+                "Function Plan Restore: block settings of plan %s not restored — %s", fub_id, result["error"]
+            )
+            return result
+        id_map = map_restored_elements(snapshot.get("elements") or {}, live_plan.get("elements") or {})
+    writes, result["unmapped"] = settings_to_write(wanted, id_map)
+    for elem_id, settings in writes.items():
+        if await api.function_plan_save_block_settings(elem_id, settings):
+            result["written"] += len(settings)
+        else:
+            result["failed"].append(elem_id)
+    if result["unmapped"]:
+        _LOGGER.warning(
+            "Function Plan Restore: block settings of snapshot element(s) %s of plan %s have no restored element",
+            ", ".join(result["unmapped"]),
+            fub_id,
+        )
+    return result
+
+
+def _block_settings_line(result: dict[str, Any]) -> str:
+    """Restore message line about the block settings (see _restore_block_settings)."""
+    if not result["included"]:
+        return (
+            f"Block settings: {ICON_WARNING} not in this backup (stored before they were captured) — "
+            "check shutter times, dimmer settings and hidden input values in Comexio\n"
+        )
+    if error := result.get("error"):
+        return f"Block settings: {ICON_ERROR} not restored — {error}\n"
+    line = f"Block settings: {ICON_ERROR if result['failed'] else ICON_SUCCESS} {result['written']} written"
+    if result["failed"]:
+        line += f", saving failed for restored element(s) #{', #'.join(result['failed'])}"
+    if result["unmapped"]:
+        line += f" | {ICON_WARNING} no restored element for backup element(s) #{', #'.join(result['unmapped'])}"
+    return line + "\n"
+
+
+def _block_settings_ok(result: dict[str, Any]) -> bool:
+    """False when block settings stored in the backup did not reach the restored plan."""
+    return not (result.get("error") or result["failed"] or result["unmapped"])
 
 
 def _restore_run_label(apply: dict, was_active: bool, auto_start: bool) -> tuple[str, str]:
@@ -666,10 +762,28 @@ def _restore_build_message(
         f"{content_line}positions: {ICON_SUCCESS if apply['pos_ok'] else ICON_ERROR} | "
         f"run_fup: {run_label}"
         f"{reactivation_note}\n"
+        f"{_block_settings_line(apply['block_settings'])}"
         f"{comment_line}"
         f"{promoted_line}"
         f"Duration: {duration:.1f}s"
     )
+
+
+async def _rebuild_new_plan(api, new_fub_id: int, snapshot: dict) -> tuple[int, int, list[str], dict[str, Any]]:
+    """(elements, connections created, warnings, block settings result) of rebuilding a new plan."""
+    id_map, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(new_fub_id, snapshot)
+    block_settings = await _restore_block_settings(api, new_fub_id, snapshot, id_map)
+    return len(id_map), connections_created, warnings, block_settings
+
+
+def _new_plan_status(
+    snapshot: dict, elements_created: int, connections_created: int, warnings: list[str], block_settings: dict
+) -> str:
+    """OK when a restore that built a new plan recreated everything, PARTIAL otherwise."""
+    structurally_complete = elements_created == len(snapshot.get("elements", {})) and connections_created == len(
+        snapshot.get("connections", {})
+    )
+    return "OK" if structurally_complete and not warnings and _block_settings_ok(block_settings) else "PARTIAL"
 
 
 def _new_plan_activation_line(run_ok: bool | None, auto_start: bool) -> str:
@@ -732,15 +846,29 @@ async def _restore_plan_as_new(
         )
         return
 
-    elements_created, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(
-        new_fub_id, snapshot
-    )
-    # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
-    # therefore routinely reports result=False even though the data payload IS applied — the
-    # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
-    # criterion here; the recreated/expected element+connection counts are. The structure is
-    # already built by the calls above, so auto_start=False can skip run_fup altogether.
-    run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
+    try:
+        elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
+            api, new_fub_id, snapshot
+        )
+        # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
+        # therefore routinely reports result=False even though the data payload IS applied — the
+        # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
+        # criterion here; the recreated/expected element+connection counts are. The structure is
+        # already built by the calls above, so auto_start=False can skip run_fup altogether.
+        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        # Same gap as the copy-restore path closes: without this the "in progress" notification
+        # above would stay forever. The backup lineage stays at the old ID — nothing was rekeyed.
+        _LOGGER.exception("Function Plan restore as new plan failed while building '%s'", plan_name)
+        persistent_notification.async_create(
+            hass,
+            f"Restore of {kind}[{slot}] for the former plan {old_fub_id} failed while building '{plan_name}' "
+            f"(new ID {new_fub_id}): {exc}. The new plan may be partially created — check Comexio Studio "
+            "and delete it manually before restoring again.",
+            title=_TITLE_RESTORE_ERR,
+            notification_id=notif_id,
+        )
+        return
     duration = time.monotonic() - t_start
 
     if old_id_still_live:
@@ -754,8 +882,7 @@ async def _restore_plan_as_new(
 
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))
-    structurally_complete = elements_created == elem_count and connections_created == conn_count
-    status = "OK" if structurally_complete and not warnings else "PARTIAL"
+    status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
 
     captured_raw = snapshot.get("captured_at")
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
@@ -779,6 +906,7 @@ async def _restore_plan_as_new(
         f"Source: {kind}[{slot}], captured {captured_label}\n"
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
+        f"{_block_settings_line(block_settings)}"
         f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
         f"{activation_line}\n\n"
         f"{consumer_line}\n"
@@ -793,13 +921,14 @@ async def _restore_plan_as_new(
 
     _LOGGER.info(
         "Function Plan Restore (new plan): old_fub=%s new_fub=%s status=%s elements=%d connections=%d/%d "
-        "run_ok=%s duration=%.1fs",
+        "block_settings=%s run_ok=%s duration=%.1fs",
         old_fub_id,
         new_fub_id,
         status,
         elements_created,
         connections_created,
         conn_count,
+        block_settings,
         run_ok,
         duration,
     )
@@ -853,8 +982,8 @@ async def _restore_plan_as_copy(
             )
             return
 
-        elements_created, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(
-            new_fub_id, snapshot
+        elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
+            api, new_fub_id, snapshot
         )
         # create_fup always creates plans inactive — auto_start=False just leaves that default
         # alone instead of calling run_fup at all (no plan_data payload here: the structure was
@@ -877,8 +1006,7 @@ async def _restore_plan_as_copy(
 
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))
-    structurally_complete = elements_created == elem_count and connections_created == conn_count
-    status = "OK" if structurally_complete and not warnings else "PARTIAL"
+    status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
 
     captured_raw = snapshot.get("captured_at")
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
@@ -892,6 +1020,7 @@ async def _restore_plan_as_copy(
         f"Source: {kind}[{slot}], captured {captured_label}\n"
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
+        f"{_block_settings_line(block_settings)}"
         f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
         f"{activation_line}\n\n"
         "Backup lineage: unchanged — snapshots stay with the source plan; the copy starts fresh.\n\n"
@@ -905,7 +1034,7 @@ async def _restore_plan_as_copy(
 
     _LOGGER.info(
         "Function Plan Restore (copy): source_fub=%s new_fub=%s new_name=%s status=%s elements=%d "
-        "connections=%d/%d run_ok=%s auto_start=%s duration=%.1fs",
+        "connections=%d/%d block_settings=%s run_ok=%s auto_start=%s duration=%.1fs",
         source_fub_id,
         new_fub_id,
         new_plan_name,
@@ -913,6 +1042,7 @@ async def _restore_plan_as_copy(
         elements_created,
         connections_created,
         conn_count,
+        block_settings,
         run_ok,
         auto_start,
         duration,
