@@ -14,7 +14,7 @@ SNAPSHOT = {"plan_name": "Kitch", "elements": {}, "connections": {}}
 def _run(auto_start: bool) -> tuple[AsyncMock, MagicMock]:
     api = SimpleNamespace(
         create_fup=AsyncMock(return_value=50),
-        function_plan_rebuild_plan_from_snapshot=AsyncMock(return_value=(0, 0, [])),
+        function_plan_rebuild_plan_from_snapshot=AsyncMock(return_value=({}, 0, [])),
         function_plan_run_fup=AsyncMock(return_value=True),
     )
     coordinator = SimpleNamespace(

@@ -398,7 +398,10 @@ def test_visualize_text_returns_a_response() -> None:
 
 
 def test_visualize_svg_returns_the_preview_url() -> None:
-    coordinator = SimpleNamespace(async_generate_plan_preview=AsyncMock(return_value="/local/comexio/plan_5.svg"))
+    coordinator = SimpleNamespace(
+        async_generate_plan_preview=AsyncMock(return_value="/local/comexio/plan_5.svg"),
+        snapshot_block_settings_for_source=MagicMock(return_value=None),
+    )
     source = (coordinator, MagicMock(), 5, PLAN, {}, {}, "live", None)
     call = SimpleNamespace(data={"format": "svg"}, return_response=True)
     with (

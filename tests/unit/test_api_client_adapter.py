@@ -1,6 +1,7 @@
 """ComexioAPI's adapters over aiocomexio.ComexioClient: each ComexioError onto the old return contract."""
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -265,6 +266,88 @@ def test_get_raw_config_keeps_io_types_and_version(comexio_api: ComexioAPI, clie
         {"2": {}},
         "11.0.2",
     )
+
+
+def test_get_raw_config_keeps_block_settings_only_as_fresh_as_the_last_fetch(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    row = {"FubElementId": 4, "Name": "autohide", "Value": "1"}
+    fetches = [{"FubBaseConfig": {"1": row}}, {"FubBaseConfig": []}, {"FubBaseConfig": {"1": row}}, {}]
+    client.get_raw_config = AsyncMock(side_effect=[RawConfig(v, {}, {}, None) for v in fetches])
+
+    seen = []
+    for _ in fetches:
+        asyncio.run(comexio_api.get_raw_config())
+        seen.append(comexio_api.block_settings)
+
+    # An empty table is "no settings"; a page without it must not leave an ever older copy behind.
+    assert seen == [{"4": {"autohide": "1"}}, {}, {"4": {"autohide": "1"}}, None]
+    assert "no longer carries $FubBaseConfig" in caplog.text
+
+
+@pytest.mark.parametrize("err", [ComexioDataError("an error page"), _connection_error()])
+def test_a_failed_config_fetch_drops_the_block_settings(
+    comexio_api: ComexioAPI, client: MagicMock, err: Exception
+) -> None:
+    # A change backup after a failed poll must not store the table of an ever older fetch.
+    comexio_api.block_settings = {"4": {"autohide": "1"}}
+    _fail(client, "get_raw_config", err)
+
+    with contextlib.suppress(aiohttp.ClientError, TimeoutError):
+        asyncio.run(comexio_api.get_raw_config())
+
+    assert comexio_api.block_settings is None
+
+
+@pytest.mark.parametrize(
+    ("answer", "saved"), [({"saved": 1}, True), ({"saved": "1"}, True), ({"saved": 0}, False), ({}, False)]
+)
+def test_save_block_settings_needs_the_saved_confirmation(
+    comexio_api: ComexioAPI, client: MagicMock, answer: dict[str, Any], saved: bool
+) -> None:
+    client._plan_json = AsyncMock(return_value=answer)
+
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is saved
+    path, form = client._plan_json.await_args.args
+    assert path == "/admin/function_function_module/savefubbaseconfig/"
+    assert (form["id"], form["element_in_0"]) == ("104", "26")
+    assert form["timestamp"]
+
+
+def test_save_block_settings_maps_a_refusal_but_raises_a_transport_error(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    _fail(client, "_plan_json", ComexioRequestRejectedError("no"))
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is False
+
+    # The restores catch transport errors to replace their "in progress" notification.
+    _fail(client, "_plan_json", _connection_error())
+    save = comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})
+    with pytest.raises(aiohttp.ClientError):
+        asyncio.run(save)
+
+
+@pytest.mark.parametrize(("answer", "cached"), [({"saved": 1}, "26"), ({"saved": 0}, "10")])
+def test_save_block_settings_updates_the_cached_table_once_confirmed(
+    comexio_api: ComexioAPI, client: MagicMock, answer: dict[str, Any], cached: str
+) -> None:
+    # A backup cycle before the next config fetch must see the restored values, not the old ones.
+    comexio_api.block_settings = {"104": {"in_0": "10", "autohide": "1"}}
+    client._plan_json = AsyncMock(return_value=answer)
+
+    asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"}))
+    asyncio.run(comexio_api.function_plan_save_block_settings(200, {"in_1": "5"}))
+
+    assert comexio_api.block_settings["104"] == {"in_0": cached, "autohide": "1"}
+    assert ("200" in comexio_api.block_settings) is (cached == "26")
+
+
+def test_save_block_settings_leaves_an_uncaptured_table_uncaptured(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    comexio_api.block_settings = None
+    client._plan_json = AsyncMock(return_value={"saved": 1})
+
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is True
+    assert comexio_api.block_settings is None
 
 
 def test_get_live_states_failure_is_none_not_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:

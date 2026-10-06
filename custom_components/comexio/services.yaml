@@ -415,7 +415,7 @@ function_plan_list_backups:
         boolean:
     diff:
       name: Include diff vs. predecessor (optional)
-      description: "If enabled, each snapshot (except the oldest known one of its plan/type) gets a 'diff' field showing added/removed markers, IOs and connections compared to the previous snapshot of the SAME type (auto vs. auto, change vs. change). Disabled by default to keep the normal response compact."
+      description: "If enabled, each snapshot (except the oldest known one of its plan/type) gets a 'diff' field showing added/removed markers, IOs and connections, plus changed block settings (shutter times, dimmer settings, hidden input values, extended view; only when both snapshots captured them), compared to the previous snapshot of the SAME type (auto vs. auto, change vs. change). Disabled by default to keep the normal response compact."
       required: false
       default: false
       selector:

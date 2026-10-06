@@ -15,6 +15,7 @@ from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 from .function_plan_backup import format_backup_label
+from .function_plan_block_settings import snapshot_block_settings
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -91,6 +92,7 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
             snapshot.get("connections", {}),
             f"snapshot:{kind}:{slot}",
             snapshot.get("labels"),
+            snapshot_block_settings(snapshot),
         )
         return
 

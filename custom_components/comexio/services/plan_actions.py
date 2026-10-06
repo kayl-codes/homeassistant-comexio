@@ -223,8 +223,9 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
     coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata = source_result
 
     if fmt == "svg":
+        block_settings = coordinator.snapshot_block_settings_for_source(fub_id, plan_name, source)
         preview_url = await coordinator.async_generate_plan_preview(
-            fub_id, plan_name, elements, connections, source, label_metadata
+            fub_id, plan_name, elements, connections, source, label_metadata, block_settings
         )
         persistent_notification.async_create(
             hass,
