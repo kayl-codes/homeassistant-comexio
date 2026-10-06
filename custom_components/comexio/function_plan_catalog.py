@@ -39,7 +39,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .function_plan_block_keys import block_ids_changed
+from .function_plan_block_keys import NO_FUB_BASE, block_ids_changed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -464,6 +464,14 @@ class FunctionPlanCatalogManager:
         fub_base = self._data.get("fub_base")
         changed_at = self._data.get("fub_base_changed_at") or self._data.get("fetched_at")
         return (fub_base if isinstance(fub_base, dict) else {}), changed_at
+
+    def fub_base_sync(self) -> dict[str, Any]:
+        """async_get_fub_base's fub_base from the cache, for state attributes that cannot await.
+
+        A verified poll has loaded the cache, so nothing is lost by not awaiting the load here.
+        """
+        fub_base = self._data.get("fub_base") if self._fub_base_verified else None
+        return fub_base if isinstance(fub_base, dict) else NO_FUB_BASE
 
     async def async_get_catalog(self) -> dict[str, Any]:
         """Return a copy of the cached catalog (for future consumers: analyses, rebuild).

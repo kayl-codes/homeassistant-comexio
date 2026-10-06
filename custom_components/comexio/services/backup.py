@@ -32,17 +32,7 @@ from ..const import (
 )
 from ..coordinator import ComexioCoordinator
 from ..function_plan_backup import is_orphaned_identity, retention_cutoff
-from ..function_plan_block_keys import (
-    BLOCK_IDS_UNCHECKED,
-    REASON_AMBIGUOUS,
-    REASON_MISSING,
-    REASON_NO_KEY,
-    SNAPSHOT_KEYS_SOURCE,
-    SOURCE_BACKFILLED_PLAUSIBLE,
-    SOURCE_BACKFILLED_UNVERIFIED,
-    UNCHECKED_NO_CATALOG,
-    UNRESOLVED_BLOCKS,
-)
+from ..function_plan_block_keys import CHECK_PLAUSIBLE, CHECK_UNRESOLVED, CHECK_UNVERIFIED, block_check
 from ..orphaned_backups import delete_all_orphaned_backup_issues, delete_orphaned_backup_issue
 from ._context import (
     _LOGIN_FAILED_MSG,
@@ -977,36 +967,11 @@ async def _resolve_restore_snapshot(
     return None
 
 
-_BLOCK_REASON_TEXT = {
-    REASON_MISSING: "no block of this kind exists on Comexio today (app or firmware removed it?)",
-    REASON_AMBIGUOUS: "several blocks on Comexio today match it",
-    REASON_NO_KEY: "the block was unknown to the block catalog when the backup was taken",
-}
 _ACCEPT_UNVERIFIED_HINT = "Check the preview, then restore with 'accept_unverified_blocks: true' to restore it anyway."
 
 
-def _unresolved_block_lines(blocks: list[dict[str, Any]]) -> str:
-    return "\n".join(
-        f"- element {block['element']}: block id {block['ref_id']} ({block['key'] or 'no key'}): "
-        f"{_BLOCK_REASON_TEXT.get(block['reason'], block['reason'])}"
-        for block in blocks
-    )
-
-
-def _unverified_blocks_reason(snapshot: dict[str, Any], no_key: list[dict[str, Any]]) -> str | None:
-    """Why the snapshot's blocks can't be verified against today's catalog, or None (needs the opt-in)."""
-    if no_key:
-        return f"{len(no_key)} logic block(s) cannot be checked:\n{_unresolved_block_lines(no_key)}"
-    if unchecked := snapshot.get(BLOCK_IDS_UNCHECKED):
-        if unchecked == UNCHECKED_NO_CATALOG:
-            return "Comexio's block catalog could not be verified in the last poll, so the block ids cannot be checked."
-        return "the block ids of this backup have not been checked yet (wait for the next backup cycle)."
-    if snapshot.get(SNAPSHOT_KEYS_SOURCE) == SOURCE_BACKFILLED_UNVERIFIED:
-        return (
-            "this backup predates the last change of Comexio's block ids, and its wiring does not fit "
-            "today's blocks — some blocks may now be different ones."
-        )
-    return None
+def _problem_lines(check: dict[str, Any]) -> str:
+    return "\n".join(f"- {line}" for line in check["problems"])
 
 
 def _block_ids_restore_error(snapshot: dict[str, Any], accept_unverified: bool) -> str | None:
@@ -1015,26 +980,34 @@ def _block_ids_restore_error(snapshot: dict[str, Any], accept_unverified: bool) 
     A block without a unique live counterpart always blocks (a restore would build a wrong or
     unknown block). Blocks that can't be checked — unknown at capture, not backfilled yet, no
     verified catalog, or backfilled with wires that don't fit today's blocks — need
-    accept_unverified_blocks (see function_plan_block_keys) — a field of its own, since the plan
-    card always confirms the restore of a deleted plan.
+    accept_unverified_blocks (see function_plan_block_keys.block_check) — a field of its own,
+    since the plan card always confirms the restore of a deleted plan. The plan card sends it when
+    its restore dialog showed these problems (backup selector attribute block_check).
     """
-    unresolved = snapshot.get(UNRESOLVED_BLOCKS) or []
-    if hard := [block for block in unresolved if block["reason"] != REASON_NO_KEY]:
+    check = block_check(snapshot)
+    if check is None:
+        return None
+    if check["status"] == CHECK_UNRESOLVED:
         return (
-            f"Restore refused: {len(hard)} logic block(s) of this backup have no unique matching block on "
-            f"Comexio today (block ids shift after an app install or firmware update):\n{_unresolved_block_lines(hard)}"
+            f"Restore refused: {len(check['problems'])} logic block(s) of this backup have no unique matching "
+            "block on Comexio today (block ids shift after an app install or firmware update):\n"
+            f"{_problem_lines(check)}"
         )
-    reason = _unverified_blocks_reason(snapshot, unresolved)
-    if reason and not accept_unverified:
-        return f"Restore refused: {reason}\n{_ACCEPT_UNVERIFIED_HINT}"
+    if check["status"] == CHECK_UNVERIFIED and not accept_unverified:
+        return (
+            "Restore refused: the logic blocks of this backup cannot be checked against today's blocks on "
+            "Comexio (block ids shift after an app install or firmware update, and this backup may be "
+            f"older than the last shift):\n{_problem_lines(check)}\n{_ACCEPT_UNVERIFIED_HINT}"
+        )
     return None
 
 
 def _log_block_ids_trust(snapshot: dict[str, Any], plan_name: str, accept_unverified: bool) -> None:
     """Leave a trace when a restore runs on block ids that are not exactly known."""
-    if accept_unverified and _unverified_blocks_reason(snapshot, snapshot.get(UNRESOLVED_BLOCKS) or []):
+    status = (block_check(snapshot) or {}).get("status")
+    if accept_unverified and status == CHECK_UNVERIFIED:
         _LOGGER.warning("Function Plan Restore of '%s': restoring unverified block ids (accepted)", plan_name)
-    elif snapshot.get(SNAPSHOT_KEYS_SOURCE) == SOURCE_BACKFILLED_PLAUSIBLE:
+    elif status == CHECK_PLAUSIBLE:
         _LOGGER.warning(
             "Function Plan Restore of '%s': block ids derived from today's catalog (backup predates the last "
             "block-id change, wiring fits) — check the restored plan",

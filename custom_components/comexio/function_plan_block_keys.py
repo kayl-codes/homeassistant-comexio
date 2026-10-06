@@ -51,6 +51,28 @@ BLOCK_IDS_UNCHECKED = "block_ids_unchecked"
 UNCHECKED_NO_KEYS = "no keys"  # not backfilled yet
 UNCHECKED_NO_CATALOG = "no catalog"  # no verified block catalog right now
 
+# Set on the copy async_get_snapshot returns for a backfilled_unverified snapshot: why its wiring
+# does not fit today's blocks (implausible_block_wiring).
+UNVERIFIED_BLOCK_PROBLEMS = "unverified_block_problems"
+# The catalog while none is verified: one shared object (never mutated), so identity memos still hit.
+NO_FUB_BASE: dict[str, Any] = {}
+
+# block_check status: how far a snapshot's block ids can be trusted (None = exactly known).
+CHECK_UNRESOLVED = "unresolved"  # a block has no unique live counterpart: a restore is refused
+CHECK_UNVERIFIED = "unverified"  # blocks cannot be checked: a restore needs accept_unverified_blocks
+CHECK_PLAUSIBLE = "plausible"  # derived from today's catalog, every wire fits today's blocks
+
+_REASON_TEXT = {
+    REASON_MISSING: "no block of this kind exists on Comexio today (app or firmware removed it?)",
+    REASON_AMBIGUOUS: "several blocks on Comexio today match it",
+    REASON_NO_KEY: "the block was unknown to the block catalog when the backup was taken",
+}
+_UNCHECKED_TEXT = {
+    UNCHECKED_NO_KEYS: "the block ids of this backup have not been checked yet (wait for the next backup cycle)",
+    UNCHECKED_NO_CATALOG: "Comexio's block catalog could not be verified in the last poll",
+}
+_BACKFILLED_UNVERIFIED_TEXT = "the wiring of this backup did not fit the blocks when its block ids were derived"
+
 _PORT_TYPE_CODES = {0: "d", 1: "a"}
 
 
@@ -329,7 +351,8 @@ def resolve_block_ids(snapshot: dict[str, Any], fub_base: Mapping[str, Any]) -> 
     A block without a unique live counterpart is marked (see _unresolved_element) and listed under
     UNRESOLVED_BLOCKS as {element, ref_id, key, reason}; a restore must refuse such a snapshot.
     Without keys (not backfilled yet) or without a catalog the stored ids are kept, and a snapshot
-    that uses blocks says so under BLOCK_IDS_UNCHECKED — a restore then needs the opt-in.
+    that uses blocks says so under BLOCK_IDS_UNCHECKED — a restore then needs the opt-in. A
+    backfilled_unverified snapshot lists why under UNVERIFIED_BLOCK_PROBLEMS.
     """
     keys = snapshot.get(SNAPSHOT_KEYS)
     stored = snapshot.get("elements") or {}
@@ -337,7 +360,24 @@ def resolve_block_ids(snapshot: dict[str, Any], fub_base: Mapping[str, Any]) -> 
         if not _used_block_ids(stored):
             return snapshot
         return {**snapshot, BLOCK_IDS_UNCHECKED: UNCHECKED_NO_KEYS if fub_base else UNCHECKED_NO_CATALOG}
-    ids_by_key = block_ids_by_key(fub_base)
+    elements, unresolved = _resolve_elements(stored, keys, block_ids_by_key(fub_base))
+    extra: dict[str, Any] = {}
+    if snapshot.get(SNAPSHOT_KEYS_SOURCE) == SOURCE_BACKFILLED_UNVERIFIED:
+        extra[UNVERIFIED_BLOCK_PROBLEMS] = implausible_block_wiring(
+            elements, snapshot.get("connections") or {}, fub_base
+        )
+    if not unresolved and elements == stored:
+        return snapshot | extra if extra else snapshot
+    resolved = snapshot | extra | {"elements": elements, UNRESOLVED_BLOCKS: unresolved}
+    # The stored hash is over the stored ids; a restore verifies against the translated plan.
+    resolved["hash"] = plan_hash(resolved)
+    return resolved
+
+
+def _resolve_elements(
+    stored: Mapping[str, Any], keys: Mapping[str, Any], ids_by_key: Mapping[str, list[str]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """(elements with today's block ids, UNRESOLVED_BLOCKS entries) of one snapshot."""
     elements: dict[str, Any] = {}
     unresolved: list[dict[str, Any]] = []
     for elem_id, elem in stored.items():
@@ -345,9 +385,36 @@ def resolve_block_ids(snapshot: dict[str, Any], fub_base: Mapping[str, Any]) -> 
         if reason is not None:
             old_id = (_block_reference(elem) or {}).get("ref_id")
             unresolved.append({"element": str(elem_id), "ref_id": old_id, "key": key, "reason": reason})
-    if not unresolved and elements == stored:
-        return snapshot
-    resolved = {**snapshot, "elements": elements, UNRESOLVED_BLOCKS: unresolved}
-    # The stored hash is over the stored ids; a restore verifies against the translated plan.
-    resolved["hash"] = plan_hash(resolved)
-    return resolved
+    return elements, unresolved
+
+
+def unresolved_block_lines(blocks: list[dict[str, Any]]) -> list[str]:
+    """One line per UNRESOLVED_BLOCKS entry: which element, which block, and why."""
+    return [
+        f"element {block['element']}: block id {block['ref_id']} ({block['key'] or 'no key'}): "
+        f"{_REASON_TEXT.get(block['reason'], block['reason'])}"
+        for block in blocks
+    ]
+
+
+def block_check(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
+    """{status, problems} of a snapshot as resolve_block_ids returned it; None when its block ids are exact.
+
+    status is CHECK_UNRESOLVED, CHECK_UNVERIFIED or CHECK_PLAUSIBLE; problems are lines naming the
+    affected elements (empty for CHECK_PLAUSIBLE). Read by the restore service and the plan card.
+    """
+    unresolved = snapshot.get(UNRESOLVED_BLOCKS) or []
+    if hard := [block for block in unresolved if block["reason"] != REASON_NO_KEY]:
+        return {"status": CHECK_UNRESOLVED, "problems": unresolved_block_lines(hard)}
+    if unresolved:
+        return {"status": CHECK_UNVERIFIED, "problems": unresolved_block_lines(unresolved)}
+    if unchecked := snapshot.get(BLOCK_IDS_UNCHECKED):
+        return {"status": CHECK_UNVERIFIED, "problems": [_UNCHECKED_TEXT.get(unchecked, str(unchecked))]}
+    source = snapshot.get(SNAPSHOT_KEYS_SOURCE)
+    if source == SOURCE_BACKFILLED_UNVERIFIED:
+        # Empty when today's catalog finds nothing wrong any more; the backfill verdict still stands.
+        problems = snapshot.get(UNVERIFIED_BLOCK_PROBLEMS) or [_BACKFILLED_UNVERIFIED_TEXT]
+        return {"status": CHECK_UNVERIFIED, "problems": list(problems)}
+    if source == SOURCE_BACKFILLED_PLAUSIBLE:
+        return {"status": CHECK_PLAUSIBLE, "problems": []}
+    return None

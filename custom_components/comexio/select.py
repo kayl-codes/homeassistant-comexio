@@ -333,7 +333,25 @@ class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorE
             attrs["orphan_view"] = True
             label = self.current_option
             attrs["orphan"] = self.coordinator.orphaned_backup_choice(label) if label is not None else None
+        # How far the chosen backup's logic block ids can be trusted — the card's restore dialog explains it.
+        attrs["block_check"] = self._chosen_block_check(attrs.get("orphan"))
         return attrs
+
+    def _chosen_block_check(self, orphan: dict[str, Any] | None) -> dict[str, Any] | None:
+        """function_plan_block_keys.block_check of the chosen snapshot, None for Live or exact block ids."""
+        backups = self.coordinator.function_plan_backup
+        if orphan is not None:
+            return backups.block_check_sync(orphan["kind"], orphan["fub_id"], orphan["plan_name"], orphan["slot"])
+        fub_id = self.coordinator.get_active_function_plan_fub_id()
+        plan_name = self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") if fub_id is not None else None
+        label = self.current_option
+        if plan_name is None or label is None or self.coordinator.orphaned_plans_view_active():
+            return None
+        entry = next(
+            (e for e in backups.plan_backups_for_identity_sync(fub_id, plan_name) if format_backup_label(e) == label),
+            None,
+        )
+        return backups.block_check_sync(entry["kind"], fub_id, plan_name, entry["slot"]) if entry else None
 
     @property
     def current_option(self) -> str | None:
