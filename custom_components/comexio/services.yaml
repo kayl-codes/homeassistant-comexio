@@ -211,9 +211,10 @@ function_plan_restore:
       name: Accept unverified logic blocks
       description: >
         Restore a backup anyway whose logic blocks cannot be checked against Comexio's
-        logic-block IDs, which shift after an app install or firmware update: the backup
-        predates such a change and its wiring does not fit today's blocks, a block was unknown
-        when the backup was taken, or the check is not possible right now. Some blocks may then
+        logic-block IDs, which shift after an app install or firmware update. That covers any
+        backup whose block IDs cannot be verified: one that predates such a change and whose
+        wiring does not fit today's blocks, one with a block that was unknown when it was taken,
+        and any backup while the check is not possible right now. Some blocks may then
         be different ones — check the preview first. A backup with a block that no longer
         exists is never restored. The plan card sets it once its restore dialog has named the
         affected blocks.

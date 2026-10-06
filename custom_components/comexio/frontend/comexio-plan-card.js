@@ -34,7 +34,7 @@ import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-pl
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.47";
+const CARD_VERSION = "0.9.48";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -1331,6 +1331,12 @@ class ComexioPlanCard extends HTMLElement {
     this._orphan = orphanView ? st.attributes.orphan || null : null;
     this._backupRow.hidden = false;
     this._restoreLabel = label;
+    // An open dialog keeps the check it showed (_confirmRestore compares against it), but a
+    // backup that became restorable meanwhile must not stay blocked: confirming then reopens
+    // the dialog with the current check.
+    if (this._restoreDialog?.open && this._restoreShownCheck?.status === "unresolved") {
+      this._restoreConfirmBtn.disabled = this._currentBlockCheck()?.status === "unresolved";
+    }
     this._restoreBtn.disabled =
       restoreRunning || !label || label === LIVE_BACKUP_OPTION || (orphanView && !this._orphan);
     let restoreTitle;
