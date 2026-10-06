@@ -430,6 +430,7 @@ def test_a_catalog_not_verified_in_the_last_poll_is_not_offered(catalog_manager:
     before, verified, shrunk, missing = asyncio.run(run())
 
     assert before == shrunk == missing == (({}, None), {})
+    assert before[1] is shrunk[1] is missing[1]  # one stable object: the selector's memo keeps hitting
     assert set(verified[0][0]) == set(verified[1]) == {"5", "23"}
 
 
@@ -767,6 +768,19 @@ def test_the_backup_selector_check_is_computed_once_per_state(stores: dict[str, 
     assert before_backfill == [before_backfill[0]] * 3
     assert before_backfill[0]["status"] == CHECK_UNVERIFIED  # not backfilled yet
     assert after_backfill is None  # captured after the last id change: exact
+
+
+def test_the_backup_selector_check_is_kept_without_a_catalog(stores: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """No verified catalog is a lasting state too: the empty fallback must not defeat the memo."""
+    stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"] = {"1": {"Lights": [snapshot]}}
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    asyncio.run(manager._async_ensure_loaded())
+
+    with patch.object(backup_module, "resolve_block_ids", wraps=resolve_block_ids) as resolve:
+        checks = [manager.block_check_sync("auto", 1, "Lights", 0) for _ in range(3)]
+
+    assert resolve.call_count == 1
+    assert checks == [checks[0]] * 3
 
 
 @pytest.mark.parametrize(

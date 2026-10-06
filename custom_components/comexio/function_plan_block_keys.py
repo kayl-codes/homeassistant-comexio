@@ -54,6 +54,8 @@ UNCHECKED_NO_CATALOG = "no catalog"  # no verified block catalog right now
 # Set on the copy async_get_snapshot returns for a backfilled_unverified snapshot: why its wiring
 # does not fit today's blocks (implausible_block_wiring).
 UNVERIFIED_BLOCK_PROBLEMS = "unverified_block_problems"
+# The catalog while none is verified: one shared object (never mutated), so identity memos still hit.
+NO_FUB_BASE: dict[str, Any] = {}
 
 # block_check status: how far a snapshot's block ids can be trusted (None = exactly known).
 CHECK_UNRESOLVED = "unresolved"  # a block has no unique live counterpart: a restore is refused

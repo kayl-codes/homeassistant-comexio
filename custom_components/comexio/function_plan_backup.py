@@ -25,6 +25,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, FUNCTION_PLAN_AUTO_BACKUP_SLOTS, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS, TIMESTAMP_DISPLAY_FORMAT
 from .function_plan_block_keys import (
+    NO_FUB_BASE,
     SNAPSHOT_KEYS,
     SNAPSHOT_KEYS_SOURCE,
     SOURCE_CAPTURED,
@@ -996,7 +997,7 @@ class FunctionPlanBackupManager:
         """
         if (stored := self._stored_snapshot(kind, fub_id, plan_name, slot)) is None:
             return None
-        fub_base = self._catalog.fub_base_sync() if self._catalog is not None else {}
+        fub_base = self._catalog.fub_base_sync() if self._catalog is not None else NO_FUB_BASE
         source = stored.get(SNAPSHOT_KEYS_SOURCE)
         memo = self._block_check_memo
         if memo is not None and memo[0] is stored and memo[1] is fub_base and memo[2] == source:
