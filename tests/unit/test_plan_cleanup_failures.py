@@ -11,7 +11,12 @@ import pytest
 from custom_components.comexio import button as button_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.button import ComexioSyncButton, _failed_writes_note
-from custom_components.comexio.const import SOURCE_CATEGORIES, WebioClass
+from custom_components.comexio.const import (
+    CONF_FUNCTION_PLAN_PLAN_MAP,
+    FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    SOURCE_CATEGORIES,
+    WebioClass,
+)
 from custom_components.comexio.coordinator import (
     PLAN_CMD_NOT_FOUND,
     PLAN_DELETE_FAILED,
@@ -22,6 +27,7 @@ from custom_components.comexio.coordinator import (
 from custom_components.comexio.services import plan_actions
 
 PLAN = "HA - Marker [1-100]"
+TRIGGER_FUB_ID = 39
 
 
 def _delete_result(**flags: Any) -> dict[str, Any]:
@@ -45,11 +51,18 @@ def _coordinator(api: Any, plans: dict[int, Any] | None = None) -> ComexioCoordi
     coordinator.server_id = "iosrv1"
     coordinator.data = {"webio_commands": {}}
     coordinator.function_plan_plans = plans or {}
+    coordinator.config_entry = SimpleNamespace(  # type: ignore[assignment]
+        options={CONF_FUNCTION_PLAN_PLAN_MAP: {FUNCTION_PLAN_TRIGGER_PLAN_NAME: TRIGGER_FUB_ID}}
+    )
     return coordinator
 
 
+def _plan_name(fub_id: int) -> str:
+    return {5: PLAN, TRIGGER_FUB_ID: FUNCTION_PLAN_TRIGGER_PLAN_NAME}.get(fub_id, f"Plan {fub_id}")
+
+
 def _api(**kwargs: Any) -> SimpleNamespace:
-    return SimpleNamespace(function_plan_name=lambda fub_id: PLAN if fub_id == 5 else f"Plan {fub_id}", **kwargs)
+    return SimpleNamespace(function_plan_name=_plan_name, **kwargs)
 
 
 def test_unwire_reports_a_plan_that_could_not_be_loaded() -> None:
@@ -287,10 +300,13 @@ def test_cleanup_finds_every_managed_plan_holding_the_source() -> None:
     # (bi): the cleanup took the plan selector's plan instead of the plan the marker sits in,
     # found nothing there and still reported success. Here the marker sits in its cluster
     # plan 36, in a stray duplicate in plan 37 and in the user's own plan 5 (never touched).
+    # (bj): the trigger plan is left to the trigger-pair audit, which removes the [TRIG]
+    # source together with its Flanke — the generic cleanup would keep it and re-flag it.
     plans = {
         5: {"elements": {"1": _marker_element(253)}},
         36: {"elements": {"1460": _marker_element(253), "1470": _marker_element(254)}},
         37: {"elements": {"2": _marker_element(253)}},
+        TRIGGER_FUB_ID: {"elements": {"4": _marker_element(253)}},
         42: {"elements": {"3": _marker_element(7)}},
     }
 
@@ -306,6 +322,23 @@ def test_cleanup_finds_every_managed_plan_holding_the_source() -> None:
         result = asyncio.run(coordinator.resolve_source_cleanup_plans([253, 254], load_failures=load_failures))
     assert result == {36: [253, 254], 37: [253]}
     assert load_failures == [38]
+
+
+def test_cleanup_scans_a_plan_behind_a_stale_trigger_mapping() -> None:
+    # The mapping still names fub 39, but Comexio reused the id for another managed plan: the
+    # trigger audit skips it (name mismatch), so the ignored-source scan must not skip it too.
+    coordinator = _coordinator(
+        SimpleNamespace(
+            function_plan_name=lambda fub_id: "HA - Marker [200-300]",
+            _find_source_element_id=ComexioAPI._find_source_element_id,
+        )
+    )
+    coordinator._load_function_plan_check_data = AsyncMock(  # type: ignore[method-assign]
+        return_value={TRIGGER_FUB_ID: {"elements": {"4": _marker_element(253)}}}
+    )
+    with patch.object(ComexioCoordinator, "_is_managed_function_plan", return_value=True):
+        result = asyncio.run(coordinator.resolve_source_cleanup_plans([253]))
+    assert result == {TRIGGER_FUB_ID: [253]}
 
 
 def _plan_cleanup_button(**api: Any) -> tuple[ComexioSyncButton, SimpleNamespace]:

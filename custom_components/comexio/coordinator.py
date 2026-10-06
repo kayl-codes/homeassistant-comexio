@@ -137,6 +137,7 @@ from .const import (
     WEBIO_RANGE_CHECK_HOUR,
     WEBIO_RANGE_CHECK_MINUTE,
     MarkerKind,
+    SourceCategory,
     WebioClass,
     active_webio_classes,
     bus_load_signal,
@@ -546,9 +547,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # still "succeeds" with old or empty data. Destructive callers check this instead of
         # last_update_success alone.
         self._last_poll_scraped: bool = False
-        # Whether the last scraped config holds titled KNX bridge markers — taken from the
+        # Ids of the titled KNX bridge markers in the last scraped config — taken from the
         # unfiltered parse, since data["markers"] is empty when marker import is off.
-        self._knx_bridge_markers_present: bool = False
+        self._knx_bridge_marker_ids: set[int] = set()
         self.sync_error: bool = False
         # Web-IO writes the last sync reported as failed — non-empty means it finished only partially.
         self.sync_failed_writes: list[str] = []
@@ -834,9 +835,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # chance to fail, and the attribute's contract is "last *successful* poll". Writing
         # it here directly would leak counts from a poll that ends up raising further down.
         source_counts = {cat.key: len(parsed_data.get(cat.data_key, [])) for cat in SOURCE_CATEGORIES.values()}
-        self._knx_bridge_markers_present = any(
-            m.get("kind") == MarkerKind.KNX_BRIDGE for m in parsed_data.get("markers", [])
-        )
+        # Kept from the last readable scrape: an empty one ({} on a transient HTTP failure) would
+        # otherwise lift the bridge markers' protection from the ignore-lists until the next poll.
+        if self._last_poll_scraped:
+            self._knx_bridge_marker_ids = {
+                int(m["id"]) for m in parsed_data.get("markers", []) if m.get("kind") == MarkerKind.KNX_BRIDGE
+            }
 
         # async_update_from_raw_config never raises (own contract, enforced internally) —
         # no local guard needed here.
@@ -2039,7 +2043,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return has_knx_artifacts(
             dict(self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})),
             self._parsed_webio_devices(),
-            has_bridge_markers=self._knx_bridge_markers_present,
+            has_bridge_markers=bool(self._knx_bridge_marker_ids),
         )
 
     async def async_uninstall_cleanup(
@@ -4069,14 +4073,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Registry-driven: resolves the option key via SourceCategory.ignored_conf_key, then
         parses it with expand_ignored_marker_ids() (comma/semicolon/space separators, optional
         letter prefix, ranges like '8-12'). Returns an empty set if unset or unsupported.
+        KNX bridge markers are never ignorable (see _unignorable_ids) and never returned.
         """
         cat = source_category(category)
         conf_key = cat.ignored_conf_key
         if conf_key is None:
             return set()
         if ignored_raw := self.config_entry.options.get(conf_key, "").strip():
-            return expand_ignored_marker_ids(ignored_raw, cat.audit_key_prefix + cat.audit_key_prefix.lower())
+            ids = expand_ignored_marker_ids(ignored_raw, cat.audit_key_prefix + cat.audit_key_prefix.lower())
+            return ids - self._unignorable_ids(category)
         return set()
+
+    def _unignorable_ids(self, category: WebioClass) -> set[int]:
+        """Ids of a category the ignore-list must never act on: the KNX bridge markers.
+
+        A bridge marker carries the KNX write path; ignoring it (e.g. a typo, 333 for 33) would
+        let the ignored-source cleanup delete its plan element and wiring and silently break
+        writing to that KNX object. They have no entity and no Web-IO command to ignore anyway.
+        """
+        return set(self._knx_bridge_marker_ids) if category == WebioClass.MARKER else set()
 
     @property
     def ignored_marker_ids(self) -> set[int]:
@@ -4104,6 +4119,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Check ignored source IDs and manage repair issues (registry-driven: markers=2/KNX=11).
 
         - Stale IDs (source no longer in Comexio) are auto-removed from options + notified.
+        - Unignorable IDs (KNX bridge markers, see _unignorable_ids) are auto-removed + notified.
         - Legacy IDs that still have HA entities or Function Plan links extend the shared
           self._cleanup_entity_ids / self._cleanup_function_plan_count accumulator (reset once
           per audit cycle by the caller, see the "IGNORED SOURCES AUDIT" block above).
@@ -4126,6 +4142,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
             return
 
+        # get_raw_config returns {} on a transient HTTP or re-login failure: every source would
+        # look gone, and the stale-ID sweep below would wipe the user's whole ignore list.
+        if not self._last_poll_scraped:
+            return
+
         ignored_raw = conf.get(conf_key, "").strip()
         if not ignored_raw:
             ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
@@ -4143,6 +4164,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
         lp_plans = await self._load_managed_plan_check_data()
         ref_type = int(category.fub_module_type)
+        unignorable_ids = all_ignored_ids & self._unignorable_ids(webio_class)
         ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids), category.unique_id_infix).keys())
         _LOGGER.debug(
             "[%s] async_check_ignored_sources[%s]: ignored=%s, plans_loaded=%s",
@@ -4151,7 +4173,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             sorted(all_ignored_ids),
             sorted(lp_plans.keys()),
         )
-        for source_id in sorted(all_ignored_ids):
+        for source_id in sorted(all_ignored_ids - unignorable_ids):
             source = sources_by_id.get(source_id)
             if not source or not source.get("name", "").strip():
                 # Source no longer exists in Comexio → stale, auto-remove
@@ -4174,33 +4196,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if has_entities or function_plan_fub_id is not None:
                 cleanup_ids.append(source_id)
 
-        # Auto-remove stale IDs from options (source deactivated/removed in Comexio)
+        # Auto-remove stale IDs (source deactivated/removed in Comexio) and unignorable ones
+        # from options — one update, two separate notifications.
+        if stale_ids or unignorable_ids:
+            self._remove_ignored_ids(conf_key, all_ignored_ids - set(stale_ids) - unignorable_ids)
         if stale_ids:
-            new_options = {**self.config_entry.options}
-            if remaining_ids := sorted(all_ignored_ids - set(stale_ids)):
-                new_options[conf_key] = ",".join(str(i) for i in remaining_ids)
-            else:
-                new_options.pop(conf_key, None)
-            self.request_options_update_without_reload(new_options)
-            stale_str = ", ".join(f"{category.audit_key_prefix}{sid}" for sid in stale_ids)
-            _LOGGER.info(
-                "[%s] Auto-removed stale %s IDs (no longer in Comexio): %s",
-                self.server_id,
-                conf_key,
-                stale_str,
-            )
-
-            # persistent_notification has no per-user language context; use English
-            notif_body = (
-                f"{category.label} IDs **{stale_str}** were automatically removed from `{conf_key}` "
+            self._notify_removed_ignored_ids(
+                category,
+                stale_ids,
+                "stale",
                 "because they no longer exist in Comexio. "
-                "They will be created as entities again on the next integration restart."
+                "They will be created as entities again on the next integration restart.",
             )
-            persistent_notification.async_create(
-                self.hass,
-                notif_body,
-                title=f"Comexio ({self.server_id})",
-                notification_id=f"comexio_stale_ignored_{webio_class.value}_{self.server_id}",
+        if unignorable_ids:
+            self._notify_removed_ignored_ids(
+                category,
+                sorted(unignorable_ids),
+                "protected",
+                "because they are KNX bridge markers: they carry the write path to a KNX object "
+                "and can never be ignored.",
             )
 
         # Extend the shared cleanup accumulator for the combined sync_mismatch repair
@@ -4208,6 +4222,30 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._cleanup_function_plan_count += len(affected_fub_ids)
         # Remove legacy ignored_<category>_cleanup issue if it still exists from an older version
         ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
+
+    def _remove_ignored_ids(self, conf_key: str, remaining_ids: set[int]) -> None:
+        """Rewrite an ignore-list option to remaining_ids (dropping the key when empty), without a reload."""
+        new_options = {**self.config_entry.options}
+        if remaining_ids:
+            new_options[conf_key] = ",".join(str(i) for i in sorted(remaining_ids))
+        else:
+            new_options.pop(conf_key, None)
+        self.request_options_update_without_reload(new_options)
+
+    def _notify_removed_ignored_ids(
+        self, category: SourceCategory, ids: list[int], reason_key: str, reason: str
+    ) -> None:
+        """Log and notify that ids were auto-removed from the category's ignore-list, and why."""
+        conf_key = category.ignored_conf_key
+        ids_str = ", ".join(f"{category.audit_key_prefix}{sid}" for sid in ids)
+        _LOGGER.info("[%s] Auto-removed %s %s IDs: %s", self.server_id, reason_key, conf_key, ids_str)
+        # persistent_notification has no per-user language context; use English
+        persistent_notification.async_create(
+            self.hass,
+            f"{category.label} IDs **{ids_str}** were automatically removed from `{conf_key}` {reason}",
+            title=f"Comexio ({self.server_id})",
+            notification_id=f"comexio_{reason_key}_ignored_{category.key.value}_{self.server_id}",
+        )
 
     async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
         """Check ignored marker IDs and manage repair issues (thin wrapper, see async_check_ignored_sources)."""
@@ -4993,13 +5031,29 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return plans
 
     async def _load_managed_plan_check_data(self, load_failures: list[int] | None = None) -> dict[int, dict]:
-        """_load_function_plan_check_data without the plans outside HA's naming.
+        """_load_function_plan_check_data without the plans outside HA's naming and the trigger plan.
 
         The ignored-source audit and its cleanup share this set, so the audit never flags
-        wiring in a plan the cleanup may not touch (see _is_managed_function_plan).
+        wiring in a plan the cleanup may not touch (see _is_managed_function_plan). The trigger
+        plan is left to the trigger-pair audit: an ignored [TRIG] source no longer counts as a
+        trigger source (_trigger_ids_by_ref), so its Source+Flanke pair is reported as orphaned
+        and removed as a whole — the generic cleanup would only see the source wired to its
+        Flanke, keep it, and flag it again on every audit.
         """
         plans = await self._load_function_plan_check_data(load_failures)
-        return {fub_id: plan_data for fub_id, plan_data in plans.items() if self._is_managed_function_plan(fub_id)}
+        return {
+            fub_id: plan_data
+            for fub_id, plan_data in plans.items()
+            if self._is_managed_function_plan(fub_id) and not self._is_live_trigger_plan(fub_id)
+        }
+
+    def _is_live_trigger_plan(self, fub_id: int) -> bool:
+        """is_trigger_plan, confirmed by the live plan name (same freshness guard as _audit_trigger_pairs).
+
+        A stale mapping whose fub_id Comexio reused for another plan must not hide that plan from
+        the ignored-source scan — the trigger audit skips it too, so nothing would flag its wiring.
+        """
+        return self.is_trigger_plan(fub_id) and self.api.function_plan_name(fub_id) == FUNCTION_PLAN_TRIGGER_PLAN_NAME
 
     async def resolve_source_cleanup_plans(
         self,
@@ -6108,7 +6162,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "ios_by_ext": {ext: [gaps_by_ext[ext], totals_by_ext[ext]] for ext in sorted(gaps_by_ext)},
         }
 
-    def _trigger_ids_by_ref(self, data: dict[str, Any]) -> dict[int, list[int]]:
+    def _trigger_ids_by_ref(self, data: dict[str, Any], include_ignored: bool = False) -> dict[int, list[int]]:
         """Trigger source ids ([TRIG]/[TP]) grouped by plan-element ref_type, one bucket per
         active, trigger-capable source category (marker ref_type=2, KNX ref_type=11 — blind guess).
 
@@ -6126,25 +6180,33 @@ class ComexioCoordinator(DataUpdateCoordinator):
         trigger sources anymore" and delete every real trigger pair the moment the category
         is toggled off. Skipping the bucket entirely leaves that category's trigger wiring
         untouched while inactive, consistent with async_check_ignored_sources' same guard.
+
+        Ignored ids are left out as well (unless include_ignored): the user opted the source out
+        of HA, so its trigger pair is reported as orphaned and removed instead of being (re-)created.
         """
         active = self.active_webio_classes
-        return {
-            int(cat.fub_module_type): [
-                int(item["id"]) for item in data[cat.data_key] if item.get("kind") == MarkerKind.TRIGGER
+        result: dict[int, list[int]] = {}
+        for cat in trigger_pair_categories():
+            if cat.key not in active:
+                continue
+            ignored = set() if include_ignored else self.ignored_ids_for(cat.key)
+            result[int(cat.fub_module_type)] = [
+                int(item["id"])
+                for item in data[cat.data_key]
+                if item.get("kind") == MarkerKind.TRIGGER and int(item["id"]) not in ignored
             ]
-            for cat in trigger_pair_categories()
-            if cat.key in active
-        }
+        return result
 
     def trigger_pairs_blocked(self) -> bool:
         """True while [TRIG] sources exist but the Flanke block isn't usable on this server.
 
         _audit_trigger_pairs then reports nothing, so sync uses this to say why it skipped them.
+        Ignored sources count too: their pairs cannot be removed while the Flanke is unusable.
         """
         if self.api.flanke_ref_id() is not None or not self.data:
             return False
         try:
-            return any(self._trigger_ids_by_ref(self.data).values())
+            return any(self._trigger_ids_by_ref(self.data, include_ignored=True).values())
         except (KeyError, TypeError):  # partial data right after setup — no sources known yet
             _LOGGER.debug("Trigger sources not readable yet — trigger pairs not reported as blocked", exc_info=True)
             return False
