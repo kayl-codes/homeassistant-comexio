@@ -36,10 +36,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Concurrency:** Web-IO syncs run under the coordinator's `_sync_lock`; webhook values arriving during a config
   fetch must win over the stale API snapshot (guard R1). Flag changes that weaken these guards.
 - **Poll timer:** `async_set_updated_data` cancels and reschedules the coordinator's periodic poll. Code that runs
-  often — webhook pushes, plan preview refreshes, periodic ticks — must not call it: webhook value updates go
-  through `_async_publish_pushed_value()`, everything else through `async_update_listeners()`. Otherwise frequent
-  calls keep postponing the poll indefinitely (#122). One-off paths (after a sync, a repair or a button press) may
-  still call it.
+  often — webhook pushes, plan preview refreshes, periodic ticks — must not call it, otherwise frequent calls keep
+  postponing the poll indefinitely (#122). Notify only the listeners that need the update: webhook values through
+  `_async_publish_pushed_value()`, coordinator entities through `async_update_listeners()`, entities fed by a
+  dedicated dispatcher signal (e.g. the bus-load tick's `bus_load_signal`) through that signal alone. One-off paths
+  (after a sync, a repair or a button press) may still call `async_set_updated_data`.
 - **Blocking I/O:** no blocking calls in the event loop; Comexio serialises requests, so avoid needless round-trips.
 
 ## Tests
