@@ -1,6 +1,7 @@
 """ComexioAPI's adapters over aiocomexio.ComexioClient: each ComexioError onto the old return contract."""
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -282,6 +283,20 @@ def test_get_raw_config_keeps_block_settings_only_as_fresh_as_the_last_fetch(
     # An empty table is "no settings"; a page without it must not leave an ever older copy behind.
     assert seen == [{"4": {"autohide": "1"}}, {}, {"4": {"autohide": "1"}}, None]
     assert "no longer carries $FubBaseConfig" in caplog.text
+
+
+@pytest.mark.parametrize("err", [ComexioDataError("an error page"), _connection_error()])
+def test_a_failed_config_fetch_drops_the_block_settings(
+    comexio_api: ComexioAPI, client: MagicMock, err: Exception
+) -> None:
+    # A change backup after a failed poll must not store the table of an ever older fetch.
+    comexio_api.block_settings = {"4": {"autohide": "1"}}
+    _fail(client, "get_raw_config", err)
+
+    with contextlib.suppress(aiohttp.ClientError, TimeoutError):
+        asyncio.run(comexio_api.get_raw_config())
+
+    assert comexio_api.block_settings is None
 
 
 @pytest.mark.parametrize(

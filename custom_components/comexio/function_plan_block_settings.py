@@ -90,22 +90,27 @@ def map_restored_elements(snapshot_elements: Mapping[str, Any], live_elements: M
     decide first: the same id at that place, else the one live element of that reference
     there. Only an element no place match finds falls back to the same id with the same
     reference (its position may not have been restored). Without either it stays unmapped.
-    A same id alone never decides: onto another plan (force_override) run_fup hands out
-    fresh ids, which can name a different block of the same type.
+    An element whose place holds blocks of its type but no unique match (stacked blocks) gets
+    no fallback: which of them it is stays unproven. A same id alone never decides: onto
+    another plan (force_override) run_fup hands out fresh ids, which can name a different
+    block of the same type.
     """
     by_place: dict[tuple[Any, ...], list[str]] = {}
     for live_id, live in live_elements.items():
         if isinstance(live, Mapping):
             by_place.setdefault(_place(live), []).append(str(live_id))
     mapping: dict[str, str] = {}
+    placeless: list[str] = []
     for elem_id, elem in snapshot_elements.items():
         candidates = by_place.get(_place(elem), [])
         if str(elem_id) in candidates:
             mapping[str(elem_id)] = str(elem_id)
         elif len(candidates) == 1:
             mapping[str(elem_id)] = candidates[0]
+        elif not candidates:
+            placeless.append(str(elem_id))
     _drop_shared_targets(mapping)
-    _map_by_same_id(snapshot_elements, live_elements, mapping)
+    _map_by_same_id(snapshot_elements, live_elements, mapping, placeless)
     return mapping
 
 
@@ -121,17 +126,20 @@ def _drop_shared_targets(mapping: dict[str, str]) -> None:
 
 
 def _map_by_same_id(
-    snapshot_elements: Mapping[str, Any], live_elements: Mapping[str, Any], mapping: dict[str, str]
+    snapshot_elements: Mapping[str, Any],
+    live_elements: Mapping[str, Any],
+    mapping: dict[str, str],
+    placeless: list[str],
 ) -> None:
-    """Map the elements no place matched to the same id, when it names the same reference and is still free."""
+    """Map the placeless elements to the same id, when it names the same reference and is still free."""
     taken = set(mapping.values())
-    for elem_id, elem in snapshot_elements.items():
-        live = live_elements.get(str(elem_id))
-        if str(elem_id) in mapping or str(elem_id) in taken or not isinstance(live, Mapping):
+    for elem_id in placeless:
+        live = live_elements.get(elem_id)
+        if elem_id in taken or not isinstance(live, Mapping):
             continue
-        if _reference(live) == _reference(elem):
-            mapping[str(elem_id)] = str(elem_id)
-            taken.add(str(elem_id))
+        if _reference(live) == _reference(snapshot_elements[elem_id]):
+            mapping[elem_id] = elem_id
+            taken.add(elem_id)
 
 
 def _reference(elem: Mapping[str, Any]) -> tuple[str, str]:
@@ -168,6 +176,23 @@ def settings_to_write(
         elif settings:
             writes[str(new_id)] = dict(settings)
     return writes, unmapped
+
+
+def live_only_settings(
+    wanted: Mapping[str, Mapping[str, str]],
+    id_map: Mapping[str, str],
+    live_settings: Mapping[str, Mapping[str, str]],
+) -> dict[str, list[str]]:
+    """{live element id: setting names it has that its snapshot element lacks}, for a restore in place.
+
+    Comexio has no way to remove a setting, so these keep their live value and the restored
+    plan differs from the backup there. live_settings is HA's last read of the table.
+    """
+    kept: dict[str, list[str]] = {}
+    for old_id, new_id in id_map.items():
+        if extra := sorted(set(live_settings.get(str(new_id), {})) - set(wanted.get(str(old_id), {}))):
+            kept[str(new_id)] = extra
+    return kept
 
 
 def block_settings_form(element_id: int | str, settings: Mapping[str, str], timestamp: str) -> dict[str, str]:

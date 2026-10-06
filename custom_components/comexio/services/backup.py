@@ -35,6 +35,7 @@ from ..function_plan_backup import is_orphaned_identity, retention_cutoff
 from ..function_plan_block_keys import CHECK_PLAUSIBLE, CHECK_UNRESOLVED, CHECK_UNVERIFIED, block_check
 from ..function_plan_block_settings import (
     block_settings_diff,
+    live_only_settings,
     map_restored_elements,
     settings_to_write,
     snapshot_block_settings,
@@ -636,20 +637,30 @@ async def _restore_block_settings(
     reloaded after the restore, by map_restored_elements. The result feeds _block_settings_line
     / _block_settings_ok: included False for a snapshot stored before settings were captured,
     error when there was no reloaded plan to match against, otherwise the new element ids
-    whose save failed and the snapshot element ids without a restored element.
+    whose save failed, the snapshot element ids without a restored element and, in place,
+    the settings the live elements have beyond the backup (live_only, Comexio cannot remove them).
     """
     wanted = snapshot_block_settings(snapshot)
-    result: dict[str, Any] = {"included": wanted is not None, "written": 0, "failed": [], "unmapped": []}
-    if not wanted:
+    result: dict[str, Any] = {
+        "included": wanted is not None,
+        "written": 0,
+        "failed": [],
+        "unmapped": [],
+        "live_only": {},
+    }
+    if wanted is None or (not wanted and id_map is not None):
         return result
     if id_map is None:
         if not live_plan:
+            if not wanted:
+                return result
             result["error"] = "the plan could not be reloaded to match its elements"
             _LOGGER.warning(
                 "Function Plan Restore: block settings of plan %s not restored — %s", fub_id, result["error"]
             )
             return result
         id_map = map_restored_elements(snapshot.get("elements") or {}, live_plan.get("elements") or {})
+        result["live_only"] = live_only_settings(wanted, id_map, api.block_settings or {})
     writes, result["unmapped"] = settings_to_write(wanted, id_map)
     for elem_id, settings in writes.items():
         if await api.function_plan_save_block_settings(elem_id, settings):
@@ -661,6 +672,12 @@ async def _restore_block_settings(
             "Function Plan Restore: block settings of snapshot element(s) %s of plan %s have no restored element",
             ", ".join(result["unmapped"]),
             fub_id,
+        )
+    if result["live_only"]:
+        _LOGGER.warning(
+            "Function Plan Restore: plan %s keeps block settings the backup does not have: %s",
+            fub_id,
+            result["live_only"],
         )
     return result
 
@@ -679,12 +696,15 @@ def _block_settings_line(result: dict[str, Any]) -> str:
         line += f", saving failed for restored element(s) #{', #'.join(result['failed'])}"
     if result["unmapped"]:
         line += f" | {ICON_WARNING} no restored element for backup element(s) #{', #'.join(result['unmapped'])}"
+    if live_only := result.get("live_only"):
+        kept = "; ".join(f"#{elem_id} {', '.join(names)}" for elem_id, names in live_only.items())
+        line += f" | {ICON_WARNING} kept settings the backup does not have (Comexio cannot remove them): {kept}"
     return line + "\n"
 
 
 def _block_settings_ok(result: dict[str, Any]) -> bool:
-    """False when block settings stored in the backup did not reach the restored plan."""
-    return not (result.get("error") or result["failed"] or result["unmapped"])
+    """False when the restored plan's block settings differ from the backup's."""
+    return not (result.get("error") or result["failed"] or result["unmapped"] or result.get("live_only"))
 
 
 def _restore_run_label(apply: dict, was_active: bool, auto_start: bool) -> tuple[str, str]:

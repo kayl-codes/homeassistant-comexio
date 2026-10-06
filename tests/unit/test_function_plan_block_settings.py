@@ -18,6 +18,7 @@ from custom_components.comexio.function_plan_block_settings import (
     block_settings_diff,
     block_settings_form,
     expand_autohide_blocks,
+    live_only_settings,
     map_restored_elements,
     parse_block_settings,
     plan_block_settings,
@@ -185,6 +186,13 @@ def test_map_falls_back_to_the_same_id_when_the_position_was_not_restored() -> N
     assert map_restored_elements({"4": _block_at(10, 10)}, {"4": _block_at(90, 90)}) == {"4": "4"}
 
 
+def test_map_gives_an_ambiguous_place_no_same_id_fallback() -> None:
+    # Two blocks of its type at its place, neither with its id: the same id elsewhere proves nothing.
+    snapshot = {"4": _block_at(10, 10)}
+    live = {"5": _block_at(10, 10), "6": _block_at(10, 10), "4": _block_at(90, 90)}
+    assert map_restored_elements(snapshot, live) == {}
+
+
 def test_map_leaves_stacked_blocks_with_one_live_counterpart_unmapped() -> None:
     snapshot = {"4": _block_at(10, 10), "5": _block_at(10, 10)}
     assert map_restored_elements(snapshot, {"104": _block_at(10, 10)}) == {}
@@ -214,6 +222,7 @@ def _restore_api(plan: dict[str, Any], save_ok: bool = True) -> SimpleNamespace:
         ),
         function_plan_run_fup=AsyncMock(return_value=True),
         function_plan_save_block_settings=AsyncMock(return_value=save_ok),
+        block_settings=None,
     )
 
 
@@ -255,7 +264,8 @@ def test_restore_as_copy_writes_the_settings_and_reports_a_failed_save(plan: dic
             )
         )
 
-    assert {call.args[0] for call in api.function_plan_save_block_settings.await_args_list} == {"104", "107"}
+    saved = {call.args[0]: call.args[1] for call in api.function_plan_save_block_settings.await_args_list}
+    assert saved == {"104": SETTINGS["4"], "107": SETTINGS["7"]}
     assert notify.call_args.kwargs["title"].endswith("PARTIAL")
     assert "Block settings:" in notify.call_args.args[1]
 
@@ -286,7 +296,7 @@ def test_settings_onto_an_existing_plan_follow_the_reloaded_elements(plan: dict[
 
     result = asyncio.run(backup_service._restore_block_settings(api, 1, _snapshot(plan, SETTINGS), live_plan=live))
 
-    assert result == {"included": True, "written": 4, "failed": [], "unmapped": []}
+    assert result == {"included": True, "written": 4, "failed": [], "unmapped": [], "live_only": {}}
     assert {call.args[0] for call in api.function_plan_save_block_settings.await_args_list} == {"104", "107"}
 
 
@@ -306,6 +316,36 @@ def test_an_unmatched_element_is_reported(plan: dict[str, Any]) -> None:
     assert result["unmapped"] == ["4", "7"]
     assert "no restored element for backup element(s) #4, #7" in backup_service._block_settings_line(result)
     assert not backup_service._block_settings_ok(result)
+
+
+def test_live_only_settings_name_what_the_backup_lacks() -> None:
+    live = {"104": {"autohide": "1", "in_0": "26", "in_1": "3"}, "107": {"time_up": "45"}, "900": {"x": "1"}}
+    assert live_only_settings(SETTINGS, {"4": "104", "7": "107"}, live) == {"104": ["in_1"]}
+
+
+def test_a_restore_in_place_reports_settings_it_could_not_remove(plan: dict[str, Any]) -> None:
+    api = _restore_api(plan)
+    api.block_settings = {"4": {**SETTINGS["4"], "in_1": "3"}}
+
+    result = asyncio.run(
+        backup_service._restore_block_settings(api, 1, _snapshot(plan, SETTINGS), live_plan=copy.deepcopy(plan))
+    )
+
+    assert result["live_only"] == {"4": ["in_1"]}
+    assert not backup_service._block_settings_ok(result)
+    assert "kept settings the backup does not have (Comexio cannot remove them): #4 in_1" in (
+        backup_service._block_settings_line(result)
+    )
+
+
+def test_a_backup_without_settings_still_reports_the_live_ones(plan: dict[str, Any]) -> None:
+    api = _restore_api(plan)
+    api.block_settings = {"7": {"time_up": "45"}}
+
+    result = asyncio.run(backup_service._restore_block_settings(api, 1, _snapshot(plan, {}), live_plan=plan))
+
+    assert (result["written"], result["live_only"]) == (0, {"7": ["time_up"]})
+    api.function_plan_save_block_settings.assert_not_awaited()
 
 
 def _in_place_apply(block_settings: dict[str, Any]) -> dict[str, Any]:
@@ -369,7 +409,10 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
     api.function_plan_update_paper = AsyncMock(return_value=True)
     api.function_plan_stop_fup = AsyncMock(return_value=True)
     api.function_plan_save_elements_pos = AsyncMock(return_value=True)
-    api.function_plan_load_elements = AsyncMock(return_value=copy.deepcopy(plan))
+    reloaded = copy.deepcopy(plan)  # run_fup handed the two blocks with settings fresh ids
+    for eid in ("4", "7"):
+        reloaded["elements"][str(int(eid) + 100)] = reloaded["elements"].pop(eid)
+    api.function_plan_load_elements = AsyncMock(return_value=reloaded)
     api.function_plan_run_fup = AsyncMock(side_effect=run_fup)
     api.function_plan_save_block_settings = AsyncMock(side_effect=save)
     coordinator = SimpleNamespace(
@@ -385,6 +428,8 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
         )
 
     assert order == ["run_fup", "save", "save"]
+    saved = {call.args[0]: call.args[1] for call in api.function_plan_save_block_settings.await_args_list}
+    assert saved == {"104": SETTINGS["4"], "107": SETTINGS["7"]}
     assert notify.call_args.kwargs["title"].endswith("OK")
     assert f"Block settings: {backup_service.ICON_SUCCESS} 4 written" in notify.call_args.args[1]
 

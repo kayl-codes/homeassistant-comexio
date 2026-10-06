@@ -498,8 +498,8 @@ class ComexioAPI:
         # Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
         self.comexio_version: str | None = None
         # Block settings of every plan element ($FubBaseConfig, see function_plan_block_settings)
-        # from the last config fetch; None when that fetch did not carry a readable table, so a
-        # backup then stores none rather than an ever older copy.
+        # from the last config fetch; None when that fetch failed or did not carry a readable
+        # table, so a backup then stores none rather than an ever older copy.
         self.block_settings: BlockSettings | None = None
         # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
         # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
@@ -802,12 +802,15 @@ class ComexioAPI:
                 _LOGGER.warning("Comexio admin session is no longer logged in — logging in again")
                 if not await self._full_login():
                     _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
+                    self.block_settings = None
                     return {}
                 raw = await self.client.get_raw_config()
         except ComexioConnectionError as err:
+            self.block_settings = None
             _raise_transport_error(err)
         except ComexioError as err:
             _LOGGER.error("Failed to fetch the Comexio configuration: %s", err)
+            self.block_settings = None
             return {}
         self.io_types = raw.io_types
         self.io_input_types = raw.io_input_types
