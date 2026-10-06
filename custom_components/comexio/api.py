@@ -1604,6 +1604,11 @@ class ComexioAPI:
 
         True once Comexio answers {"saved": 1}; False (after a warning) for a refusal or any
         other answer. A transport failure raises aiohttp.ClientError / TimeoutError.
+        A confirmed save also updates self.block_settings: until the next config fetch, a
+        backup cycle would otherwise read the pre-restore values and store them as a change.
+        settings are values as Comexio stores them (parse_block_settings), so the cache holds
+        what the next fetch reads. A fetch already running during the save can still bring back
+        the older table — the next one corrects it.
         """
         what = f"Saving block settings {sorted(settings)} of function plan element {element_id}"
 
@@ -1615,7 +1620,12 @@ class ComexioAPI:
             if str(answer.get("saved")) != "1":
                 raise ComexioRequestRejectedError(f"{what} was not confirmed: {answer!r:.200}")
 
-        return await _succeeded(what, save, transport_raises=True)
+        saved = await _succeeded(what, save, transport_raises=True)
+        if saved and self.block_settings is not None:
+            self.block_settings.setdefault(str(element_id), {}).update(
+                {str(name): str(value) for name, value in settings.items()}
+            )
+        return saved
 
     async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:
         """Delete elements from a function plan (removes elements + their connections).

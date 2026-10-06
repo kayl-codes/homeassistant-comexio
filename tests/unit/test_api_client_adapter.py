@@ -327,6 +327,29 @@ def test_save_block_settings_maps_a_refusal_but_raises_a_transport_error(
         asyncio.run(save)
 
 
+@pytest.mark.parametrize(("answer", "cached"), [({"saved": 1}, "26"), ({"saved": 0}, "10")])
+def test_save_block_settings_updates_the_cached_table_once_confirmed(
+    comexio_api: ComexioAPI, client: MagicMock, answer: dict[str, Any], cached: str
+) -> None:
+    # A backup cycle before the next config fetch must see the restored values, not the old ones.
+    comexio_api.block_settings = {"104": {"in_0": "10", "autohide": "1"}}
+    client._plan_json = AsyncMock(return_value=answer)
+
+    asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"}))
+    asyncio.run(comexio_api.function_plan_save_block_settings(200, {"in_1": "5"}))
+
+    assert comexio_api.block_settings["104"] == {"in_0": cached, "autohide": "1"}
+    assert ("200" in comexio_api.block_settings) is (cached == "26")
+
+
+def test_save_block_settings_leaves_an_uncaptured_table_uncaptured(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    comexio_api.block_settings = None
+    client._plan_json = AsyncMock(return_value={"saved": 1})
+
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is True
+    assert comexio_api.block_settings is None
+
+
 def test_get_live_states_failure_is_none_not_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
     _fail(client, "get_live_states", _connection_error())
     assert asyncio.run(comexio_api.get_live_states(5, 2)) == (None, None)
