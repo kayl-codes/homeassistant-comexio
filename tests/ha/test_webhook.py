@@ -124,6 +124,9 @@ async def test_webhook_rejects_malformed_payload(
     assert {state.entity_id: state.state for state in hass.states.async_all()} == before
 
 
+# Noon in the test time zone: the test advances the clock by more than scan_interval, which from the wall
+# clock could cross a nightly job (FIRMWARE_CHECK_* / WEBIO_RANGE_CHECK_*) and run it against unstubbed mocks.
+@pytest.mark.freeze_time("2026-10-06 19:00:00+00:00")
 @pytest.mark.parametrize("push", PUSHES.values(), ids=PUSHES.keys())
 async def test_webhook_pushes_do_not_postpone_the_periodic_poll(
     hass: HomeAssistant,
