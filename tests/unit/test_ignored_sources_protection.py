@@ -106,14 +106,16 @@ def _check_ignored(
     final_data: dict[str, Any],
     webio_class: WebioClass = WebioClass.MARKER,
     plans: dict[int, Any] | None = None,
+    import_flags: dict[str, bool] | None = None,
+    load_plans: AsyncMock | None = None,
 ) -> MagicMock:
     """Run async_check_ignored_sources with every HA side effect stubbed; returns the notification mock."""
     coordinator._cleanup_entity_ids = []
     coordinator._cleanup_function_plan_count = 0
-    coordinator._load_managed_plan_check_data = AsyncMock(return_value=plans or {})  # type: ignore[method-assign]
+    coordinator._load_managed_plan_check_data = load_plans or AsyncMock(return_value=plans or {})  # type: ignore[method-assign]
     coordinator.marker_entities_by_id = MagicMock(return_value={})  # type: ignore[method-assign]
     coordinator.request_options_update_without_reload = MagicMock()  # type: ignore[method-assign]
-    conf = {**IMPORT_ALL, **coordinator.config_entry.options}
+    conf = {**(import_flags or IMPORT_ALL), **coordinator.config_entry.options}
     with (
         patch.object(coordinator_module.ir, "async_delete_issue"),
         patch.object(coordinator_module.persistent_notification, "async_create") as notify,
@@ -179,25 +181,33 @@ def test_stale_ids_keep_their_notification() -> None:
 
 
 @pytest.mark.parametrize(
-    ("webio_class", "options", "final_data"),
+    ("webio_class", "options", "final_data", "import_flags"),
     [
         # Nothing to remove: no options write on every poll.
-        (WebioClass.MARKER, {CONF_IGNORED_MARKERS: "33"}, {"markers": MARKERS}),
+        (WebioClass.MARKER, {CONF_IGNORED_MARKERS: "33"}, {"markers": MARKERS}, IMPORT_ALL),
         # K333 stays ignored although marker 333 is a bridge marker — separate id spaces.
         (
             WebioClass.KNX,
             {CONF_IGNORED_KNX: f"{BRIDGE_MARKER_ID}"},
             {"knx": [{"id": BRIDGE_MARKER_ID, "name": "Licht"}]},
+            IMPORT_ALL,
+        ),
+        # Opting a category out leaves its dormant list alone — 999 is not swept as stale.
+        (
+            WebioClass.MARKER,
+            {CONF_IGNORED_MARKERS: "33,999"},
+            {"markers": []},
+            {"import_markers": False, "import_knx": True},
         ),
     ],
-    ids=["nothing_to_remove", "knx_id_equal_to_a_bridge_marker"],
+    ids=["nothing_to_remove", "knx_id_equal_to_a_bridge_marker", "category_opted_out"],
 )
 def test_valid_ignore_lists_stay_untouched(
-    webio_class: WebioClass, options: dict[str, Any], final_data: dict[str, Any]
+    webio_class: WebioClass, options: dict[str, Any], final_data: dict[str, Any], import_flags: dict[str, bool]
 ) -> None:
     coordinator = _coordinator(options, {BRIDGE_MARKER_ID})
 
-    notify = _check_ignored(coordinator, final_data, webio_class)
+    notify = _check_ignored(coordinator, final_data, webio_class, import_flags=import_flags)
 
     coordinator.request_options_update_without_reload.assert_not_called()
     notify.assert_not_called()
@@ -222,3 +232,49 @@ def test_trigger_pairs_count_as_blocked_for_ignored_sources() -> None:
     coordinator.data = {"markers": [{"id": 7, "kind": MarkerKind.TRIGGER}], "knx": []}
 
     assert coordinator.trigger_pairs_blocked()
+
+
+def test_ignore_entries_saved_during_the_audit_survive_the_pruning() -> None:
+    # An options-flow save while the audit awaits the plan data must not be overwritten with
+    # the poll's conf snapshot: the newly ignored 44 would be dropped and its source reactivated.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
+
+    async def _options_saved_meanwhile() -> dict[int, Any]:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,44,999"}  # type: ignore[misc]
+        return {}
+
+    notify = _check_ignored(
+        coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile)
+    )
+
+    coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33,44"})
+    assert set(_notifications(notify)) == {STALE_ID}
+
+
+def test_bridge_markers_are_pruned_while_the_category_is_opted_out() -> None:
+    # Bridge markers come from the unfiltered scrape: the protected id is removed even with marker
+    # import off, while the dormant list gets no stale sweep (999 stays, the audit never runs).
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: f"33,{BRIDGE_MARKER_ID},999"}, {BRIDGE_MARKER_ID})
+
+    notify = _check_ignored(coordinator, {"markers": []}, import_flags={"import_markers": False, "import_knx": True})
+
+    coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33,999"})
+    assert set(_notifications(notify)) == {PROTECTED_ID}
+    coordinator._load_managed_plan_check_data.assert_not_awaited()
+
+
+def test_stale_id_removed_by_the_user_during_the_audit_is_not_reported() -> None:
+    # 999 was stale in the poll's snapshot, but the user dropped it meanwhile: no write and no
+    # "automatically removed" notification for an id that is no longer in the list.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
+
+    async def _options_saved_meanwhile() -> dict[int, Any]:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
+        return {}
+
+    notify = _check_ignored(
+        coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile)
+    )
+
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()

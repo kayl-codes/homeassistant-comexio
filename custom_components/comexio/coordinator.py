@@ -4075,13 +4075,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         letter prefix, ranges like '8-12'). Returns an empty set if unset or unsupported.
         KNX bridge markers are never ignorable (see _unignorable_ids) and never returned.
         """
-        cat = source_category(category)
-        conf_key = cat.ignored_conf_key
+        return self._configured_ignored_ids(source_category(category)) - self._unignorable_ids(category)
+
+    def _configured_ignored_ids(self, category: SourceCategory) -> set[int]:
+        """Every id in the category's ignore-list option as currently stored, unignorable ones included."""
+        conf_key = category.ignored_conf_key
         if conf_key is None:
             return set()
         if ignored_raw := self.config_entry.options.get(conf_key, "").strip():
-            ids = expand_ignored_marker_ids(ignored_raw, cat.audit_key_prefix + cat.audit_key_prefix.lower())
-            return ids - self._unignorable_ids(category)
+            return expand_ignored_marker_ids(ignored_raw, category.audit_key_prefix + category.audit_key_prefix.lower())
         return set()
 
     def _unignorable_ids(self, category: WebioClass) -> set[int]:
@@ -4119,7 +4121,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Check ignored source IDs and manage repair issues (registry-driven: markers=2/KNX=11).
 
         - Stale IDs (source no longer in Comexio) are auto-removed from options + notified.
-        - Unignorable IDs (KNX bridge markers, see _unignorable_ids) are auto-removed + notified.
+        - Unignorable IDs (KNX bridge markers, see _unignorable_ids) are auto-removed + notified,
+          also while the category is opted out.
         - Legacy IDs that still have HA entities or Function Plan links extend the shared
           self._cleanup_entity_ids / self._cleanup_function_plan_count accumulator (reset once
           per audit cycle by the caller, see the "IGNORED SOURCES AUDIT" block above).
@@ -4134,26 +4137,36 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_invalid_{self.server_id}")
 
         # A category the user has opted out of contributes an empty final_data[data_key] by
-        # design (see _async_update_data). Running the stale-ID sweep below against that empty
-        # list would flag EVERY configured ignore-id as "no longer in Comexio" and silently wipe
-        # the user's ignore list on a mere toggle-off. The list is dormant config while the
-        # category is off — leave it untouched; the sweep resumes when it is re-enabled.
-        if webio_class not in active_webio_classes(conf):
+        # design (see _async_update_data). Running the stale-ID sweep against that empty list
+        # would flag EVERY configured ignore-id as "no longer in Comexio" and silently wipe the
+        # user's ignore list on a mere toggle-off. The list is dormant config while the category
+        # is off — no stale sweep; it resumes when the category is re-enabled.
+        active = webio_class in active_webio_classes(conf)
+        if not active:
             ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
-            return
 
         # get_raw_config returns {} on a transient HTTP or re-login failure: every source would
-        # look gone, and the stale-ID sweep below would wipe the user's whole ignore list.
+        # look gone, and the stale-ID sweep would wipe the user's whole ignore list.
         if not self._last_poll_scraped:
             return
 
+        stale_ids = await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else set()
+        # Bridge markers come from the unfiltered scrape, so they are known (and pruned) even
+        # while the category is opted out.
+        self._prune_ignored_ids(category, webio_class, conf_key, stale_ids)
+
+    async def _audit_ignored_sources(
+        self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass, conf_key: str
+    ) -> set[int]:
+        """Audit an active category's ignore-list; return its stale IDs and extend the cleanup accumulator."""
+        category = source_category(webio_class)
         ignored_raw = conf.get(conf_key, "").strip()
         if not ignored_raw:
             ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
-            return
+            return set()
 
         sources_by_id = {int(item["id"]): item for item in final_data.get(category.data_key, [])}
-        stale_ids: list[int] = []
+        stale_ids: set[int] = set()
         cleanup_ids: list[int] = []
         affected_fub_ids: set[int] = set()
 
@@ -4164,7 +4177,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
         lp_plans = await self._load_managed_plan_check_data()
         ref_type = int(category.fub_module_type)
-        unignorable_ids = all_ignored_ids & self._unignorable_ids(webio_class)
         ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids), category.unique_id_infix).keys())
         _LOGGER.debug(
             "[%s] async_check_ignored_sources[%s]: ignored=%s, plans_loaded=%s",
@@ -4173,11 +4185,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             sorted(all_ignored_ids),
             sorted(lp_plans.keys()),
         )
-        for source_id in sorted(all_ignored_ids - unignorable_ids):
+        for source_id in sorted(all_ignored_ids - self._unignorable_ids(webio_class)):
             source = sources_by_id.get(source_id)
             if not source or not source.get("name", "").strip():
                 # Source no longer exists in Comexio → stale, auto-remove
-                stale_ids.append(source_id)
+                stale_ids.add(source_id)
                 continue
 
             # Source exists and is intentionally ignored — only flag if legacy entities/links remain
@@ -4196,32 +4208,44 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if has_entities or function_plan_fub_id is not None:
                 cleanup_ids.append(source_id)
 
-        # Auto-remove stale IDs (source deactivated/removed in Comexio) and unignorable ones
-        # from options — one update, two separate notifications.
-        if stale_ids or unignorable_ids:
-            self._remove_ignored_ids(conf_key, all_ignored_ids - set(stale_ids) - unignorable_ids)
-        if stale_ids:
-            self._notify_removed_ignored_ids(
-                category,
-                stale_ids,
-                "stale",
-                "because they no longer exist in Comexio. "
-                "They will be created as entities again on the next integration restart.",
-            )
-        if unignorable_ids:
-            self._notify_removed_ignored_ids(
-                category,
-                sorted(unignorable_ids),
-                "protected",
-                "because they are KNX bridge markers: they carry the write path to a KNX object "
-                "and can never be ignored.",
-            )
-
         # Extend the shared cleanup accumulator for the combined sync_mismatch repair
         self._cleanup_entity_ids.extend((webio_class.value, sid) for sid in cleanup_ids)
         self._cleanup_function_plan_count += len(affected_fub_ids)
         # Remove legacy ignored_<category>_cleanup issue if it still exists from an older version
         ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
+        return stale_ids
+
+    def _prune_ignored_ids(
+        self, category: SourceCategory, webio_class: WebioClass, conf_key: str, stale_ids: set[int]
+    ) -> None:
+        """Drop stale and unignorable IDs from the ignore-list option — one update, separate notifications.
+
+        Re-reads the option instead of the poll's conf snapshot: an options-flow save that landed
+        while the audit awaited the plan data would otherwise be overwritten, dropping IDs the
+        user just added and reactivating their sources.
+        """
+        current_ids = self._configured_ignored_ids(category)
+        stale = current_ids & stale_ids
+        protected = current_ids & self._unignorable_ids(webio_class)
+        if not (stale or protected):
+            return
+        self._remove_ignored_ids(conf_key, current_ids - stale - protected)
+        if stale:
+            self._notify_removed_ignored_ids(
+                category,
+                sorted(stale),
+                "stale",
+                "because they no longer exist in Comexio. "
+                "They will be created as entities again on the next integration restart.",
+            )
+        if protected:
+            self._notify_removed_ignored_ids(
+                category,
+                sorted(protected),
+                "protected",
+                "because they are KNX bridge markers: they carry the write path to a KNX object "
+                "and can never be ignored.",
+            )
 
     def _remove_ignored_ids(self, conf_key: str, remaining_ids: set[int]) -> None:
         """Rewrite an ignore-list option to remaining_ids (dropping the key when empty), without a reload."""
