@@ -743,7 +743,8 @@ def test_a_plan_dropping_out_of_the_watchdog_is_warned_once(api: ComexioAPI, cap
         CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19, "HA - Gone": 99},
         CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt", "43", "x"],
     }
-    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    # A poll has read the full plan list — only then does a missing pick count as gone.
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options), scraped_plan_ids={19, 43})
     with caplog.at_level(logging.WARNING):
         asyncio.run(coordinator.async_watch_managed_plans())
         asyncio.run(coordinator.async_watch_managed_plans())

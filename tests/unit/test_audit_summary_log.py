@@ -34,6 +34,7 @@ def _coordinator(audit: dict[str, Any]) -> ComexioCoordinator:
     coordinator.server_id = "cx1"
     coordinator.last_audit_results = audit
     coordinator.last_summary_hash = None
+    coordinator._last_logged_mismatches = frozenset()
     return coordinator
 
 
@@ -69,3 +70,26 @@ def test_a_new_cleanup_item_logs_the_summary_again(caplog: pytest.LogCaptureFixt
         coordinator._log_audit_summary({"function_plan_missing_M253", "cleanup_entity_KNX_9"})
 
     assert "2 issues detected" in caplog.text
+
+
+def test_a_replaced_cleanup_item_logs_the_summary_again(caplog: pytest.LogCaptureFixture) -> None:
+    """Review: one leftover swapped for another keeps every count — the item identities still differ."""
+    coordinator = _coordinator(_audit(cleanup_entities=[("Marker", 295)]))
+    coordinator._log_audit_summary({"cleanup_entity_Marker_295"})
+    coordinator.last_audit_results = _audit(cleanup_entities=[("KNX", 9)])
+
+    with caplog.at_level(logging.INFO):
+        coordinator._log_audit_summary({"cleanup_entity_KNX_9"})
+
+    assert "Ignored sources to clean up (1): KNX/9" in caplog.text
+
+
+def test_an_unchanged_audit_is_not_logged_again(caplog: pytest.LogCaptureFixture) -> None:
+    coordinator = _coordinator(_audit(cleanup_entities=[("Marker", 295)]))
+    coordinator._log_audit_summary({"cleanup_entity_Marker_295"})
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO):
+        coordinator._log_audit_summary({"cleanup_entity_Marker_295"})
+
+    assert caplog.text == ""

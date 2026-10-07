@@ -541,6 +541,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.audit_ignored: bool = False
         self.last_audit_failed: bool = False
         self.last_summary_hash: str | None = None
+        self._last_logged_mismatches: frozenset[str] = frozenset()
         self.in_sync: bool = False
         # Whether the most recent _async_update_data run actually scraped the server: a poll
         # skipped for in_sync, or one whose get_raw_config came back empty ({} on a non-200),
@@ -1351,6 +1352,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if self.last_summary_hash is not None:
                 _LOGGER.info("[%s] Audit successful: All systems are 100%% in sync!", self.server_id)
             self.last_summary_hash = None
+            self._last_logged_mismatches = frozenset()
             return
 
         audit = self.last_audit_results
@@ -1362,10 +1364,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             f"-{_count_by_ref(audit['function_plan_trigger_orphan'])}-{len(audit['knx_bridge_missing'])}"
             f"-{len(audit['knx_bridge_loopback_missing'])}-{len(audit['cleanup_entities'])}"
         )
-        # Only log details if the audit result differs from the previous run
-        if self.last_summary_hash == current_summary_content:
+        # Only log details if the audit result differs from the previous run. The counts alone
+        # miss one item replaced by another, so the mismatch keys (item identities) count too.
+        mismatch_keys = frozenset(mismatches)
+        if self.last_summary_hash == current_summary_content and self._last_logged_mismatches == mismatch_keys:
             return
         self.last_summary_hash = current_summary_content
+        self._last_logged_mismatches = mismatch_keys
         self._log_audit_details(len(mismatches))
 
     def _log_audit_details(self, mismatch_count: int) -> None:
@@ -1564,6 +1569,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     # Confirmed no plan left: drop the deleted plans from the snapshot, but keep it
                     # "loaded" so the audits run on the empty set instead of waiting (#140).
                     self.function_plan_plans = {}
+                    # Forget the unknown block references of the deleted plans as well.
+                    self.reference_monitor.check_plans({})
                     await self._async_recheck_after_snapshot_update()
                 self.async_update_listeners()
                 return
@@ -3460,10 +3467,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _unresolved_plan_identities(self) -> frozenset[tuple[int, str]]:
         """(fub_id, name) of the plan_map entries and named user picks Comexio no longer has under that name.
 
-        Empty without a live plan list: a failed fetch must not read as every plan gone. Once a
-        poll read an empty plan list, every entry is unresolved (#140).
+        Empty without a live plan list: a failed fetch, or a cache holding only the plans HA itself
+        created or looked up, must not read as every other plan gone. Once a poll read an empty
+        plan list, every entry is unresolved (#140).
         """
-        if not self.api.fub_data and self.live_plan_list() is None:
+        if self.live_plan_list() is None:
             return frozenset()
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []

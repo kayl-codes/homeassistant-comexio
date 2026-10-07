@@ -131,7 +131,26 @@ def _snapshot_coordinator(live_plans: dict | None) -> ComexioCoordinator:
     coordinator._async_audit_orphaned_backups = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
     coordinator.async_request_refresh = AsyncMock()  # type: ignore[method-assign]
+    coordinator.reference_monitor = MagicMock()
     return coordinator
+
+
+@pytest.mark.parametrize(
+    "live_plans", [None, {}, {"8": {"Name": "Live"}}], ids=["no-plan-list", "no-plan-left", "plans-left"]
+)
+def test_no_plan_left_clears_the_unknown_block_references(live_plans: dict | None) -> None:
+    """Review: the deleted plans' unknown block references must not stay in the log and the repair report.
+
+    Only a poll that found no plan proves them deleted: an empty bulk load while plans exist keeps the findings.
+    """
+    coordinator = _snapshot_coordinator(live_plans)
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    if live_plans == {}:
+        coordinator.reference_monitor.check_plans.assert_called_once_with({})
+    else:
+        coordinator.reference_monitor.check_plans.assert_not_called()
 
 
 def test_no_plan_left_empties_the_snapshot_but_keeps_it_loaded() -> None:
@@ -197,10 +216,10 @@ def test_no_plan_left_reruns_a_pending_wiring_check() -> None:
     assert coordinator._lp_missing_recheck_pending is False
 
 
-def _identity_coordinator(live_plans: dict | None) -> ComexioCoordinator:
+def _identity_coordinator(live_plans: dict | None, cached_plans: dict | None = None) -> ComexioCoordinator:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.scraped_plan_ids = None if live_plans is None else set()
-    coordinator.api = SimpleNamespace(fub_data=live_plans if live_plans is not None else {})
+    coordinator.api = SimpleNamespace(fub_data=live_plans if live_plans is not None else cached_plans or {})
     coordinator.config_entry = SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - Marker 1-50": 7}})
     return coordinator
 
@@ -212,6 +231,13 @@ def test_every_plan_identity_is_unresolved_once_no_plan_is_left() -> None:
 
 def test_no_plan_identity_is_unresolved_without_a_plan_list() -> None:
     assert _identity_coordinator(None)._unresolved_plan_identities() == frozenset()
+
+
+def test_no_plan_identity_is_unresolved_by_a_partial_plan_cache() -> None:
+    """Review: before a poll read the full list the cache holds only plans HA created or looked up."""
+    coordinator = _identity_coordinator(None, cached_plans={"9": {"Name": "HA - Trigger"}})
+
+    assert coordinator._unresolved_plan_identities() == frozenset()
 
 
 def test_a_failed_bulk_load_shows_the_reset_changed_plans_at_once() -> None:
