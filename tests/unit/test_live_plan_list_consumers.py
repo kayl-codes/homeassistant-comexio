@@ -1,6 +1,7 @@
 """Deleted-plan backups follow coordinator.live_plan_list(): None = no plan list, {} = no plan left in Comexio."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -182,11 +183,10 @@ def test_a_stale_bulk_load_after_no_plan_was_left_is_discarded() -> None:
     coordinator.async_request_refresh.assert_awaited_once()
 
 
-@pytest.mark.parametrize("live_plans", [None, {"7": {"Name": "Live"}}], ids=["no-plan-list", "plans-left"])
-def test_a_bulk_load_is_kept_unless_no_plan_is_left(live_plans: dict | None) -> None:
-    """The stale-load guard only fires on a confirmed empty plan list — never before the first poll."""
+def _full_cycle_coordinator(live_plans: dict | None, bulk_result: dict) -> ComexioCoordinator:
+    """A _snapshot_coordinator whose bulk load returns bulk_result, stubbed for the full backup path."""
     coordinator = _snapshot_coordinator(live_plans)
-    coordinator.api.function_plan_load_all_plans = AsyncMock(return_value=dict(DELETED_PLAN))
+    coordinator.api.function_plan_load_all_plans = AsyncMock(return_value=bulk_result)
     coordinator.api.comexio_version = None
     coordinator.api.block_settings = {}
     coordinator.function_plan_backup = SimpleNamespace(
@@ -197,12 +197,97 @@ def test_a_bulk_load_is_kept_unless_no_plan_is_left(live_plans: dict | None) -> 
     coordinator.function_plan_label_maps = MagicMock(return_value=({}, {}, {}))  # type: ignore[method-assign]
     coordinator._current_plan_format = MagicMock(return_value=None)  # type: ignore[method-assign]
     coordinator._async_refresh_service_descriptions = AsyncMock()  # type: ignore[method-assign]
+    return coordinator
+
+
+@pytest.mark.parametrize("live_plans", [None, {"7": {"Name": "Live"}}], ids=["no-plan-list", "plans-left"])
+def test_a_bulk_load_is_kept_while_the_poll_still_lists_its_plans(live_plans: dict | None) -> None:
+    """Only plans the latest poll no longer lists are dropped — and nothing before the first poll."""
+    coordinator = _full_cycle_coordinator(live_plans, dict(DELETED_PLAN))
 
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
     assert coordinator.function_plan_plans == DELETED_PLAN
     coordinator.reference_monitor.check_plans.assert_called_once_with(DELETED_PLAN)
     coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
+
+
+def test_a_plan_deleted_during_the_bulk_load_does_not_come_back() -> None:
+    """Review: a poll found plan 7 deleted while the bulk load was in flight; plan 8 is still there."""
+    kept_plan = {8: {"elements": {}, "connections": {}}}
+    coordinator = _full_cycle_coordinator({"8": {"Name": "Kept"}}, {**DELETED_PLAN, **kept_plan})
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == kept_plan
+    coordinator.reference_monitor.check_plans.assert_called_once_with(kept_plan)
+    assert coordinator.function_plan_backup.async_auto_backup.await_args.args[0] == kept_plan
+    # M253 was only referenced in the deleted plan — the refresh rebuilds the entities without it.
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+def test_a_bulk_load_whose_plans_were_all_deleted_meanwhile_is_not_kept(caplog: pytest.LogCaptureFixture) -> None:
+    """Review: plan 7 was deleted and plan 9 created during the load — the snapshot drops 7 and waits for 9."""
+    coordinator = _full_cycle_coordinator({"9": {"Name": "New"}}, dict(DELETED_PLAN))
+
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == {}
+    assert coordinator._referenced_marker_ids() is None  # "not loaded" until plan 9 arrives
+    coordinator.reference_monitor.check_plans.assert_called_once_with({})
+    coordinator.function_plan_backup.async_auto_backup.assert_not_awaited()
+    coordinator._async_audit_orphaned_backups.assert_awaited_once()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_plan_list_key_that_is_no_number_does_not_break_the_cycle() -> None:
+    """A $Fubs key that is no plain number is skipped, as everywhere else — the cycle keeps plan 7."""
+    coordinator = _full_cycle_coordinator({"7": {"Name": "Live"}, "x": {}}, dict(DELETED_PLAN))
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == DELETED_PLAN
+    coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("live_plans", "expected"), [({}, {}), ({"7": {"Name": "Live"}}, DELETED_PLAN)], ids=["no-plan-left", "plans-left"]
+)
+def test_a_failed_bulk_load_clears_the_snapshot_only_when_no_plan_is_left(live_plans: dict, expected: dict) -> None:
+    """Review: with no plan left a failed load cannot keep the deleted plans in the audits; otherwise it keeps them."""
+    coordinator = _snapshot_coordinator(live_plans)
+    coordinator.api.function_plan_load_all_plans = AsyncMock(side_effect=OSError("timeout"))
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == expected
+    if live_plans == {}:
+        coordinator.reference_monitor.check_plans.assert_called_once_with({})
+        coordinator.async_request_refresh.assert_awaited_once()  # M253 rebuilt away
+        coordinator._async_audit_orphaned_backups.assert_awaited_once()
+    else:
+        coordinator.reference_monitor.check_plans.assert_not_called()
+        coordinator.async_request_refresh.assert_not_awaited()
+        coordinator._async_audit_orphaned_backups.assert_not_awaited()
+    coordinator.async_update_listeners.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("live_plans", "warns"),
+    [({}, False), (None, True), ({"7": {"Name": "Live"}}, True)],
+    ids=["no-plan-left", "no-plan-list", "plans-left"],
+)
+def test_an_empty_bulk_load_warns_only_when_plans_should_exist(
+    live_plans: dict | None, warns: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review: a server without plans is a normal state, not a failed load to warn about every cycle."""
+    coordinator = _snapshot_coordinator(live_plans)
+
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert any(r.levelno == logging.WARNING and "no plans loaded" in r.getMessage() for r in caplog.records) is warns
 
 
 def test_an_empty_bulk_load_without_a_plan_list_keeps_the_snapshot() -> None:
@@ -300,6 +385,7 @@ def test_a_failed_bulk_load_shows_the_reset_changed_plans_at_once() -> None:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.server_id = "cx1"
     coordinator._function_plan_backup_lock = asyncio.Lock()
+    coordinator.scraped_plan_ids = None
     coordinator.last_changed_plans = [{"fub_id": 2}]
     coordinator.api = SimpleNamespace(function_plan_load_all_plans=AsyncMock(side_effect=OSError("timeout")))
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]

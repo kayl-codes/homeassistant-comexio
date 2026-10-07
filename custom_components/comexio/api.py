@@ -1871,7 +1871,8 @@ class ComexioAPI:
         """
         fub_ids = {int(fid) for fid in self._fub_data}
         if not fub_ids:
-            _LOGGER.warning("function_plan_load_all_plans: self._fub_data is empty — nothing to load")
+            # No plan in Comexio is a normal state; the coordinator's backup cycle reports it.
+            _LOGGER.debug("function_plan_load_all_plans: self._fub_data is empty — nothing to load")
             return {}
 
         t_start = time.monotonic()
