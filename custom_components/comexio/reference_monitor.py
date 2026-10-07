@@ -11,7 +11,7 @@ Repair with a text that says so, instead of claiming a firmware incompatibility.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 import logging
 from typing import Any
@@ -47,6 +47,8 @@ ISSUE_TRANSLATION_KEY = "reference_catalog_mismatch"
 # Same issue id, other text: the check did not run, so nothing is known about the firmware.
 ISSUE_TRANSLATION_KEY_UNCHECKED = "reference_catalog_unchecked"
 UNKNOWN_REFS_LOG_LIMIT = 20
+# Marks a finding kept from an earlier check because its plan could not be judged this time.
+CARRIED_OVER_SUFFIX = " (carried over, not re-checked)"
 
 # GitHub rejects new-issue URLs much beyond ~8 KB; stay well below so every browser opens it.
 ISSUE_URL_MAX_CHARS = 7000
@@ -76,6 +78,7 @@ class ReferenceCatalogMonitor:
         self._check_not_run: str | None = None
         self._integration_version: str | None = None
         self._unknown_refs: list[tuple[str, str, str]] | None = None
+        self._unchecked_plans: frozenset[str] = frozenset()
         self._missing_catalog_polls = 0
 
     @property
@@ -170,6 +173,7 @@ class ReferenceCatalogMonitor:
             ha_version=HA_VERSION,
             blocked=tuple(self._blocked),
             unknown_plan_refs=tuple(self._unknown_refs or ()),
+            unchecked_plans=self._unchecked_plans,
         )
         title, body = build_issue_report(self._api.reference_check, REFERENCE_REQUIRED, context)
         return github_issue_url(ISSUE_TRACKER_URL, title, body)
@@ -218,15 +222,11 @@ class ReferenceCatalogMonitor:
             ir.async_delete_issue(self._hass, DOMAIN, self._issue_id)
             self._issue_active = False
 
-    def _refs_of_unloaded_plans(
-        self, loaded: Mapping[Any, Any], present: Mapping[Any, Any]
-    ) -> list[tuple[str, str, str]]:
-        """The last findings of the plans still present but not in `loaded` — nothing to judge them by anew."""
+    def _refs_of_unchecked_plans(self, unchecked: Collection[str]) -> list[tuple[str, str, str]]:
+        """The last findings of the plans present but not judged this time — nothing to judge them by anew."""
         if not self._unknown_refs:
             return []
-        loaded_ids = {str(fub_id) for fub_id in loaded}
-        present_ids = {str(fub_id) for fub_id in present} - loaded_ids
-        return [ref for ref in self._unknown_refs if ref[0] in present_ids]
+        return [ref for ref in self._unknown_refs if ref[0] in unchecked]
 
     def check_plans(self, plans: Mapping[Any, Any]) -> None:
         """Log plan elements referencing block types the live catalog doesn't know (on change only).
@@ -234,48 +234,66 @@ class ReferenceCatalogMonitor:
         Without a catalog check the findings of plans no longer present are still dropped: deleted
         plans reference nothing. Present means listed by the latest poll, not merely in `plans`:
         a bulk snapshot can miss a live plan, which cannot be judged and keeps its last findings.
+        Such kept findings are marked as carried over in the log and the Repair report.
         """
         check = self._api.reference_check
         live_ids = check.fub_base_ids if check is not None else None
         listed = self._listed_plans() if self._listed_plans is not None else None
         present_plans = plans if listed is None else listed
+        # Not judged this time: listed plans the bulk load missed, or every present plan without a catalog.
+        loaded_ids = {str(fub_id) for fub_id in plans} if live_ids else set()
+        unchecked = {str(fub_id) for fub_id in present_plans} - loaded_ids
+        previous_refs, previous_unchecked = self._unknown_refs or [], self._unchecked_plans
+        self._unchecked_plans = frozenset(unchecked)
         if live_ids:
             # Sorted: carried-over findings must not read as a change when a load misses or brings back a plan.
-            found = sorted(
-                find_unknown_fub_base_refs(plans, live_ids) + self._refs_of_unloaded_plans(plans, present_plans)
-            )
+            found = sorted(find_unknown_fub_base_refs(plans, live_ids) + self._refs_of_unchecked_plans(unchecked))
         elif not present_plans:
             found = []
         elif self._unknown_refs is None:
             return  # never judged: no findings to drop, and no catalog to judge the plans by
         else:
-            found = self._refs_of_unloaded_plans({}, present_plans)
-        if found == self._unknown_refs:
-            return
+            found = self._refs_of_unchecked_plans(unchecked)
+        findings_changed = found != self._unknown_refs
         self._unknown_refs = found
-        if self._blocked:
+        # A plan the load missed or brought back changes only the carried-over marks: the report
+        # follows at once (async_check may keep the last result without rebuilding it), the log
+        # does not — the same findings are no change worth a log line.
+        marks_changed = _carried_over(found, unchecked) != _carried_over(previous_refs, previous_unchecked)
+        if self._blocked and (findings_changed or marks_changed):
             # Add the plan findings to the pre-filled report, keeping why the check didn't run.
             self._update_issue(self._blocked, self._check_not_run)
-        if not found and present_plans and not live_ids:
+        if findings_changed:
+            self._log_plan_findings(found, unchecked, checked=bool(live_ids))
+
+    def _log_plan_findings(self, found: list[tuple[str, str, str]], unchecked: set[str], checked: bool) -> None:
+        """Log the changed findings; never claim a check for plans that weren't judged this time."""
+        if not found and unchecked and not checked:
             _LOGGER.info(
                 "[%s] Function plans: findings of deleted plans dropped; the remaining plans are not checked "
                 "for unknown block types until the block catalog is available",
                 self._server_id,
             )
             return
+        not_loaded = f"; {len(unchecked)} listed plan(s) not loaded and not checked" if checked and unchecked else ""
         if not found:
-            _LOGGER.info("[%s] Function plans: no elements with unknown block types", self._server_id)
+            _LOGGER.info(
+                "[%s] Function plans: no elements with unknown block types in the loaded plans%s",
+                self._server_id,
+                not_loaded,
+            )
             return
-        shown = [f"{fub}/{elem}: 5 {ref}" for fub, elem, ref in found[:UNKNOWN_REFS_LOG_LIMIT]]
+        shown = [format_plan_ref(ref, unchecked) for ref in found[:UNKNOWN_REFS_LOG_LIMIT]]
         if len(found) > UNKNOWN_REFS_LOG_LIMIT:
             shown.append(f"... {len(found) - UNKNOWN_REFS_LOG_LIMIT} more")
         _LOGGER.warning(
             "[%s] Function plans: %d element(s) reference a block type unknown to Comexio %s "
-            "(shown as 'Configuration fault' in the editor): %s",
+            "(shown as 'Configuration fault' in the editor): %s%s",
             self._server_id,
             len(found),
             self._api.comexio_version,
             ", ".join(shown),
+            not_loaded,
         )
 
 
@@ -292,6 +310,17 @@ class IssueContext:
     ha_version: str | None
     blocked: tuple[str, ...]
     unknown_plan_refs: tuple[tuple[str, str, str], ...] = ()
+    unchecked_plans: frozenset[str] = frozenset()
+
+
+def _carried_over(refs: Iterable[tuple[str, str, str]], unchecked: Collection[str]) -> set[tuple[str, str, str]]:
+    return {ref for ref in refs if ref[0] in unchecked}
+
+
+def format_plan_ref(ref: tuple[str, str, str], unchecked: Collection[str] = ()) -> str:
+    """One finding as `plan/element: 5 block-id`, marked when its plan was not judged this time."""
+    fub, elem, ref_id = ref
+    return f"{fub}/{elem}: 5 {ref_id}{CARRIED_OVER_SUFFIX if fub in unchecked else ''}"
 
 
 def _ref_id_owner(check: ReferenceCheck, kind: str, ref_id: int | None) -> str:
@@ -371,7 +400,7 @@ def build_issue_report(
         "```",
     ]
     if context.unknown_plan_refs:
-        refs = [f"{fub}/{elem}: 5 {ref}" for fub, elem, ref in context.unknown_plan_refs]
+        refs = [format_plan_ref(ref, context.unchecked_plans) for ref in context.unknown_plan_refs]
         lines += ["", "### Plan elements with unknown block types", "```", *_capped(refs), "```"]
     return title, "\n".join(lines)
 

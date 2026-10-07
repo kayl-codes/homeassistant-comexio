@@ -371,6 +371,105 @@ def test_plans_never_judged_stay_unjudged_without_a_check() -> None:
     assert monitor._unknown_refs is None
 
 
+CLEAN_PLAN = {"elements": {}, "connections": {}}
+CARRIED_REF = ("8", "4", "998")
+
+
+def test_a_clean_check_names_the_listed_plans_the_load_missed(caplog: pytest.LogCaptureFixture) -> None:
+    """(bt) A plan the bulk load missed was not checked — "no unknown block types" must not cover it silently."""
+    monitor = _monitor(None, listed={"7": {}, "8": {}, "9": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: CLEAN_PLAN})
+
+    assert monitor._unknown_refs == []
+    assert [record.getMessage() for record in caplog.records] == [
+        "[srv] Function plans: no elements with unknown block types in the loaded plans; "
+        "2 listed plan(s) not loaded and not checked"
+    ]
+
+
+def test_a_clean_check_of_every_listed_plan_has_no_unchecked_note(caplog: pytest.LogCaptureFixture) -> None:
+    monitor = _monitor(None, listed={"7": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: CLEAN_PLAN})
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "[srv] Function plans: no elements with unknown block types in the loaded plans"
+    ]
+
+
+def test_findings_of_plans_the_load_missed_are_marked_as_carried_over(caplog: pytest.LogCaptureFixture) -> None:
+    """(bt) A kept finding was not re-checked this poll — the log says so, a freshly found one stays unmarked."""
+    monitor = _monitor(None, listed={"7": {}, "8": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+    monitor._unknown_refs = [CARRIED_REF]
+    plan_7 = {"elements": {"3": {"reference": {"type": 5, "ref_id": 999}}}, "connections": {}}
+
+    with caplog.at_level(logging.WARNING, logger=reference_monitor.__name__):
+        monitor.check_plans({7: plan_7})
+
+    message = caplog.records[-1].getMessage()
+    assert f"7/3: 5 999, 8/4: 5 998{reference_monitor.CARRIED_OVER_SUFFIX}; 1 listed plan(s)" in message
+
+
+def test_findings_kept_without_a_catalog_are_marked_as_carried_over(caplog: pytest.LogCaptureFixture) -> None:
+    """Without a catalog no plan is judged — every kept finding is carried over, but no load is "missing"."""
+    monitor = _monitor(None, listed={"7": {}})
+    monitor._unknown_refs = [UNKNOWN_REF, CARRIED_REF]
+
+    with caplog.at_level(logging.WARNING, logger=reference_monitor.__name__):
+        monitor.check_plans({})
+
+    message = caplog.records[-1].getMessage()
+    assert message.endswith(f": 7/3: 5 999{reference_monitor.CARRIED_OVER_SUFFIX}")
+
+
+def test_the_repair_report_marks_carried_over_findings(raw: dict[str, Any], issue_registry: MagicMock) -> None:
+    """(bt) The pre-filled GitHub report tells a kept finding from one checked this poll."""
+    monitor = _monitor(_references(raw), listed={"7": {}, "8": {}})
+    del raw["FubModules"]["5"][str(FLANKE_ID)]
+    asyncio.run(monitor.async_check(raw))  # blocked: the Repair carries the report
+    monitor._unknown_refs = [CARRIED_REF]
+    plan_7 = {"elements": {"3": {"reference": {"type": 5, "ref_id": 999}}}, "connections": {}}
+
+    monitor.check_plans({7: plan_7})
+
+    url = _issue_kwargs(issue_registry)["learn_more_url"]
+    body = parse_qs(urlsplit(url).query)["body"][0]
+    assert f"8/4: 5 998{reference_monitor.CARRIED_OVER_SUFFIX}" in body
+    assert "7/3: 5 999\n" in body
+
+
+def test_the_repair_report_follows_a_plan_the_load_misses_and_brings_back(
+    raw: dict[str, Any], issue_registry: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review: unchanged findings, only the mark changes — the report follows at once, the log stays quiet."""
+    monitor = _monitor(_references(raw), listed={"7": {}, "8": {}})
+    del raw["FubModules"]["5"][str(FLANKE_ID)]
+    asyncio.run(monitor.async_check(raw))
+    plan_8 = {"elements": {"4": {"reference": {"type": 5, "ref_id": 998}}}, "connections": {}}
+    monitor.check_plans({7: CLEAN_PLAN, 8: plan_8})
+    marked = f"8/4: 5 998{reference_monitor.CARRIED_OVER_SUFFIX}"
+
+    def body() -> str:
+        return parse_qs(urlsplit(_issue_kwargs(issue_registry)["learn_more_url"]).query)["body"][0]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: CLEAN_PLAN})  # the bulk load missed plan 8
+        assert marked in body()
+        monitor.check_plans({7: CLEAN_PLAN, 8: plan_8})  # back, checked again
+        assert "8/4: 5 998\n" in body()
+        assert marked not in body()
+
+    assert monitor._unknown_refs == [CARRIED_REF]
+    assert not caplog.records
+
+
 def test_clearing_the_plan_refs_keeps_the_unchecked_repair(raw: dict[str, Any], issue_registry: MagicMock) -> None:
     """Review: no plan left while no check ran must not turn "check didn't run" into "blocks unusable"."""
     monitor = _monitor(_references(raw))
