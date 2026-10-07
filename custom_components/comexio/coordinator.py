@@ -1561,7 +1561,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 loaded = await self.api.function_plan_load_all_plans(raise_errors=True)
                 load_failed = False
             except ComexioError as err:
-                _LOGGER.error(
+                _LOGGER.warning(
                     "[%s] Function Plan bulk load failed: %s — keeping the plans still listed", self.server_id, err
                 )
                 loaded = {}

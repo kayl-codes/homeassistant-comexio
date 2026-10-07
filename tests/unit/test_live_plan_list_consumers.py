@@ -338,12 +338,16 @@ def test_an_empty_bulk_load_warns_only_when_plans_should_exist(
     assert any(r.levelno == logging.WARNING and "no plans loaded" in r.getMessage() for r in caplog.records) is warns
 
 
-@pytest.mark.parametrize("error", [OSError("timeout"), ComexioError("server busy")], ids=["unexpected", "comexio"])
+@pytest.mark.parametrize(
+    ("error", "level"),
+    [(OSError("timeout"), logging.ERROR), (ComexioError("server busy"), logging.WARNING)],
+    ids=["unexpected", "comexio"],
+)
 @pytest.mark.parametrize(
     "live_plans", [{}, None, {"7": {"Name": "Live"}}], ids=["no-plan-left", "no-plan-list", "plans-left"]
 )
 def test_a_failed_bulk_load_is_logged_once_not_warned_about_again(
-    live_plans: dict | None, error: Exception, caplog: pytest.LogCaptureFixture
+    live_plans: dict | None, error: Exception, level: int, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Review: the API swallowed a ComexioError into {} — the cycle asks for it, so it is no "no plans loaded"."""
     coordinator = _snapshot_coordinator(live_plans)
@@ -353,7 +357,7 @@ def test_a_failed_bulk_load_is_logged_once_not_warned_about_again(
         asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
     coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(raise_errors=True)
-    assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == [logging.ERROR]
+    assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == [level]
 
 
 @pytest.mark.parametrize(

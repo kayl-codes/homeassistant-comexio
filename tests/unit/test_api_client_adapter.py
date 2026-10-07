@@ -451,8 +451,9 @@ def test_load_all_plans_failure_raises_on_request(comexio_api: ComexioAPI, clien
     """The backup cycle must tell a failed load from "no plans" — it asks for the error."""
     comexio_api._fub_data = {"1": {}}
     _fail(client, "load_all_function_plans", HTTP_ERROR)
+    call = comexio_api.function_plan_load_all_plans(raise_errors=True)
     with pytest.raises(type(HTTP_ERROR)):
-        asyncio.run(comexio_api.function_plan_load_all_plans(raise_errors=True))
+        asyncio.run(call)
 
 
 @pytest.mark.parametrize(
