@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Any
 
+from aiocomexio import ComexioConnectionError
 from aiocomexio.function_plan import diff_snapshots, resolve_element_label, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -1245,24 +1246,33 @@ async def _load_restorable_snapshot(
     return snapshot
 
 
-async def _fetch_restore_plans(api, as_copy: bool) -> tuple[dict[str, Any], str | None]:
-    """Fresh plan list ($Fubs) for a restore — api.fub_data may be up to one poll interval stale.
+async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, Any] | None, str | None]:
+    """fub_id's entry in a fresh plan list ($Fubs) — api.fub_data may be up to one poll interval stale.
 
     The in-place decision (does the plan still exist, under what name?) must not be made on
     stale data; the fetch also refreshes api.comexio_version, so the firmware check sees an
-    update since the last poll. Returns (plans, None), or ({}, why) when the list could not be
-    read: an in-place restore must stop then — an unread list looks like a deleted plan, and
-    confirm would rebuild a plan that still runs. A copy only needs the version and goes on
-    (it reports its own errors); its firmware check then uses the last polled version.
+    update since the last poll. Returns (entry or None if the plan is gone, None), or
+    (None, why) when the list or the entry could not be read: an in-place restore must stop
+    then — an unread entry looks like a deleted plan, and confirm would rebuild a plan that
+    still runs. A copy only needs the version and goes on (it reports its own errors); its
+    firmware check then may use the last polled version.
     """
     try:
         fubs = (await api.get_raw_config()).get("Fubs")
-    except (aiohttp.ClientError, TimeoutError) as err:
+    except (aiohttp.ClientError, TimeoutError, ComexioConnectionError) as err:
         error = f"Comexio is not reachable ({err!r})"
     else:
         # aiocomexio decodes an empty plan list (PHP's []) to {} — a dict is always a read list.
-        if isinstance(fubs, dict):
-            return fubs, None
+        entry = fubs.get(str(fub_id)) if isinstance(fubs, dict) else None
+        if isinstance(fubs, dict) and (entry is None or isinstance(entry, dict)):
+            return entry, None
+        if fubs is not None:  # None: get_raw_config already logged why the page was not read
+            _LOGGER.warning(
+                "Function Plan Restore: unexpected plan list ($Fubs %s, entry for %s: %.200r)",
+                type(fubs).__name__,
+                fub_id,
+                entry,
+            )
         error = "Comexio's plan list could not be read (see the log)"
     if as_copy:
         _LOGGER.warning(
@@ -1270,8 +1280,8 @@ async def _fetch_restore_plans(api, as_copy: bool) -> tuple[dict[str, Any], str 
             error,
             api.comexio_version,
         )
-        return {}, None
-    return {}, error
+        return None, None
+    return None, error
 
 
 async def _resolve_restore_conflict(
@@ -1403,7 +1413,7 @@ async def _run_function_plan_restore(
         persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=_TITLE_RESTORE_ERR)
         return
 
-    live_fubs, fetch_error = await _fetch_restore_plans(api, as_copy)
+    live_fub, fetch_error = await _fetch_live_plan(api, fub_id, as_copy)
     if fetch_error:
         _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) aborted: %s", plan_name, fub_id, fetch_error)
         persistent_notification.async_create(
@@ -1423,7 +1433,6 @@ async def _run_function_plan_restore(
         await _refresh_service_descriptions(hass)
         return
 
-    live_fub = live_fubs.get(str(fub_id))
     if live_fub is not None:
         api.update_fub_cache_entry(fub_id, live_fub)  # keep the cache fresh for _restore_plan_in_place's reads
     snapshot_name = snapshot.get("plan_name", str(fub_id))

@@ -513,7 +513,10 @@ def test_list_entries_count_the_stored_block_values(
 ) -> None:
     """(bn)(3): the diff only shows changed values — the count tells how many the backup holds."""
     entry = backup_module._backup_entry("1", "Lights", 0, _snapshot(plan, settings))
-    assert entry.get("block_setting_count") == count
+    if count is None:
+        assert "block_setting_count" not in entry  # not captured — no count, not a null one
+    else:
+        assert entry["block_setting_count"] == count
 
 
 def test_list_entries_carry_the_firmware_the_backup_was_taken_on(plan: dict[str, Any]) -> None:

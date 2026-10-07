@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioConnectionError
 from aiocomexio.function_plan import plan_hash
 from aiocomexio.reference_catalog import fub_base_key
 import aiohttp
@@ -658,8 +659,14 @@ def test_the_firmware_check_uses_the_freshly_fetched_version(data: dict[str, Any
 
 @pytest.mark.parametrize(
     ("page", "fetch_error"),
-    [({}, None), ({"FubModules": {}}, None), (None, aiohttp.ClientError("down"))],
-    ids=["page not readable", "no plan list", "unreachable"],
+    [
+        ({}, None),
+        ({"FubModules": {}}, None),
+        ({"FubModules": {}, "Fubs": {"42": "not a plan"}}, None),
+        (None, aiohttp.ClientError("down")),
+        (None, ComexioConnectionError("down")),  # no aiohttp cause: _raise_transport_error raises it as is
+    ],
+    ids=["page not readable", "no plan list", "malformed entry", "unreachable", "unreachable without cause"],
 )
 def test_an_unread_plan_list_stops_an_in_place_restore(
     page: dict[str, Any] | None, fetch_error: Exception | None
@@ -684,8 +691,14 @@ def test_an_empty_plan_list_means_the_plan_was_deleted() -> None:
 
 @pytest.mark.parametrize(
     ("page", "fetch_error"),
-    [({}, None), ({"FubModules": {}}, None), (None, aiohttp.ClientError("down"))],
-    ids=["page not readable", "no plan list", "unreachable"],
+    [
+        ({}, None),
+        ({"FubModules": {}}, None),
+        ({"FubModules": {}, "Fubs": {"42": "not a plan"}}, None),
+        (None, aiohttp.ClientError("down")),
+        (None, ComexioConnectionError("down")),
+    ],
+    ids=["page not readable", "no plan list", "malformed entry", "unreachable", "unreachable without cause"],
 )
 def test_an_unread_plan_list_does_not_stop_a_copy(page: dict[str, Any] | None, fetch_error: Exception | None) -> None:
     """The copy only fetches for the firmware version; it reports Comexio errors itself."""
