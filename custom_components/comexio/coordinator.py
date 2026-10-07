@@ -1360,7 +1360,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             f"-{len(audit['orphan'])}-{audit['ip_mismatch']}-{len(audit['function_plan_missing'])}"
             f"-{len(audit['function_plan_dangling'])}-{_count_by_ref(audit['function_plan_trigger_missing'])}"
             f"-{_count_by_ref(audit['function_plan_trigger_orphan'])}-{len(audit['knx_bridge_missing'])}"
-            f"-{len(audit['knx_bridge_loopback_missing'])}"
+            f"-{len(audit['knx_bridge_loopback_missing'])}-{len(audit['cleanup_entities'])}"
         )
         # Only log details if the audit result differs from the previous run
         if self.last_summary_hash == current_summary_content:
@@ -1376,11 +1376,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ip_mismatch = audit["ip_mismatch"]
         mismatched_ips = {cls: v["device_ip"] for cls, v in audit["webio_devices"].items() if v["ip_mismatch"]}
 
-        # Consolidated warning for the Home Assistant log overview
+        # Consolidated warning for the Home Assistant log overview — names every category that
+        # adds to mismatch_count, so the parts always add up to the total.
         _LOGGER.warning(
             "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
-            "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d, Trigger gaps:%d, Trigger orphans:%d, "
-            "KNX bridges:%d, KNX loopback:%d)",
+            "Renames:%d, Orphans:%d, IP:%d, Cleanup:%d, Not wired:%d, Plan debris:%d, Trigger gaps:%d, "
+            "Trigger orphans:%d, KNX bridges:%d, KNX loopback:%d)",
             self.server_id,
             mismatch_count,
             len(audit["type"]),
@@ -1388,6 +1389,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             len(audit["rename"]),
             len(audit["orphan"]),
             1 if ip_mismatch else 0,
+            len(audit["cleanup_entities"]),
+            len(audit["function_plan_missing"]),
             len(audit["function_plan_dangling"]),
             _count_by_ref(trigger_missing),
             _count_by_ref(trigger_orphan),
@@ -1416,6 +1419,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if always or audit[result_key]:
                 _log_audit_items(icon, label, audit[result_key])
 
+        if cleanup := audit["cleanup_entities"]:
+            _LOGGER.info(
+                "%s Ignored sources to clean up (%d): %s",
+                ICON_DELETE,
+                len(cleanup),
+                ", ".join(f"{cls_val}/{source_id}" for cls_val, source_id in sorted(cleanup)),
+            )
         if trigger_missing:
             _LOGGER.info(
                 "%s Trigger markers not wired (%d): %s",
@@ -1550,30 +1560,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # They judge by live_plan_list() (the poll's $Fubs), not by this {}: a failed bulk
                 # load while plans exist cannot make their backups look orphaned.
                 await self._async_audit_orphaned_backups()
+                if self.live_plan_list() == {}:
+                    # Confirmed no plan left: drop the deleted plans from the snapshot, but keep it
+                    # "loaded" so the audits run on the empty set instead of waiting (#140).
+                    self.function_plan_plans = {}
+                    await self._async_recheck_after_snapshot_update()
                 self.async_update_listeners()
                 return
             self.function_plan_plans = plans
             self.reference_monitor.check_plans(plans)
-            # Re-evaluate which unlabeled markers are now referenced in a plan (see
-            # aiocomexio parse_config). Compared against the set last USED by parse_config —
-            # a no-op on every normal cycle; only an actual change (marker newly wired in,
-            # or dropped from every plan) triggers an extra refresh, so the fix isn't tied
-            # to (potentially very long) scan_interval waits. _last_referenced_marker_ids
-            # is deliberately NOT updated here: the triggered refresh does that itself,
-            # keeping the comparison anchored to what entities were actually built from.
-            new_referenced_markers = self._referenced_marker_ids() or set()
-            markers_changed = new_referenced_markers != self._last_referenced_marker_ids
-            snapshot_fub_ids = frozenset(plans.keys())
-            snapshot_changed = snapshot_fub_ids != self._last_bulk_snapshot_fub_ids
-            self._last_bulk_snapshot_fub_ids = snapshot_fub_ids
-            if (self._lp_missing_recheck_pending and snapshot_changed) or markers_changed:
-                # The audit skipped the function_plan_missing check because a relevant plan
-                # wasn't loaded yet — re-run it now that the snapshot actually changed. Gating
-                # on snapshot_changed (not just the pending flag) keeps a relevant plan that the
-                # bulk endpoint can never deliver (e.g. a persistently malformed entry) from
-                # retriggering this refresh every single cycle forever.
-                self._lp_missing_recheck_pending = False
-                await self.async_request_refresh()
+            await self._async_recheck_after_snapshot_update()
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
@@ -1733,6 +1729,40 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("[%s] Ignoring unparseable persisted function plan id %r", self.server_id, saved)
             return None
 
+    async def _async_recheck_after_snapshot_update(self) -> None:
+        """Refresh once when the new bulk snapshot changes what the last audit/parse_config saw.
+
+        Re-evaluates which unlabeled markers are now referenced in a plan (see aiocomexio
+        parse_config). Compared against the set last USED by parse_config — a no-op on every
+        normal cycle; only an actual change (marker newly wired in, or dropped from every plan)
+        triggers an extra refresh, so the fix isn't tied to (potentially very long)
+        scan_interval waits. _last_referenced_marker_ids is deliberately NOT updated here: the
+        triggered refresh does that itself, keeping the comparison anchored to what entities
+        were actually built from.
+        """
+        new_referenced_markers = self._referenced_marker_ids() or set()
+        markers_changed = new_referenced_markers != self._last_referenced_marker_ids
+        snapshot_fub_ids = frozenset(self.function_plan_plans.keys())
+        snapshot_changed = snapshot_fub_ids != self._last_bulk_snapshot_fub_ids
+        self._last_bulk_snapshot_fub_ids = snapshot_fub_ids
+        if (self._lp_missing_recheck_pending and snapshot_changed) or markers_changed:
+            # The audit skipped the function_plan_missing check because a relevant plan
+            # wasn't loaded yet — re-run it now that the snapshot actually changed. Gating
+            # on snapshot_changed (not just the pending flag) keeps a relevant plan that the
+            # bulk endpoint can never deliver (e.g. a persistently malformed entry) from
+            # retriggering this refresh every single cycle forever.
+            self._lp_missing_recheck_pending = False
+            await self.async_request_refresh()
+
+    def _function_plan_snapshot_loaded(self) -> bool:
+        """Whether function_plan_plans holds a loaded snapshot — {} counts only while no plan is left (#140).
+
+        Derived from the poll's plan list on every call instead of a stored flag, so a plan
+        created after "no plan left" turns an empty snapshot back into "not loaded" even when
+        the next bulk load fails.
+        """
+        return bool(self.function_plan_plans) or self.live_plan_list() == {}
+
     def _referenced_marker_ids(self) -> set[str] | None:
         """Return marker IDs (type-2 element ref_ids) present in any existing plan.
 
@@ -1741,7 +1771,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         does NOT require the element to participate in a connection — a marker merely
         placed in a plan already needs its type/live value resolved in the preview.
         """
-        if not self.function_plan_plans:
+        if not self._function_plan_snapshot_loaded():
             return None
         referenced: set[str] = set()
         for plan_data in self.function_plan_plans.values():
@@ -3430,10 +3460,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _unresolved_plan_identities(self) -> frozenset[tuple[int, str]]:
         """(fub_id, name) of the plan_map entries and named user picks Comexio no longer has under that name.
 
-        Empty without a live plan list: a failed fetch must not read as every plan gone.
+        Empty without a live plan list: a failed fetch must not read as every plan gone. Once a
+        poll read an empty plan list, every entry is unresolved (#140).
         """
-        fub_data = self.api.fub_data
-        if not fub_data:
+        if not self.api.fub_data and self.live_plan_list() is None:
             return frozenset()
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
@@ -5819,9 +5849,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         returning False and, via _lp_missing_recheck_pending, retriggering a refresh every
         backup cycle without end. The empty-snapshot guard stays explicit so the original
         startup race (no plans loaded yet at all) is still caught even when relevant_fub_ids
-        itself is empty (legacy CONF_FUNCTION_PLAN_FUB_ID == "auto").
+        itself is empty (legacy CONF_FUNCTION_PLAN_FUB_ID == "auto"); a snapshot emptied because
+        no plan is left counts as loaded, so the audit reports deleted managed plans (#140).
         """
-        if not self.function_plan_plans:
+        if not self._function_plan_snapshot_loaded():
             return False
         existing_fub_ids = {int(fub_id) for fub_id in self.api.fub_data}
         return (relevant_fub_ids & existing_fub_ids) <= self.function_plan_plans.keys()

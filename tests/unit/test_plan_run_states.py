@@ -179,6 +179,7 @@ class _FakeCoordinator(SimpleNamespace):
     watchdog_user_plan_candidates = ComexioCoordinator.watchdog_user_plan_candidates
     _watchdog_run_state = ComexioCoordinator._watchdog_run_state
     _unresolved_plan_identities = ComexioCoordinator._unresolved_plan_identities
+    live_plan_list = ComexioCoordinator.live_plan_list
     _warn_unresolved_watch_picks = ComexioCoordinator._warn_unresolved_watch_picks
     managed_plan_start_blocked = ComexioCoordinator.managed_plan_start_blocked
     async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans

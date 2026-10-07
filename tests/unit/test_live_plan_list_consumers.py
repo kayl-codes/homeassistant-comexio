@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.comexio import repairs
-from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.const import CONF_FUNCTION_PLAN_PLAN_MAP, DOMAIN
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.repairs import ComexioRepairFlow
 from custom_components.comexio.services import backup
@@ -99,6 +99,7 @@ def test_a_backup_cycle_without_plans_still_audits_the_orphaned_backups() -> Non
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.server_id = "cx1"
     coordinator._function_plan_backup_lock = asyncio.Lock()
+    coordinator.scraped_plan_ids = None
     coordinator.api = SimpleNamespace(function_plan_load_all_plans=AsyncMock(return_value={}))
     audit = AsyncMock()
     coordinator._async_audit_orphaned_backups = audit  # type: ignore[method-assign]
@@ -109,6 +110,108 @@ def test_a_backup_cycle_without_plans_still_audits_the_orphaned_backups() -> Non
     audit.assert_awaited_once()
     # The orphaned-backups sensor and select show the audit's result right away, not at the next poll.
     coordinator.async_update_listeners.assert_called_once()
+
+
+DELETED_PLAN = {7: {"elements": {"1": {"reference": {"type": "2", "ref_id": "253"}}}, "connections": {}}}
+
+
+def _snapshot_coordinator(live_plans: dict | None) -> ComexioCoordinator:
+    """A coordinator whose last bulk snapshot still holds plan 7, and whose next bulk load finds nothing."""
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = "cx1"
+    coordinator._function_plan_backup_lock = asyncio.Lock()
+    coordinator.scraped_plan_ids = None if live_plans is None else set()
+    coordinator.api = SimpleNamespace(
+        function_plan_load_all_plans=AsyncMock(return_value={}), fub_data=live_plans if live_plans is not None else {}
+    )
+    coordinator.function_plan_plans = dict(DELETED_PLAN)
+    coordinator._last_bulk_snapshot_fub_ids = frozenset(DELETED_PLAN)
+    coordinator._last_referenced_marker_ids = {"253"}
+    coordinator._lp_missing_recheck_pending = False
+    coordinator._async_audit_orphaned_backups = AsyncMock()  # type: ignore[method-assign]
+    coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
+    coordinator.async_request_refresh = AsyncMock()  # type: ignore[method-assign]
+    return coordinator
+
+
+def test_no_plan_left_empties_the_snapshot_but_keeps_it_loaded() -> None:
+    """#140: the deleted plan leaves the snapshot, and {} now reads as "loaded, no plans" — not "not loaded"."""
+    coordinator = _snapshot_coordinator({})
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == {}
+    assert coordinator._referenced_marker_ids() == set()
+    # A deleted managed plan (fub 7) is judged against the empty plan list instead of waited for.
+    assert coordinator._relevant_plans_loaded({7}) is True
+    # M253 was only referenced in the deleted plan — the refresh rebuilds the entities without it.
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+def test_an_empty_bulk_load_without_a_plan_list_keeps_the_snapshot() -> None:
+    """Without a poll's plan list an empty bulk load is no proof that every plan is gone."""
+    coordinator = _snapshot_coordinator(None)
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == DELETED_PLAN
+    coordinator.async_request_refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "bulk_load", [AsyncMock(return_value={}), AsyncMock(side_effect=OSError("timeout"))], ids=["empty", "failed"]
+)
+def test_a_plan_created_after_no_plan_was_left_makes_the_empty_snapshot_unloaded_again(bulk_load: AsyncMock) -> None:
+    """Review: once a poll reads a new plan, {} is "not loaded" again even while every bulk load fails."""
+    coordinator = _snapshot_coordinator({})
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+    coordinator.api.fub_data = {"8": {"Name": "New"}}
+    coordinator.api.function_plan_load_all_plans = bulk_load
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator._referenced_marker_ids() is None
+    assert coordinator._relevant_plans_loaded({8}) is False
+
+
+def test_repeated_cycles_with_no_plan_left_refresh_only_once() -> None:
+    coordinator = _snapshot_coordinator({})
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+    coordinator._last_referenced_marker_ids = set()  # what the triggered refresh records
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+def test_no_plan_left_reruns_a_pending_wiring_check() -> None:
+    """The skipped function_plan_missing check runs once the snapshot is known to be empty."""
+    coordinator = _snapshot_coordinator({})
+    coordinator._last_referenced_marker_ids = set()
+    coordinator.function_plan_plans = {7: {"elements": {}, "connections": {}}}
+    coordinator._lp_missing_recheck_pending = True
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    coordinator.async_request_refresh.assert_awaited_once()
+    assert coordinator._lp_missing_recheck_pending is False
+
+
+def _identity_coordinator(live_plans: dict | None) -> ComexioCoordinator:
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.scraped_plan_ids = None if live_plans is None else set()
+    coordinator.api = SimpleNamespace(fub_data=live_plans if live_plans is not None else {})
+    coordinator.config_entry = SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - Marker 1-50": 7}})
+    return coordinator
+
+
+def test_every_plan_identity_is_unresolved_once_no_plan_is_left() -> None:
+    """#140: an empty plan list read by a poll means the mapped plan is gone, not "no list"."""
+    assert _identity_coordinator({})._unresolved_plan_identities() == frozenset({(7, "HA - Marker 1-50")})
+
+
+def test_no_plan_identity_is_unresolved_without_a_plan_list() -> None:
+    assert _identity_coordinator(None)._unresolved_plan_identities() == frozenset()
 
 
 def test_a_failed_bulk_load_shows_the_reset_changed_plans_at_once() -> None:
