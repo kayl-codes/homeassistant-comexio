@@ -534,11 +534,12 @@ def test_a_restore_warns_when_the_backup_was_taken_on_other_firmware(
     if stored is not None:
         snap[backup_module.SNAPSHOT_COMEXIO_VERSION] = stored
     with patch.object(backup_service.persistent_notification, "async_create") as notify:
-        backup_service._warn_firmware_differs(MagicMock(), snap, 1, "Lights", live)
+        backup_service._warn_firmware_differs(MagicMock(), snap, "iosrv1", 1, "Lights", live)
     assert notify.called is warned
     if warned:
         assert "firmware 11.0.2, Comexio now runs 11.1.4" in notify.call_args.args[1]
-        assert notify.call_args.kwargs["notification_id"] == "comexio_restore_firmware_1"
+        # Server and plan name too: another server's or plan's warning for fub 1 must not replace it.
+        assert notify.call_args.kwargs["notification_id"] == "comexio_restore_firmware_iosrv1_1_Lights"
 
 
 def test_diff_labels_name_the_element_and_mark_missing_values(plan: dict[str, Any]) -> None:

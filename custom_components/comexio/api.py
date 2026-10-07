@@ -501,10 +501,10 @@ class ComexioAPI:
         # from the last config fetch; None when that fetch failed or did not carry a readable
         # table, so a backup then stores none rather than an ever older copy.
         self.block_settings: BlockSettings | None = None
-        # Block settings saves started so far / still running — a config fetch that overlapped one
+        # Block settings saves Comexio confirmed so far — a config fetch during which one completed
         # may carry the table from before it and must not overwrite the cache the save updated.
-        self._block_settings_saves_started: int = 0
-        self._block_settings_saves_running: int = 0
+        # A refused or failed save changed nothing on Comexio, so it does not count.
+        self._block_settings_saves_confirmed: int = 0
         # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
         # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
         self.reference_check: ReferenceCheck | None = None
@@ -799,8 +799,7 @@ class ComexioAPI:
         aiohttp.ClientError / TimeoutError.
         """
         run_state_mark = self._run_state_mark
-        saves_before = self._block_settings_saves_started
-        save_running_before = self._block_settings_saves_running > 0
+        saves_before = self._block_settings_saves_confirmed
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -823,15 +822,11 @@ class ComexioAPI:
         if raw.comexio_version:
             self.comexio_version = raw.comexio_version
         block_settings = parse_block_settings(raw.variables.get("FubBaseConfig"))
-        overlapped_save = (
-            save_running_before
-            or self._block_settings_saves_running > 0
-            or self._block_settings_saves_started != saves_before
-        )
-        if overlapped_save:
+        if self._block_settings_saves_confirmed != saves_before:
             # The page may predate the save; the cache already holds the saved values — or stays
             # None (not read) rather than taking a pre-save table. The next fetch without an
-            # overlapping save brings the whole table up to date.
+            # overlapping save brings the whole table up to date. A save still running now
+            # applies its values to the table taken here once Comexio confirms it.
             _LOGGER.debug("Block settings: config fetch overlapped a save — keeping the cached table")
         else:
             if block_settings is None and self.block_settings is not None:
@@ -1639,16 +1634,13 @@ class ComexioAPI:
             if str(answer.get("saved")) != "1":
                 raise ComexioRequestRejectedError(f"{what} was not confirmed: {answer!r:.200}")
 
-        self._block_settings_saves_started += 1
-        self._block_settings_saves_running += 1
-        try:
-            saved = await _succeeded(what, save, transport_raises=True)
-        finally:
-            self._block_settings_saves_running -= 1
-        if saved and self.block_settings is not None:
-            self.block_settings.setdefault(str(element_id), {}).update(
-                {str(name): str(value) for name, value in settings.items()}
-            )
+        saved = await _succeeded(what, save, transport_raises=True)
+        if saved:
+            self._block_settings_saves_confirmed += 1
+            if self.block_settings is not None:
+                self.block_settings.setdefault(str(element_id), {}).update(
+                    {str(name): str(value) for name, value in settings.items()}
+                )
         return saved
 
     async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:

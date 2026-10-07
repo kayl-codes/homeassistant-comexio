@@ -59,5 +59,7 @@ def test_restore_in_place_gets_the_callers_auto_start(auto_start: bool) -> None:
         patch.object(backup, "_refresh_service_descriptions", AsyncMock()),
         patch.object(backup, "_restore_plan_in_place", AsyncMock()) as in_place,
     ):
-        asyncio.run(backup._run_function_plan_restore(MagicMock(), call, SimpleNamespace(), api, None))
+        asyncio.run(
+            backup._run_function_plan_restore(MagicMock(), call, SimpleNamespace(server_id="iosrv1"), api, None)
+        )
     assert in_place.await_args.kwargs["auto_start"] is auto_start
