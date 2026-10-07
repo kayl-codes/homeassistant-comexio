@@ -51,6 +51,9 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
 
+# Snapshot key: Comexio's firmware version at capture time (ComexioAPI.comexio_version).
+SNAPSHOT_COMEXIO_VERSION = "comexio_version"
+
 # Fallback used when backfilling snapshots captured before paper/DPI tracking existed and
 # the plan can no longer be matched live (deleted or reassigned) — a spacious default so a
 # rebuild from such a snapshot cannot come out smaller/clipped versus the (unknown) original.
@@ -98,9 +101,12 @@ def _backup_entry(key: str, plan_name: str, slot: int, snap: dict[str, Any]) -> 
         entry["operation"] = snap["operation"]
     if "restored_at" in snap:
         entry["restored_at"] = snap["restored_at"]
-    for opt_key in ("paper", "dpi", "orientation"):
+    for opt_key in ("paper", "dpi", "orientation", SNAPSHOT_COMEXIO_VERSION):
         if opt_key in snap:
             entry[opt_key] = snap[opt_key]
+    if (settings := snapshot_block_settings(snap)) is not None:
+        # How many block values the snapshot carries — the diff only shows the ones that changed.
+        entry["block_setting_count"] = sum(len(values) for values in settings.values())
     return entry
 
 
@@ -423,9 +429,9 @@ class FunctionPlanBackupManager:
             snapshot[SNAPSHOT_BLOCK_SETTINGS] = block_settings
         if comexio_version is not None:
             # Comexio's own firmware/frontend version at capture time (ComexioAPI.comexio_version,
-            # e.g. "11.0.2") — lets a future restore detect "this snapshot predates a firmware
-            # update", same stamp as function_plan_catalog.py's cached element/block-type catalog.
-            snapshot["comexio_version"] = comexio_version
+            # e.g. "11.0.2") — lets a restore warn that this snapshot predates a firmware
+            # update, same stamp as function_plan_catalog.py's cached element/block-type catalog.
+            snapshot[SNAPSHOT_COMEXIO_VERSION] = comexio_version
         return snapshot
 
     async def async_auto_backup(

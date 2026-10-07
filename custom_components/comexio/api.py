@@ -501,6 +501,10 @@ class ComexioAPI:
         # from the last config fetch; None when that fetch failed or did not carry a readable
         # table, so a backup then stores none rather than an ever older copy.
         self.block_settings: BlockSettings | None = None
+        # Block settings saves Comexio confirmed so far — a config fetch during which one completed
+        # may carry the table from before it and must not overwrite the cache the save updated.
+        # A refused or failed save changed nothing on Comexio, so it does not count.
+        self._block_settings_saves_confirmed: int = 0
         # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
         # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
         self.reference_check: ReferenceCheck | None = None
@@ -795,6 +799,7 @@ class ComexioAPI:
         aiohttp.ClientError / TimeoutError.
         """
         run_state_mark = self._run_state_mark
+        saves_before = self._block_settings_saves_confirmed
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -817,9 +822,18 @@ class ComexioAPI:
         if raw.comexio_version:
             self.comexio_version = raw.comexio_version
         block_settings = parse_block_settings(raw.variables.get("FubBaseConfig"))
-        if block_settings is None and self.block_settings is not None:
-            _LOGGER.warning("Comexio's config page no longer carries $FubBaseConfig — block settings are not backed up")
-        self.block_settings = block_settings
+        if self._block_settings_saves_confirmed != saves_before:
+            # The page may predate the save; the cache already holds the saved values — or stays
+            # None (not read) rather than taking a pre-save table. The next fetch without an
+            # overlapping save brings the whole table up to date. A save still running now
+            # applies its values to the table taken here once Comexio confirms it.
+            _LOGGER.debug("Block settings: config fetch overlapped a save — keeping the cached table")
+        else:
+            if block_settings is None and self.block_settings is not None:
+                _LOGGER.warning(
+                    "Comexio's config page no longer carries $FubBaseConfig — block settings are not backed up"
+                )
+            self.block_settings = block_settings
         if isinstance(fubs := raw.variables.get("Fubs"), dict):
             self._fetch_marks.append((fubs, run_state_mark))
         return raw.variables
@@ -1607,8 +1621,8 @@ class ComexioAPI:
         A confirmed save also updates self.block_settings: until the next config fetch, a
         backup cycle would otherwise read the pre-restore values and store them as a change.
         settings are values as Comexio stores them (parse_block_settings), so the cache holds
-        what the next fetch reads. A fetch already running during the save can still bring back
-        the older table — the next one corrects it.
+        what the next fetch reads. A config fetch overlapping the save keeps this cache instead
+        of its possibly older table (see get_raw_config).
         """
         what = f"Saving block settings {sorted(settings)} of function plan element {element_id}"
 
@@ -1621,10 +1635,12 @@ class ComexioAPI:
                 raise ComexioRequestRejectedError(f"{what} was not confirmed: {answer!r:.200}")
 
         saved = await _succeeded(what, save, transport_raises=True)
-        if saved and self.block_settings is not None:
-            self.block_settings.setdefault(str(element_id), {}).update(
-                {str(name): str(value) for name, value in settings.items()}
-            )
+        if saved:
+            self._block_settings_saves_confirmed += 1
+            if self.block_settings is not None:
+                self.block_settings.setdefault(str(element_id), {}).update(
+                    {str(name): str(value) for name, value in settings.items()}
+                )
         return saved
 
     async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:
