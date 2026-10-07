@@ -849,6 +849,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
         # Resolves this server's block-type ids (e.g. the Flanke) before any plan write below.
         await self.reference_monitor.async_check(raw_config)
+        # The audits below read the plan snapshot of the last backup cycle; plans deleted since
+        # must not keep their wiring in them until the next cycle prunes it.
+        self._prune_deleted_plans_from_snapshot()
 
         final_data = _imported_data(parsed_data, conf)
         self._merge_polled_states(final_data)
@@ -1550,9 +1553,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Reset up front so a failed/empty cycle never leaves a stale result from a
             # previous poll behind — ComexioPlanChangedSensor must reflect *this* cycle only.
             self.last_changed_plans = []
+            requested = function_plan_ids(self.api.fub_data)
             try:
-                loaded = await self.api.function_plan_load_all_plans()
+                loaded = await self.api.function_plan_load_all_plans(raise_errors=True)
                 load_failed = False
+            except ComexioError as err:
+                _LOGGER.error(
+                    "[%s] Function Plan bulk load failed: %s — keeping the plans still listed", self.server_id, err
+                )
+                loaded = {}
+                load_failed = True
             except Exception:
                 _LOGGER.exception(
                     "[%s] Function Plan bulk load failed — keeping the plans still listed", self.server_id
@@ -1564,8 +1574,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # A failed load is logged above, and plans all deleted meanwhile are no fault.
                 await self._async_finish_cycle_without_plans(reason_known=load_failed or bool(loaded))
                 return
-            self.function_plan_plans = plans
-            self.reference_monitor.check_plans(plans)
+            # The load could not deliver a plan created meanwhile (e.g. a managed plan seeded by a sync).
+            self.function_plan_plans = {**self._plans_added_meanwhile(requested), **plans}
+            self.reference_monitor.check_plans(self.function_plan_plans)
             await self._async_recheck_after_snapshot_update()
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
@@ -1772,17 +1783,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # left {} still reads as "loaded", so the audits run on the empty set instead of
         # waiting (#140). Done before the awaited audit below, so a timeout cannot skip it
         # and a managed plan seeded meanwhile is not dropped afterwards.
-        kept = self._drop_plans_deleted_meanwhile(self.function_plan_plans)
         # "No plan left" also counts when the snapshot was already {}: the first one confirmed empty is a change.
-        snapshot_changed = kept.keys() != self.function_plan_plans.keys() or self.live_plan_list() == {}
-        if snapshot_changed:
-            self.function_plan_plans = kept
-            # Forget the unknown block references of the deleted plans as well.
-            self.reference_monitor.check_plans(kept)
+        self._prune_deleted_plans_from_snapshot(force=self.live_plan_list() == {})
         # Show the reset last_changed_plans before anything awaited can run into the cycle timeout.
         self.async_update_listeners()
-        if snapshot_changed:
-            await self._async_recheck_after_snapshot_update()
+        # Also when the poll pruned the snapshot already: the recheck compares against the last
+        # cycle itself, so it rebuilds the entities of markers only the deleted plans referenced.
+        await self._async_recheck_after_snapshot_update()
         # The orphaned-backup repairs need no plan wirings; with no plan left in Comexio
         # every backup is orphaned, so they must not wait for a bulk load that has nothing.
         # They judge by live_plan_list() (the poll's $Fubs), not by the snapshot: a failed
@@ -1795,7 +1802,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         The bulk load filters by the plan list it started with; a poll in between can have
         found plans deleted since, and keeping them would bring them back into audits and backups.
-        Also prunes the previous snapshot when a cycle loads no plan.
+        Also prunes the snapshot itself (every poll, and a cycle that loads no plan) and the
+        plans created during a bulk load.
         """
         live = self.live_plan_list()
         if live is None:
@@ -1809,6 +1817,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 len(plans) - len(kept),
             )
         return kept
+
+    def _prune_deleted_plans_from_snapshot(self, force: bool = False) -> bool:
+        """Drop the plans the latest poll no longer lists from the snapshot; True if it changed.
+
+        force applies the pruned snapshot even when nothing was dropped (a confirmed "no plan left").
+        """
+        kept = self._drop_plans_deleted_meanwhile(self.function_plan_plans)
+        if not force and kept.keys() == self.function_plan_plans.keys():
+            return False
+        self.function_plan_plans = kept
+        # Forget the unknown block references of the deleted plans as well.
+        self.reference_monitor.check_plans(kept)
+        return True
+
+    def _plans_added_meanwhile(self, requested: set[int]) -> dict[int, dict]:
+        """Snapshot entries of plans the poll lists but a bulk load for `requested` did not ask for."""
+        return self._drop_plans_deleted_meanwhile(
+            {fid: plan for fid, plan in self.function_plan_plans.items() if fid not in requested}
+        )
 
     def _function_plan_snapshot_loaded(self) -> bool:
         """Whether function_plan_plans holds a loaded snapshot — {} counts only while no plan is left (#140).

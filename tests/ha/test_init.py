@@ -110,6 +110,28 @@ async def test_statistics_unit_fix_runs_in_background_and_stops_on_unload(
     assert cancelled.is_set()
 
 
+async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Plan 9 is no longer in the poll's $Fubs: the audits must not wait for the next backup cycle to forget it."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    plan = {"elements": {}, "connections": {}}
+    coordinator.function_plan_plans = {1: plan, 9: plan}
+    audit_webio = coordinator._async_audit_webio
+    seen: list[set[int]] = []
+
+    async def recording_audit(*args: Any) -> bool:
+        seen.append(set(coordinator.function_plan_plans))
+        return await audit_webio(*args)
+
+    with patch.object(coordinator, "_async_audit_webio", recording_audit):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert seen == [{1}]  # plan 1 is still in config_basic.json's $Fubs
+
+
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])
 async def test_setup_retry_when_unreachable(
     hass: HomeAssistant,

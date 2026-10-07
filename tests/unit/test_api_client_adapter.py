@@ -447,6 +447,14 @@ def test_load_all_plans_failure_is_empty(comexio_api: ComexioAPI, client: MagicM
     assert asyncio.run(comexio_api.function_plan_load_all_plans()) == {}
 
 
+def test_load_all_plans_failure_raises_on_request(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """The backup cycle must tell a failed load from "no plans" — it asks for the error."""
+    comexio_api._fub_data = {"1": {}}
+    _fail(client, "load_all_function_plans", HTTP_ERROR)
+    with pytest.raises(type(HTTP_ERROR)):
+        asyncio.run(comexio_api.function_plan_load_all_plans(raise_errors=True))
+
+
 @pytest.mark.parametrize(
     ("args", "method", "expected_call"),
     [
