@@ -41,6 +41,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   `_async_publish_pushed_value()`, coordinator entities through `async_update_listeners()`, entities fed by a
   dedicated dispatcher signal (e.g. the bus-load tick's `bus_load_signal`) through that signal alone. One-off paths
   (after a sync, a repair or a button press) may still call `async_set_updated_data`.
+- **Plan existence:** whether a function plan still exists is decided by `live_plan_list()` (the plan list of the
+  last poll; `None` until the first full poll), never by a bulk-load snapshot — the bulk load may omit plans. Flag
+  code that drops findings, backups or watches of a plan only because a snapshot lacks it.
 - **Blocking I/O:** no blocking calls in the event loop; Comexio serialises requests, so avoid needless round-trips.
 
 ## Tests
