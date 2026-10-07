@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio.function_plan import plan_hash
 from aiocomexio.reference_catalog import fub_base_key
+import aiohttp
 import pytest
 
 from custom_components.comexio import (
@@ -17,7 +18,7 @@ from custom_components.comexio import (
     select as select_module,
 )
 from custom_components.comexio.const import DOMAIN
-from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
+from custom_components.comexio.function_plan_backup import SNAPSHOT_COMEXIO_VERSION, FunctionPlanBackupManager
 from custom_components.comexio.function_plan_block_keys import (
     BLOCK_IDS_UNCHECKED,
     CHECK_PLAUSIBLE,
@@ -573,17 +574,102 @@ def test_a_missing_block_is_named_with_its_reason() -> None:
     assert "accept_unverified_blocks" not in error  # no opt-in can place a block that is gone
 
 
-def _run_restore(snapshot: dict[str, Any], **data: Any) -> tuple[SimpleNamespace, MagicMock]:
-    api = SimpleNamespace(login=AsyncMock(return_value=False))
+def _run_restore(
+    snapshot: dict[str, Any],
+    *,
+    logged_in: bool = False,
+    live_version: str | None = None,
+    live_name: str = "Kitch",
+    fetch_error: Exception | None = None,
+    **data: Any,
+) -> tuple[SimpleNamespace, MagicMock]:
+    api = SimpleNamespace(login=AsyncMock(return_value=logged_in), comexio_version="11.0.2")
+
+    async def fetch_config() -> dict[str, Any]:
+        if fetch_error is not None:
+            raise fetch_error
+        api.comexio_version = live_version  # the fresh page carries today's firmware, not the last poll's
+        return {"FubModules": {}, "Fubs": {"42": {"Name": live_name}}}
+
+    api.get_raw_config = AsyncMock(side_effect=fetch_config)
+    api.update_fub_cache_entry = MagicMock()
     call = SimpleNamespace(data={"confirm": True, **data})
     with (
         patch.object(backup_service, "_resolve_restore_params", AsyncMock(return_value=(42, "auto", 0, "Kitch"))),
         patch.object(backup_service, "_resolve_backup_identity", AsyncMock(return_value=("Kitch", None))),
         patch.object(backup_service, "_resolve_restore_snapshot", AsyncMock(return_value=snapshot)),
         patch.object(backup_service.persistent_notification, "async_create") as notify,
+        patch.object(backup_service, "_restore_plan_as_copy", AsyncMock()) as as_copy,
+        patch.object(backup_service, "_restore_plan_in_place", AsyncMock()),
+        patch.object(backup_service, "_restore_plan_as_new", AsyncMock()),
+        patch.object(backup_service, "_refresh_service_descriptions", AsyncMock()),
     ):
-        asyncio.run(backup_service._run_function_plan_restore(MagicMock(), call, MagicMock(), api, plan_hash))
+        coordinator = SimpleNamespace(server_id="iosrv1")
+        asyncio.run(backup_service._run_function_plan_restore(MagicMock(), call, coordinator, api, plan_hash))
+    api.restore_as_copy = as_copy
     return api, notify
+
+
+def _notification_titles(notify: MagicMock) -> list[str]:
+    return [c.kwargs.get("title") for c in notify.call_args_list]
+
+
+@pytest.mark.parametrize(("logged_in", "warned"), [(True, True), (False, False)])
+def test_a_restore_warns_about_other_firmware_only_once_it_proceeds(logged_in: bool, warned: bool) -> None:
+    """(bn)(8): the warning comes after the login, so a restore that stops there does not announce it."""
+    snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
+
+    _api, notify = _run_restore(
+        snapshot, logged_in=logged_in, live_version="11.1.4", as_copy=True, new_plan_name="Copy"
+    )
+
+    assert (backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)) is warned
+
+
+@pytest.mark.parametrize(
+    ("live_name", "confirm", "warned"),
+    [("Kitch", False, True), ("Other", False, False), ("Other", True, True)],
+    ids=["no conflict", "conflict refused", "conflict confirmed"],
+)
+def test_an_in_place_restore_warns_only_once_the_conflict_check_lets_it_proceed(
+    live_name: str, confirm: bool, warned: bool
+) -> None:
+    snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
+
+    _api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", live_name=live_name, confirm=confirm)
+
+    assert (backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)) is warned
+
+
+@pytest.mark.parametrize("data", [{}, {"as_copy": True, "new_plan_name": "Copy"}], ids=["in place", "as copy"])
+def test_the_firmware_check_uses_the_freshly_fetched_version(data: dict[str, Any]) -> None:
+    """The last poll saw 11.0.2 like the backup; the firmware changed since, which only a fresh fetch shows."""
+    snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
+
+    _api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", **data)
+
+    assert backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)
+    warning = next(c for c in notify.call_args_list if c.kwargs.get("title") == backup_service._TITLE_RESTORE_FIRMWARE)
+    assert warning.kwargs["notification_id"] == "comexio_restore_firmware_iosrv1_42_Kitch"
+
+
+def test_an_unreachable_comexio_does_not_stop_a_copy_at_the_firmware_check() -> None:
+    """The copy only fetches for the firmware version; it reports Comexio errors itself."""
+    snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
+
+    api, _notify = _run_restore(
+        snapshot, logged_in=True, fetch_error=aiohttp.ClientError("down"), as_copy=True, new_plan_name="Copy"
+    )
+
+    api.restore_as_copy.assert_awaited_once()
+
+
+def test_a_refused_restore_does_not_warn_about_firmware() -> None:
+    snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2", UNRESOLVED_BLOCKS: [MISSING_BLOCK]}
+
+    _api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4")
+
+    assert backup_service._TITLE_RESTORE_FIRMWARE not in _notification_titles(notify)
 
 
 @pytest.mark.parametrize("data", [{}, {"as_copy": True, "new_plan_name": "Copy"}], ids=["in place", "as copy"])

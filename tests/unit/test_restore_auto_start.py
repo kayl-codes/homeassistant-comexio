@@ -49,6 +49,7 @@ def test_restore_in_place_gets_the_callers_auto_start(auto_start: bool) -> None:
         login=AsyncMock(return_value=True),
         get_raw_config=AsyncMock(return_value={"Fubs": {"42": live}}),
         update_fub_cache_entry=MagicMock(),
+        comexio_version=None,
     )
     call = SimpleNamespace(data={"confirm": True, "auto_start": auto_start})
     with (
@@ -58,5 +59,7 @@ def test_restore_in_place_gets_the_callers_auto_start(auto_start: bool) -> None:
         patch.object(backup, "_refresh_service_descriptions", AsyncMock()),
         patch.object(backup, "_restore_plan_in_place", AsyncMock()) as in_place,
     ):
-        asyncio.run(backup._run_function_plan_restore(MagicMock(), call, SimpleNamespace(), api, None))
+        asyncio.run(
+            backup._run_function_plan_restore(MagicMock(), call, SimpleNamespace(server_id="iosrv1"), api, None)
+        )
     assert in_place.await_args.kwargs["auto_start"] is auto_start
