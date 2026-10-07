@@ -36,7 +36,7 @@ def test_polled_knx_values_merge_with_webhook_and_cache() -> None:
 def test_ignored_ids_for_a_category(raw: str | None, ids: set[int]) -> None:
     conf_key = source_category(WebioClass.MARKER).ignored_conf_key
     options = {} if raw is None else {conf_key: raw}
-    coordinator = _coordinator(config_entry=SimpleNamespace(options=options))
+    coordinator = _coordinator(config_entry=SimpleNamespace(options=options), _knx_bridge_marker_ids=set())
 
     assert coordinator._ignored_ids_for(WebioClass.MARKER) == ids
 
