@@ -147,6 +147,21 @@ def test_change_backup_stores_the_plans_settings(stores: dict[str, Any], plan: d
     assert manager.block_settings_sync("change", 1, "Lights", 0) == SETTINGS
 
 
+def test_backups_stamp_the_firmware_they_were_taken_on(stores: dict[str, Any], plan: dict[str, Any]) -> None:
+    """(bn)(8): without the stamp the restore's firmware warning stays silent for every backup."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+
+    async def run() -> None:
+        await manager.async_auto_backup({1: plan}, {"1": {"Name": "Lights"}}, comexio_version="11.1.4")
+        await manager.async_change_backup(1, plan, "Lights", "sort", comexio_version="11.1.4")
+
+    asyncio.run(run())
+
+    auto = stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"][0]
+    change = stores[f"{DOMAIN}_logikplan_changes_{SERVER_ID}"]["1"]["Lights"][0]
+    assert auto[backup_module.SNAPSHOT_COMEXIO_VERSION] == change[backup_module.SNAPSHOT_COMEXIO_VERSION] == "11.1.4"
+
+
 def test_a_backup_without_the_table_stores_no_settings_key(stores: dict[str, Any], plan: dict[str, Any]) -> None:
     manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
     asyncio.run(manager.async_change_backup(1, plan, "Lights", "sort"))
@@ -456,7 +471,7 @@ def test_diff_is_none_when_a_snapshot_lacks_settings(plan: dict[str, Any]) -> No
     assert block_settings_diff(_snapshot(plan, SETTINGS), _snapshot(plan, None)) is None
 
 
-def test_backup_diffs_carry_the_settings_group_only_when_both_sides_have_settings(plan: dict[str, Any]) -> None:
+def test_backup_diffs_mark_a_side_stored_without_settings_instead_of_hiding_it(plan: dict[str, Any]) -> None:
     snapshots = {
         0: _snapshot(plan, {**SETTINGS, "7": {"time_up": "50", "time_down": "40"}}),
         1: _snapshot(plan, SETTINGS),
@@ -477,7 +492,53 @@ def test_backup_diffs_carry_the_settings_group_only_when_both_sides_have_setting
         asyncio.run(backup_service._attach_backup_diffs(coordinator, entries, "auto"))
 
     assert entries[0]["diff"]["block_settings"] == ["Nicht (#7): time_up 45 → 50"]
-    assert "block_settings" not in entries[1]["diff"]  # its predecessor was stored before the capture
+    # (bn)(1): its predecessor was stored before the capture — said, not silently left out.
+    assert entries[1]["diff"]["block_settings"] == ["#nv — no block values stored in the older backup, not compared"]
+
+
+@pytest.mark.parametrize(
+    ("newer_settings", "older_settings", "side"),
+    [(SETTINGS, None, "the older backup"), (None, SETTINGS, "this backup"), (None, None, "either backup")],
+)
+def test_the_nv_line_names_the_side_without_settings(
+    plan: dict[str, Any], newer_settings: dict | None, older_settings: dict | None, side: str
+) -> None:
+    line = backup_service._no_block_settings_line(_snapshot(plan, newer_settings), _snapshot(plan, older_settings))
+    assert line == f"#nv — no block values stored in {side}, not compared"
+
+
+@pytest.mark.parametrize(("settings", "count"), [(SETTINGS, 4), ({}, 0), (None, None)])
+def test_list_entries_count_the_stored_block_values(
+    plan: dict[str, Any], settings: dict | None, count: int | None
+) -> None:
+    """(bn)(3): the diff only shows changed values — the count tells how many the backup holds."""
+    entry = backup_module._backup_entry("1", "Lights", 0, _snapshot(plan, settings))
+    assert entry.get("block_setting_count") == count
+
+
+def test_list_entries_carry_the_firmware_the_backup_was_taken_on(plan: dict[str, Any]) -> None:
+    snap = _snapshot(plan, None) | {backup_module.SNAPSHOT_COMEXIO_VERSION: "11.1.4"}
+    assert backup_module._backup_entry("1", "Lights", 0, snap)["comexio_version"] == "11.1.4"
+    assert "comexio_version" not in backup_module._backup_entry("1", "Lights", 0, _snapshot(plan, None))
+
+
+@pytest.mark.parametrize(
+    ("stored", "live", "warned"),
+    [("11.0.2", "11.1.4", True), ("11.1.4", "11.1.4", False), (None, "11.1.4", False), ("11.0.2", None, False)],
+)
+def test_a_restore_warns_when_the_backup_was_taken_on_other_firmware(
+    plan: dict[str, Any], stored: str | None, live: str | None, warned: bool
+) -> None:
+    """(bn)(8): the restore goes on, but says the backup predates a firmware change."""
+    snap = _snapshot(plan, None)
+    if stored is not None:
+        snap[backup_module.SNAPSHOT_COMEXIO_VERSION] = stored
+    with patch.object(backup_service.persistent_notification, "async_create") as notify:
+        backup_service._warn_firmware_differs(MagicMock(), snap, 1, "Lights", live)
+    assert notify.called is warned
+    if warned:
+        assert "firmware 11.0.2, Comexio now runs 11.1.4" in notify.call_args.args[1]
+        assert notify.call_args.kwargs["notification_id"] == "comexio_restore_firmware_1"
 
 
 def test_diff_labels_name_the_element_and_mark_missing_values(plan: dict[str, Any]) -> None:

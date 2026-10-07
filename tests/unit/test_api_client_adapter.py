@@ -350,6 +350,90 @@ def test_save_block_settings_leaves_an_uncaptured_table_uncaptured(comexio_api: 
     assert comexio_api.block_settings is None
 
 
+def _old_table_page() -> RawConfig:
+    """A config page read before the save: element 104 still has in_0 = 10."""
+    return RawConfig({"FubBaseConfig": {"1": {"FubElementId": 104, "Name": "in_0", "Value": "10"}}}, {}, {}, None)
+
+
+def test_a_config_fetch_overlapping_a_save_keeps_the_saved_values(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """(bn)(4): a fetch that read the page before the save must not put the old value back into the cache."""
+    comexio_api.block_settings = {"104": {"in_0": "10"}}
+    client._plan_json = AsyncMock(return_value={"saved": 1})
+
+    async def fetch_during_save() -> RawConfig:
+        await comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})
+        return _old_table_page()
+
+    client.get_raw_config = AsyncMock(side_effect=fetch_during_save)
+    asyncio.run(comexio_api.get_raw_config())
+
+    assert comexio_api.block_settings == {"104": {"in_0": "26"}}
+    # The next fetch without a save in between takes the page's table again.
+    client.get_raw_config = AsyncMock(return_value=_old_table_page())
+    asyncio.run(comexio_api.get_raw_config())
+    assert comexio_api.block_settings == {"104": {"in_0": "10"}}
+
+
+def test_a_config_fetch_during_a_running_save_keeps_the_cache(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """A save already running when the fetch starts may land after the page was read."""
+    comexio_api.block_settings = {"104": {"in_0": "10"}}
+
+    async def run() -> None:
+        save_done, page_read = asyncio.Event(), asyncio.Event()
+
+        async def slow_save(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            await page_read.wait()
+            return {"saved": 1}
+
+        async def slow_fetch() -> RawConfig:
+            page_read.set()  # the page is read while the save is still running ...
+            await save_done.wait()  # ... and the fetch only finishes after the save
+            return _old_table_page()
+
+        client._plan_json = AsyncMock(side_effect=slow_save)
+        client.get_raw_config = AsyncMock(side_effect=slow_fetch)
+        save = asyncio.create_task(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"}))
+        await asyncio.sleep(0)
+        fetch = asyncio.create_task(comexio_api.get_raw_config())
+        await save
+        save_done.set()
+        await fetch
+
+    asyncio.run(run())
+
+    assert comexio_api.block_settings == {"104": {"in_0": "26"}}
+
+
+def test_a_config_fetch_overlapping_a_save_leaves_an_unread_cache_unread(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """With no table read yet, an overlapping fetch must not capture the pre-save page either."""
+    comexio_api.block_settings = None
+    client._plan_json = AsyncMock(return_value={"saved": 1})
+
+    async def fetch_during_save() -> RawConfig:
+        await comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})
+        return _old_table_page()
+
+    client.get_raw_config = AsyncMock(side_effect=fetch_during_save)
+    asyncio.run(comexio_api.get_raw_config())
+
+    assert comexio_api.block_settings is None  # "not read" — no backup stores the pre-save values
+
+
+def test_a_failed_save_does_not_freeze_the_cache(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """A save that raises still counts as finished, so later fetches take the page again."""
+    comexio_api.block_settings = {"104": {"in_0": "26"}}
+    _fail(client, "_plan_json", _connection_error())
+    with pytest.raises(aiohttp.ClientError):
+        asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "30"}))
+
+    client.get_raw_config = AsyncMock(return_value=_old_table_page())
+    asyncio.run(comexio_api.get_raw_config())
+
+    assert comexio_api.block_settings == {"104": {"in_0": "10"}}
+
+
 def test_get_live_states_failure_is_none_not_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
     _fail(client, "get_live_states", _connection_error())
     assert asyncio.run(comexio_api.get_live_states(5, 2)) == (None, None)

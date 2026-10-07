@@ -31,7 +31,7 @@ from ..const import (
     TIMESTAMP_DISPLAY_FORMAT,
 )
 from ..coordinator import ComexioCoordinator
-from ..function_plan_backup import is_orphaned_identity, retention_cutoff
+from ..function_plan_backup import SNAPSHOT_COMEXIO_VERSION, is_orphaned_identity, retention_cutoff
 from ..function_plan_block_keys import CHECK_PLAUSIBLE, CHECK_UNRESOLVED, CHECK_UNVERIFIED, block_check
 from ..function_plan_block_settings import (
     block_settings_diff,
@@ -55,6 +55,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _TITLE_RESTORE_ERR = "Function Plan Restore — Error"
 _TITLE_RESTORE_PROGRESS = "Function Plan Restore — IN PROGRESS"
+_TITLE_RESTORE_FIRMWARE = "Function Plan Restore — Other Firmware"
 _TITLE_LIST_BACKUPS_ERR = "Function Plan Backups — Error"
 _TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
 _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
@@ -69,6 +70,9 @@ _AGE_KEYS = ("days", "hours", "minutes", "seconds")
 _LabelMaps = tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]
 # A block setting one side of a backup diff does not have.
 _MISSING_VALUE = "—"
+# Diff line when a side of the diff was stored before block settings were captured (#nv = no
+# value): without it a values diff would silently look like "nothing changed".
+_NO_BLOCK_SETTINGS = "#nv — no block values stored in {side}, not compared"
 
 
 def _coerce_int(value) -> int | None:
@@ -240,6 +244,19 @@ async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[di
         }
         if (settings_diff := block_settings_diff(newer, older)) is not None:
             entry["diff"]["block_settings"] = _label_block_settings_diff(settings_diff, newer, catalog, newer_maps)
+        else:
+            entry["diff"]["block_settings"] = [_no_block_settings_line(newer, older)]
+
+
+def _no_block_settings_line(newer: dict, older: dict) -> str:
+    """The #nv diff line naming which side of the diff was stored without block settings."""
+    if snapshot_block_settings(newer) is not None:
+        side = "the older backup"
+    elif snapshot_block_settings(older) is not None:
+        side = "this backup"
+    else:
+        side = "either backup"
+    return _NO_BLOCK_SETTINGS.format(side=side)
 
 
 def _label_block_settings_diff(
@@ -1180,6 +1197,29 @@ def _log_block_ids_trust(snapshot: dict[str, Any], plan_name: str, accept_unveri
         )
 
 
+def _warn_firmware_differs(
+    hass: HomeAssistant, snapshot: dict[str, Any], fub_id: int, plan_name: str, live: str | None
+) -> None:
+    """Warn (log + notification, the restore goes on) when the backup was taken on another Comexio firmware.
+
+    Block ids are already translated to today's catalog (resolve_block_ids); what a firmware
+    update changed in a block's behaviour or settings is not, so the user should check the plan.
+    Silent when either version is unknown (snapshots stored before the stamp, no poll yet).
+    """
+    stored = snapshot.get(SNAPSHOT_COMEXIO_VERSION)
+    if not stored or not live or str(stored) == str(live):
+        return
+    message = (
+        f"The backup of '{plan_name}' was taken on Comexio firmware {stored}, Comexio now runs {live}. "
+        "Once restored, check the plan's blocks and their values."
+    )
+    _LOGGER.warning("Function Plan Restore: %s", message)
+    # One notification per plan: a restore re-run with confirm=true replaces it instead of stacking.
+    persistent_notification.async_create(
+        hass, message, title=_TITLE_RESTORE_FIRMWARE, notification_id=f"comexio_restore_firmware_{fub_id}"
+    )
+
+
 async def _resolve_restore_conflict(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -1313,6 +1353,7 @@ async def _run_function_plan_restore(
     if not await api.login():
         persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=_TITLE_RESTORE_ERR)
         return
+    _warn_firmware_differs(hass, snapshot, fub_id, plan_name, api.comexio_version)
 
     if as_copy:
         # The source plan is never touched here — no conflict/identity check applies.

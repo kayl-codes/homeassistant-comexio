@@ -17,7 +17,7 @@ from custom_components.comexio import (
     select as select_module,
 )
 from custom_components.comexio.const import DOMAIN
-from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
+from custom_components.comexio.function_plan_backup import SNAPSHOT_COMEXIO_VERSION, FunctionPlanBackupManager
 from custom_components.comexio.function_plan_block_keys import (
     BLOCK_IDS_UNCHECKED,
     CHECK_PLAUSIBLE,
@@ -573,17 +573,45 @@ def test_a_missing_block_is_named_with_its_reason() -> None:
     assert "accept_unverified_blocks" not in error  # no opt-in can place a block that is gone
 
 
-def _run_restore(snapshot: dict[str, Any], **data: Any) -> tuple[SimpleNamespace, MagicMock]:
-    api = SimpleNamespace(login=AsyncMock(return_value=False))
+def _run_restore(
+    snapshot: dict[str, Any], *, logged_in: bool = False, live_version: str | None = None, **data: Any
+) -> tuple[SimpleNamespace, MagicMock]:
+    api = SimpleNamespace(login=AsyncMock(return_value=logged_in), comexio_version=live_version)
     call = SimpleNamespace(data={"confirm": True, **data})
     with (
         patch.object(backup_service, "_resolve_restore_params", AsyncMock(return_value=(42, "auto", 0, "Kitch"))),
         patch.object(backup_service, "_resolve_backup_identity", AsyncMock(return_value=("Kitch", None))),
         patch.object(backup_service, "_resolve_restore_snapshot", AsyncMock(return_value=snapshot)),
         patch.object(backup_service.persistent_notification, "async_create") as notify,
+        patch.object(backup_service, "_restore_plan_as_copy", AsyncMock()),
+        patch.object(backup_service, "_refresh_service_descriptions", AsyncMock()),
     ):
         asyncio.run(backup_service._run_function_plan_restore(MagicMock(), call, MagicMock(), api, plan_hash))
     return api, notify
+
+
+def _notification_titles(notify: MagicMock) -> list[str]:
+    return [c.kwargs.get("title") for c in notify.call_args_list]
+
+
+@pytest.mark.parametrize(("logged_in", "warned"), [(True, True), (False, False)])
+def test_a_restore_warns_about_other_firmware_only_once_it_proceeds(logged_in: bool, warned: bool) -> None:
+    """(bn)(8): the warning comes after the login, so a restore that stops there does not announce it."""
+    snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
+
+    _api, notify = _run_restore(
+        snapshot, logged_in=logged_in, live_version="11.1.4", as_copy=True, new_plan_name="Copy"
+    )
+
+    assert (backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)) is warned
+
+
+def test_a_refused_restore_does_not_warn_about_firmware() -> None:
+    snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2", UNRESOLVED_BLOCKS: [MISSING_BLOCK]}
+
+    _api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4")
+
+    assert backup_service._TITLE_RESTORE_FIRMWARE not in _notification_titles(notify)
 
 
 @pytest.mark.parametrize("data", [{}, {"as_copy": True, "new_plan_name": "Copy"}], ids=["in place", "as copy"])

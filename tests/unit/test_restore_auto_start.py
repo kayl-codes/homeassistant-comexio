@@ -49,6 +49,7 @@ def test_restore_in_place_gets_the_callers_auto_start(auto_start: bool) -> None:
         login=AsyncMock(return_value=True),
         get_raw_config=AsyncMock(return_value={"Fubs": {"42": live}}),
         update_fub_cache_entry=MagicMock(),
+        comexio_version=None,
     )
     call = SimpleNamespace(data={"confirm": True, "auto_start": auto_start})
     with (
