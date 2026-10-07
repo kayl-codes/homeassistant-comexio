@@ -116,6 +116,7 @@ async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
     """Plan 9 is no longer in the poll's $Fubs: the audits must not wait for the next backup cycle to forget it."""
     await _setup(hass, mock_config_entry)
     coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator._last_referenced_markers_from_snapshot is False  # no bulk load yet: stored backup
     plan = {"elements": {}, "connections": {}}
     coordinator.function_plan_plans = {1: plan, 9: plan}
     audit_webio = coordinator._async_audit_webio
@@ -130,6 +131,7 @@ async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
         await hass.async_block_till_done()
 
     assert seen == [{1}]  # plan 1 is still in config_basic.json's $Fubs
+    assert coordinator._last_referenced_markers_from_snapshot is True
 
 
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])

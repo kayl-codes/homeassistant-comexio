@@ -213,21 +213,33 @@ class ReferenceCatalogMonitor:
     def check_plans(self, plans: Mapping[Any, Any]) -> None:
         """Log plan elements referencing block types the live catalog doesn't know (on change only).
 
-        No plans clears the findings even without a catalog check: deleted plans reference nothing.
+        Without a catalog check the findings of plans no longer present are still dropped: deleted
+        plans reference nothing.
         """
-        if plans:
-            check = self._api.reference_check
-            if check is None or not check.fub_base_ids:
-                return
-            found = find_unknown_fub_base_refs(plans, check.fub_base_ids)
-        else:
+        check = self._api.reference_check
+        live_ids = check.fub_base_ids if check is not None else None
+        if live_ids:
+            found = find_unknown_fub_base_refs(plans, live_ids)
+        elif not plans:
             found = []
+        elif self._unknown_refs is None:
+            return  # never judged: no findings to drop, and no catalog to judge the plans by
+        else:
+            present = {str(fub_id) for fub_id in plans}
+            found = [ref for ref in self._unknown_refs if ref[0] in present]
         if found == self._unknown_refs:
             return
         self._unknown_refs = found
         if self._blocked:
             # Add the plan findings to the pre-filled report, keeping why the check didn't run.
             self._update_issue(self._blocked, self._check_not_run)
+        if not found and plans and not live_ids:
+            _LOGGER.info(
+                "[%s] Function plans: findings of deleted plans dropped; the remaining plans are not checked "
+                "for unknown block types until the block catalog is available",
+                self._server_id,
+            )
+            return
         if not found:
             _LOGGER.info("[%s] Function plans: no elements with unknown block types", self._server_id)
             return

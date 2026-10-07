@@ -534,6 +534,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # instead of waiting for the next scheduled poll (which could be hours away with a long
         # scan_interval).
         self._last_referenced_marker_ids: set[str] = set()
+        # False while those came from the stored backup fallback instead of a loaded plan snapshot.
+        self._last_referenced_markers_from_snapshot = False
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
         self.knx_states: dict[str, Any] = {}
@@ -920,6 +922,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # unnamed-but-wired marker still gets an entity on every restart, not just after
         # the first backup cycle has run.
         referenced_markers = self._referenced_marker_ids()
+        self._last_referenced_markers_from_snapshot = referenced_markers is not None
         if referenced_markers is None:
             referenced_markers = await self.function_plan_backup.async_referenced_marker_ids()
         self._last_referenced_marker_ids = referenced_markers
@@ -1748,8 +1751,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         triggered refresh does that itself, keeping the comparison anchored to what entities
         were actually built from.
         """
-        new_referenced_markers = self._referenced_marker_ids() or set()
-        markers_changed = new_referenced_markers != self._last_referenced_marker_ids
+        new_referenced_markers = self._referenced_marker_ids()
+        if new_referenced_markers is None:
+            # No loaded snapshot: one refresh moves the poll from the snapshot's markers to the stored
+            # backup's; after it there is nothing to compare — "no marker" would refresh every cycle.
+            markers_changed = self._last_referenced_markers_from_snapshot
+        else:
+            markers_changed = new_referenced_markers != self._last_referenced_marker_ids
         snapshot_fub_ids = frozenset(self.function_plan_plans.keys())
         snapshot_changed = snapshot_fub_ids != self._last_bulk_snapshot_fub_ids
         self._last_bulk_snapshot_fub_ids = snapshot_fub_ids

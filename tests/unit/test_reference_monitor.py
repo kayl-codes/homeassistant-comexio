@@ -228,6 +228,57 @@ def test_plans_keep_the_unknown_refs_without_a_check() -> None:
     assert monitor._unknown_refs == [UNKNOWN_REF]
 
 
+def test_deleted_plans_drop_their_unknown_refs_without_a_check() -> None:
+    """Review: a deleted plan's findings must leave the log and Repair report while other plans remain."""
+    monitor = _monitor(None)
+    monitor._unknown_refs = [UNKNOWN_REF, ("8", "4", "998")]
+
+    monitor.check_plans({7: {"elements": {}, "connections": {}}})
+
+    assert monitor._unknown_refs == [UNKNOWN_REF]
+
+
+@pytest.mark.parametrize(
+    ("refs", "expected_log"),
+    [
+        ([UNKNOWN_REF, ("8", "4", "998")], "1 element(s) reference a block type unknown"),
+        ([("8", "4", "998")], "the remaining plans are not checked"),
+    ],
+    ids=["findings-remain", "all-findings-dropped"],
+)
+def test_dropping_deleted_plan_findings_refreshes_the_unchecked_repair_and_the_log(
+    raw: dict[str, Any],
+    issue_registry: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+    refs: list[tuple[str, str, str]],
+    expected_log: str,
+) -> None:
+    """The Repair is refreshed and keeps "check didn't run"; the log never claims a check that didn't run."""
+    monitor = _monitor(_references(raw))
+    monitor._hass.async_add_executor_job = AsyncMock(side_effect=OSError("disk"))
+    asyncio.run(monitor.async_check(raw))
+    monitor._unknown_refs = refs
+
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: {"elements": {}, "connections": {}}})
+
+    kwargs = _issue_kwargs(issue_registry)
+    assert kwargs["translation_key"] == ISSUE_TRANSLATION_KEY_UNCHECKED
+    assert issue_registry.async_create_issue.call_count == 2
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(expected_log in message for message in messages)
+    assert not any("no elements with unknown block types" in message for message in messages)
+
+
+def test_plans_never_judged_stay_unjudged_without_a_check() -> None:
+    """No catalog and no earlier findings: nothing to drop, nothing to log."""
+    monitor = _monitor(None)
+
+    monitor.check_plans({7: {"elements": {}, "connections": {}}})
+
+    assert monitor._unknown_refs is None
+
+
 def test_clearing_the_plan_refs_keeps_the_unchecked_repair(raw: dict[str, Any], issue_registry: MagicMock) -> None:
     """Review: no plan left while no check ran must not turn "check didn't run" into "blocks unusable"."""
     monitor = _monitor(_references(raw))

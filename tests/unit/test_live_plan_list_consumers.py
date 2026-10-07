@@ -131,6 +131,7 @@ def _snapshot_coordinator(live_plans: dict | None) -> ComexioCoordinator:
     coordinator.function_plan_plans = dict(DELETED_PLAN)
     coordinator._last_bulk_snapshot_fub_ids = frozenset(DELETED_PLAN)
     coordinator._last_referenced_marker_ids = {"253"}
+    coordinator._last_referenced_markers_from_snapshot = True
     coordinator._lp_missing_recheck_pending = False
     coordinator._async_audit_orphaned_backups = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
@@ -443,6 +444,33 @@ def test_a_plan_created_after_no_plan_was_left_makes_the_empty_snapshot_unloaded
 
     assert coordinator._referenced_marker_ids() is None
     assert coordinator._relevant_plans_loaded({8}) is False
+
+
+def test_failing_bulk_loads_without_a_snapshot_do_not_refresh_on_every_cycle() -> None:
+    """Review: the poll took the wired markers from the stored backup; no snapshot is no "no marker" change."""
+    coordinator = _snapshot_coordinator({"8": {"Name": "Other"}})
+    coordinator.function_plan_plans = {}
+    coordinator._last_bulk_snapshot_fub_ids = frozenset()
+    coordinator._last_referenced_markers_from_snapshot = False  # {"253"} came from the stored backup
+    coordinator.api.function_plan_load_all_plans = AsyncMock(side_effect=ComexioError("timeout"))
+
+    for _ in range(2):
+        asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator._referenced_marker_ids() is None
+    coordinator.async_request_refresh.assert_not_awaited()
+
+
+def test_a_snapshot_lost_by_a_failed_bulk_load_refreshes_only_once() -> None:
+    """The poll after the loss switches to the stored backup's markers; later failed cycles change nothing."""
+    coordinator = _snapshot_coordinator({"8": {"Name": "Other"}})
+    coordinator.api.function_plan_load_all_plans = AsyncMock(side_effect=ComexioError("timeout"))
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+    coordinator._last_referenced_markers_from_snapshot = False  # what the triggered refresh records
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    coordinator.async_request_refresh.assert_awaited_once()
 
 
 def test_repeated_cycles_with_no_plan_left_refresh_only_once() -> None:
