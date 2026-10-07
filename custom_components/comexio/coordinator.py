@@ -1556,6 +1556,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.exception("[%s] Function Plan bulk load failed — keeping previous snapshot", self.server_id)
                 self.async_update_listeners()  # show the reset last_changed_plans now
                 return
+            if plans and self.live_plan_list() == {}:
+                # A poll confirmed no plan left while this bulk load was in flight: its plans are stale.
+                _LOGGER.debug("[%s] Discarding a stale bulk load — the latest poll found no plan", self.server_id)
+                plans = {}
             if not plans:
                 _LOGGER.warning(
                     "[%s] Function Plan backup cycle: no plans loaded — only auditing orphaned backups",

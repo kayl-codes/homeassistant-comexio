@@ -167,6 +167,44 @@ def test_no_plan_left_empties_the_snapshot_but_keeps_it_loaded() -> None:
     coordinator.async_request_refresh.assert_awaited_once()
 
 
+def test_a_stale_bulk_load_after_no_plan_was_left_is_discarded() -> None:
+    """Review: a bulk load answered before the deletion must not bring the deleted plan back."""
+    coordinator = _snapshot_coordinator({})
+    coordinator.api.function_plan_load_all_plans = AsyncMock(return_value=dict(DELETED_PLAN))
+    coordinator.function_plan_backup = SimpleNamespace(async_auto_backup=AsyncMock())
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == {}
+    coordinator.reference_monitor.check_plans.assert_called_once_with({})
+    coordinator.function_plan_backup.async_auto_backup.assert_not_awaited()
+    # M253 was only referenced in the stale plan — the refresh rebuilds the entities without it.
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.parametrize("live_plans", [None, {"7": {"Name": "Live"}}], ids=["no-plan-list", "plans-left"])
+def test_a_bulk_load_is_kept_unless_no_plan_is_left(live_plans: dict | None) -> None:
+    """The stale-load guard only fires on a confirmed empty plan list — never before the first poll."""
+    coordinator = _snapshot_coordinator(live_plans)
+    coordinator.api.function_plan_load_all_plans = AsyncMock(return_value=dict(DELETED_PLAN))
+    coordinator.api.comexio_version = None
+    coordinator.api.block_settings = {}
+    coordinator.function_plan_backup = SimpleNamespace(
+        async_auto_backup=AsyncMock(return_value=[]),
+        async_backfill_paper_metadata=AsyncMock(),
+        async_backfill_block_keys=AsyncMock(),
+    )
+    coordinator.function_plan_label_maps = MagicMock(return_value=({}, {}, {}))  # type: ignore[method-assign]
+    coordinator._current_plan_format = MagicMock(return_value=None)  # type: ignore[method-assign]
+    coordinator._async_refresh_service_descriptions = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == DELETED_PLAN
+    coordinator.reference_monitor.check_plans.assert_called_once_with(DELETED_PLAN)
+    coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
+
+
 def test_an_empty_bulk_load_without_a_plan_list_keeps_the_snapshot() -> None:
     """Without a poll's plan list an empty bulk load is no proof that every plan is gone."""
     coordinator = _snapshot_coordinator(None)
