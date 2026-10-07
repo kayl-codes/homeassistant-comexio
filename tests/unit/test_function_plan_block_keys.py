@@ -581,6 +581,7 @@ def _run_restore(
     live_version: str | None = None,
     live_name: str = "Kitch",
     fetch_error: Exception | None = None,
+    page: dict[str, Any] | None = None,
     **data: Any,
 ) -> tuple[SimpleNamespace, MagicMock]:
     api = SimpleNamespace(login=AsyncMock(return_value=logged_in), comexio_version="11.0.2")
@@ -588,6 +589,8 @@ def _run_restore(
     async def fetch_config() -> dict[str, Any]:
         if fetch_error is not None:
             raise fetch_error
+        if page is not None:
+            return page
         api.comexio_version = live_version  # the fresh page carries today's firmware, not the last poll's
         return {"FubModules": {}, "Fubs": {"42": {"Name": live_name}}}
 
@@ -600,13 +603,13 @@ def _run_restore(
         patch.object(backup_service, "_resolve_restore_snapshot", AsyncMock(return_value=snapshot)),
         patch.object(backup_service.persistent_notification, "async_create") as notify,
         patch.object(backup_service, "_restore_plan_as_copy", AsyncMock()) as as_copy,
-        patch.object(backup_service, "_restore_plan_in_place", AsyncMock()),
-        patch.object(backup_service, "_restore_plan_as_new", AsyncMock()),
+        patch.object(backup_service, "_restore_plan_in_place", AsyncMock()) as in_place,
+        patch.object(backup_service, "_restore_plan_as_new", AsyncMock()) as as_new,
         patch.object(backup_service, "_refresh_service_descriptions", AsyncMock()),
     ):
         coordinator = SimpleNamespace(server_id="iosrv1")
         asyncio.run(backup_service._run_function_plan_restore(MagicMock(), call, coordinator, api, plan_hash))
-    api.restore_as_copy = as_copy
+    api.restore_as_copy, api.restore_in_place, api.restore_as_new = as_copy, in_place, as_new
     return api, notify
 
 
@@ -653,12 +656,43 @@ def test_the_firmware_check_uses_the_freshly_fetched_version(data: dict[str, Any
     assert warning.kwargs["notification_id"] == "comexio_restore_firmware_iosrv1_42_Kitch"
 
 
-def test_an_unreachable_comexio_does_not_stop_a_copy_at_the_firmware_check() -> None:
+@pytest.mark.parametrize(
+    ("page", "fetch_error"),
+    [({}, None), ({"FubModules": {}}, None), (None, aiohttp.ClientError("down"))],
+    ids=["page not readable", "no plan list", "unreachable"],
+)
+def test_an_unread_plan_list_stops_an_in_place_restore(
+    page: dict[str, Any] | None, fetch_error: Exception | None
+) -> None:
+    """An unread list must not look like a deleted plan: confirm would rebuild a plan that still runs."""
+    api, notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page=page, fetch_error=fetch_error)
+
+    api.restore_as_new.assert_not_awaited()
+    api.restore_in_place.assert_not_awaited()
+    assert "Restore of 'Kitch' aborted" in notify.call_args.args[1]
+    assert "Nothing was changed" in notify.call_args.args[1]
+
+
+def test_an_empty_plan_list_means_the_plan_was_deleted() -> None:
+    """A read but empty plan list (aiocomexio decodes PHP's [] to {}): the plan is gone, rebuilt as new."""
+    api, _notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page={"FubModules": {}, "Fubs": {}})
+
+    api.restore_as_new.assert_awaited_once()
+    assert api.restore_as_new.await_args.kwargs["old_id_still_live"] is False
+    api.restore_in_place.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("page", "fetch_error"),
+    [({}, None), ({"FubModules": {}}, None), (None, aiohttp.ClientError("down"))],
+    ids=["page not readable", "no plan list", "unreachable"],
+)
+def test_an_unread_plan_list_does_not_stop_a_copy(page: dict[str, Any] | None, fetch_error: Exception | None) -> None:
     """The copy only fetches for the firmware version; it reports Comexio errors itself."""
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 
     api, _notify = _run_restore(
-        snapshot, logged_in=True, fetch_error=aiohttp.ClientError("down"), as_copy=True, new_plan_name="Copy"
+        snapshot, logged_in=True, page=page, fetch_error=fetch_error, as_copy=True, new_plan_name="Copy"
     )
 
     api.restore_as_copy.assert_awaited_once()

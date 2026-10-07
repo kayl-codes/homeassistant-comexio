@@ -1224,28 +1224,54 @@ def _warn_firmware_differs(
     )
 
 
-async def _fetch_restore_config(api, as_copy: bool) -> dict[str, Any]:
-    """Fresh config page for a restore — api.fub_data may be up to one poll interval stale.
+async def _load_restorable_snapshot(
+    hass: HomeAssistant,
+    coordinator: ComexioCoordinator,
+    fub_id: int,
+    plan_name: str,
+    kind: str,
+    slot: int,
+    accept_unverified: bool,
+) -> dict[str, Any] | None:
+    """The backup snapshot to restore, or None (already reported) if it is missing or its blocks cannot be placed."""
+    snapshot = await _resolve_restore_snapshot(hass, coordinator, fub_id, plan_name, kind, slot)
+    if snapshot is None:
+        return None
+    if block_error := _block_ids_restore_error(snapshot, accept_unverified):
+        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) %s[%s]: %s", plan_name, fub_id, kind, slot, block_error)
+        persistent_notification.async_create(hass, block_error, title=_TITLE_RESTORE_ERR)
+        return None
+    _log_block_ids_trust(snapshot, plan_name, accept_unverified)
+    return snapshot
+
+
+async def _fetch_restore_plans(api, as_copy: bool) -> tuple[dict[str, Any], str | None]:
+    """Fresh plan list ($Fubs) for a restore — api.fub_data may be up to one poll interval stale.
 
     The in-place decision (does the plan still exist, under what name?) must not be made on
     stale data; the fetch also refreshes api.comexio_version, so the firmware check sees an
-    update since the last poll. A copy only needs the version: an unreachable Comexio does not
-    stop it here (the copy reports its own errors), the check then uses the last polled version.
+    update since the last poll. Returns (plans, None), or ({}, why) when the list could not be
+    read: an in-place restore must stop then — an unread list looks like a deleted plan, and
+    confirm would rebuild a plan that still runs. A copy only needs the version and goes on
+    (it reports its own errors); its firmware check then uses the last polled version.
     """
     try:
-        raw_config = await api.get_raw_config()
+        fubs = (await api.get_raw_config()).get("Fubs")
     except (aiohttp.ClientError, TimeoutError) as err:
-        if not as_copy:
-            raise
-        _LOGGER.warning("Function Plan Restore: config fetch failed (%s)", err)
-        raw_config = {}
-    if "FubModules" not in raw_config:
+        error = f"Comexio is not reachable ({err!r})"
+    else:
+        # aiocomexio decodes an empty plan list (PHP's []) to {} — a dict is always a read list.
+        if isinstance(fubs, dict):
+            return fubs, None
+        error = "Comexio's plan list could not be read (see the log)"
+    if as_copy:
         _LOGGER.warning(
-            "Function Plan Restore: Comexio's config page could not be read — "
-            "the firmware check uses the version from the last poll (%s)",
+            "Function Plan Restore: %s — the firmware check may use the version from the last poll (%s)",
+            error,
             api.comexio_version,
         )
-    return raw_config
+        return {}, None
+    return {}, error
 
 
 async def _resolve_restore_conflict(
@@ -1369,20 +1395,23 @@ async def _run_function_plan_restore(
         )
         return
 
-    snapshot = await _resolve_restore_snapshot(hass, coordinator, fub_id, plan_name, kind, slot)
+    snapshot = await _load_restorable_snapshot(hass, coordinator, fub_id, plan_name, kind, slot, accept_unverified)
     if snapshot is None:
         return
-    if block_error := _block_ids_restore_error(snapshot, accept_unverified):
-        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) %s[%s]: %s", plan_name, fub_id, kind, slot, block_error)
-        persistent_notification.async_create(hass, block_error, title=_TITLE_RESTORE_ERR)
-        return
-    _log_block_ids_trust(snapshot, plan_name, accept_unverified)
 
     if not await api.login():
         persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=_TITLE_RESTORE_ERR)
         return
 
-    raw_config = await _fetch_restore_config(api, as_copy)
+    live_fubs, fetch_error = await _fetch_restore_plans(api, as_copy)
+    if fetch_error:
+        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) aborted: %s", plan_name, fub_id, fetch_error)
+        persistent_notification.async_create(
+            hass,
+            f"Restore of '{plan_name}' aborted: {fetch_error}. Nothing was changed — try again once Comexio responds.",
+            title=_TITLE_RESTORE_ERR,
+        )
+        return
 
     def warn_firmware() -> None:
         _warn_firmware_differs(hass, snapshot, coordinator.server_id, fub_id, plan_name, api.comexio_version)
@@ -1394,7 +1423,7 @@ async def _run_function_plan_restore(
         await _refresh_service_descriptions(hass)
         return
 
-    live_fub = raw_config.get("Fubs", {}).get(str(fub_id))
+    live_fub = live_fubs.get(str(fub_id))
     if live_fub is not None:
         api.update_fub_cache_entry(fub_id, live_fub)  # keep the cache fresh for _restore_plan_in_place's reads
     snapshot_name = snapshot.get("plan_name", str(fub_id))
