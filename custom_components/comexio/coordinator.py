@@ -505,7 +505,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api.config_entry = entry
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
-        self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id)
+        self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id, listed_plans=self.live_plan_list)
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.

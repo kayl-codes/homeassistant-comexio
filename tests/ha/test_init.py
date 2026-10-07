@@ -134,6 +134,20 @@ async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
     assert coordinator._last_referenced_markers_from_snapshot is True
 
 
+async def test_the_reference_monitor_judges_findings_by_the_polls_plan_list(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """A plan the poll lists but the snapshot lacks keeps its findings; plan 9, no longer listed, loses them."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    coordinator.api.reference_check = None  # no catalog: the findings can only be kept or dropped
+    coordinator.reference_monitor._unknown_refs = [("1", "3", "999"), ("9", "4", "998")]
+
+    coordinator.reference_monitor.check_plans({})
+
+    assert coordinator.reference_monitor._unknown_refs == [("1", "3", "999")]  # plan 1 is in config_basic.json
+
+
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])
 async def test_setup_retry_when_unreachable(
     hass: HomeAssistant,
