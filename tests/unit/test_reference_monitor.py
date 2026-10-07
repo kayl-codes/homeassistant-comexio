@@ -205,6 +205,44 @@ def test_recovery_is_logged(raw: dict[str, Any], issue_registry: MagicMock, capl
     assert any("usable again" in record.getMessage() for record in caplog.records)
 
 
+UNKNOWN_REF = ("7", "3", "999")
+
+
+def test_no_plans_clear_the_unknown_refs_even_without_a_check() -> None:
+    """Review: deleted plans reference nothing — their findings must not wait for the next catalog check."""
+    monitor = _monitor(None)
+    monitor._unknown_refs = [UNKNOWN_REF]
+
+    monitor.check_plans({})
+
+    assert monitor._unknown_refs == []
+
+
+def test_plans_keep_the_unknown_refs_without_a_check() -> None:
+    """Without a catalog check, plans that still exist cannot be judged — the last findings stay."""
+    monitor = _monitor(None)
+    monitor._unknown_refs = [UNKNOWN_REF]
+
+    monitor.check_plans({7: {"elements": {}, "connections": {}}})
+
+    assert monitor._unknown_refs == [UNKNOWN_REF]
+
+
+def test_clearing_the_plan_refs_keeps_the_unchecked_repair(raw: dict[str, Any], issue_registry: MagicMock) -> None:
+    """Review: no plan left while no check ran must not turn "check didn't run" into "blocks unusable"."""
+    monitor = _monitor(_references(raw))
+    monitor._hass.async_add_executor_job = AsyncMock(side_effect=OSError("disk"))
+    asyncio.run(monitor.async_check(raw))
+    monitor._unknown_refs = [UNKNOWN_REF]
+
+    monitor.check_plans({})
+
+    kwargs = _issue_kwargs(issue_registry)
+    assert kwargs["translation_key"] == ISSUE_TRANSLATION_KEY_UNCHECKED
+    assert kwargs["translation_placeholders"]["reason"] == REASON_CHECK_FAILED
+    assert issue_registry.async_create_issue.call_count == 2  # the refresh with the cleared plan findings
+
+
 def test_integration_version_is_retried_until_known(raw: dict[str, Any], issue_registry: MagicMock) -> None:
     monitor = _monitor(_references(raw), version=None)
     asyncio.run(monitor.async_check(raw))

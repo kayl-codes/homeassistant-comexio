@@ -61,15 +61,20 @@ def test_an_ignored_source_to_clean_up_shows_up_in_the_counts_and_the_list(caplo
 
 
 def test_a_new_cleanup_item_logs_the_summary_again(caplog: pytest.LogCaptureFixture) -> None:
-    """The change hash covers cleanup_entities, so a new leftover is not swallowed as "unchanged"."""
+    """The change hash covers cleanup_entities, so a new leftover is not swallowed as "unchanged".
+
+    Same mismatch keys in both calls: only the cleanup count in the hash can trigger the second log.
+    """
+    keys = {"function_plan_missing_M253", "cleanup_entity_KNX_9"}
     coordinator = _coordinator(_audit(function_plan_missing=[{"name": "M253"}]))
-    coordinator._log_audit_summary({"function_plan_missing_M253"})
+    coordinator._log_audit_summary(keys)
+    caplog.clear()
     coordinator.last_audit_results = _audit(function_plan_missing=[{"name": "M253"}], cleanup_entities=[("KNX", 9)])
 
     with caplog.at_level(logging.INFO):
-        coordinator._log_audit_summary({"function_plan_missing_M253", "cleanup_entity_KNX_9"})
+        coordinator._log_audit_summary(keys)
 
-    assert "2 issues detected" in caplog.text
+    assert "Ignored sources to clean up (1): KNX/9" in caplog.text
 
 
 def test_a_replaced_cleanup_item_logs_the_summary_again(caplog: pytest.LogCaptureFixture) -> None:

@@ -65,6 +65,7 @@ class ReferenceCatalogMonitor:
         self._fingerprint: tuple | None = None
         self._issue_active = False
         self._blocked: list[str] = []
+        self._check_not_run: str | None = None
         self._integration_version: str | None = None
         self._unknown_refs: list[tuple[str, str, str]] | None = None
         self._missing_catalog_polls = 0
@@ -168,6 +169,7 @@ class ReferenceCatalogMonitor:
     def _update_issue(self, blocked: list[str], check_not_run: str | None = None) -> None:
         """Raise/refresh or clear the Repair; check_not_run is the reason when the check itself didn't run."""
         self._blocked = blocked
+        self._check_not_run = check_not_run
         if blocked:
             issue_url = self._issue_url()
             # Re-created on every poll while blocked: async_create_issue updates the existing
@@ -209,16 +211,23 @@ class ReferenceCatalogMonitor:
             self._issue_active = False
 
     def check_plans(self, plans: Mapping[Any, Any]) -> None:
-        """Log plan elements referencing block types the live catalog doesn't know (on change only)."""
-        check = self._api.reference_check
-        if check is None or not check.fub_base_ids:
-            return
-        found = find_unknown_fub_base_refs(plans, check.fub_base_ids)
+        """Log plan elements referencing block types the live catalog doesn't know (on change only).
+
+        No plans clears the findings even without a catalog check: deleted plans reference nothing.
+        """
+        if plans:
+            check = self._api.reference_check
+            if check is None or not check.fub_base_ids:
+                return
+            found = find_unknown_fub_base_refs(plans, check.fub_base_ids)
+        else:
+            found = []
         if found == self._unknown_refs:
             return
         self._unknown_refs = found
         if self._blocked:
-            self._update_issue(self._blocked)  # add the plan findings to the pre-filled report
+            # Add the plan findings to the pre-filled report, keeping why the check didn't run.
+            self._update_issue(self._blocked, self._check_not_run)
         if not found:
             _LOGGER.info("[%s] Function plans: no elements with unknown block types", self._server_id)
             return

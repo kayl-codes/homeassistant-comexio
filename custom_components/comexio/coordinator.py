@@ -525,8 +525,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # tell "a relevant plan just landed" apart from "nothing changed, but a plan the bulk
         # endpoint never delivers is still missing" (e.g. a persistently malformed entry skipped
         # by function_plan_load_all_plans). Without this, a recheck that can never succeed would
-        # retrigger async_request_refresh() on every single backup cycle forever.
-        self._last_bulk_snapshot_fub_ids: frozenset[int] = frozenset()
+        # retrigger async_request_refresh() on every single backup cycle forever. None until the
+        # first loaded snapshot, so a first one confirmed empty still counts as a change.
+        self._last_bulk_snapshot_fub_ids: frozenset[int] | None = None
         # Marker IDs (type-2 element ref_ids) referenced in a plan as of the last parse_config
         # call — an unnamed marker still needs a real entity/value if it's wired somewhere (see
         # aiocomexio parse_config). Tracked here so a change triggers an immediate extra refresh

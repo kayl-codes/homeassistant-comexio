@@ -216,6 +216,24 @@ def test_no_plan_left_reruns_a_pending_wiring_check() -> None:
     assert coordinator._lp_missing_recheck_pending is False
 
 
+def test_a_first_snapshot_confirmed_empty_reruns_a_pending_wiring_check() -> None:
+    """Review: no snapshot was loaded yet, so "no plan left" is a change even though both id sets are empty."""
+    coordinator = _snapshot_coordinator({})
+    coordinator.function_plan_plans = {}
+    coordinator._last_bulk_snapshot_fub_ids = None
+    coordinator._last_referenced_marker_ids = set()
+    coordinator._lp_missing_recheck_pending = True
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    coordinator.async_request_refresh.assert_awaited_once()
+    assert coordinator._last_bulk_snapshot_fub_ids == frozenset()
+    # Still pending after that refresh (e.g. a plan the bulk load never delivers): no refresh loop.
+    coordinator._lp_missing_recheck_pending = True
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
 def _identity_coordinator(live_plans: dict | None, cached_plans: dict | None = None) -> ComexioCoordinator:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.scraped_plan_ids = None if live_plans is None else set()
