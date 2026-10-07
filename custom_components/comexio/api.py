@@ -1857,7 +1857,7 @@ class ComexioAPI:
         )
         return data
 
-    async def function_plan_load_all_plans(self, strict: bool = False) -> dict[int, dict]:
+    async def function_plan_load_all_plans(self, strict: bool = False, raise_errors: bool = False) -> dict[int, dict]:
         """Load elements and connections for ALL known function plans in one bulk request.
 
         Uses the loadallelements endpoint (bulk variant of loadelements) instead of one
@@ -1867,17 +1867,21 @@ class ComexioAPI:
         real elements collection instead of treating them as empty plans. Unlike
         function_plan_load_elements(strict=True) it does not check connections, so a result here
         is no source for run_fup (a restore or rewrite).
-        Returns {fub_id: {"elements": {...}, "connections": {...}}}, {} on failure.
+        Returns {fub_id: {"elements": {...}, "connections": {...}}}, {} on failure — or, with
+        raise_errors=True, raises the ComexioError, so a caller can tell a failure from no plans.
         """
         fub_ids = {int(fid) for fid in self._fub_data}
         if not fub_ids:
-            _LOGGER.warning("function_plan_load_all_plans: self._fub_data is empty — nothing to load")
+            # No plan in Comexio is a normal state; the coordinator's backup cycle reports it.
+            _LOGGER.debug("function_plan_load_all_plans: self._fub_data is empty — nothing to load")
             return {}
 
         t_start = time.monotonic()
         try:
             plans = await self.client.load_all_function_plans(fub_ids, strict=strict)
         except ComexioError as err:
+            if raise_errors:
+                raise
             _LOGGER.error("function_plan_load_all_plans failed: %s", err)
             return {}
         _LOGGER.info(

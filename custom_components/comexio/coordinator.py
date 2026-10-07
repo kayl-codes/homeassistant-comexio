@@ -505,7 +505,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api.config_entry = entry
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
-        self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id)
+        self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id, listed_plans=self.live_plan_list)
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
@@ -525,14 +525,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # tell "a relevant plan just landed" apart from "nothing changed, but a plan the bulk
         # endpoint never delivers is still missing" (e.g. a persistently malformed entry skipped
         # by function_plan_load_all_plans). Without this, a recheck that can never succeed would
-        # retrigger async_request_refresh() on every single backup cycle forever.
-        self._last_bulk_snapshot_fub_ids: frozenset[int] = frozenset()
+        # retrigger async_request_refresh() on every single backup cycle forever. None until the
+        # first loaded snapshot, so a first one confirmed empty still counts as a change.
+        self._last_bulk_snapshot_fub_ids: frozenset[int] | None = None
         # Marker IDs (type-2 element ref_ids) referenced in a plan as of the last parse_config
         # call — an unnamed marker still needs a real entity/value if it's wired somewhere (see
         # aiocomexio parse_config). Tracked here so a change triggers an immediate extra refresh
         # instead of waiting for the next scheduled poll (which could be hours away with a long
         # scan_interval).
         self._last_referenced_marker_ids: set[str] = set()
+        # False while those came from the stored backup fallback instead of a loaded plan snapshot.
+        self._last_referenced_markers_from_snapshot = False
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
         self.knx_states: dict[str, Any] = {}
@@ -541,6 +544,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.audit_ignored: bool = False
         self.last_audit_failed: bool = False
         self.last_summary_hash: str | None = None
+        self._last_logged_mismatches: frozenset[str] = frozenset()
         self.in_sync: bool = False
         # Whether the most recent _async_update_data run actually scraped the server: a poll
         # skipped for in_sync, or one whose get_raw_config came back empty ({} on a non-200),
@@ -847,6 +851,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         await self.function_plan_catalog.async_update_from_raw_config(raw_config, self.api.comexio_version)
         # Resolves this server's block-type ids (e.g. the Flanke) before any plan write below.
         await self.reference_monitor.async_check(raw_config)
+        # The audits below read the plan snapshot of the last backup cycle; plans deleted since
+        # must not keep their wiring in them until the next cycle prunes it.
+        self._prune_deleted_plans_from_snapshot()
 
         final_data = _imported_data(parsed_data, conf)
         self._merge_polled_states(final_data)
@@ -915,6 +922,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # unnamed-but-wired marker still gets an entity on every restart, not just after
         # the first backup cycle has run.
         referenced_markers = self._referenced_marker_ids()
+        self._last_referenced_markers_from_snapshot = referenced_markers is not None
         if referenced_markers is None:
             referenced_markers = await self.function_plan_backup.async_referenced_marker_ids()
         self._last_referenced_marker_ids = referenced_markers
@@ -1351,6 +1359,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if self.last_summary_hash is not None:
                 _LOGGER.info("[%s] Audit successful: All systems are 100%% in sync!", self.server_id)
             self.last_summary_hash = None
+            self._last_logged_mismatches = frozenset()
             return
 
         audit = self.last_audit_results
@@ -1360,12 +1369,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             f"-{len(audit['orphan'])}-{audit['ip_mismatch']}-{len(audit['function_plan_missing'])}"
             f"-{len(audit['function_plan_dangling'])}-{_count_by_ref(audit['function_plan_trigger_missing'])}"
             f"-{_count_by_ref(audit['function_plan_trigger_orphan'])}-{len(audit['knx_bridge_missing'])}"
-            f"-{len(audit['knx_bridge_loopback_missing'])}"
+            f"-{len(audit['knx_bridge_loopback_missing'])}-{len(audit['cleanup_entities'])}"
         )
-        # Only log details if the audit result differs from the previous run
-        if self.last_summary_hash == current_summary_content:
+        # Only log details if the audit result differs from the previous run. The counts alone
+        # miss one item replaced by another, so the mismatch keys (item identities) count too.
+        mismatch_keys = frozenset(mismatches)
+        if self.last_summary_hash == current_summary_content and self._last_logged_mismatches == mismatch_keys:
             return
         self.last_summary_hash = current_summary_content
+        self._last_logged_mismatches = mismatch_keys
         self._log_audit_details(len(mismatches))
 
     def _log_audit_details(self, mismatch_count: int) -> None:
@@ -1376,11 +1388,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ip_mismatch = audit["ip_mismatch"]
         mismatched_ips = {cls: v["device_ip"] for cls, v in audit["webio_devices"].items() if v["ip_mismatch"]}
 
-        # Consolidated warning for the Home Assistant log overview
+        # Consolidated warning for the Home Assistant log overview — names every category that
+        # adds to mismatch_count, so the parts always add up to the total.
         _LOGGER.warning(
             "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
-            "Renames:%d, Orphans:%d, IP:%d, Plan debris:%d, Trigger gaps:%d, Trigger orphans:%d, "
-            "KNX bridges:%d, KNX loopback:%d)",
+            "Renames:%d, Orphans:%d, IP:%d, Cleanup:%d, Not wired:%d, Plan debris:%d, Trigger gaps:%d, "
+            "Trigger orphans:%d, KNX bridges:%d, KNX loopback:%d)",
             self.server_id,
             mismatch_count,
             len(audit["type"]),
@@ -1388,6 +1401,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             len(audit["rename"]),
             len(audit["orphan"]),
             1 if ip_mismatch else 0,
+            len(audit["cleanup_entities"]),
+            len(audit["function_plan_missing"]),
             len(audit["function_plan_dangling"]),
             _count_by_ref(trigger_missing),
             _count_by_ref(trigger_orphan),
@@ -1416,6 +1431,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if always or audit[result_key]:
                 _log_audit_items(icon, label, audit[result_key])
 
+        if cleanup := audit["cleanup_entities"]:
+            _LOGGER.info(
+                "%s Ignored sources to clean up (%d): %s",
+                ICON_DELETE,
+                len(cleanup),
+                ", ".join(f"{cls_val}/{source_id}" for cls_val, source_id in sorted(cleanup)),
+            )
         if trigger_missing:
             _LOGGER.info(
                 "%s Trigger markers not wired (%d): %s",
@@ -1534,46 +1556,31 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Reset up front so a failed/empty cycle never leaves a stale result from a
             # previous poll behind — ComexioPlanChangedSensor must reflect *this* cycle only.
             self.last_changed_plans = []
+            requested = function_plan_ids(self.api.fub_data)
             try:
-                plans = await self.api.function_plan_load_all_plans()
-            except Exception:
-                _LOGGER.exception("[%s] Function Plan bulk load failed — keeping previous snapshot", self.server_id)
-                self.async_update_listeners()  # show the reset last_changed_plans now
-                return
-            if not plans:
+                loaded = await self.api.function_plan_load_all_plans(raise_errors=True)
+                load_failed = False
+            except ComexioError as err:
                 _LOGGER.warning(
-                    "[%s] Function Plan backup cycle: no plans loaded — only auditing orphaned backups",
-                    self.server_id,
+                    "[%s] Function Plan bulk load failed: %s — keeping the plans still listed", self.server_id, err
                 )
-                # The orphaned-backup repairs need no plan wirings; with no plan left in Comexio
-                # every backup is orphaned, so they must not wait for a bulk load that has nothing.
-                # They judge by live_plan_list() (the poll's $Fubs), not by this {}: a failed bulk
-                # load while plans exist cannot make their backups look orphaned.
-                await self._async_audit_orphaned_backups()
-                self.async_update_listeners()
+                loaded = {}
+                load_failed = True
+            except Exception:
+                _LOGGER.exception(
+                    "[%s] Function Plan bulk load failed — keeping the plans still listed", self.server_id
+                )
+                loaded = {}
+                load_failed = True
+            plans = self._drop_plans_deleted_meanwhile(loaded)
+            if not plans:
+                # A failed load is logged above, and plans all deleted meanwhile are no fault.
+                await self._async_finish_cycle_without_plans(reason_known=load_failed or bool(loaded))
                 return
-            self.function_plan_plans = plans
-            self.reference_monitor.check_plans(plans)
-            # Re-evaluate which unlabeled markers are now referenced in a plan (see
-            # aiocomexio parse_config). Compared against the set last USED by parse_config —
-            # a no-op on every normal cycle; only an actual change (marker newly wired in,
-            # or dropped from every plan) triggers an extra refresh, so the fix isn't tied
-            # to (potentially very long) scan_interval waits. _last_referenced_marker_ids
-            # is deliberately NOT updated here: the triggered refresh does that itself,
-            # keeping the comparison anchored to what entities were actually built from.
-            new_referenced_markers = self._referenced_marker_ids() or set()
-            markers_changed = new_referenced_markers != self._last_referenced_marker_ids
-            snapshot_fub_ids = frozenset(plans.keys())
-            snapshot_changed = snapshot_fub_ids != self._last_bulk_snapshot_fub_ids
-            self._last_bulk_snapshot_fub_ids = snapshot_fub_ids
-            if (self._lp_missing_recheck_pending and snapshot_changed) or markers_changed:
-                # The audit skipped the function_plan_missing check because a relevant plan
-                # wasn't loaded yet — re-run it now that the snapshot actually changed. Gating
-                # on snapshot_changed (not just the pending flag) keeps a relevant plan that the
-                # bulk endpoint can never deliver (e.g. a persistently malformed entry) from
-                # retriggering this refresh every single cycle forever.
-                self._lp_missing_recheck_pending = False
-                await self.async_request_refresh()
+            # The load could not deliver a plan created meanwhile (e.g. a managed plan seeded by a sync).
+            self.function_plan_plans = {**self._plans_added_meanwhile(requested), **plans}
+            self.reference_monitor.check_plans(self.function_plan_plans)
+            await self._async_recheck_after_snapshot_update()
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
@@ -1733,6 +1740,120 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("[%s] Ignoring unparseable persisted function plan id %r", self.server_id, saved)
             return None
 
+    async def _async_recheck_after_snapshot_update(self) -> None:
+        """Refresh once when the new bulk snapshot changes what the last audit/parse_config saw.
+
+        Re-evaluates which unlabeled markers are now referenced in a plan (see aiocomexio
+        parse_config). Compared against the set last USED by parse_config — a no-op on every
+        normal cycle; only an actual change (marker newly wired in, or dropped from every plan)
+        triggers an extra refresh, so the fix isn't tied to (potentially very long)
+        scan_interval waits. _last_referenced_marker_ids is deliberately NOT updated here: the
+        triggered refresh does that itself, keeping the comparison anchored to what entities
+        were actually built from.
+        """
+        new_referenced_markers = self._referenced_marker_ids()
+        if new_referenced_markers is None:
+            # No loaded snapshot: one refresh moves the poll from the snapshot's markers to the stored
+            # backup's; after it there is nothing to compare — "no marker" would refresh every cycle.
+            markers_changed = self._last_referenced_markers_from_snapshot
+        else:
+            markers_changed = new_referenced_markers != self._last_referenced_marker_ids
+        snapshot_fub_ids = frozenset(self.function_plan_plans.keys())
+        snapshot_changed = snapshot_fub_ids != self._last_bulk_snapshot_fub_ids
+        self._last_bulk_snapshot_fub_ids = snapshot_fub_ids
+        if (self._lp_missing_recheck_pending and snapshot_changed) or markers_changed:
+            # The audit skipped the function_plan_missing check because a relevant plan
+            # wasn't loaded yet — re-run it now that the snapshot actually changed. Gating
+            # on snapshot_changed (not just the pending flag) keeps a relevant plan that the
+            # bulk endpoint can never deliver (e.g. a persistently malformed entry) from
+            # retriggering this refresh every single cycle forever.
+            self._lp_missing_recheck_pending = False
+            await self.async_request_refresh()
+
+    async def _async_finish_cycle_without_plans(self, reason_known: bool) -> None:
+        """End a backup cycle that loaded no current plan wiring.
+
+        reason_known: the bulk load failed (already logged), or every plan it delivered was deleted meanwhile.
+        """
+        if reason_known or self.live_plan_list() == {}:
+            # A known state — no warning on every cycle of a server without plans.
+            _LOGGER.debug(
+                "[%s] Function Plan backup cycle: no current plan loaded — only auditing orphaned backups",
+                self.server_id,
+            )
+        else:
+            _LOGGER.warning(
+                "[%s] Function Plan backup cycle: no plans loaded — only auditing orphaned backups",
+                self.server_id,
+            )
+        # Keep the previous wirings of the plans the poll still lists — a plan this load
+        # omitted keeps its wiring and findings — but drop the deleted ones. With no plan
+        # left {} still reads as "loaded", so the audits run on the empty set instead of
+        # waiting (#140). Done before the awaited audit below, so a timeout cannot skip it
+        # and a managed plan seeded meanwhile is not dropped afterwards.
+        # "No plan left" also counts when the snapshot was already {}: the first one confirmed empty is a change.
+        self._prune_deleted_plans_from_snapshot(force=self.live_plan_list() == {})
+        # Show the reset last_changed_plans before anything awaited can run into the cycle timeout.
+        self.async_update_listeners()
+        # Also when the poll pruned the snapshot already: the recheck compares against the last
+        # cycle itself, so it rebuilds the entities of markers only the deleted plans referenced.
+        await self._async_recheck_after_snapshot_update()
+        # The orphaned-backup repairs need no plan wirings; with no plan left in Comexio
+        # every backup is orphaned, so they must not wait for a bulk load that has nothing.
+        # They judge by live_plan_list() (the poll's $Fubs), not by the snapshot: a failed
+        # bulk load while plans exist cannot make their backups look orphaned.
+        await self._async_audit_orphaned_backups()
+        self.async_update_listeners()
+
+    def _drop_plans_deleted_meanwhile(self, plans: dict[int, dict]) -> dict[int, dict]:
+        """Drop the plans the latest poll no longer lists — e.g. deleted while the bulk load was in flight.
+
+        The bulk load filters by the plan list it started with; a poll in between can have
+        found plans deleted since, and keeping them would bring them back into audits and backups.
+        Also prunes the snapshot itself (every poll, and a cycle that loads no plan) and the
+        plans created during a bulk load.
+        """
+        live = self.live_plan_list()
+        if live is None:
+            return plans
+        live_ids = function_plan_ids(live)
+        kept = {fid: plan for fid, plan in plans.items() if fid in live_ids}
+        if len(kept) < len(plans):
+            _LOGGER.debug(
+                "[%s] Dropping %d function plan(s) the latest poll no longer lists",
+                self.server_id,
+                len(plans) - len(kept),
+            )
+        return kept
+
+    def _prune_deleted_plans_from_snapshot(self, force: bool = False) -> bool:
+        """Drop the plans the latest poll no longer lists from the snapshot; True if it changed.
+
+        force applies the pruned snapshot even when nothing was dropped (a confirmed "no plan left").
+        """
+        kept = self._drop_plans_deleted_meanwhile(self.function_plan_plans)
+        if not force and kept.keys() == self.function_plan_plans.keys():
+            return False
+        self.function_plan_plans = kept
+        # Forget the unknown block references of the deleted plans as well.
+        self.reference_monitor.check_plans(kept)
+        return True
+
+    def _plans_added_meanwhile(self, requested: set[int]) -> dict[int, dict]:
+        """Snapshot entries of plans the poll lists but a bulk load for `requested` did not ask for."""
+        return self._drop_plans_deleted_meanwhile(
+            {fid: plan for fid, plan in self.function_plan_plans.items() if fid not in requested}
+        )
+
+    def _function_plan_snapshot_loaded(self) -> bool:
+        """Whether function_plan_plans holds a loaded snapshot — {} counts only while no plan is left (#140).
+
+        Derived from the poll's plan list on every call instead of a stored flag, so a plan
+        created after "no plan left" turns an empty snapshot back into "not loaded" even when
+        the next bulk load fails.
+        """
+        return bool(self.function_plan_plans) or self.live_plan_list() == {}
+
     def _referenced_marker_ids(self) -> set[str] | None:
         """Return marker IDs (type-2 element ref_ids) present in any existing plan.
 
@@ -1741,7 +1862,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         does NOT require the element to participate in a connection — a marker merely
         placed in a plan already needs its type/live value resolved in the preview.
         """
-        if not self.function_plan_plans:
+        if not self._function_plan_snapshot_loaded():
             return None
         referenced: set[str] = set()
         for plan_data in self.function_plan_plans.values():
@@ -3430,10 +3551,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _unresolved_plan_identities(self) -> frozenset[tuple[int, str]]:
         """(fub_id, name) of the plan_map entries and named user picks Comexio no longer has under that name.
 
-        Empty without a live plan list: a failed fetch must not read as every plan gone.
+        Empty without a live plan list: a failed fetch, or a cache holding only the plans HA itself
+        created or looked up, must not read as every other plan gone. Once a poll read an empty
+        plan list, every entry is unresolved (#140).
         """
-        fub_data = self.api.fub_data
-        if not fub_data:
+        if self.live_plan_list() is None:
             return frozenset()
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
@@ -5819,9 +5941,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         returning False and, via _lp_missing_recheck_pending, retriggering a refresh every
         backup cycle without end. The empty-snapshot guard stays explicit so the original
         startup race (no plans loaded yet at all) is still caught even when relevant_fub_ids
-        itself is empty (legacy CONF_FUNCTION_PLAN_FUB_ID == "auto").
+        itself is empty (legacy CONF_FUNCTION_PLAN_FUB_ID == "auto"); a snapshot emptied because
+        no plan is left counts as loaded, so the audit reports deleted managed plans (#140).
         """
-        if not self.function_plan_plans:
+        if not self._function_plan_snapshot_loaded():
             return False
         existing_fub_ids = {int(fub_id) for fub_id in self.api.fub_data}
         return (relevant_fub_ids & existing_fub_ids) <= self.function_plan_plans.keys()

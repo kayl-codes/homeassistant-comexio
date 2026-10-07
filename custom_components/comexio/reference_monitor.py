@@ -11,7 +11,7 @@ Repair with a text that says so, instead of claiming a firmware incompatibility.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import logging
 from typing import Any
@@ -57,14 +57,23 @@ ISSUE_TRUNCATED_LINE = "_… truncated — please attach the Home Assistant log.
 class ReferenceCatalogMonitor:
     """Per-entry state of the reference check: loaded files, last logged result, issue flag."""
 
-    def __init__(self, hass: HomeAssistant, api: ComexioAPI, server_id: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api: ComexioAPI,
+        server_id: str,
+        listed_plans: Callable[[], Mapping[Any, Any] | None] | None = None,
+    ) -> None:
+        """listed_plans returns the plans the latest poll lists (None until a full poll read them)."""
         self._hass = hass
         self._api = api
         self._server_id = server_id
+        self._listed_plans = listed_plans
         self._references: dict[str, ReferenceCatalog] | None = None
         self._fingerprint: tuple | None = None
         self._issue_active = False
         self._blocked: list[str] = []
+        self._check_not_run: str | None = None
         self._integration_version: str | None = None
         self._unknown_refs: list[tuple[str, str, str]] | None = None
         self._missing_catalog_polls = 0
@@ -168,6 +177,7 @@ class ReferenceCatalogMonitor:
     def _update_issue(self, blocked: list[str], check_not_run: str | None = None) -> None:
         """Raise/refresh or clear the Repair; check_not_run is the reason when the check itself didn't run."""
         self._blocked = blocked
+        self._check_not_run = check_not_run
         if blocked:
             issue_url = self._issue_url()
             # Re-created on every poll while blocked: async_create_issue updates the existing
@@ -208,17 +218,51 @@ class ReferenceCatalogMonitor:
             ir.async_delete_issue(self._hass, DOMAIN, self._issue_id)
             self._issue_active = False
 
+    def _refs_of_unloaded_plans(
+        self, loaded: Mapping[Any, Any], present: Mapping[Any, Any]
+    ) -> list[tuple[str, str, str]]:
+        """The last findings of the plans still present but not in `loaded` — nothing to judge them by anew."""
+        if not self._unknown_refs:
+            return []
+        loaded_ids = {str(fub_id) for fub_id in loaded}
+        present_ids = {str(fub_id) for fub_id in present} - loaded_ids
+        return [ref for ref in self._unknown_refs if ref[0] in present_ids]
+
     def check_plans(self, plans: Mapping[Any, Any]) -> None:
-        """Log plan elements referencing block types the live catalog doesn't know (on change only)."""
+        """Log plan elements referencing block types the live catalog doesn't know (on change only).
+
+        Without a catalog check the findings of plans no longer present are still dropped: deleted
+        plans reference nothing. Present means listed by the latest poll, not merely in `plans`:
+        a bulk snapshot can miss a live plan, which cannot be judged and keeps its last findings.
+        """
         check = self._api.reference_check
-        if check is None or not check.fub_base_ids:
-            return
-        found = find_unknown_fub_base_refs(plans, check.fub_base_ids)
+        live_ids = check.fub_base_ids if check is not None else None
+        listed = self._listed_plans() if self._listed_plans is not None else None
+        present_plans = plans if listed is None else listed
+        if live_ids:
+            # Sorted: carried-over findings must not read as a change when a load misses or brings back a plan.
+            found = sorted(
+                find_unknown_fub_base_refs(plans, live_ids) + self._refs_of_unloaded_plans(plans, present_plans)
+            )
+        elif not present_plans:
+            found = []
+        elif self._unknown_refs is None:
+            return  # never judged: no findings to drop, and no catalog to judge the plans by
+        else:
+            found = self._refs_of_unloaded_plans({}, present_plans)
         if found == self._unknown_refs:
             return
         self._unknown_refs = found
         if self._blocked:
-            self._update_issue(self._blocked)  # add the plan findings to the pre-filled report
+            # Add the plan findings to the pre-filled report, keeping why the check didn't run.
+            self._update_issue(self._blocked, self._check_not_run)
+        if not found and present_plans and not live_ids:
+            _LOGGER.info(
+                "[%s] Function plans: findings of deleted plans dropped; the remaining plans are not checked "
+                "for unknown block types until the block catalog is available",
+                self._server_id,
+            )
+            return
         if not found:
             _LOGGER.info("[%s] Function plans: no elements with unknown block types", self._server_id)
             return

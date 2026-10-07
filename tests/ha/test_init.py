@@ -110,6 +110,44 @@ async def test_statistics_unit_fix_runs_in_background_and_stops_on_unload(
     assert cancelled.is_set()
 
 
+async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Plan 9 is no longer in the poll's $Fubs: the audits must not wait for the next backup cycle to forget it."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator._last_referenced_markers_from_snapshot is False  # no bulk load yet: stored backup
+    plan = {"elements": {}, "connections": {}}
+    coordinator.function_plan_plans = {1: plan, 9: plan}
+    audit_webio = coordinator._async_audit_webio
+    seen: list[set[int]] = []
+
+    async def recording_audit(*args: Any) -> bool:
+        seen.append(set(coordinator.function_plan_plans))
+        return await audit_webio(*args)
+
+    with patch.object(coordinator, "_async_audit_webio", recording_audit):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert seen == [{1}]  # plan 1 is still in config_basic.json's $Fubs
+    assert coordinator._last_referenced_markers_from_snapshot is True
+
+
+async def test_the_reference_monitor_judges_findings_by_the_polls_plan_list(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """A plan the poll lists but the snapshot lacks keeps its findings; plan 9, no longer listed, loses them."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    coordinator.api.reference_check = None  # no catalog: the findings can only be kept or dropped
+    coordinator.reference_monitor._unknown_refs = [("1", "3", "999"), ("9", "4", "998")]
+
+    coordinator.reference_monitor.check_plans({})
+
+    assert coordinator.reference_monitor._unknown_refs == [("1", "3", "999")]  # plan 1 is in config_basic.json
+
+
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])
 async def test_setup_retry_when_unreachable(
     hass: HomeAssistant,
