@@ -101,6 +101,7 @@ def test_a_backup_cycle_without_plans_still_audits_the_orphaned_backups() -> Non
     coordinator.server_id = "cx1"
     coordinator._function_plan_backup_lock = asyncio.Lock()
     coordinator.scraped_plan_ids = None
+    coordinator.function_plan_plans = {}
     coordinator.api = SimpleNamespace(function_plan_load_all_plans=AsyncMock(return_value={}))
     audit = AsyncMock()
     coordinator._async_audit_orphaned_backups = audit  # type: ignore[method-assign]
@@ -110,7 +111,7 @@ def test_a_backup_cycle_without_plans_still_audits_the_orphaned_backups() -> Non
 
     audit.assert_awaited_once()
     # The orphaned-backups sensor and select show the audit's result right away, not at the next poll.
-    coordinator.async_update_listeners.assert_called_once()
+    assert coordinator.async_update_listeners.call_count == 2  # the reset at once, the audit's result after
 
 
 DELETED_PLAN = {7: {"elements": {"1": {"reference": {"type": "2", "ref_id": "253"}}}, "connections": {}}}
@@ -137,20 +138,26 @@ def _snapshot_coordinator(live_plans: dict | None) -> ComexioCoordinator:
 
 
 @pytest.mark.parametrize(
-    "live_plans", [None, {}, {"8": {"Name": "Live"}}], ids=["no-plan-list", "no-plan-left", "plans-left"]
+    ("live_plans", "deleted"),
+    [(None, False), ({}, True), ({"7": {"Name": "Live"}}, False), ({"8": {"Name": "Other"}}, True)],
+    ids=["no-plan-list", "no-plan-left", "plan-still-listed", "plan-no-longer-listed"],
 )
-def test_no_plan_left_clears_the_unknown_block_references(live_plans: dict | None) -> None:
+def test_an_empty_bulk_load_clears_the_unknown_block_references_of_deleted_plans(
+    live_plans: dict | None, deleted: bool
+) -> None:
     """Review: the deleted plans' unknown block references must not stay in the log and the repair report.
 
-    Only a poll that found no plan proves them deleted: an empty bulk load while plans exist keeps the findings.
+    Only a poll that no longer lists a plan proves it deleted: a plan still listed keeps its findings.
     """
     coordinator = _snapshot_coordinator(live_plans)
 
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
-    if live_plans == {}:
+    if deleted:
+        assert coordinator.function_plan_plans == {}
         coordinator.reference_monitor.check_plans.assert_called_once_with({})
     else:
+        assert coordinator.function_plan_plans == DELETED_PLAN
         coordinator.reference_monitor.check_plans.assert_not_called()
 
 
@@ -252,25 +259,63 @@ def test_a_plan_list_key_that_is_no_number_does_not_break_the_cycle() -> None:
 
 
 @pytest.mark.parametrize(
-    ("live_plans", "expected"), [({}, {}), ({"7": {"Name": "Live"}}, DELETED_PLAN)], ids=["no-plan-left", "plans-left"]
+    ("live_plans", "expected"),
+    [({}, {}), ({"8": {"Name": "Other"}}, {}), ({"7": {"Name": "Live"}}, DELETED_PLAN)],
+    ids=["no-plan-left", "plan-no-longer-listed", "plan-still-listed"],
 )
-def test_a_failed_bulk_load_clears_the_snapshot_only_when_no_plan_is_left(live_plans: dict, expected: dict) -> None:
-    """Review: with no plan left a failed load cannot keep the deleted plans in the audits; otherwise it keeps them."""
+def test_a_failed_bulk_load_keeps_only_the_plans_still_listed(live_plans: dict, expected: dict) -> None:
+    """Review: a failed load cannot keep deleted plans in the audits, but keeps the wiring of the plans still listed."""
     coordinator = _snapshot_coordinator(live_plans)
     coordinator.api.function_plan_load_all_plans = AsyncMock(side_effect=OSError("timeout"))
 
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
     assert coordinator.function_plan_plans == expected
-    if live_plans == {}:
-        coordinator.reference_monitor.check_plans.assert_called_once_with({})
-        coordinator.async_request_refresh.assert_awaited_once()  # M253 rebuilt away
-        coordinator._async_audit_orphaned_backups.assert_awaited_once()
-    else:
+    if expected:
         coordinator.reference_monitor.check_plans.assert_not_called()
         coordinator.async_request_refresh.assert_not_awaited()
-        coordinator._async_audit_orphaned_backups.assert_not_awaited()
-    coordinator.async_update_listeners.assert_called_once()
+    else:
+        coordinator.reference_monitor.check_plans.assert_called_once_with({})
+        coordinator.async_request_refresh.assert_awaited_once()  # M253 rebuilt away
+    # The orphaned-backup audit judges by the poll's plan list, so it runs even after a failed load.
+    coordinator._async_audit_orphaned_backups.assert_awaited_once()
+    assert coordinator.async_update_listeners.call_count == 2  # the reset at once, the audit's result after
+
+
+@pytest.mark.parametrize(
+    "bulk_load", [AsyncMock(return_value={}), AsyncMock(side_effect=OSError("timeout"))], ids=["empty", "failed"]
+)
+def test_a_cycle_without_plans_keeps_the_wiring_and_findings_of_the_plans_still_listed(bulk_load: AsyncMock) -> None:
+    """Review: only the deleted plan 7 leaves the snapshot and the findings — plan 8 the load omitted stays."""
+    plan_8 = {"elements": {}, "connections": {}}
+    coordinator = _snapshot_coordinator({"8": {"Name": "Kept"}})
+    coordinator.function_plan_plans = {**DELETED_PLAN, 8: plan_8}
+    coordinator.api.function_plan_load_all_plans = bulk_load
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == {8: plan_8}
+    coordinator.reference_monitor.check_plans.assert_called_once_with({8: plan_8})
+    coordinator.async_request_refresh.assert_awaited_once()  # M253 was only referenced in plan 7
+
+
+def test_an_empty_bulk_load_prunes_the_snapshot_before_the_orphaned_backup_audit() -> None:
+    """Review: a timeout during the audit must not skip the pruning, nor may it drop a plan seeded meanwhile."""
+    coordinator = _snapshot_coordinator({"8": {"Name": "Managed"}})
+    seeded = {"elements": {}, "connections": {}}
+
+    async def audit() -> None:
+        assert coordinator.function_plan_plans == {}  # 7 is already dropped when the audit starts
+        coordinator.reference_monitor.check_plans.assert_called_once_with({})
+        coordinator.async_request_refresh.assert_awaited_once()
+        coordinator.async_update_listeners.assert_called_once()  # the reset last_changed_plans shows at once
+        coordinator.function_plan_plans[8] = seeded  # _create_managed_plan seeds plan 8 meanwhile
+
+    coordinator._async_audit_orphaned_backups = AsyncMock(side_effect=audit)  # type: ignore[method-assign]
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == {8: seeded}
 
 
 @pytest.mark.parametrize(
@@ -288,6 +333,21 @@ def test_an_empty_bulk_load_warns_only_when_plans_should_exist(
         asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
     assert any(r.levelno == logging.WARNING and "no plans loaded" in r.getMessage() for r in caplog.records) is warns
+
+
+@pytest.mark.parametrize(
+    "live_plans", [{}, None, {"7": {"Name": "Live"}}], ids=["no-plan-left", "no-plan-list", "plans-left"]
+)
+def test_a_failed_bulk_load_is_logged_once_not_warned_about_again(
+    live_plans: dict | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _snapshot_coordinator(live_plans)
+    coordinator.api.function_plan_load_all_plans = AsyncMock(side_effect=OSError("timeout"))
+
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == [logging.ERROR]
 
 
 def test_an_empty_bulk_load_without_a_plan_list_keeps_the_snapshot() -> None:
@@ -386,11 +446,18 @@ def test_a_failed_bulk_load_shows_the_reset_changed_plans_at_once() -> None:
     coordinator.server_id = "cx1"
     coordinator._function_plan_backup_lock = asyncio.Lock()
     coordinator.scraped_plan_ids = None
+    coordinator.function_plan_plans = {}
     coordinator.last_changed_plans = [{"fub_id": 2}]
     coordinator.api = SimpleNamespace(function_plan_load_all_plans=AsyncMock(side_effect=OSError("timeout")))
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
 
+    async def audit() -> None:
+        # Shown before anything awaited, so a cycle timeout cannot keep the old list on screen.
+        coordinator.async_update_listeners.assert_called_once()
+
+    coordinator._async_audit_orphaned_backups = AsyncMock(side_effect=audit)  # type: ignore[method-assign]
+
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
     assert coordinator.last_changed_plans == []
-    coordinator.async_update_listeners.assert_called_once()
+    coordinator._async_audit_orphaned_backups.assert_awaited_once()
