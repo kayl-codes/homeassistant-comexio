@@ -1253,8 +1253,20 @@ async def _load_restorable_snapshot(
 
 
 def _is_named_plan(key: str, plan: Any) -> bool:
-    """A $Fubs entry is a plan dict with a str Name, filed under its own Id (where it carries one)."""
-    return isinstance(plan, dict) and isinstance(plan.get("Name"), str) and str(plan.get("Id", key)) == key
+    """A $Fubs entry is a plan dict with a str Name, filed under its own Id.
+
+    The key must be a plan id as str(fub_id) spells it, also for an entry that carries no Id
+    itself — under any other key the lookup by id would miss a plan that still runs.
+    """
+    return (
+        isinstance(plan, dict)
+        and isinstance(plan.get("Name"), str)
+        and isinstance(key, str)
+        and key.isascii()
+        and key.isdecimal()
+        and (key == "0" or not key.startswith("0"))
+        and str(plan.get("Id", key)) == key
+    )
 
 
 def _plan_list_entry(page: dict[str, Any], fub_id: int) -> tuple[dict[str, Any] | None, str | None]:

@@ -697,6 +697,9 @@ UNREAD_PLAN_LISTS = [
         _USE_COPY,
         id="sibling under another plan's id",
     ),
+    # an entry without Id is only trusted under a key that str(fub_id) can spell
+    pytest.param({"FubModules": {}, "Fubs": {"Kitch": {"Name": "Kitch"}}}, None, _USE_COPY, id="plan under a name"),
+    pytest.param({"FubModules": {}, "Fubs": {"042": {"Name": "Kitch"}}}, None, _USE_COPY, id="plan under a padded id"),
     pytest.param(None, aiohttp.ClientError("down"), _RETRY, id="unreachable"),
     # no aiohttp cause: _raise_transport_error raises it as is
     pytest.param(None, ComexioConnectionError("down"), _RETRY, id="unreachable without cause"),
