@@ -108,6 +108,7 @@ def test_a_backup_cycle_without_plans_still_audits_the_orphaned_backups() -> Non
     coordinator._async_audit_orphaned_backups = audit  # type: ignore[method-assign]
     coordinator._async_recheck_after_snapshot_update = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
+    coordinator.reference_monitor = MagicMock()
 
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
@@ -156,12 +157,10 @@ def test_an_empty_bulk_load_clears_the_unknown_block_references_of_deleted_plans
 
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
-    if deleted:
-        assert coordinator.function_plan_plans == {}
-        coordinator.reference_monitor.check_plans.assert_called_once_with({})
-    else:
-        assert coordinator.function_plan_plans == DELETED_PLAN
-        coordinator.reference_monitor.check_plans.assert_not_called()
+    expected = {} if deleted else DELETED_PLAN
+    assert coordinator.function_plan_plans == expected
+    # Also for an unchanged snapshot: carried-over findings of plans outside it follow the plan list.
+    coordinator.reference_monitor.check_plans.assert_called_once_with(expected)
 
 
 def test_no_plan_left_empties_the_snapshot_but_keeps_it_loaded() -> None:
@@ -274,11 +273,10 @@ def test_a_failed_bulk_load_keeps_only_the_plans_still_listed(live_plans: dict, 
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
     assert coordinator.function_plan_plans == expected
+    coordinator.reference_monitor.check_plans.assert_called_once_with(expected)
     if expected:
-        coordinator.reference_monitor.check_plans.assert_not_called()
         coordinator.async_request_refresh.assert_not_awaited()
     else:
-        coordinator.reference_monitor.check_plans.assert_called_once_with({})
         coordinator.async_request_refresh.assert_awaited_once()  # M253 rebuilt away
     # The orphaned-backup audit judges by the poll's plan list, so it runs even after a failed load.
     coordinator._async_audit_orphaned_backups.assert_awaited_once()
@@ -418,10 +416,8 @@ def test_a_poll_prunes_the_plans_it_no_longer_lists_from_the_snapshot(live_plans
 
     assert coordinator.function_plan_plans == expected
     assert changed is (expected != DELETED_PLAN)
-    if changed:
-        coordinator.reference_monitor.check_plans.assert_called_once_with({})
-    else:
-        coordinator.reference_monitor.check_plans.assert_not_called()
+    # Every poll, not only on a change: a carried-over finding of a plan outside the snapshot follows the plan list.
+    coordinator.reference_monitor.check_plans.assert_called_once_with(expected)
 
 
 def test_an_empty_bulk_load_without_a_plan_list_keeps_the_snapshot() -> None:
@@ -549,6 +545,7 @@ def test_a_failed_bulk_load_shows_the_reset_changed_plans_at_once() -> None:
     coordinator.scraped_plan_ids = None
     coordinator.function_plan_plans = {}
     coordinator.last_changed_plans = [{"fub_id": 2}]
+    coordinator.reference_monitor = MagicMock()
     coordinator.api = SimpleNamespace(
         function_plan_load_all_plans=AsyncMock(side_effect=OSError("timeout")), fub_data={}
     )
