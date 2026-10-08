@@ -344,7 +344,7 @@ function_plan_keep_backups:
 
 function_plan_list_backups:
   name: Function Plan List Backups
-  description: Returns stored function plan backup snapshots (plan, type, slot, timestamp, operation) as a service response. All filters are optional and can be combined.
+  description: Returns stored function plan backup snapshots (plan, type, slot, timestamp, operation; if recorded also restored_at, comexio_version, paper/dpi/orientation and block_setting_count) as a service response. All filters are optional and can be combined.
   fields:
     config_entry:
       name: Comexio instance

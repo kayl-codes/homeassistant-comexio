@@ -673,6 +673,14 @@ UNREAD_PLAN_LISTS = [
     pytest.param(
         {"FubModules": {}, "Fubs": {"42": {"Name": "Kitch"}, "7": None}}, None, _USE_COPY, id="malformed sibling"
     ),
+    # 42 missing next to a plan dict without a name — the list's shape is off, 42 may still run
+    pytest.param({"FubModules": {}, "Fubs": {"7": {"Id": 7}}}, None, _USE_COPY, id="nameless sibling"),
+    pytest.param(
+        {"FubModules": {}, "Fubs": {"42": {"Name": "Kitch"}, "7": {"Id": 7}}},
+        None,
+        _USE_COPY,
+        id="nameless sibling next to the plan",
+    ),
     pytest.param(None, aiohttp.ClientError("down"), _RETRY, id="unreachable"),
     # no aiohttp cause: _raise_transport_error raises it as is
     pytest.param(None, ComexioConnectionError("down"), _RETRY, id="unreachable without cause"),

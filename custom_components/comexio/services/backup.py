@@ -1255,9 +1255,10 @@ async def _load_restorable_snapshot(
 def _plan_list_entry(page: dict[str, Any], fub_id: int) -> tuple[dict[str, Any] | None, str | None]:
     """fub_id's entry in a fetched page's plan list ($Fubs), or (None, why) if the list is not safely read.
 
-    aiocomexio decodes an empty plan list (PHP's []) to {}. Only a map of plan dicts, whose entry
-    for fub_id (if any) carries a name, counts as read — in anything else a missing, null or
-    nameless entry could hide a plan that still runs.
+    aiocomexio decodes an empty plan list (PHP's []) to {}. Only a map of plan dicts that all carry
+    a name counts as read — in anything else a missing, null or nameless entry could hide a plan
+    that still runs. An empty name is still a name: it only differs from the backup's and then
+    goes through the identity check, which needs confirm.
     """
     fubs = page.get("Fubs")
     if fubs is None:
@@ -1267,17 +1268,21 @@ def _plan_list_entry(page: dict[str, Any], fub_id: int) -> tuple[dict[str, Any] 
     if not isinstance(fubs, dict):
         _LOGGER.warning("Function Plan Restore: unexpected plan list ($Fubs is a %s)", type(fubs).__name__)
         return None, _PLAN_LIST_UNEXPECTED
-    entry = fubs.get(str(fub_id))
-    non_plans = {key: type(plan).__name__ for key, plan in fubs.items() if not isinstance(plan, dict)}
-    if non_plans or (entry is not None and not isinstance(entry.get("Name"), str)):
+    unnamed = {
+        key: plan for key, plan in fubs.items() if not (isinstance(plan, dict) and isinstance(plan.get("Name"), str))
+    }
+    if unnamed:
         _LOGGER.warning(
-            "Function Plan Restore: unexpected plan list (entries that are no plan: %.200r; entry for %s: %.200r)",
-            non_plans,
+            "Function Plan Restore: unexpected plan list (%d of %d entries are no named plan, fub %s among them: %s): "
+            "%.200r",
+            len(unnamed),
+            len(fubs),
             fub_id,
-            entry,
+            str(fub_id) in unnamed,
+            unnamed,
         )
         return None, _PLAN_LIST_UNEXPECTED
-    return entry, None
+    return fubs.get(str(fub_id)), None
 
 
 async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, Any] | None, str | None]:
