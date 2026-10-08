@@ -657,50 +657,68 @@ def test_the_firmware_check_uses_the_freshly_fetched_version(data: dict[str, Any
     assert warning.kwargs["notification_id"] == "comexio_restore_firmware_iosrv1_42_Kitch"
 
 
-@pytest.mark.parametrize(
-    ("page", "fetch_error"),
-    [
-        ({}, None),
-        ({"FubModules": {}}, None),
-        ({"FubModules": {}, "Fubs": {"42": "not a plan"}}, None),
-        (None, aiohttp.ClientError("down")),
-        (None, ComexioConnectionError("down")),  # no aiohttp cause: _raise_transport_error raises it as is
-    ],
-    ids=["page not readable", "no plan list", "malformed entry", "unreachable", "unreachable without cause"],
-)
+_RETRY = "try again"
+_USE_COPY = "'Restore as copy' still works"
+# (page, fetch error, hint in the abort notice) for every plan list an in-place restore must not trust.
+UNREAD_PLAN_LISTS = [
+    pytest.param({}, None, _RETRY, id="page not readable"),
+    pytest.param({"FubModules": {}}, None, _RETRY, id="no plan list"),
+    pytest.param({"FubModules": {}, "Fubs": [{"Name": "Kitch"}]}, None, _USE_COPY, id="list not keyed by id"),
+    pytest.param({"FubModules": {}, "Fubs": {"42": "not a plan"}}, None, _USE_COPY, id="malformed entry"),
+    pytest.param({"FubModules": {}, "Fubs": {"42": None}}, None, _USE_COPY, id="null entry"),
+    pytest.param({"FubModules": {}, "Fubs": {"42": {"Id": 42}}}, None, _USE_COPY, id="entry without name"),
+    # 42 missing from a list that was not read cleanly — it may still run
+    pytest.param({"FubModules": {}, "Fubs": {"7": "not a plan"}}, None, _USE_COPY, id="malformed list"),
+    # the entry itself reads fine, but a list with non-plans is not trusted as a whole
+    pytest.param(
+        {"FubModules": {}, "Fubs": {"42": {"Name": "Kitch"}, "7": None}}, None, _USE_COPY, id="malformed sibling"
+    ),
+    pytest.param(None, aiohttp.ClientError("down"), _RETRY, id="unreachable"),
+    # no aiohttp cause: _raise_transport_error raises it as is
+    pytest.param(None, ComexioConnectionError("down"), _RETRY, id="unreachable without cause"),
+]
+
+
+@pytest.mark.parametrize(("page", "fetch_error", "hint"), UNREAD_PLAN_LISTS)
 def test_an_unread_plan_list_stops_an_in_place_restore(
-    page: dict[str, Any] | None, fetch_error: Exception | None
+    page: dict[str, Any] | None, fetch_error: Exception | None, hint: str
 ) -> None:
     """An unread list must not look like a deleted plan: confirm would rebuild a plan that still runs."""
     api, notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page=page, fetch_error=fetch_error)
 
     api.restore_as_new.assert_not_awaited()
     api.restore_in_place.assert_not_awaited()
-    assert "Restore of 'Kitch' aborted" in notify.call_args.args[1]
-    assert "Nothing was changed" in notify.call_args.args[1]
+    message = notify.call_args.args[1]
+    assert "Restore of 'Kitch' aborted" in message
+    assert "Nothing was changed" in message
+    assert hint in message
 
 
-def test_an_empty_plan_list_means_the_plan_was_deleted() -> None:
-    """A read but empty plan list (aiocomexio decodes PHP's [] to {}): the plan is gone, rebuilt as new."""
-    api, _notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page={"FubModules": {}, "Fubs": {}})
+@pytest.mark.parametrize(
+    "fubs", [{}, {"7": {"Name": "Other"}}], ids=["empty list (PHP's [] decoded to {})", "other plans only"]
+)
+def test_a_read_plan_list_without_the_plan_means_it_was_deleted(fubs: dict[str, Any]) -> None:
+    """A cleanly read list without the plan: it is gone, rebuilt as new."""
+    api, _notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page={"FubModules": {}, "Fubs": fubs})
 
     api.restore_as_new.assert_awaited_once()
     assert api.restore_as_new.await_args.kwargs["old_id_still_live"] is False
     api.restore_in_place.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    ("page", "fetch_error"),
-    [
-        ({}, None),
-        ({"FubModules": {}}, None),
-        ({"FubModules": {}, "Fubs": {"42": "not a plan"}}, None),
-        (None, aiohttp.ClientError("down")),
-        (None, ComexioConnectionError("down")),
-    ],
-    ids=["page not readable", "no plan list", "malformed entry", "unreachable", "unreachable without cause"],
-)
-def test_an_unread_plan_list_does_not_stop_a_copy(page: dict[str, Any] | None, fetch_error: Exception | None) -> None:
+def test_a_plan_among_others_is_restored_in_place() -> None:
+    page = {"FubModules": {}, "Fubs": {"7": {"Name": "Other"}, "42": {"Name": "Kitch"}}}
+
+    api, _notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page=page)
+
+    api.restore_in_place.assert_awaited_once()
+    api.restore_as_new.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("page", "fetch_error", "hint"), UNREAD_PLAN_LISTS)
+def test_an_unread_plan_list_does_not_stop_a_copy(
+    page: dict[str, Any] | None, fetch_error: Exception | None, hint: str
+) -> None:
     """The copy only fetches for the firmware version; it reports Comexio errors itself."""
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 

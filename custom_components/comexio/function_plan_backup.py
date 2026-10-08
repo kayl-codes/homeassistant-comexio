@@ -803,7 +803,8 @@ class FunctionPlanBackupManager:
         """Return metadata (no element payloads) for all stored snapshots, newest first.
 
         Shape: {"auto": [...], "change": [...]} with entries
-        {fub_id, plan_name, captured_at, hash, operation?, paper?, dpi?, orientation?, slot}.
+        {fub_id, plan_name, captured_at, hash, operation?, restored_at?, paper?, dpi?, orientation?,
+        comexio_version?, block_setting_count?, slot}.
         slot is scoped per (fub_id, plan_name) identity, not per raw fub_id.
         """
         await self._async_ensure_loaded()

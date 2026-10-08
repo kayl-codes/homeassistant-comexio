@@ -64,6 +64,12 @@ _TITLE_KEEP_BACKUPS_ERR = "Function Plan Keep Backups — Error"
 _PLAN_LIST_UNAVAILABLE = (
     "The plan list could not be read from Comexio right now — nothing changed, try again in a few minutes."
 )
+# Why an in-place restore stopped before deciding on a plan list it could not trust.
+_PLAN_LIST_UNREAD = "Comexio's plan list could not be read (see the log) — try again once Comexio responds"
+_PLAN_LIST_UNEXPECTED = (
+    "Comexio's plan list has an unexpected shape (see the log), so an in-place restore is not safe — "
+    "'Restore as copy' still works"
+)
 
 _AGE_KEYS = ("days", "hours", "minutes", "seconds")
 
@@ -1246,6 +1252,34 @@ async def _load_restorable_snapshot(
     return snapshot
 
 
+def _plan_list_entry(page: dict[str, Any], fub_id: int) -> tuple[dict[str, Any] | None, str | None]:
+    """fub_id's entry in a fetched page's plan list ($Fubs), or (None, why) if the list is not safely read.
+
+    aiocomexio decodes an empty plan list (PHP's []) to {}. Only a map of plan dicts, whose entry
+    for fub_id (if any) carries a name, counts as read — in anything else a missing, null or
+    nameless entry could hide a plan that still runs.
+    """
+    fubs = page.get("Fubs")
+    if fubs is None:
+        if page:  # an empty page: get_raw_config already logged why it was not read
+            _LOGGER.warning("Function Plan Restore: the Comexio page carries no plan list ($Fubs)")
+        return None, _PLAN_LIST_UNREAD
+    if not isinstance(fubs, dict):
+        _LOGGER.warning("Function Plan Restore: unexpected plan list ($Fubs is a %s)", type(fubs).__name__)
+        return None, _PLAN_LIST_UNEXPECTED
+    entry = fubs.get(str(fub_id))
+    non_plans = {key: type(plan).__name__ for key, plan in fubs.items() if not isinstance(plan, dict)}
+    if non_plans or (entry is not None and not isinstance(entry.get("Name"), str)):
+        _LOGGER.warning(
+            "Function Plan Restore: unexpected plan list (entries that are no plan: %.200r; entry for %s: %.200r)",
+            non_plans,
+            fub_id,
+            entry,
+        )
+        return None, _PLAN_LIST_UNEXPECTED
+    return entry, None
+
+
 async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, Any] | None, str | None]:
     """fub_id's entry in a fresh plan list ($Fubs) — api.fub_data may be up to one poll interval stale.
 
@@ -1258,22 +1292,13 @@ async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, A
     firmware check then may use the last polled version.
     """
     try:
-        fubs = (await api.get_raw_config()).get("Fubs")
+        page = await api.get_raw_config()
     except (aiohttp.ClientError, TimeoutError, ComexioConnectionError) as err:
-        error = f"Comexio is not reachable ({err!r})"
+        error = f"Comexio is not reachable ({err!r}) — try again once it responds"
     else:
-        # aiocomexio decodes an empty plan list (PHP's []) to {} — a dict is always a read list.
-        entry = fubs.get(str(fub_id)) if isinstance(fubs, dict) else None
-        if isinstance(fubs, dict) and (entry is None or isinstance(entry, dict)):
+        entry, error = _plan_list_entry(page, fub_id)
+        if error is None:
             return entry, None
-        if fubs is not None:  # None: get_raw_config already logged why the page was not read
-            _LOGGER.warning(
-                "Function Plan Restore: unexpected plan list ($Fubs %s, entry for %s: %.200r)",
-                type(fubs).__name__,
-                fub_id,
-                entry,
-            )
-        error = "Comexio's plan list could not be read (see the log)"
     if as_copy:
         _LOGGER.warning(
             "Function Plan Restore: %s — the firmware check may use the version from the last poll (%s)",
@@ -1418,7 +1443,7 @@ async def _run_function_plan_restore(
         _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) aborted: %s", plan_name, fub_id, fetch_error)
         persistent_notification.async_create(
             hass,
-            f"Restore of '{plan_name}' aborted: {fetch_error}. Nothing was changed — try again once Comexio responds.",
+            f"Restore of '{plan_name}' aborted: {fetch_error}. Nothing was changed.",
             title=_TITLE_RESTORE_ERR,
         )
         return
