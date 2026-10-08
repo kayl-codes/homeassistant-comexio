@@ -77,7 +77,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   itself; it installs them with `-r requirements.txt` (`test_ci_workflow_installs_from_requirements_txt`).
 - Every reason a repair flow aborts with needs a translation under `issues.<translation_key>.fix_flow.abort`
   in all five translation files (`tests/unit/test_repair_translations.py`); a new fixable issue goes into that
-  test's `ENTRY_STEP_BY_ISSUE`, a computed `translation_key` into `DYNAMIC_FIXABLE_KEYS`.
+  test's `ENTRY_STEP_BY_ISSUE` (the step `async_step_init` routes it to; the test reads the issue_id from the
+  raise site). A computed `translation_key` must come from a `self.` helper returning constants or from a
+  parameter whose callers pass constants; `is_fixable` stays a literal `True`/`False`.
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
 - Test function parameters carry type annotations.
 
