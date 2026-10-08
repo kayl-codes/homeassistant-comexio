@@ -1056,7 +1056,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         com_map = _build_com_audit_map(audited_commands, ha_map)
 
         webio_devices = parsed_data.get("webio_devices", {})
-        self._update_import_disabled_issues(conf, disabled_commands, webio_devices)
+        marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
+        self._update_import_disabled_issues(conf, disabled_commands, webio_devices, marker_titles)
         if self._report_missing_webio_classes(conf, webio_devices):
             return False
 
@@ -1183,29 +1184,44 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return ha_map, io_meta_by_key
 
     def _update_import_disabled_issues(
-        self, conf: dict[str, Any], disabled_commands: dict[WebioClass, int], webio_devices: dict[str, Any]
+        self,
+        conf: dict[str, Any],
+        disabled_commands: dict[WebioClass, int],
+        webio_devices: dict[str, Any],
+        marker_titles: dict[int, str],
     ) -> None:
         """Raise or clear the import_disabled repair issue of every Web-IO class.
 
         Raised for a class whose import is switched off while its Web-IO commands, managed
-        plans or Web-IO device/class still exist, unless the user chose to ignore that. Left
-        alone after an unreadable config scrape (no commands then would look like "all cleaned
-        up" and drop a still valid issue) and while a sync or cleanup holds _sync_lock (a
-        cleanup's mid-run refresh would raise the issue it is just working off again). Plans
-        count only while they still exist in Comexio (live_plan_list), not by plan_map alone.
+        plans, trigger pairs or Web-IO device/class still exist, unless the user chose to
+        ignore that. Left alone after an unreadable config scrape (no commands then would look
+        like "all cleaned up" and drop a still valid issue), while no plan list was ever read
+        (a plan deleted in Comexio would still count), and while a sync or cleanup holds
+        _sync_lock (a cleanup's mid-run refresh would raise the issue it is just working off
+        again). Nor cleared while the trigger plan's snapshot is not loaded yet (its pairs are
+        unknown then). marker_titles ({id: title} of every marker) tells KNX bridge markers in
+        the trigger plan from plain markers.
         """
         if not self._last_poll_scraped or self._sync_lock.locked():
             return
+        plan_map = self._existing_managed_plans(conf)
+        if plan_map is None:
+            return
+        trigger_sources = self._cached_trigger_sources(plan_map, marker_titles)
         active = set(active_webio_classes(conf))
         ignored = set(conf.get(CONF_IMPORT_DISABLED_IGNORED) or [])
-        plan_map = dict(conf.get(CONF_FUNCTION_PLAN_PLAN_MAP) or {})
-        if (live_plans := self.live_plan_list()) is not None:
-            plan_map = {name: fub_id for name, fub_id in plan_map.items() if str(fub_id) in live_plans}
         for cls in WEBIO_CLASSES:
             issue_id = import_disabled_issue_id(cls, self.server_id)
-            counts = import_disabled_counts(cls, disabled_commands.get(cls, 0), plan_map, webio_devices)
-            if cls in active or cls.value in ignored or not any(counts.values()):
+            counts = import_disabled_counts(
+                cls, disabled_commands.get(cls, 0), plan_map, webio_devices, trigger_sources
+            )
+            if cls in active or cls.value in ignored:
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+                continue
+            if not any(counts.values()):
+                # Unloaded trigger plan: its pairs may be all that is left — keep the issue.
+                if trigger_sources is not None or not SOURCE_CATEGORIES[cls].supports_trigger_pairs:
+                    ir.async_delete_issue(self.hass, DOMAIN, issue_id)
                 continue
             _LOGGER.debug(
                 "[%s] %s import is switched off, but the server still has %s", self.server_id, cls.value, counts
@@ -1224,6 +1240,44 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 },
                 data={"entry_id": self.config_entry.entry_id, "webio_class": cls.value, "counts": counts},
             )
+
+    def _existing_managed_plans(self, conf: dict[str, Any]) -> dict[str, Any] | None:
+        """The plan_map entries whose plan still exists in Comexio; None while no plan list is known.
+
+        Judged by this poll's $Fubs read, else by the last poll that read one (live_plan_list).
+        """
+        plan_ids = self._polled_plan_ids
+        if plan_ids is None and (live_plans := self.live_plan_list()) is not None:
+            plan_ids = function_plan_ids(live_plans)
+        if plan_ids is None:
+            return None
+        existing = {str(fub_id) for fub_id in plan_ids}
+        plan_map = conf.get(CONF_FUNCTION_PLAN_PLAN_MAP) or {}
+        return {name: fub_id for name, fub_id in plan_map.items() if str(fub_id) in existing}
+
+    def _cached_trigger_sources(
+        self, plan_map: dict[str, Any], marker_titles: dict[int, str]
+    ) -> dict[int, list[tuple[int, int]]] | None:
+        """The shared trigger plan's sources by owning category, from its cached snapshot.
+
+        Empty when no trigger plan exists (plan_map holds only plans still in Comexio); None
+        while it exists but its snapshot is not loaded yet (first poll after a reload, before
+        the bulk load) — its pairs are unknown then, not zero.
+        """
+        if (fub_id := plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)) is None:
+            return {}
+        try:
+            snapshot = self.function_plan_plans.get(int(fub_id))
+        except (TypeError, ValueError):
+            _LOGGER.warning("[%s] Trigger plan id %r in the plan map is not a number", self.server_id, fub_id)
+            return {}
+        if snapshot is None:
+            return None
+        return trigger_sources_by_category(
+            self.api.function_plan_element_refs(snapshot),
+            marker_titles,
+            {int(cat.fub_module_type) for cat in trigger_pair_categories()},
+        )
 
     def _report_missing_webio_classes(self, conf: dict[str, Any], webio_devices: dict[str, Any]) -> bool:
         """Raise a repair issue if a Web-IO class is entirely missing on the server; True if one is.

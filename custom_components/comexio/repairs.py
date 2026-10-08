@@ -1122,7 +1122,9 @@ class ComexioRepairFlow(RepairsFlow):
             step_id="import_disabled",
             description_placeholders={
                 "category": category.label,
-                **{key: str(counts.get(key, 0)) for key in ("commands", "plans", "devices", "classes")},
+                **{
+                    key: str(counts.get(key, 0)) for key in ("commands", "plans", "trigger_pairs", "devices", "classes")
+                },
             },
             data_schema=vol.Schema(
                 {

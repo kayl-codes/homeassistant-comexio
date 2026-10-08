@@ -158,9 +158,18 @@ def test_every_webio_class_has_its_own_cleanup_scope(webio_class: WebioClass) ->
 def test_import_disabled_counts_add_the_commands_to_the_scope_counts() -> None:
     assert import_disabled_counts(WebioClass.MARKER, 7, PLAN_MAP, WEBIO_DEVICES) == {
         "commands": 7,
+        "trigger_pairs": 0,
         "plans": 2,
         "devices": 1,
         "classes": 1,
     }
     # Nothing left on the server: all zero, so no repair issue.
     assert not any(import_disabled_counts(WebioClass.KNX, 0, {}, {}).values())
+
+
+def test_import_disabled_counts_include_the_category_s_trigger_pairs() -> None:
+    """Regression: pairs left in the shared trigger plan alone must still raise the repair."""
+    sources = {2: [(2, 6), (2, 7)], 11: [(2, 364)]}
+    assert import_disabled_counts(WebioClass.MARKER, 0, {}, {}, sources)["trigger_pairs"] == 2
+    assert import_disabled_counts(WebioClass.KNX, 0, {}, {}, sources)["trigger_pairs"] == 1
+    assert not any(import_disabled_counts(WebioClass.IO, 0, {}, {}, sources).values())

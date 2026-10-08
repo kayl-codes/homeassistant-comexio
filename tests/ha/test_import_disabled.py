@@ -11,7 +11,13 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import CONF_IGNORED_MARKERS, CONF_IMPORT_DISABLED_IGNORED, DOMAIN
+from custom_components.comexio.const import (
+    CONF_FUNCTION_PLAN_PLAN_MAP,
+    CONF_IGNORED_MARKERS,
+    CONF_IMPORT_DISABLED_IGNORED,
+    DOMAIN,
+    FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+)
 from custom_components.comexio.repairs import ComexioRepairFlow
 from tests.common import load_json_fixture
 
@@ -39,6 +45,7 @@ async def _run_repair(hass: HomeAssistant, action: str) -> dict[str, Any]:
     form = await flow.async_step_init()
     assert form["type"] is FlowResultType.FORM
     assert form["description_placeholders"]["commands"] == "2"
+    assert form["description_placeholders"]["trigger_pairs"] == "0"
     return await flow.async_step_import_disabled({"action": action})
 
 
@@ -62,7 +69,7 @@ async def test_switched_off_import_raises_its_own_issue_instead_of_orphans(
 
     issue = _issue(hass, MARKER_ISSUE)
     assert issue is not None
-    assert issue.data["counts"] == {"commands": 2, "plans": 0, "devices": 1, "classes": 1}
+    assert issue.data["counts"] == {"commands": 2, "trigger_pairs": 0, "plans": 0, "devices": 1, "classes": 1}
     assert issue.translation_placeholders["category"] == "Marker"
     # The marker commands are no orphans: "delete orphans" would have removed them.
     coordinator = hass.data[DOMAIN][markers_off_entry.entry_id]
@@ -242,3 +249,145 @@ async def test_options_form_prefills_the_ignore_list(
 
     key = next(k for k in result["data_schema"].schema if k == CONF_IGNORED_MARKERS)
     assert key.description["suggested_value"] == "2"
+
+
+async def test_plans_count_only_while_they_still_exist_in_comexio(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """A plan deleted in Comexio (id 99, not in $Fubs) must not count as a leftover."""
+    plan_map = {"HA - Marker [1-100]": 1, "HA - Marker [101-200]": 99}
+    entry = _with_options(mock_config_entry, {"import_markers": False, CONF_FUNCTION_PLAN_PLAN_MAP: plan_map})
+    await _setup(hass, entry)
+
+    issue = _issue(hass, MARKER_ISSUE)
+    assert issue is not None
+    assert issue.data["counts"]["plans"] == 1
+
+
+async def test_no_plan_list_leaves_the_issue_alone(
+    hass: HomeAssistant, markers_off_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Without any $Fubs read a deleted plan would count, so the issue is neither raised nor cleared."""
+    await _setup(hass, markers_off_entry)
+    coordinator = hass.data[DOMAIN][markers_off_entry.entry_id]
+    assert _issue(hass, MARKER_ISSUE) is not None
+
+    config = load_json_fixture("config_basic.json")
+    del config["Fubs"]
+    del config["WebDevices"]["30"]  # nothing left — would clear the issue if the poll judged it
+    mock_comexio_api[-1].get_raw_config.return_value = config
+    coordinator.scraped_plan_ids = None
+    await coordinator.async_refresh()
+
+    assert _issue(hass, MARKER_ISSUE) is not None
+
+
+async def test_trigger_pairs_alone_keep_the_issue(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Marker pairs left in the shared trigger plan are leftovers too — the scope cleanup removes them."""
+    entry = _with_options(
+        mock_config_entry, {"import_markers": False, CONF_FUNCTION_PLAN_PLAN_MAP: {FUNCTION_PLAN_TRIGGER_PLAN_NAME: 2}}
+    )
+    await _setup(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    trigger_plan = {"elements": {"10": {"reference": {"type": 2, "ref_id": 1}}}, "connections": {}}
+    coordinator.function_plan_plans[2] = trigger_plan
+
+    config = load_json_fixture("config_basic.json")
+    del config["WebDevices"]["30"]  # commands, device and class gone — only the pair is left
+    mock_comexio_api[-1].get_raw_config.return_value = config
+    await coordinator.async_refresh()
+
+    issue = _issue(hass, MARKER_ISSUE)
+    assert issue is not None
+    assert issue.data["counts"] == {"commands": 0, "trigger_pairs": 1, "plans": 0, "devices": 0, "classes": 0}
+
+
+async def _refresh_with_only_the_trigger_plan_left(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], trigger_plan: dict | None
+) -> Any:
+    """Set up, then poll a config whose marker commands, device and class are gone."""
+    await _setup(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    if trigger_plan is not None:
+        coordinator.function_plan_plans[2] = trigger_plan
+    else:
+        coordinator.function_plan_plans.pop(2, None)
+    config = load_json_fixture("config_basic.json")
+    del config["WebDevices"]["30"]
+    mock_comexio_api[-1].get_raw_config.return_value = config
+    await coordinator.async_refresh()
+    return coordinator
+
+
+async def test_a_bridge_marker_pair_counts_for_knx_not_markers(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Marker 7 ("Rollo Wohnen [K3]") is a KNX bridge: its pair belongs to the KNX cleanup."""
+    entry = _with_options(
+        mock_config_entry,
+        {
+            "import_markers": False,
+            "import_knx": False,
+            CONF_FUNCTION_PLAN_PLAN_MAP: {FUNCTION_PLAN_TRIGGER_PLAN_NAME: 2},
+        },
+    )
+    trigger_plan = {"elements": {"10": {"reference": {"type": 2, "ref_id": 7}}}, "connections": {}}
+    await _refresh_with_only_the_trigger_plan_left(hass, entry, mock_comexio_api, trigger_plan)
+
+    assert _issue(hass, MARKER_ISSUE) is None
+    knx_issue = _issue(hass, f"import_disabled_knx_{SERVER_ID}")
+    assert knx_issue is not None
+    assert knx_issue.data["counts"]["trigger_pairs"] == 1
+
+
+async def test_an_unloaded_trigger_plan_does_not_clear_the_issue(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Its pairs are unknown until the snapshot loads — they may be all that is left."""
+    entry = _with_options(
+        mock_config_entry, {"import_markers": False, CONF_FUNCTION_PLAN_PLAN_MAP: {FUNCTION_PLAN_TRIGGER_PLAN_NAME: 2}}
+    )
+    await _refresh_with_only_the_trigger_plan_left(hass, entry, mock_comexio_api, None)
+
+    assert _issue(hass, MARKER_ISSUE) is not None
+
+
+async def test_a_deleted_trigger_plan_counts_no_pairs(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Plan 99 is not in $Fubs: a still cached snapshot of it must not keep the issue alive."""
+    entry = _with_options(
+        mock_config_entry, {"import_markers": False, CONF_FUNCTION_PLAN_PLAN_MAP: {FUNCTION_PLAN_TRIGGER_PLAN_NAME: 99}}
+    )
+    await _setup(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator.function_plan_plans[99] = {"elements": {"10": {"reference": {"type": 2, "ref_id": 1}}}}
+    config = load_json_fixture("config_basic.json")
+    del config["WebDevices"]["30"]
+    mock_comexio_api[-1].get_raw_config.return_value = config
+    await coordinator.async_refresh()
+
+    assert _issue(hass, MARKER_ISSUE) is None
+
+
+async def test_a_poll_without_plan_list_judges_plans_by_the_last_one(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """$Fubs unread this poll: the last poll's list still filters out the deleted plan 99."""
+    plan_map = {"HA - Marker [1-100]": 1, "HA - Marker [101-200]": 99}
+    entry = _with_options(mock_config_entry, {"import_markers": False, CONF_FUNCTION_PLAN_PLAN_MAP: plan_map})
+    await _setup(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator.scraped_plan_ids = {1, 2}
+    mock_comexio_api[-1]._fub_data = load_json_fixture("config_basic.json")["Fubs"]  # the last poll's list
+
+    config = load_json_fixture("config_basic.json")
+    del config["Fubs"]
+    mock_comexio_api[-1].get_raw_config.return_value = config
+    await coordinator.async_refresh()
+
+    issue = _issue(hass, MARKER_ISSUE)
+    assert issue is not None
+    assert issue.data["counts"]["plans"] == 1
