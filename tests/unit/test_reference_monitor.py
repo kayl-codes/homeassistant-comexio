@@ -134,6 +134,10 @@ def _issue_kwargs(registry: MagicMock) -> dict[str, Any]:
     return registry.async_create_issue.call_args.kwargs
 
 
+def _report_body(registry: MagicMock) -> str:
+    return parse_qs(urlsplit(_issue_kwargs(registry)["learn_more_url"]).query)["body"][0]
+
+
 def test_missing_block_raises_the_mismatch_repair(raw: dict[str, Any], issue_registry: MagicMock) -> None:
     monitor = _monitor(_references(raw))
     del raw["FubModules"]["5"][str(FLANKE_ID)]
@@ -455,18 +459,51 @@ def test_the_repair_report_follows_a_plan_the_load_misses_and_brings_back(
     monitor.check_plans({7: CLEAN_PLAN, 8: plan_8})
     marked = f"8/4: 5 998{reference_monitor.CARRIED_OVER_SUFFIX}"
 
-    def body() -> str:
-        return parse_qs(urlsplit(_issue_kwargs(issue_registry)["learn_more_url"]).query)["body"][0]
-
     caplog.clear()
     with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
         monitor.check_plans({7: CLEAN_PLAN})  # the bulk load missed plan 8
-        assert marked in body()
+        assert marked in _report_body(issue_registry)
         monitor.check_plans({7: CLEAN_PLAN, 8: plan_8})  # back, checked again
-        assert "8/4: 5 998\n" in body()
-        assert marked not in body()
+        assert "8/4: 5 998\n" in _report_body(issue_registry)
+        assert marked not in _report_body(issue_registry)
 
     assert monitor._unknown_refs == [CARRIED_REF]
+    assert not caplog.records
+
+
+def test_a_carried_over_finding_goes_when_the_poll_no_longer_lists_its_plan(
+    raw: dict[str, Any], issue_registry: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review: plan 8 is deleted while outside the snapshot — the unchanged snapshot must not keep its finding."""
+    listed = {"7": {}, "8": {}}
+    monitor = _monitor(_references(raw), listed=listed)
+    del raw["FubModules"]["5"][str(FLANKE_ID)]
+    asyncio.run(monitor.async_check(raw))  # blocked: the Repair carries the report
+    monitor._unknown_refs = [CARRIED_REF]
+    monitor.check_plans({7: CLEAN_PLAN})  # plan 8 listed but not loaded: carried over
+    assert f"8/4: 5 998{reference_monitor.CARRIED_OVER_SUFFIX}" in _report_body(issue_registry)
+
+    del listed["8"]
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: CLEAN_PLAN})  # the same snapshot on the next poll
+
+    assert monitor._unknown_refs == []
+    assert "8/4" not in _report_body(issue_registry)
+    assert [record.getMessage() for record in caplog.records] == [
+        "[srv] Function plans: no elements with unknown block types in the loaded plans"
+    ]
+
+
+def test_the_first_poll_before_any_bulk_load_claims_no_check(caplog: pytest.LogCaptureFixture) -> None:
+    """Review: an empty snapshot never judged is no clean result — the first bulk load's result is logged instead."""
+    monitor = _monitor(None, listed={"7": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({})
+
+    assert monitor._unknown_refs is None
     assert not caplog.records
 
 

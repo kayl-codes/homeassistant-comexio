@@ -1832,12 +1832,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         force applies the pruned snapshot even when nothing was dropped (a confirmed "no plan left").
         """
         kept = self._drop_plans_deleted_meanwhile(self.function_plan_plans)
-        if not force and kept.keys() == self.function_plan_plans.keys():
-            return False
-        self.function_plan_plans = kept
-        # Forget the unknown block references of the deleted plans as well.
+        changed = force or kept.keys() != self.function_plan_plans.keys()
+        if changed:
+            self.function_plan_plans = kept
+        # Also with an unchanged snapshot: the findings carried over for a plan outside it follow the
+        # plan list, so a deleted one drops them and the not-checked marks stay current. Logs only changes.
         self.reference_monitor.check_plans(kept)
-        return True
+        return changed
 
     def _plans_added_meanwhile(self, requested: set[int]) -> dict[int, dict]:
         """Snapshot entries of plans the poll lists but a bulk load for `requested` did not ask for."""

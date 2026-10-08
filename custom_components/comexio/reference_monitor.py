@@ -236,6 +236,10 @@ class ReferenceCatalogMonitor:
         a bulk snapshot can miss a live plan, which cannot be judged and keeps its last findings.
         Such kept findings are marked as carried over in the log and the Repair report.
         """
+        if self._unknown_refs is None and not plans:
+            # Never judged and nothing loaded (e.g. the first poll before any bulk load): no finding
+            # to drop, and a "clean" line now would claim a check that did not happen.
+            return
         check = self._api.reference_check
         live_ids = check.fub_base_ids if check is not None else None
         listed = self._listed_plans() if self._listed_plans is not None else None
