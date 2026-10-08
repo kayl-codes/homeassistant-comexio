@@ -618,16 +618,20 @@ def _notification_titles(notify: MagicMock) -> list[str]:
     return [c.kwargs.get("title") for c in notify.call_args_list]
 
 
+def _restores_run(api: SimpleNamespace) -> int:
+    """How many restore helpers (in place, as new, as copy) the restore awaited."""
+    return api.restore_in_place.await_count + api.restore_as_new.await_count + api.restore_as_copy.await_count
+
+
 @pytest.mark.parametrize(("logged_in", "warned"), [(True, True), (False, False)])
 def test_a_restore_warns_about_other_firmware_only_once_it_proceeds(logged_in: bool, warned: bool) -> None:
     """(bn)(8): the warning comes after the login, so a restore that stops there does not announce it."""
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 
-    _api, notify = _run_restore(
-        snapshot, logged_in=logged_in, live_version="11.1.4", as_copy=True, new_plan_name="Copy"
-    )
+    api, notify = _run_restore(snapshot, logged_in=logged_in, live_version="11.1.4", as_copy=True, new_plan_name="Copy")
 
     assert (backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)) is warned
+    assert api.restore_as_copy.await_count == int(warned)  # the warning never replaces the restore
 
 
 @pytest.mark.parametrize(
@@ -640,9 +644,10 @@ def test_an_in_place_restore_warns_only_once_the_conflict_check_lets_it_proceed(
 ) -> None:
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 
-    _api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", live_name=live_name, confirm=confirm)
+    api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", live_name=live_name, confirm=confirm)
 
     assert (backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)) is warned
+    assert _restores_run(api) == int(warned)
 
 
 @pytest.mark.parametrize("data", [{}, {"as_copy": True, "new_plan_name": "Copy"}], ids=["in place", "as copy"])
@@ -650,9 +655,10 @@ def test_the_firmware_check_uses_the_freshly_fetched_version(data: dict[str, Any
     """The last poll saw 11.0.2 like the backup; the firmware changed since, which only a fresh fetch shows."""
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 
-    _api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", **data)
+    api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", **data)
 
     assert backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)
+    assert _restores_run(api) == 1
     warning = next(c for c in notify.call_args_list if c.kwargs.get("title") == backup_service._TITLE_RESTORE_FIRMWARE)
     assert warning.kwargs["notification_id"] == "comexio_restore_firmware_iosrv1_42_Kitch"
 
