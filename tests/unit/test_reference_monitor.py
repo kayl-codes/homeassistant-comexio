@@ -580,6 +580,34 @@ def test_issue_report_without_a_check() -> None:
     assert "Reference check did not run" in body
 
 
+def test_issue_report_without_a_check_keeps_the_carried_over_findings() -> None:
+    """Sourcery: no check this poll must not drop the plan findings kept from the last one."""
+    context = IssueContext("0.11.0-rc1", "2026.9.1", ("fub_base:x (not checked)",), (UNKNOWN_REF,), frozenset({"7"}))
+    _, body = build_issue_report(None, REFERENCE_REQUIRED, context)
+    assert "Reference check did not run" in body
+    assert f"7/3: 5 999{reference_monitor.CARRIED_OVER_SUFFIX}" in body
+
+
+def test_a_lost_catalog_keeps_the_plan_findings_in_the_repair_report(
+    raw: dict[str, Any], issue_registry: MagicMock
+) -> None:
+    """Sourcery: after a firmware update without a block catalog the report still names the kept findings."""
+    monitor = _monitor(_references(raw), listed={"7": {}})
+    empty = {**raw, "FubModules": {**raw["FubModules"], "5": []}}
+    plan_7 = {"elements": {"3": {"reference": {"type": 5, "ref_id": 999}}}, "connections": {}}
+    asyncio.run(monitor.async_check(raw))
+    monitor.check_plans({7: plan_7})
+    assert monitor._unknown_refs == [UNKNOWN_REF]
+
+    monitor._api.comexio_version = "11.2.0"  # a firmware update: the kept result no longer counts
+    asyncio.run(monitor.async_check(empty))
+    monitor.check_plans({7: plan_7})  # nothing to judge plan 7 by: its finding is carried over
+
+    body = _report_body(issue_registry)
+    assert "Reference check did not run" in body
+    assert f"7/3: 5 999{reference_monitor.CARRIED_OVER_SUFFIX}" in body
+
+
 def test_issue_url_is_prefilled_and_cut_to_fit() -> None:
     base = "https://github.com/owner/repo/issues"
     url = github_issue_url(base, "Title", "line one\nline two")

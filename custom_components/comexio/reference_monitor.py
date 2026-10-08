@@ -384,25 +384,26 @@ def build_issue_report(
     ]
     if check is None:
         lines += ["", "Reference check did not run — see the Home Assistant log."]
-        return title, "\n".join(lines)
-    lines += [
-        "",
-        "### Required blocks",
-        *_required_detail_lines(check, required),
-        "",
-        "### Summary",
-        check.summary(include_duration=False),
-        "",
-        "### Deviations",
-        "```",
-        *(format_deviations(check, ISSUE_LIST_LIMIT) or ["none"]),
-        "```",
-        "",
-        "### Live blocks not in the reference",
-        "```",
-        *(_capped([key for c in check.catalogs.values() for key in c.new_keys]) or ["none"]),
-        "```",
-    ]
+    else:
+        lines += [
+            "",
+            "### Required blocks",
+            *_required_detail_lines(check, required),
+            "",
+            "### Summary",
+            check.summary(include_duration=False),
+            "",
+            "### Deviations",
+            "```",
+            *(format_deviations(check, ISSUE_LIST_LIMIT) or ["none"]),
+            "```",
+            "",
+            "### Live blocks not in the reference",
+            "```",
+            *(_capped([key for c in check.catalogs.values() for key in c.new_keys]) or ["none"]),
+            "```",
+        ]
+    # Also without a check: the findings kept from the last one (marked as carried over) still belong in the report.
     if context.unknown_plan_refs:
         refs = [format_plan_ref(ref, context.unchecked_plans) for ref in context.unknown_plan_refs]
         lines += ["", "### Plan elements with unknown block types", "```", *_capped(refs), "```"]
