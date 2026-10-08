@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Any
 
+from aiocomexio import ComexioConnectionError
 from aiocomexio.function_plan import diff_snapshots, resolve_element_label, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -62,6 +63,12 @@ _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Er
 _TITLE_KEEP_BACKUPS_ERR = "Function Plan Keep Backups — Error"
 _PLAN_LIST_UNAVAILABLE = (
     "The plan list could not be read from Comexio right now — nothing changed, try again in a few minutes."
+)
+# Why an in-place restore stopped before deciding on a plan list it could not trust.
+_PLAN_LIST_UNREAD = "Comexio's plan list could not be read (see the log) — try again once Comexio responds"
+_PLAN_LIST_UNEXPECTED = (
+    "Comexio's plan list has an unexpected shape (see the log), so an in-place restore is not safe — "
+    "'Restore as copy' still works"
 )
 
 _AGE_KEYS = ("days", "hours", "minutes", "seconds")
@@ -1224,28 +1231,100 @@ def _warn_firmware_differs(
     )
 
 
-async def _fetch_restore_config(api, as_copy: bool) -> dict[str, Any]:
-    """Fresh config page for a restore — api.fub_data may be up to one poll interval stale.
+async def _load_restorable_snapshot(
+    hass: HomeAssistant,
+    coordinator: ComexioCoordinator,
+    fub_id: int,
+    plan_name: str,
+    kind: str,
+    slot: int,
+    accept_unverified: bool,
+) -> dict[str, Any] | None:
+    """The backup snapshot to restore, or None (already reported) if it is missing or its blocks cannot be placed."""
+    snapshot = await _resolve_restore_snapshot(hass, coordinator, fub_id, plan_name, kind, slot)
+    if snapshot is None:
+        return None
+    if block_error := _block_ids_restore_error(snapshot, accept_unverified):
+        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) %s[%s]: %s", plan_name, fub_id, kind, slot, block_error)
+        persistent_notification.async_create(hass, block_error, title=_TITLE_RESTORE_ERR)
+        return None
+    _log_block_ids_trust(snapshot, plan_name, accept_unverified)
+    return snapshot
+
+
+def _is_named_plan(key: str, plan: Any) -> bool:
+    """A $Fubs entry is a plan dict with a str Name, filed under its own Id.
+
+    The key must be a plan id as str(fub_id) spells it, also for an entry that carries no Id
+    itself — under any other key the lookup by id would miss a plan that still runs.
+    """
+    return (
+        isinstance(plan, dict)
+        and isinstance(plan.get("Name"), str)
+        and isinstance(key, str)
+        and key.isascii()
+        and key.isdecimal()
+        and (key == "0" or not key.startswith("0"))
+        and str(plan.get("Id", key)) == key
+    )
+
+
+def _plan_list_entry(page: dict[str, Any], fub_id: int) -> tuple[dict[str, Any] | None, str | None]:
+    """fub_id's entry in a fetched page's plan list ($Fubs), or (None, why) if the list is not safely read.
+
+    aiocomexio decodes an empty plan list (PHP's []) to {}. Only a map of plan dicts that all carry
+    a name, each under its own id, counts as read — in anything else a missing, null, nameless or
+    misfiled entry could hide a plan that still runs. An empty name is still a name: it only
+    differs from the backup's and then goes through the identity check, which needs confirm.
+    """
+    fubs = page.get("Fubs")
+    if fubs is None:
+        if page:  # an empty page: get_raw_config already logged why it was not read
+            _LOGGER.warning("Function Plan Restore: the Comexio page carries no plan list ($Fubs)")
+        return None, _PLAN_LIST_UNREAD
+    if not isinstance(fubs, dict):
+        _LOGGER.warning("Function Plan Restore: unexpected plan list ($Fubs is a %s)", type(fubs).__name__)
+        return None, _PLAN_LIST_UNEXPECTED
+    if unexpected := {key: plan for key, plan in fubs.items() if not _is_named_plan(key, plan)}:
+        _LOGGER.warning(
+            "Function Plan Restore: unexpected plan list while looking for fub %s "
+            "(%d of %d entries are no named plan under its id): %.200r",
+            fub_id,
+            len(unexpected),
+            len(fubs),
+            unexpected,
+        )
+        return None, _PLAN_LIST_UNEXPECTED
+    return fubs.get(str(fub_id)), None
+
+
+async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, Any] | None, str | None]:
+    """fub_id's entry in a fresh plan list ($Fubs) — api.fub_data may be up to one poll interval stale.
 
     The in-place decision (does the plan still exist, under what name?) must not be made on
     stale data; the fetch also refreshes api.comexio_version, so the firmware check sees an
-    update since the last poll. A copy only needs the version: an unreachable Comexio does not
-    stop it here (the copy reports its own errors), the check then uses the last polled version.
+    update since the last poll. Returns (entry or None if the plan is gone, None), or
+    (None, why) when the list or the entry could not be read: an in-place restore must stop
+    then — an unread entry looks like a deleted plan, and confirm would rebuild a plan that
+    still runs. A copy only needs the version and goes on (it reports its own errors); its
+    firmware check then may use the last polled version.
     """
     try:
-        raw_config = await api.get_raw_config()
-    except (aiohttp.ClientError, TimeoutError) as err:
-        if not as_copy:
-            raise
-        _LOGGER.warning("Function Plan Restore: config fetch failed (%s)", err)
-        raw_config = {}
-    if "FubModules" not in raw_config:
+        page = await api.get_raw_config()
+    except (aiohttp.ClientError, TimeoutError, ComexioConnectionError) as err:
+        error = f"Comexio is not reachable ({err!r}) — try again once it responds"
+    else:
+        entry, error = _plan_list_entry(page, fub_id)
+        if error is None:
+            return entry, None
+    if as_copy:
         _LOGGER.warning(
-            "Function Plan Restore: Comexio's config page could not be read — "
-            "the firmware check uses the version from the last poll (%s)",
+            "Function Plan Restore: %s — the firmware check may use the version from the last poll (%s)",
+            error,
             api.comexio_version,
         )
-    return raw_config
+        return None, None
+    return None, error
 
 
 async def _resolve_restore_conflict(
@@ -1369,20 +1448,23 @@ async def _run_function_plan_restore(
         )
         return
 
-    snapshot = await _resolve_restore_snapshot(hass, coordinator, fub_id, plan_name, kind, slot)
+    snapshot = await _load_restorable_snapshot(hass, coordinator, fub_id, plan_name, kind, slot, accept_unverified)
     if snapshot is None:
         return
-    if block_error := _block_ids_restore_error(snapshot, accept_unverified):
-        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) %s[%s]: %s", plan_name, fub_id, kind, slot, block_error)
-        persistent_notification.async_create(hass, block_error, title=_TITLE_RESTORE_ERR)
-        return
-    _log_block_ids_trust(snapshot, plan_name, accept_unverified)
 
     if not await api.login():
         persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=_TITLE_RESTORE_ERR)
         return
 
-    raw_config = await _fetch_restore_config(api, as_copy)
+    live_fub, fetch_error = await _fetch_live_plan(api, fub_id, as_copy)
+    if fetch_error:
+        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) aborted: %s", plan_name, fub_id, fetch_error)
+        persistent_notification.async_create(
+            hass,
+            f"Restore of '{plan_name}' aborted: {fetch_error}. Nothing was changed.",
+            title=_TITLE_RESTORE_ERR,
+        )
+        return
 
     def warn_firmware() -> None:
         _warn_firmware_differs(hass, snapshot, coordinator.server_id, fub_id, plan_name, api.comexio_version)
@@ -1394,7 +1476,6 @@ async def _run_function_plan_restore(
         await _refresh_service_descriptions(hass)
         return
 
-    live_fub = raw_config.get("Fubs", {}).get(str(fub_id))
     if live_fub is not None:
         api.update_fub_cache_entry(fub_id, live_fub)  # keep the cache fresh for _restore_plan_in_place's reads
     snapshot_name = snapshot.get("plan_name", str(fub_id))

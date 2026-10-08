@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioConnectionError
 from aiocomexio.function_plan import plan_hash
 from aiocomexio.reference_catalog import fub_base_key
 import aiohttp
@@ -581,6 +582,7 @@ def _run_restore(
     live_version: str | None = None,
     live_name: str = "Kitch",
     fetch_error: Exception | None = None,
+    page: dict[str, Any] | None = None,
     **data: Any,
 ) -> tuple[SimpleNamespace, MagicMock]:
     api = SimpleNamespace(login=AsyncMock(return_value=logged_in), comexio_version="11.0.2")
@@ -588,8 +590,10 @@ def _run_restore(
     async def fetch_config() -> dict[str, Any]:
         if fetch_error is not None:
             raise fetch_error
+        if page is not None:
+            return page
         api.comexio_version = live_version  # the fresh page carries today's firmware, not the last poll's
-        return {"FubModules": {}, "Fubs": {"42": {"Name": live_name}}}
+        return {"FubModules": {}, "Fubs": {"42": {"Id": 42, "Name": live_name}}}  # Comexio's shape: int Id
 
     api.get_raw_config = AsyncMock(side_effect=fetch_config)
     api.update_fub_cache_entry = MagicMock()
@@ -600,13 +604,13 @@ def _run_restore(
         patch.object(backup_service, "_resolve_restore_snapshot", AsyncMock(return_value=snapshot)),
         patch.object(backup_service.persistent_notification, "async_create") as notify,
         patch.object(backup_service, "_restore_plan_as_copy", AsyncMock()) as as_copy,
-        patch.object(backup_service, "_restore_plan_in_place", AsyncMock()),
-        patch.object(backup_service, "_restore_plan_as_new", AsyncMock()),
+        patch.object(backup_service, "_restore_plan_in_place", AsyncMock()) as in_place,
+        patch.object(backup_service, "_restore_plan_as_new", AsyncMock()) as as_new,
         patch.object(backup_service, "_refresh_service_descriptions", AsyncMock()),
     ):
         coordinator = SimpleNamespace(server_id="iosrv1")
         asyncio.run(backup_service._run_function_plan_restore(MagicMock(), call, coordinator, api, plan_hash))
-    api.restore_as_copy = as_copy
+    api.restore_as_copy, api.restore_in_place, api.restore_as_new = as_copy, in_place, as_new
     return api, notify
 
 
@@ -614,16 +618,20 @@ def _notification_titles(notify: MagicMock) -> list[str]:
     return [c.kwargs.get("title") for c in notify.call_args_list]
 
 
+def _restores_run(api: SimpleNamespace) -> int:
+    """How many restore helpers (in place, as new, as copy) the restore awaited."""
+    return api.restore_in_place.await_count + api.restore_as_new.await_count + api.restore_as_copy.await_count
+
+
 @pytest.mark.parametrize(("logged_in", "warned"), [(True, True), (False, False)])
 def test_a_restore_warns_about_other_firmware_only_once_it_proceeds(logged_in: bool, warned: bool) -> None:
     """(bn)(8): the warning comes after the login, so a restore that stops there does not announce it."""
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 
-    _api, notify = _run_restore(
-        snapshot, logged_in=logged_in, live_version="11.1.4", as_copy=True, new_plan_name="Copy"
-    )
+    api, notify = _run_restore(snapshot, logged_in=logged_in, live_version="11.1.4", as_copy=True, new_plan_name="Copy")
 
     assert (backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)) is warned
+    assert api.restore_as_copy.await_count == int(warned)  # the warning never replaces the restore
 
 
 @pytest.mark.parametrize(
@@ -636,9 +644,10 @@ def test_an_in_place_restore_warns_only_once_the_conflict_check_lets_it_proceed(
 ) -> None:
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 
-    _api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", live_name=live_name, confirm=confirm)
+    api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", live_name=live_name, confirm=confirm)
 
     assert (backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)) is warned
+    assert _restores_run(api) == int(warned)
 
 
 @pytest.mark.parametrize("data", [{}, {"as_copy": True, "new_plan_name": "Copy"}], ids=["in place", "as copy"])
@@ -646,19 +655,103 @@ def test_the_firmware_check_uses_the_freshly_fetched_version(data: dict[str, Any
     """The last poll saw 11.0.2 like the backup; the firmware changed since, which only a fresh fetch shows."""
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 
-    _api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", **data)
+    api, notify = _run_restore(snapshot, logged_in=True, live_version="11.1.4", **data)
 
     assert backup_service._TITLE_RESTORE_FIRMWARE in _notification_titles(notify)
+    assert _restores_run(api) == 1
     warning = next(c for c in notify.call_args_list if c.kwargs.get("title") == backup_service._TITLE_RESTORE_FIRMWARE)
     assert warning.kwargs["notification_id"] == "comexio_restore_firmware_iosrv1_42_Kitch"
 
 
-def test_an_unreachable_comexio_does_not_stop_a_copy_at_the_firmware_check() -> None:
+_RETRY = "try again"
+_USE_COPY = "'Restore as copy' still works"
+# (page, fetch error, hint in the abort notice) for every plan list an in-place restore must not trust.
+UNREAD_PLAN_LISTS = [
+    pytest.param({}, None, _RETRY, id="page not readable"),
+    pytest.param({"FubModules": {}}, None, _RETRY, id="no plan list"),
+    pytest.param({"FubModules": {}, "Fubs": [{"Name": "Kitch"}]}, None, _USE_COPY, id="list not keyed by id"),
+    pytest.param({"FubModules": {}, "Fubs": {"42": "not a plan"}}, None, _USE_COPY, id="malformed entry"),
+    pytest.param({"FubModules": {}, "Fubs": {"42": None}}, None, _USE_COPY, id="null entry"),
+    pytest.param({"FubModules": {}, "Fubs": {"42": {"Id": 42}}}, None, _USE_COPY, id="entry without name"),
+    # 42 missing from a list that was not read cleanly — it may still run
+    pytest.param({"FubModules": {}, "Fubs": {"7": "not a plan"}}, None, _USE_COPY, id="malformed list"),
+    # the entry itself reads fine, but a list with non-plans is not trusted as a whole
+    pytest.param(
+        {"FubModules": {}, "Fubs": {"42": {"Name": "Kitch"}, "7": None}}, None, _USE_COPY, id="malformed sibling"
+    ),
+    # 42 missing next to a plan dict without a name — the list's shape is off, 42 may still run
+    pytest.param({"FubModules": {}, "Fubs": {"7": {"Id": 7}}}, None, _USE_COPY, id="nameless sibling"),
+    pytest.param(
+        {"FubModules": {}, "Fubs": {"42": {"Name": "Kitch"}, "7": {"Id": 7}}},
+        None,
+        _USE_COPY,
+        id="nameless sibling next to the plan",
+    ),
+    # 42 filed under another key: looking it up by id would miss a plan that still runs
+    pytest.param(
+        {"FubModules": {}, "Fubs": {"Kitch": {"Id": 42, "Name": "Kitch"}}}, None, _USE_COPY, id="plan not under its id"
+    ),
+    pytest.param(
+        {"FubModules": {}, "Fubs": {"42": {"Id": 42, "Name": "Kitch"}, "7": {"Id": 8, "Name": "Other"}}},
+        None,
+        _USE_COPY,
+        id="sibling under another plan's id",
+    ),
+    # an entry without Id is only trusted under a key that str(fub_id) can spell
+    pytest.param({"FubModules": {}, "Fubs": {"Kitch": {"Name": "Kitch"}}}, None, _USE_COPY, id="plan under a name"),
+    pytest.param({"FubModules": {}, "Fubs": {"042": {"Name": "Kitch"}}}, None, _USE_COPY, id="plan under a padded id"),
+    pytest.param(None, aiohttp.ClientError("down"), _RETRY, id="unreachable"),
+    # no aiohttp cause: _raise_transport_error raises it as is
+    pytest.param(None, ComexioConnectionError("down"), _RETRY, id="unreachable without cause"),
+]
+
+
+@pytest.mark.parametrize(("page", "fetch_error", "hint"), UNREAD_PLAN_LISTS)
+def test_an_unread_plan_list_stops_an_in_place_restore(
+    page: dict[str, Any] | None, fetch_error: Exception | None, hint: str
+) -> None:
+    """An unread list must not look like a deleted plan: confirm would rebuild a plan that still runs."""
+    api, notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page=page, fetch_error=fetch_error)
+
+    api.restore_as_new.assert_not_awaited()
+    api.restore_in_place.assert_not_awaited()
+    message = notify.call_args.args[1]
+    assert "Restore of 'Kitch' aborted" in message
+    assert "Nothing was changed" in message
+    assert hint in message
+
+
+@pytest.mark.parametrize(
+    "fubs", [{}, {"7": {"Id": 7, "Name": "Other"}}], ids=["empty list (PHP's [] decoded to {})", "other plans only"]
+)
+def test_a_read_plan_list_without_the_plan_means_it_was_deleted(fubs: dict[str, Any]) -> None:
+    """A cleanly read list without the plan: it is gone, rebuilt as new."""
+    api, _notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page={"FubModules": {}, "Fubs": fubs})
+
+    api.restore_as_new.assert_awaited_once()
+    assert api.restore_as_new.await_args.kwargs["old_id_still_live"] is False
+    api.restore_in_place.assert_not_awaited()
+
+
+def test_a_plan_among_others_is_restored_in_place() -> None:
+    # one entry with Comexio's int Id, one without an Id (filed by its key)
+    page = {"FubModules": {}, "Fubs": {"7": {"Id": 7, "Name": "Other"}, "42": {"Name": "Kitch"}}}
+
+    api, _notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page=page)
+
+    api.restore_in_place.assert_awaited_once()
+    api.restore_as_new.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("page", "fetch_error", "hint"), UNREAD_PLAN_LISTS)
+def test_an_unread_plan_list_does_not_stop_a_copy(
+    page: dict[str, Any] | None, fetch_error: Exception | None, hint: str
+) -> None:
     """The copy only fetches for the firmware version; it reports Comexio errors itself."""
     snapshot = {"plan_name": "Kitch", SNAPSHOT_COMEXIO_VERSION: "11.0.2"}
 
     api, _notify = _run_restore(
-        snapshot, logged_in=True, fetch_error=aiohttp.ClientError("down"), as_copy=True, new_plan_name="Copy"
+        snapshot, logged_in=True, page=page, fetch_error=fetch_error, as_copy=True, new_plan_name="Copy"
     )
 
     api.restore_as_copy.assert_awaited_once()
