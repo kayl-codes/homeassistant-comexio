@@ -593,7 +593,7 @@ def _run_restore(
         if page is not None:
             return page
         api.comexio_version = live_version  # the fresh page carries today's firmware, not the last poll's
-        return {"FubModules": {}, "Fubs": {"42": {"Name": live_name}}}
+        return {"FubModules": {}, "Fubs": {"42": {"Id": 42, "Name": live_name}}}  # Comexio's shape: int Id
 
     api.get_raw_config = AsyncMock(side_effect=fetch_config)
     api.update_fub_cache_entry = MagicMock()
@@ -681,6 +681,16 @@ UNREAD_PLAN_LISTS = [
         _USE_COPY,
         id="nameless sibling next to the plan",
     ),
+    # 42 filed under another key: looking it up by id would miss a plan that still runs
+    pytest.param(
+        {"FubModules": {}, "Fubs": {"Kitch": {"Id": 42, "Name": "Kitch"}}}, None, _USE_COPY, id="plan not under its id"
+    ),
+    pytest.param(
+        {"FubModules": {}, "Fubs": {"42": {"Id": 42, "Name": "Kitch"}, "7": {"Id": 8, "Name": "Other"}}},
+        None,
+        _USE_COPY,
+        id="sibling under another plan's id",
+    ),
     pytest.param(None, aiohttp.ClientError("down"), _RETRY, id="unreachable"),
     # no aiohttp cause: _raise_transport_error raises it as is
     pytest.param(None, ComexioConnectionError("down"), _RETRY, id="unreachable without cause"),
@@ -703,7 +713,7 @@ def test_an_unread_plan_list_stops_an_in_place_restore(
 
 
 @pytest.mark.parametrize(
-    "fubs", [{}, {"7": {"Name": "Other"}}], ids=["empty list (PHP's [] decoded to {})", "other plans only"]
+    "fubs", [{}, {"7": {"Id": 7, "Name": "Other"}}], ids=["empty list (PHP's [] decoded to {})", "other plans only"]
 )
 def test_a_read_plan_list_without_the_plan_means_it_was_deleted(fubs: dict[str, Any]) -> None:
     """A cleanly read list without the plan: it is gone, rebuilt as new."""
@@ -715,7 +725,8 @@ def test_a_read_plan_list_without_the_plan_means_it_was_deleted(fubs: dict[str, 
 
 
 def test_a_plan_among_others_is_restored_in_place() -> None:
-    page = {"FubModules": {}, "Fubs": {"7": {"Name": "Other"}, "42": {"Name": "Kitch"}}}
+    # one entry with Comexio's int Id, one without an Id (filed by its key)
+    page = {"FubModules": {}, "Fubs": {"7": {"Id": 7, "Name": "Other"}, "42": {"Name": "Kitch"}}}
 
     api, _notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page=page)
 

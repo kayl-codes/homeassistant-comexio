@@ -1252,13 +1252,18 @@ async def _load_restorable_snapshot(
     return snapshot
 
 
+def _is_named_plan(key: str, plan: Any) -> bool:
+    """A $Fubs entry is a plan dict with a str Name, filed under its own Id (where it carries one)."""
+    return isinstance(plan, dict) and isinstance(plan.get("Name"), str) and str(plan.get("Id", key)) == key
+
+
 def _plan_list_entry(page: dict[str, Any], fub_id: int) -> tuple[dict[str, Any] | None, str | None]:
     """fub_id's entry in a fetched page's plan list ($Fubs), or (None, why) if the list is not safely read.
 
     aiocomexio decodes an empty plan list (PHP's []) to {}. Only a map of plan dicts that all carry
-    a name counts as read — in anything else a missing, null or nameless entry could hide a plan
-    that still runs. An empty name is still a name: it only differs from the backup's and then
-    goes through the identity check, which needs confirm.
+    a name, each under its own id, counts as read — in anything else a missing, null, nameless or
+    misfiled entry could hide a plan that still runs. An empty name is still a name: it only
+    differs from the backup's and then goes through the identity check, which needs confirm.
     """
     fubs = page.get("Fubs")
     if fubs is None:
@@ -1268,18 +1273,14 @@ def _plan_list_entry(page: dict[str, Any], fub_id: int) -> tuple[dict[str, Any] 
     if not isinstance(fubs, dict):
         _LOGGER.warning("Function Plan Restore: unexpected plan list ($Fubs is a %s)", type(fubs).__name__)
         return None, _PLAN_LIST_UNEXPECTED
-    unnamed = {
-        key: plan for key, plan in fubs.items() if not (isinstance(plan, dict) and isinstance(plan.get("Name"), str))
-    }
-    if unnamed:
+    if unexpected := {key: plan for key, plan in fubs.items() if not _is_named_plan(key, plan)}:
         _LOGGER.warning(
-            "Function Plan Restore: unexpected plan list (%d of %d entries are no named plan, fub %s among them: %s): "
-            "%.200r",
-            len(unnamed),
-            len(fubs),
+            "Function Plan Restore: unexpected plan list while looking for fub %s "
+            "(%d of %d entries are no named plan under its id): %.200r",
             fub_id,
-            str(fub_id) in unnamed,
-            unnamed,
+            len(unexpected),
+            len(fubs),
+            unexpected,
         )
         return None, _PLAN_LIST_UNEXPECTED
     return fubs.get(str(fub_id)), None
