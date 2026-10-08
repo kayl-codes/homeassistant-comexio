@@ -41,6 +41,7 @@ from .const import (
     is_valid_entity_name_schema,
     parse_ignored_marker_tokens,
     parse_watchdog_user_plan_pick,
+    prune_import_disabled_ignored,
     watchdog_user_plan_pick,
 )
 
@@ -241,7 +242,11 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             # user can't even opt into would be a dead field.
             if cat.key in hidden_cats:
                 continue
-            schema_dict[vol.Optional(cat.ignored_conf_key, default=conf.get(cat.ignored_conf_key, ""))] = str
+            # suggested_value, not default: HA sends no key for a field the user emptied, and a
+            # default would fill the old list back in — the last entry could never be removed.
+            schema_dict[
+                vol.Optional(cat.ignored_conf_key, description={"suggested_value": conf.get(cat.ignored_conf_key, "")})
+            ] = str
         schema_dict[
             vol.Optional(
                 CONF_FUNCTION_PLAN_PLAN_PREFIX,
@@ -310,17 +315,14 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
     def _restore_missing_ignored_fields(
         user_input: dict, conf: dict, source_cats: list[SourceCategory], hidden_cats: set[WebioClass]
     ) -> None:
-        """Preserve the old ignored_conf_key value for any category voluptuous sent no change for.
+        """Fill in the ignored_conf_key value of every category user_input has none for.
 
-        A hidden category (see async_step_init's docstring) is expectedly absent from
-        user_input — restored quietly. Any other absence is unexpected and logged.
+        A visible field the user emptied is sent without its key, so it reads as an emptied
+        list. Only a hidden category (see async_step_init) had no field and keeps its old list.
         """
         for cat in source_cats:
-            if cat.ignored_conf_key in user_input:
-                continue
-            if cat.key not in hidden_cats:
-                _LOGGER.warning("%s field missing from user_input — restoring from saved options", cat.ignored_conf_key)
-            user_input[cat.ignored_conf_key] = conf.get(cat.ignored_conf_key, "")
+            if cat.ignored_conf_key not in user_input:
+                user_input[cat.ignored_conf_key] = conf.get(cat.ignored_conf_key, "") if cat.key in hidden_cats else ""
 
     @staticmethod
     def _normalize_user_input(user_input: dict, conf: dict, errors: dict, hidden_cats: set[WebioClass]) -> None:
@@ -368,9 +370,12 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         """Merge new options with existing entry options and create the config entry.
 
         Preserves fields not shown in the form (e.g. passwords); explicitly removes
-        empty ignore-list fields since HA won't auto-delete an emptied optional field.
+        empty ignore-list fields since HA won't auto-delete an emptied optional field, and
+        the import_disabled "ignore" choice of every category whose import is on again.
         """
-        merged_options = {**self._config_entry.options, **user_input}
+        merged_options = prune_import_disabled_ignored(
+            {**self._config_entry.options, **user_input}, self._config_entry.data
+        )
         for cat in ignore_list_categories():
             if not merged_options.get(cat.ignored_conf_key, "").strip():
                 merged_options.pop(cat.ignored_conf_key, None)

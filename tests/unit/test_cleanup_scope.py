@@ -11,10 +11,12 @@ from custom_components.comexio.cleanup_scope import (
     TRIGGER_PLAN_KEEP,
     TRIGGER_PLAN_REMOVE_PAIRS,
     has_knx_artifacts,
+    import_disabled_counts,
     plan_in_scope,
     plans_in_scope,
     scope_counts,
     scope_includes_knx,
+    scope_of_class,
     scope_trigger_ref_type,
     trigger_plan_action,
     trigger_sources_by_category,
@@ -136,3 +138,29 @@ def test_has_knx_artifacts_counts_bridge_markers() -> None:
     """Titled bridge markers alone are pre-release leftovers the KNX cleanup must reset."""
     assert has_knx_artifacts({}, {}, has_bridge_markers=True)
     assert not has_knx_artifacts({}, {}, has_bridge_markers=False)
+
+
+@pytest.mark.parametrize(
+    ("webio_class", "scope"),
+    [(WebioClass.MARKER, CLEANUP_SCOPE_MARKER), ("io", CLEANUP_SCOPE_IO), (WebioClass.KNX, CLEANUP_SCOPE_KNX)],
+)
+def test_scope_of_class_removes_exactly_that_class(webio_class: str, scope: str) -> None:
+    assert scope_of_class(webio_class) == scope
+    assert webio_classes_in_scope(scope) == (WebioClass(webio_class),)
+
+
+@pytest.mark.parametrize("webio_class", WEBIO_CLASSES)
+def test_every_webio_class_has_its_own_cleanup_scope(webio_class: WebioClass) -> None:
+    """A new class without a scope would crash every poll (import_disabled counters)."""
+    assert webio_classes_in_scope(scope_of_class(webio_class)) == (webio_class,)
+
+
+def test_import_disabled_counts_add_the_commands_to_the_scope_counts() -> None:
+    assert import_disabled_counts(WebioClass.MARKER, 7, PLAN_MAP, WEBIO_DEVICES) == {
+        "commands": 7,
+        "plans": 2,
+        "devices": 1,
+        "classes": 1,
+    }
+    # Nothing left on the server: all zero, so no repair issue.
+    assert not any(import_disabled_counts(WebioClass.KNX, 0, {}, {}).values())

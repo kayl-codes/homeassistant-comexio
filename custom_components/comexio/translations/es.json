@@ -99,6 +99,13 @@
         "keep": "📦 Conservar estas copias",
         "delete": "🗑️ Eliminar estas copias"
       }
+    },
+    "import_disabled_action": {
+      "options": {
+        "cleanup": "🧹 Limpiar (eliminar function plans, dispositivo, clase y comandos Web-IO)",
+        "ignore": "🔇 Ignorar (conservarlo todo)",
+        "enable": "🔁 Volver a activar la importación"
+      }
     }
   },
   "options": {
@@ -429,6 +436,21 @@
     "reference_catalog_unchecked": {
       "title": "No se ejecutó la comprobación de bloques funcionales de Comexio ({server_id})",
       "description": "La integración no pudo comprobar qué bloques funcionales proporciona Comexio {version} en este servidor ({reason}). Hasta que la comprobación tenga éxito, las funciones que colocan el/los bloque(s) **{blocks}** en los planes funcionales (marcadores disparadores `[TRIG]`) están desactivadas para que no se creen elementos defectuosos.\n\nEsto no indica un firmware incompatible. La comprobación se repite en cada consulta y esta reparación desaparece en cuanto tenga éxito. Si persiste, revise el registro de Home Assistant e **[infórmelo en GitHub]({issue_url})**."
+    },
+    "import_disabled": {
+      "title": "Importación de {category} desactivada — restos en Comexio ({server_id})",
+      "fix_flow": {
+        "step": {
+          "import_disabled": {
+            "title": "Importación de {category} desactivada",
+            "description": "La importación de **{category}** está desactivada, pero Comexio aún contiene lo que la integración creó para ella: **{commands} comando(s) Web-IO**, {plans} function plan(s) gestionado(s), {devices} dispositivo(s) Web-IO y {classes} clase(s) Web-IO. La sincronización no los cuenta como huérfanos y no los toca.\n\n* **Limpiar** elimina los function plans de {category} (y sus pares en el plan de disparadores compartido) y después el dispositivo y la clase Web-IO de {category} con todos sus comandos. En KNX también se vacían los títulos de los marcadores puente. Después se recarga la integración. No se puede deshacer.\n* **Ignorar** lo conserva todo y no vuelve a preguntar — hasta que la importación se active y más tarde se desactive de nuevo.\n* **Volver a activar la importación** crea de nuevo las entidades de {category}.\n\nLas entidades de HA de esta categoría ya se eliminaron al desactivar la importación."
+          }
+        },
+        "abort": {
+          "sync_running": "Ahora mismo se está ejecutando una sincronización, una comprobación de rango Web-IO o una recarga de la integración. No se ha cambiado nada — vuelve a abrir esta reparación cuando haya terminado.",
+          "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado."
+        }
+      }
     }
   }
 }

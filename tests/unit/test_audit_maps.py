@@ -4,12 +4,13 @@ from typing import Any
 
 import pytest
 
-from custom_components.comexio.const import io_audit_key
+from custom_components.comexio.const import WebioClass, io_audit_key
 from custom_components.comexio.coordinator import (
     ComexioCoordinator,
     _build_com_audit_map,
     _fallback_audit_key,
     _source_max_ids,
+    _split_disabled_commands,
 )
 
 
@@ -125,3 +126,26 @@ def test_renamed_command_skips_the_type_and_wiring_checks() -> None:
     assert mismatches == {"rename_M2"}
     assert found["type"] == []
     assert found["function_plan_missing"] == []
+
+
+def test_commands_of_a_switched_off_class_leave_the_audit() -> None:
+    """KNX import off: its commands are counted for the import_disabled repair, never as orphans."""
+    commands = {
+        "HA M5 Licht": {"cmdId": 1, "webioClass": WebioClass.MARKER},
+        "HA K1 Tor": {"cmdId": 2, "webioClass": WebioClass.KNX},
+        "HA K2 Licht": {"cmdId": 3, "webioClass": "knx"},
+        "HA IO BASE Q1": {"cmdId": 4, "webioClass": "io"},
+        "Ohne Klasse": {"cmdId": 5},
+        "Unbekannt": {"cmdId": 6, "webioClass": "fremd"},
+    }
+
+    kept, disabled = _split_disabled_commands(commands, (WebioClass.MARKER, WebioClass.IO))
+
+    # A command without a known class stays in the audit, as before.
+    assert set(kept) == {"HA M5 Licht", "HA IO BASE Q1", "Ohne Klasse", "Unbekannt"}
+    assert disabled == {WebioClass.KNX: 2}
+
+
+def test_no_class_switched_off_keeps_every_command() -> None:
+    commands = {"HA K1 Tor": {"webioClass": "knx"}}
+    assert _split_disabled_commands(commands, tuple(WebioClass)) == (commands, {})

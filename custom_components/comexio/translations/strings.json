@@ -99,6 +99,13 @@
         "keep": "📦 Keep these backups",
         "delete": "🗑️ Delete these backups"
       }
+    },
+    "import_disabled_action": {
+      "options": {
+        "cleanup": "🧹 Clean up (delete function plans, Web-IO device, class and commands)",
+        "ignore": "🔇 Ignore (keep everything)",
+        "enable": "🔁 Switch the import on again"
+      }
     }
   },
   "options": {
@@ -429,6 +436,21 @@
     "reference_catalog_unchecked": {
       "title": "Comexio function block check did not run ({server_id})",
       "description": "The integration could not check which function blocks Comexio {version} on this server provides ({reason}). Until the check succeeds, features that place the block(s) **{blocks}** in function plans (trigger markers `[TRIG]`) are disabled so no broken elements are written.\n\nThis is not a sign of an incompatible firmware. The check runs again on every poll and this repair disappears once it succeeds. If it stays, check the Home Assistant log and **[report it on GitHub]({issue_url})**."
+    },
+    "import_disabled": {
+      "title": "{category} import switched off — leftovers on Comexio ({server_id})",
+      "fix_flow": {
+        "step": {
+          "import_disabled": {
+            "title": "{category} import switched off",
+            "description": "The **{category}** import is switched off, but Comexio still has what the integration created for it: **{commands} Web-IO command(s)**, {plans} managed function plan(s), {devices} Web-IO device(s) and {classes} Web-IO class(es). The sync does not count these as orphans and leaves them alone.\n\n* **Clean up** deletes the {category} function plans (and its pairs in the shared trigger plan), then the {category} Web-IO device and class with all its commands. For KNX, the titles of the bridge markers are cleared as well. The integration reloads afterwards. This cannot be undone.\n* **Ignore** keeps everything and does not ask again — until the import is switched on and later off again.\n* **Switch the import on again** creates the {category} entities again.\n\nThe HA entities of this category were already removed when the import was switched off."
+          }
+        },
+        "abort": {
+          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished.",
+          "entry_not_found": "The associated config entry could not be found — it may have been removed."
+        }
+      }
     }
   }
 }

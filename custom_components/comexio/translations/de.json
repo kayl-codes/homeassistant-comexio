@@ -99,6 +99,13 @@
         "keep": "📦 Backups behalten",
         "delete": "🗑️ Backups löschen"
       }
+    },
+    "import_disabled_action": {
+      "options": {
+        "cleanup": "🧹 Aufräumen (Logikpläne, Web-IO-Gerät, Klasse und Befehle löschen)",
+        "ignore": "🔇 Ignorieren (alles behalten)",
+        "enable": "🔁 Import wieder einschalten"
+      }
     }
   },
   "options": {
@@ -429,6 +436,21 @@
     "reference_catalog_unchecked": {
       "title": "Prüfung der Comexio-Funktionsbausteine nicht gelaufen ({server_id})",
       "description": "Die Integration konnte nicht prüfen, welche Funktionsbausteine Comexio {version} auf diesem Server bereitstellt ({reason}). Bis die Prüfung gelingt, sind Funktionen deaktiviert, die den/die Baustein(e) **{blocks}** in Logikpläne setzen (Trigger-Merker `[TRIG]`), damit keine fehlerhaften Elemente angelegt werden.\n\nDas ist kein Hinweis auf eine inkompatible Firmware. Die Prüfung läuft bei jeder Abfrage erneut, und diese Reparatur verschwindet, sobald sie gelingt. Bleibt sie bestehen, bitte das Home-Assistant-Protokoll prüfen und **[auf GitHub melden]({issue_url})**."
+    },
+    "import_disabled": {
+      "title": "{category}-Import abgeschaltet — Reste auf dem Comexio ({server_id})",
+      "fix_flow": {
+        "step": {
+          "import_disabled": {
+            "title": "{category}-Import abgeschaltet",
+            "description": "Der **{category}**-Import ist abgeschaltet, auf dem Comexio liegt aber noch, was die Integration dafür angelegt hat: **{commands} Web-IO-Befehl(e)**, {plans} verwaltete(r) Logikplan/-pläne, {devices} Web-IO-Gerät(e) und {classes} Web-IO-Klasse(n). Der Sync zählt sie nicht als verwaist und lässt sie unangetastet.\n\n* **Aufräumen** löscht die {category}-Logikpläne (und ihre Paare im gemeinsamen Trigger-Plan), danach das {category}-Web-IO-Gerät und die Klasse mit allen Befehlen. Bei KNX werden außerdem die Titel der Brücken-Merker geleert. Danach lädt die Integration neu. Das lässt sich nicht rückgängig machen.\n* **Ignorieren** lässt alles bestehen und fragt nicht erneut — bis der Import wieder ein- und später erneut abgeschaltet wird.\n* **Import wieder einschalten** legt die {category}-Entitäten wieder an.\n\nDie HA-Entitäten dieser Kategorie wurden schon beim Abschalten des Imports entfernt."
+          }
+        },
+        "abort": {
+          "sync_running": "Gerade läuft ein Sync, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert — öffne diese Reparatur erneut, wenn er abgeschlossen ist.",
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt."
+        }
+      }
     }
   }
 }

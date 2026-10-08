@@ -34,6 +34,7 @@ from .cleanup_scope import (
     TRIGGER_PLAN_KEEP,
     TRIGGER_PLAN_REMOVE_PAIRS,
     has_knx_artifacts,
+    import_disabled_counts,
     plans_in_scope,
     scope_counts,
     scope_includes_knx,
@@ -69,6 +70,7 @@ from .const import (
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_HOST,
+    CONF_IMPORT_DISABLED_IGNORED,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_KNX_PRERELEASE_CLEANUP_PENDING,
     CONF_PASSWORD,
@@ -111,6 +113,7 @@ from .const import (
     ICON_NETWORK,
     ICON_RENAME,
     ICON_WARNING,
+    ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     MARKER_READ_ONLY_SUFFIX,
@@ -147,6 +150,7 @@ from .const import (
     expand_ignored_marker_ids,
     function_plan_ids,
     fw_update_signal,
+    import_disabled_issue_id,
     io_audit_key,
     io_column_rows,
     parse_watchdog_user_plan_pick,
@@ -380,6 +384,30 @@ def _build_com_audit_map(
             }
         )
     return com_map
+
+
+def _split_disabled_commands(
+    com_commands: dict[str, Any], active_classes: Iterable[WebioClass]
+) -> tuple[dict[str, Any], dict[WebioClass, int]]:
+    """(commands of imported classes, command count per class whose import is switched off).
+
+    A switched-off category has no HA source, so its commands would all count as orphans —
+    and deleting orphans would remove what the user may still want (see the import_disabled
+    repair). A command without a known class stays in the audit, as before.
+    """
+    active = set(active_classes)
+    kept: dict[str, Any] = {}
+    disabled: dict[WebioClass, int] = {}
+    for name, info in com_commands.items():
+        try:
+            cls = WebioClass(info.get("webioClass"))
+        except ValueError:
+            cls = None
+        if cls is None or cls in active:
+            kept[name] = info
+        else:
+            disabled[cls] = disabled.get(cls, 0) + 1
+    return kept, disabled
 
 
 def _add_audit_orphan(orphans: list[dict[str, Any]], mismatches: set[str], com: dict[str, Any]) -> None:
@@ -1022,9 +1050,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         repair issue (see _report_missing_webio_classes) and the poll ends early.
         """
         ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
-        com_map = _build_com_audit_map(final_data["webio_commands"], ha_map)
+        audited_commands, disabled_commands = _split_disabled_commands(
+            final_data["webio_commands"], active_webio_classes(conf)
+        )
+        com_map = _build_com_audit_map(audited_commands, ha_map)
 
         webio_devices = parsed_data.get("webio_devices", {})
+        self._update_import_disabled_issues(conf, disabled_commands, webio_devices)
         if self._report_missing_webio_classes(conf, webio_devices):
             return False
 
@@ -1149,6 +1181,49 @@ class ComexioCoordinator(DataUpdateCoordinator):
             ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
             io_meta_by_key[key] = io
         return ha_map, io_meta_by_key
+
+    def _update_import_disabled_issues(
+        self, conf: dict[str, Any], disabled_commands: dict[WebioClass, int], webio_devices: dict[str, Any]
+    ) -> None:
+        """Raise or clear the import_disabled repair issue of every Web-IO class.
+
+        Raised for a class whose import is switched off while its Web-IO commands, managed
+        plans or Web-IO device/class still exist, unless the user chose to ignore that. Left
+        alone after an unreadable config scrape (no commands then would look like "all cleaned
+        up" and drop a still valid issue) and while a sync or cleanup holds _sync_lock (a
+        cleanup's mid-run refresh would raise the issue it is just working off again). Plans
+        count only while they still exist in Comexio (live_plan_list), not by plan_map alone.
+        """
+        if not self._last_poll_scraped or self._sync_lock.locked():
+            return
+        active = set(active_webio_classes(conf))
+        ignored = set(conf.get(CONF_IMPORT_DISABLED_IGNORED) or [])
+        plan_map = dict(conf.get(CONF_FUNCTION_PLAN_PLAN_MAP) or {})
+        if (live_plans := self.live_plan_list()) is not None:
+            plan_map = {name: fub_id for name, fub_id in plan_map.items() if str(fub_id) in live_plans}
+        for cls in WEBIO_CLASSES:
+            issue_id = import_disabled_issue_id(cls, self.server_id)
+            counts = import_disabled_counts(cls, disabled_commands.get(cls, 0), plan_map, webio_devices)
+            if cls in active or cls.value in ignored or not any(counts.values()):
+                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+                continue
+            _LOGGER.debug(
+                "[%s] %s import is switched off, but the server still has %s", self.server_id, cls.value, counts
+            )
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_IMPORT_DISABLED,
+                translation_placeholders={
+                    "server_id": self.server_id,
+                    "category": webio_class_label(cls),
+                    **{key: str(value) for key, value in counts.items()},
+                },
+                data={"entry_id": self.config_entry.entry_id, "webio_class": cls.value, "counts": counts},
+            )
 
     def _report_missing_webio_classes(self, conf: dict[str, Any], webio_devices: dict[str, Any]) -> bool:
         """Raise a repair issue if a Web-IO class is entirely missing on the server; True if one is.

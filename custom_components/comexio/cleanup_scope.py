@@ -144,6 +144,23 @@ def scope_counts(plan_map: dict[str, Any], webio_devices: dict[str, Any]) -> dic
     return counts
 
 
+def scope_of_class(webio_class: str) -> str:
+    """The partial cleanup scope that removes exactly one Web-IO class's part."""
+    cls = WebioClass(webio_class)
+    return next(scope for scope, scope_cls in _SCOPE_CLASS.items() if scope_cls == cls)
+
+
+def import_disabled_counts(
+    webio_class: str, command_count: int, plan_map: dict[str, Any], webio_devices: dict[str, Any]
+) -> dict[str, int]:
+    """What a category whose import is switched off still has on the server.
+
+    command_count: its Web-IO commands; the rest is what scope_counts reports for its scope
+    (managed plans, Web-IO device, Web-IO class). All zero means nothing is left to clean up.
+    """
+    return {"commands": command_count, **scope_counts(plan_map, webio_devices)[scope_of_class(webio_class)]}
+
+
 def has_knx_artifacts(
     plan_map: dict[str, Any], webio_devices: dict[str, Any], has_bridge_markers: bool = False
 ) -> bool:
