@@ -222,9 +222,16 @@ def _routed_step(issue_id: str) -> str:
 
 
 def _fix_flow_aborts(file_name: str) -> dict[str, set[str]]:
+    """Per issue with a fix flow: the abort reasons that have a non-empty text (an empty one shows nothing)."""
     data = json.loads((COMPONENT / "translations" / file_name).read_text(encoding="utf-8"))
     return {
-        key: set(issue["fix_flow"].get("abort", {})) for key, issue in data["issues"].items() if "fix_flow" in issue
+        key: {
+            reason
+            for reason, text in issue["fix_flow"].get("abort", {}).items()
+            if isinstance(text, str) and text.strip()
+        }
+        for key, issue in data["issues"].items()
+        if "fix_flow" in issue
     }
 
 
