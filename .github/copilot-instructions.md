@@ -44,6 +44,26 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Plan existence:** whether a function plan still exists is decided by `live_plan_list()` (the plan list of the
   last poll; `None` until the first full poll), never by a bulk-load snapshot — the bulk load may omit plans. Flag
   code that drops findings, backups or watches of a plan only because a snapshot lacks it.
+- **Plan identity:** a function plan is identified by its `fub_id` and its name together — Comexio reuses the
+  `fub_id` of a deleted plan, and plan names are not unique. Flag code that matches backups, snapshots, watches or
+  findings to a plan by only one of the two.
+- **Data read from Comexio:** an entry counts as missing from a list or mapping read from Comexio (e.g. `$Fubs`)
+  only after the whole list passed a shape check — every entry has the expected type, its key is a canonical id
+  string, and an `Id` the entry carries matches that key. An unreadable or malformed list means "unknown", never "deleted". Flag code that turns a
+  read or parse failure into "entry missing" and acts on it (#158).
+- **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
+  change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
+  the summary reports issues that no category shows (#153).
+- **Re-check under the lock:** state checked before waiting for a lock (an armed preview, a selection generation, a
+  cached object, a running sync or restore) can change while waiting; check it again once the lock is held, as
+  `plan_preview.async_follow_selection` does. Flag a check followed by `async with <lock>` without that re-check.
+- **Early returns:** a coordinator cycle that changes state an entity shows and then returns early still calls
+  `async_update_listeners()`, otherwise the entity shows the old state until the next poll.
+- **Timestamps:** a timestamp that starts a cooldown or retry interval, or records the last attempt, is taken
+  after the awaited request it belongs to, not before — otherwise a slow Comexio shortens the interval.
+- **Repeated calls stay quiet:** paths the plan card or a timer repeats (keepalive, retries, periodic ticks) report
+  failures at debug level, without a persistent notification or repair each time — e.g.
+  `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure.
 - **Blocking I/O:** no blocking calls in the event loop; Comexio serialises requests, so avoid needless round-trips.
 
 ## Tests
@@ -55,6 +75,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - Exact pins of manifest.json requirements in `tests/requirements.txt` and `tests/ha/requirements.txt` must match
   manifest.json (`scripts/generate_requirements.py --check` enforces it). `ci.yml` never names a manifest package
   itself; it installs them with `-r requirements.txt` (`test_ci_workflow_installs_from_requirements_txt`).
+- Every reason a repair flow aborts with needs a translation under `issues.<translation_key>.fix_flow.abort`
+  in all five translation files (`tests/unit/test_repair_translations.py`); a new fixable issue goes into that
+  test's `ENTRY_STEP_BY_ISSUE` (the step `async_step_init` routes it to; the test reads the issue_id from the
+  raise site). A computed `translation_key` must come from a `self.` helper returning constants or from a
+  parameter whose callers pass constants; `is_fixable` stays a literal `True`/`False`.
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
 - Test function parameters carry type annotations.
 

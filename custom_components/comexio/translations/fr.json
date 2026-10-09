@@ -285,6 +285,9 @@
             "title": "Corriger les ID d'entité",
             "description": "**{count} entités** ont un entity_id qui ne suit pas le schéma stable Comexio (serveur, extension, numéro IO / marqueur / KNX — indépendant du nom affiché). Exemple : {example}\n\nLa correction les renomme. **L'historique et les statistiques suivent automatiquement.** Les automatisations, scripts et tableaux de bord ne sont **pas** mis à jour — **au moins {references} automatisations/scripts** (? = non vérifiable) utilisent actuellement ces entity_id et devront être adaptés ; vérifiez aussi les tableaux de bord. Les entity_id renommés manuellement sont également renommés.\n\nVoulez-vous corriger les identifiants maintenant ?"
           }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
         }
       }
     },
@@ -296,6 +299,9 @@
             "title": "Nettoyer les statistiques",
             "description": "**{count} orphaned long-term statistics** were found that no longer belong to any existing entity (leftovers from previous entity IDs).\n\nThey can be safely deleted. **Live sensors and their current history are not affected** — only the orphaned entries are removed.\n\nWould you like to delete them now?"
           }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
         }
       }
     },
@@ -313,7 +319,9 @@
           }
         },
         "abort": {
-          "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois l'opération terminée."
+          "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois l'opération terminée.",
+          "missing_entry_id": "Aucun identifiant d'entrée de configuration n'a été fourni pour ce problème de réparation.",
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
         }
       }
     },
@@ -327,7 +335,9 @@
           }
         },
         "abort": {
-          "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois l'opération terminée."
+          "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois l'opération terminée.",
+          "missing_entry_id": "Aucun identifiant d'entrée de configuration n'a été fourni pour ce problème de réparation.",
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
         }
       }
     },
@@ -345,7 +355,8 @@
           }
         },
         "abort": {
-          "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois l'opération terminée."
+          "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois l'opération terminée.",
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
         }
       }
     },
