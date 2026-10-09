@@ -88,6 +88,18 @@ async def test_import_on_raises_no_import_disabled_issue(
     assert _issue(hass, f"import_disabled_knx_{SERVER_ID}") is None  # KNX off, but nothing on the server
 
 
+# Every ComexioAPI call that removes something on the server.
+_DESTRUCTIVE_API_METHODS = (
+    "delete_webio_device",
+    "delete_webio_base",
+    "delete_fup",
+    "delete_single_command",
+    "function_plan_delete_elements",
+    "delete_marker",
+    "function_plan_remove_trigger_pairs",
+)
+
+
 async def test_ignore_keeps_everything_and_does_not_ask_again(
     hass: HomeAssistant, markers_off_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:
@@ -103,6 +115,9 @@ async def test_ignore_keeps_everything_and_does_not_ask_again(
     await coordinator.async_refresh()
     assert coordinator.last_update_success
     assert _issue(hass, MARKER_ISSUE) is None
+    api = mock_comexio_api[-1]
+    for name in _DESTRUCTIVE_API_METHODS:
+        getattr(api, name).assert_not_awaited()
 
 
 async def test_enable_switches_the_import_on_and_drops_the_ignore(
@@ -153,6 +168,7 @@ async def test_options_flow_switching_the_import_on_drops_the_ignore(
     await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["import_markers"] is True
     assert CONF_IMPORT_DISABLED_IGNORED not in entry.options
 
 
