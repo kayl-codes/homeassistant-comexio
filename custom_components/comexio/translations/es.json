@@ -292,6 +292,9 @@
             "title": "Corregir ID de entidad",
             "description": "**{count} entidades** tienen un entity_id que no sigue el esquema estable de Comexio (servidor, extensión, número de IO / marcador / KNX — independiente del nombre visible). Ejemplo: {example}\n\nAl corregirlos se renombran. **El historial y las estadísticas se trasladan automáticamente.** Las automatizaciones, scripts y paneles **no** se actualizan — **al menos {references} automatizaciones/scripts** (? = no comprobable) usan actualmente estos entity_id y deberán ajustarse; revisa también los paneles. Los entity_id renombrados manualmente también se renombran.\n\n¿Quieres corregir los IDs ahora?"
           }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada — es posible que se haya eliminado."
         }
       }
     },
@@ -303,6 +306,9 @@
             "title": "Limpiar estadísticas",
             "description": "**{count} orphaned long-term statistics** were found that no longer belong to any existing entity (leftovers from previous entity IDs).\n\nThey can be safely deleted. **Live sensors and their current history are not affected** — only the orphaned entries are removed.\n\nWould you like to delete them now?"
           }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada — es posible que se haya eliminado."
         }
       }
     },
@@ -320,7 +326,9 @@
           }
         },
         "abort": {
-          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado."
+          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado.",
+          "missing_entry_id": "No se proporcionó ningún ID de entrada de configuración para este problema de reparación.",
+          "entry_not_found": "No se encontró la entrada de configuración asociada — es posible que se haya eliminado."
         }
       }
     },
@@ -334,7 +342,9 @@
           }
         },
         "abort": {
-          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado."
+          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado.",
+          "missing_entry_id": "No se proporcionó ningún ID de entrada de configuración para este problema de reparación.",
+          "entry_not_found": "No se encontró la entrada de configuración asociada — es posible que se haya eliminado."
         }
       }
     },
@@ -352,7 +362,8 @@
           }
         },
         "abort": {
-          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado."
+          "sync_running": "Hay una sincronización, una comprobación de rango Web-IO o una recarga de la integración en curso. No se ha cambiado nada: vuelva a abrir esta reparación cuando haya terminado.",
+          "entry_not_found": "No se encontró la entrada de configuración asociada — es posible que se haya eliminado."
         }
       }
     },

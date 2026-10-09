@@ -292,6 +292,9 @@
             "title": "Entity-IDs korrigieren",
             "description": "**{count} Entitäten** haben eine Entity-ID, die nicht dem stabilen Comexio-Schema folgt (Server, Extension, IO- / Merker- / KNX-Nummer — unabhängig vom Anzeigenamen). Beispiel: {example}\n\nBeim Korrigieren werden sie umbenannt. **History und Statistiken ziehen automatisch mit.** Automationen, Skripte und Dashboards werden **nicht** angepasst — **mindestens {references} Automationen/Skripte** (? = nicht prüfbar) verwenden diese Entity-IDs aktuell und müssen danach angepasst werden; bitte auch Dashboards prüfen. Von dir manuell umbenannte Entity-IDs werden ebenfalls umbenannt.\n\nMöchtest du die IDs jetzt korrigieren?"
           }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt."
         }
       }
     },
@@ -303,6 +306,9 @@
             "title": "Statistiken bereinigen",
             "description": "Es wurden **{count} verwaiste Langzeit-Statistiken** gefunden, die zu keiner existierenden Entität mehr gehören (Überreste früherer Entity-IDs).\n\nDiese können gefahrlos gelöscht werden. **Laufende Sensoren und deren aktuelle Historie sind nicht betroffen** — nur die verwaisten Einträge werden entfernt.\n\nMöchtest du sie jetzt löschen?"
           }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt."
         }
       }
     },
@@ -320,7 +326,9 @@
           }
         },
         "abort": {
-          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist."
+          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist.",
+          "missing_entry_id": "Für dieses Reparatur-Problem wurde keine Konfigurationseintrags-ID übergeben.",
+          "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt."
         }
       }
     },
@@ -334,7 +342,9 @@
           }
         },
         "abort": {
-          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist."
+          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist.",
+          "missing_entry_id": "Für dieses Reparatur-Problem wurde keine Konfigurationseintrags-ID übergeben.",
+          "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt."
         }
       }
     },
@@ -352,7 +362,8 @@
           }
         },
         "abort": {
-          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist."
+          "sync_running": "Gerade läuft eine Synchronisierung, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert – öffne diese Reparatur erneut, sobald das abgeschlossen ist.",
+          "entry_not_found": "Der zugehörige Konfigurationseintrag konnte nicht gefunden werden — er wurde möglicherweise entfernt."
         }
       }
     },

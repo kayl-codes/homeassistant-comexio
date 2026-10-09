@@ -292,6 +292,9 @@
             "title": "Fix Entity IDs",
             "description": "**{count} entities** have an entity_id that doesn't follow the stable Comexio scheme (server, extension, IO / marker / KNX id — independent of the display name). Example: {example}\n\nFixing renames them. **History and statistics move along automatically.** Automations, scripts and dashboards are **not** updated — **at least {references} automations/scripts** (? = could not be checked) currently reference these entity IDs and must be adjusted afterwards; please check dashboards as well. Entity IDs you renamed manually are renamed too.\n\nWould you like to fix the IDs now?"
           }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed."
         }
       }
     },
@@ -303,6 +306,9 @@
             "title": "Clean Up Statistics",
             "description": "**{count} orphaned long-term statistics** were found that no longer belong to any existing entity (leftovers from previous entity IDs).\n\nThey can be safely deleted. **Live sensors and their current history are not affected** — only the orphaned entries are removed.\n\nWould you like to delete them now?"
           }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed."
         }
       }
     },
@@ -320,7 +326,9 @@
           }
         },
         "abort": {
-          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished."
+          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished.",
+          "missing_entry_id": "No config entry ID was provided with this repair issue.",
+          "entry_not_found": "The associated config entry could not be found — it may have been removed."
         }
       }
     },
@@ -334,7 +342,9 @@
           }
         },
         "abort": {
-          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished."
+          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished.",
+          "missing_entry_id": "No config entry ID was provided with this repair issue.",
+          "entry_not_found": "The associated config entry could not be found — it may have been removed."
         }
       }
     },
@@ -352,7 +362,8 @@
           }
         },
         "abort": {
-          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished."
+          "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished.",
+          "entry_not_found": "The associated config entry could not be found — it may have been removed."
         }
       }
     },
