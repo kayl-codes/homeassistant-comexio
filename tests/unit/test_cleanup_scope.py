@@ -10,6 +10,7 @@ from custom_components.comexio.cleanup_scope import (
     TRIGGER_PLAN_DELETE,
     TRIGGER_PLAN_KEEP,
     TRIGGER_PLAN_REMOVE_PAIRS,
+    count_placeholder,
     has_knx_artifacts,
     import_disabled_counts,
     plan_in_scope,
@@ -156,7 +157,7 @@ def test_every_webio_class_has_its_own_cleanup_scope(webio_class: WebioClass) ->
 
 
 def test_import_disabled_counts_add_the_commands_to_the_scope_counts() -> None:
-    assert import_disabled_counts(WebioClass.MARKER, 7, PLAN_MAP, WEBIO_DEVICES) == {
+    assert import_disabled_counts(WebioClass.MARKER, 7, PLAN_MAP, WEBIO_DEVICES, {}) == {
         "commands": 7,
         "trigger_pairs": 0,
         "bridge_markers": 0,
@@ -180,3 +181,20 @@ def test_import_disabled_counts_give_bridge_markers_to_knx_only() -> None:
     """Regression: titled bridge markers alone must keep the KNX repair (its cleanup resets them)."""
     assert import_disabled_counts(WebioClass.KNX, 0, {}, {}, None, 2)["bridge_markers"] == 2
     assert not any(import_disabled_counts(WebioClass.MARKER, 0, {}, {}, None, 2).values())
+
+
+def test_trigger_sources_by_category_ignores_trailing_blanks_of_a_bridge_title() -> None:
+    """Regression: "... [K3] " is a bridge marker for the counts and the reset — its pair is KNX's too."""
+    assert trigger_sources_by_category([(2, 7)], {7: "Rollo [K3] "}, {2, 11}) == {11: [(2, 7)]}
+
+
+def test_import_disabled_counts_keep_unknown_counts_unknown() -> None:
+    """Regression: an unloaded trigger plan or unknown bridge placement must not read as 0."""
+    marker = import_disabled_counts(WebioClass.MARKER, 2, {}, {}, None)
+    assert marker["trigger_pairs"] is None
+    knx = import_disabled_counts(WebioClass.KNX, 0, {}, {}, {}, None)
+    assert knx["bridge_markers"] is None
+    assert knx["trigger_pairs"] == 0
+    assert import_disabled_counts(WebioClass.IO, 0, {}, {}, None)["trigger_pairs"] == 0  # IO has no pairs
+    assert count_placeholder(None) == "?"
+    assert count_placeholder(0) == "0"

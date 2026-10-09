@@ -33,6 +33,7 @@ from .cleanup_scope import (
     TRIGGER_PLAN_DELETE,
     TRIGGER_PLAN_KEEP,
     TRIGGER_PLAN_REMOVE_PAIRS,
+    count_placeholder,
     has_knx_artifacts,
     import_disabled_counts,
     plans_in_scope,
@@ -1207,14 +1208,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Raised for a class whose import is switched off while its Web-IO commands, managed
         plans, trigger pairs, Web-IO device/class or (KNX) resettable bridge markers still
-        exist, unless the user chose to
-        ignore that. Left alone after an unreadable config scrape (no commands then would look
-        like "all cleaned up" and drop a still valid issue), while no plan list was ever read
-        (a plan deleted in Comexio would still count), and while a sync or cleanup holds
-        _sync_lock (a cleanup's mid-run refresh would raise the issue it is just working off
-        again). Nor cleared while the trigger plan's snapshot or (KNX) the placement of the bridge
-        markers is not known yet. marker_titles ({id: title} of every marker) tells KNX bridge markers in
-        the trigger plan from plain markers.
+        exist, unless the user chose to ignore that. Left alone after an unreadable config
+        scrape (no commands then would look like "all cleaned up" and drop a still valid
+        issue), while no plan list was ever read (a plan deleted in Comexio would still
+        count), and while a sync or cleanup holds _sync_lock (a cleanup's mid-run refresh
+        would raise the issue it is just working off again). Nor cleared while the trigger
+        plan's snapshot or (KNX) the placement of the bridge markers is not known yet; raised
+        on the known leftovers meanwhile, the unknown counts shown as such (count_placeholder).
+        marker_titles ({id: title} of every marker) tells KNX bridge markers in the trigger
+        plan from plain markers.
         """
         if not self._last_poll_scraped or self._sync_lock.locked():
             return
@@ -1233,7 +1235,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 plan_map,
                 webio_devices,
                 trigger_sources,
-                bridge_markers or 0,
+                bridge_markers,
             )
             if cls in active or cls.value in ignored:
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
@@ -1256,7 +1258,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 translation_placeholders={
                     "server_id": self.server_id,
                     "category": webio_class_label(cls),
-                    **{key: str(value) for key, value in counts.items()},
+                    **{key: count_placeholder(value) for key, value in counts.items()},
                 },
                 data={"entry_id": self.config_entry.entry_id, "webio_class": cls.value, "counts": counts},
             )

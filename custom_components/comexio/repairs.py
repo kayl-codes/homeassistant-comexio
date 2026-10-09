@@ -19,6 +19,7 @@ from .cleanup_scope import (
     CLEANUP_SCOPE_MARKER,
     CLEANUP_SCOPES,
     SKIPPED_KNX_BRIDGE_MARKERS,
+    count_placeholder,
     scope_includes_knx,
     scope_of_class,
 )
@@ -1133,7 +1134,7 @@ class ComexioRepairFlow(RepairsFlow):
             description_placeholders={
                 "category": category.label,
                 **{
-                    key: str(counts.get(key, 0))
+                    key: count_placeholder(counts.get(key, 0))
                     for key in ("commands", "plans", "trigger_pairs", "devices", "classes", "bridge_markers")
                 },
             },

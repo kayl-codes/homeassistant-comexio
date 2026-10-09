@@ -441,6 +441,7 @@ async def _refresh_with_only_the_trigger_plan_left(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     if trigger_plan is not None:
         coordinator.function_plan_plans[2] = trigger_plan
+        coordinator.function_plan_plans[1] = {"elements": {}}  # every plan loaded: bridge placement known
     else:
         coordinator.function_plan_plans.pop(2, None)
     config = load_json_fixture("config_basic.json")
@@ -478,7 +479,17 @@ async def test_an_unloaded_trigger_plan_does_not_clear_the_issue(
     entry = _with_options(
         mock_config_entry, {"import_markers": False, CONF_FUNCTION_PLAN_PLAN_MAP: {FUNCTION_PLAN_TRIGGER_PLAN_NAME: 2}}
     )
-    await _refresh_with_only_the_trigger_plan_left(hass, entry, mock_comexio_api, None)
+    await _setup(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator.function_plan_plans[2] = {"elements": {}}
+    await coordinator.async_refresh()
+    assert _issue(hass, MARKER_ISSUE) is not None
+
+    del coordinator.function_plan_plans[2]
+    config = load_json_fixture("config_basic.json")
+    del config["WebDevices"]["30"]
+    mock_comexio_api[-1].get_raw_config.return_value = config
+    await coordinator.async_refresh()
 
     assert _issue(hass, MARKER_ISSUE) is not None
 
@@ -621,3 +632,31 @@ async def test_a_stale_dialog_is_refused_while_the_entry_reloads(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "import_enabled"
+
+
+async def test_unknown_trigger_pairs_show_as_unknown_not_zero(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The known commands raise the issue; the pairs of an unloaded trigger plan read "?", then their count."""
+    entry = _with_options(
+        mock_config_entry, {"import_markers": False, CONF_FUNCTION_PLAN_PLAN_MAP: {FUNCTION_PLAN_TRIGGER_PLAN_NAME: 2}}
+    )
+    await _setup(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator.function_plan_plans.pop(2, None)
+    await coordinator.async_refresh()
+    issue = _issue(hass, MARKER_ISSUE)
+    assert issue is not None
+    assert issue.data["counts"]["trigger_pairs"] is None
+    assert issue.translation_placeholders["trigger_pairs"] == "?"
+    flow = ComexioRepairFlow(MARKER_ISSUE, issue.data)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["description_placeholders"]["trigger_pairs"] == "?"
+
+    coordinator.function_plan_plans[2] = {"elements": {"10": {"reference": {"type": 2, "ref_id": 1}}}}
+    await coordinator.async_refresh()
+
+    issue = _issue(hass, MARKER_ISSUE)
+    assert issue is not None
+    assert issue.data["counts"]["trigger_pairs"] == 1
