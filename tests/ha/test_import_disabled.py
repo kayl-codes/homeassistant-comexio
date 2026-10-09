@@ -24,6 +24,7 @@ from tests.common import load_json_fixture
 from .conftest import SERVER_ID
 
 MARKER_ISSUE = f"import_disabled_marker_{SERVER_ID}"
+KNX_ISSUE = f"import_disabled_knx_{SERVER_ID}"
 SYNC_ISSUE = f"sync_mismatch_{SERVER_ID}"
 
 
@@ -69,7 +70,14 @@ async def test_switched_off_import_raises_its_own_issue_instead_of_orphans(
 
     issue = _issue(hass, MARKER_ISSUE)
     assert issue is not None
-    assert issue.data["counts"] == {"commands": 2, "trigger_pairs": 0, "plans": 0, "devices": 1, "classes": 1}
+    assert issue.data["counts"] == {
+        "commands": 2,
+        "trigger_pairs": 0,
+        "bridge_markers": 0,
+        "plans": 0,
+        "devices": 1,
+        "classes": 1,
+    }
     assert issue.translation_placeholders["category"] == "Marker"
     # The marker commands are no orphans: "delete orphans" would have removed them.
     coordinator = hass.data[DOMAIN][markers_off_entry.entry_id]
@@ -79,13 +87,96 @@ async def test_switched_off_import_raises_its_own_issue_instead_of_orphans(
         assert sync_issue.data["counts"]["orphan"] == 0
 
 
+def _without_the_bridge_marker(config: dict[str, Any]) -> dict[str, Any]:
+    """The fixture config with marker 7 ("Rollo Wohnen [K3]") titled like a plain marker."""
+    config["FubModules"]["2"]["7"]["Name"] = "Rollo Wohnen"
+    return config
+
+
 async def test_import_on_raises_no_import_disabled_issue(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    api_returns: dict[str, Any],
+    mock_comexio_api: list[ComexioAPI],
 ) -> None:
+    api_returns["get_raw_config"] = _without_the_bridge_marker(load_json_fixture("config_basic.json"))
     await _setup(hass, mock_config_entry)
 
     assert _issue(hass, MARKER_ISSUE) is None
-    assert _issue(hass, f"import_disabled_knx_{SERVER_ID}") is None  # KNX off, but nothing on the server
+    assert _issue(hass, KNX_ISSUE) is None  # KNX off, but nothing on the server
+
+
+async def _refresh_with_plans(hass: HomeAssistant, entry: MockConfigEntry, plans: dict[int, dict]) -> Any:
+    """Set up (KNX off, marker 7 is a titled bridge marker), then poll with these plan snapshots."""
+    await _setup(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator.function_plan_plans.clear()
+    coordinator.function_plan_plans.update(plans)
+    await coordinator.async_refresh()
+    return coordinator
+
+
+_EMPTY_PLANS = {1: {"elements": {}}, 2: {"elements": {}}}
+
+
+async def test_a_titled_bridge_marker_alone_keeps_the_knx_issue(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Regression: the KNX cleanup resets bridge marker titles — a marker left alone still needs it."""
+    await _refresh_with_plans(hass, mock_config_entry, _EMPTY_PLANS)
+
+    issue = _issue(hass, KNX_ISSUE)
+    assert issue is not None
+    assert issue.data["counts"] == {
+        "commands": 0,
+        "trigger_pairs": 0,
+        "bridge_markers": 1,
+        "plans": 0,
+        "devices": 0,
+        "classes": 0,
+    }
+    assert _issue(hass, MARKER_ISSUE) is None  # the bridge marker is KNX's, not the marker import's
+    flow = ComexioRepairFlow(KNX_ISSUE, issue.data)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["description_placeholders"]["bridge_markers"] == "1"
+
+
+async def test_a_bridge_marker_a_user_plan_places_raises_no_issue(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The cleanup leaves a still placed bridge marker alone — counting it would loop the repair."""
+    plans = {**_EMPTY_PLANS, 2: {"elements": {"10": {"reference": {"type": 2, "ref_id": 7}}}}}
+    await _refresh_with_plans(hass, mock_config_entry, plans)
+
+    assert _issue(hass, KNX_ISSUE) is None
+
+
+async def test_unknown_bridge_marker_placement_keeps_the_issue(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """A plan without a snapshot may place the marker: the issue stays until that is known."""
+    coordinator = await _refresh_with_plans(hass, mock_config_entry, _EMPTY_PLANS)
+    assert _issue(hass, KNX_ISSUE) is not None
+
+    del coordinator.function_plan_plans[2]
+    await coordinator.async_refresh()
+
+    assert _issue(hass, KNX_ISSUE) is not None
+
+
+async def test_the_knx_issue_clears_once_the_bridge_title_is_gone(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    coordinator = await _refresh_with_plans(hass, mock_config_entry, _EMPTY_PLANS)
+    assert _issue(hass, KNX_ISSUE) is not None
+
+    mock_comexio_api[-1].get_raw_config.return_value = _without_the_bridge_marker(
+        load_json_fixture("config_basic.json")
+    )
+    await coordinator.async_refresh()
+
+    assert _issue(hass, KNX_ISSUE) is None
 
 
 # Every ComexioAPI call that removes something on the server.
@@ -332,7 +423,14 @@ async def test_trigger_pairs_alone_keep_the_issue(
 
     issue = _issue(hass, MARKER_ISSUE)
     assert issue is not None
-    assert issue.data["counts"] == {"commands": 0, "trigger_pairs": 1, "plans": 0, "devices": 0, "classes": 0}
+    assert issue.data["counts"] == {
+        "commands": 0,
+        "trigger_pairs": 1,
+        "bridge_markers": 0,
+        "plans": 0,
+        "devices": 0,
+        "classes": 0,
+    }
 
 
 async def _refresh_with_only_the_trigger_plan_left(
@@ -368,7 +466,7 @@ async def test_a_bridge_marker_pair_counts_for_knx_not_markers(
     await _refresh_with_only_the_trigger_plan_left(hass, entry, mock_comexio_api, trigger_plan)
 
     assert _issue(hass, MARKER_ISSUE) is None
-    knx_issue = _issue(hass, f"import_disabled_knx_{SERVER_ID}")
+    knx_issue = _issue(hass, KNX_ISSUE)
     assert knx_issue is not None
     assert knx_issue.data["counts"]["trigger_pairs"] == 1
 

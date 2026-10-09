@@ -322,6 +322,19 @@ def _source_max_ids(raw_config: dict[str, Any]) -> tuple[int, int]:
     return max_id, knx_max_id
 
 
+def _leftovers_unknown(
+    webio_class: WebioClass, trigger_sources: dict[int, Any] | None, bridge_markers: int | None
+) -> bool:
+    """Whether part of what a switched-off category left on the server is not known yet.
+
+    trigger_sources None: the trigger plan's snapshot is not loaded (categories with trigger
+    pairs); bridge_markers None: the bridge markers' placement is unknown (KNX).
+    """
+    if trigger_sources is None and SOURCE_CATEGORIES[webio_class].supports_trigger_pairs:
+        return True
+    return bridge_markers is None and webio_class == WebioClass.KNX
+
+
 def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[str, Any]:
     """The parsed config narrowed to the categories the user imports (import_* options)."""
     import_markers = conf.get("import_markers", True)
@@ -1193,13 +1206,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Raise or clear the import_disabled repair issue of every Web-IO class.
 
         Raised for a class whose import is switched off while its Web-IO commands, managed
-        plans, trigger pairs or Web-IO device/class still exist, unless the user chose to
+        plans, trigger pairs, Web-IO device/class or (KNX) resettable bridge markers still
+        exist, unless the user chose to
         ignore that. Left alone after an unreadable config scrape (no commands then would look
         like "all cleaned up" and drop a still valid issue), while no plan list was ever read
         (a plan deleted in Comexio would still count), and while a sync or cleanup holds
         _sync_lock (a cleanup's mid-run refresh would raise the issue it is just working off
-        again). Nor cleared while the trigger plan's snapshot is not loaded yet (its pairs are
-        unknown then). marker_titles ({id: title} of every marker) tells KNX bridge markers in
+        again). Nor cleared while the trigger plan's snapshot or (KNX) the placement of the bridge
+        markers is not known yet. marker_titles ({id: title} of every marker) tells KNX bridge markers in
         the trigger plan from plain markers.
         """
         if not self._last_poll_scraped or self._sync_lock.locked():
@@ -1208,19 +1222,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if plan_map is None:
             return
         trigger_sources = self._cached_trigger_sources(plan_map, marker_titles)
+        bridge_markers = self._resettable_bridge_marker_count(plan_map)
         active = set(active_webio_classes(conf))
         ignored = set(conf.get(CONF_IMPORT_DISABLED_IGNORED) or [])
         for cls in WEBIO_CLASSES:
             issue_id = import_disabled_issue_id(cls, self.server_id)
             counts = import_disabled_counts(
-                cls, disabled_commands.get(cls, 0), plan_map, webio_devices, trigger_sources
+                cls,
+                disabled_commands.get(cls, 0),
+                plan_map,
+                webio_devices,
+                trigger_sources,
+                bridge_markers or 0,
             )
             if cls in active or cls.value in ignored:
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
                 continue
             if not any(counts.values()):
-                # Unloaded trigger plan: its pairs may be all that is left — keep the issue.
-                if trigger_sources is not None or not SOURCE_CATEGORIES[cls].supports_trigger_pairs:
+                # Unknown pairs or bridge markers may be all that is left — keep the issue then.
+                if not _leftovers_unknown(cls, trigger_sources, bridge_markers):
                     ir.async_delete_issue(self.hass, DOMAIN, issue_id)
                 continue
             _LOGGER.debug(
@@ -1241,19 +1261,51 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 data={"entry_id": self.config_entry.entry_id, "webio_class": cls.value, "counts": counts},
             )
 
-    def _existing_managed_plans(self, conf: dict[str, Any]) -> dict[str, Any] | None:
-        """The plan_map entries whose plan still exists in Comexio; None while no plan list is known.
-
-        Judged by this poll's $Fubs read, else by the last poll that read one (live_plan_list).
-        """
+    def _known_plan_ids(self) -> set[int] | None:
+        """Ids of every plan in Comexio: this poll's $Fubs read, else the last poll's; None if never read."""
         plan_ids = self._polled_plan_ids
         if plan_ids is None and (live_plans := self.live_plan_list()) is not None:
             plan_ids = function_plan_ids(live_plans)
-        if plan_ids is None:
+        return plan_ids
+
+    def _existing_managed_plans(self, conf: dict[str, Any]) -> dict[str, Any] | None:
+        """The plan_map entries whose plan still exists in Comexio; None while no plan list is known."""
+        if (plan_ids := self._known_plan_ids()) is None:
             return None
         existing = {str(fub_id) for fub_id in plan_ids}
         plan_map = conf.get(CONF_FUNCTION_PLAN_PLAN_MAP) or {}
         return {name: fub_id for name, fub_id in plan_map.items() if str(fub_id) in existing}
+
+    def _resettable_bridge_marker_count(self, plan_map: dict[str, Any]) -> int | None:
+        """Titled KNX bridge markers a KNX cleanup would reset; None while their placement is unknown.
+
+        The cleanup deletes the KNX plans and the KNX pairs of the trigger plan, then resets only
+        bridge markers no other plan places (api.reset_knx_bridge_markers). One a user plan still
+        places keeps its title — counting it would raise the issue again after every cleanup.
+        plan_map: the managed plans still in Comexio (_existing_managed_plans).
+        """
+        if not self._knx_bridge_marker_ids:
+            return 0
+        if (plan_ids := self._known_plan_ids()) is None:
+            return None
+        cleaned = {str(fub_id) for fub_id in plans_in_scope(plan_map, CLEANUP_SCOPE_KNX).values()}
+        cleaned.add(str(plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)))
+        marker_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
+        placed: set[int] = set()
+        for fub_id in plan_ids:
+            if str(fub_id) in cleaned:
+                continue
+            if (snapshot := self.function_plan_plans.get(fub_id)) is None:
+                _LOGGER.debug(
+                    "[%s] Plan %s has no snapshot yet — bridge marker placement unknown", self.server_id, fub_id
+                )
+                return None
+            placed.update(
+                ref_id
+                for ref_type, ref_id in self.api.function_plan_element_refs(snapshot)
+                if ref_type == marker_ref_type
+            )
+        return len(self._knx_bridge_marker_ids - placed)
 
     def _cached_trigger_sources(
         self, plan_map: dict[str, Any], marker_titles: dict[int, str]

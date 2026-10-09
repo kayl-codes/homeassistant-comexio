@@ -159,6 +159,7 @@ def test_import_disabled_counts_add_the_commands_to_the_scope_counts() -> None:
     assert import_disabled_counts(WebioClass.MARKER, 7, PLAN_MAP, WEBIO_DEVICES) == {
         "commands": 7,
         "trigger_pairs": 0,
+        "bridge_markers": 0,
         "plans": 2,
         "devices": 1,
         "classes": 1,
@@ -173,3 +174,9 @@ def test_import_disabled_counts_include_the_category_s_trigger_pairs() -> None:
     assert import_disabled_counts(WebioClass.MARKER, 0, {}, {}, sources)["trigger_pairs"] == 2
     assert import_disabled_counts(WebioClass.KNX, 0, {}, {}, sources)["trigger_pairs"] == 1
     assert not any(import_disabled_counts(WebioClass.IO, 0, {}, {}, sources).values())
+
+
+def test_import_disabled_counts_give_bridge_markers_to_knx_only() -> None:
+    """Regression: titled bridge markers alone must keep the KNX repair (its cleanup resets them)."""
+    assert import_disabled_counts(WebioClass.KNX, 0, {}, {}, None, 2)["bridge_markers"] == 2
+    assert not any(import_disabled_counts(WebioClass.MARKER, 0, {}, {}, None, 2).values())

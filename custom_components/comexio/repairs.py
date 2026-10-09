@@ -1133,7 +1133,8 @@ class ComexioRepairFlow(RepairsFlow):
             description_placeholders={
                 "category": category.label,
                 **{
-                    key: str(counts.get(key, 0)) for key in ("commands", "plans", "trigger_pairs", "devices", "classes")
+                    key: str(counts.get(key, 0))
+                    for key in ("commands", "plans", "trigger_pairs", "devices", "classes", "bridge_markers")
                 },
             },
             data_schema=vol.Schema(

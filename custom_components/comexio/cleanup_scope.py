@@ -156,19 +156,26 @@ def import_disabled_counts(
     plan_map: dict[str, Any],
     webio_devices: dict[str, Any],
     trigger_sources: dict[int, list[tuple[int, int]]] | None = None,
+    bridge_markers: int = 0,
 ) -> dict[str, int]:
     """What a category whose import is switched off still has on the server.
 
     command_count: its Web-IO commands; trigger_sources: the shared trigger plan's sources by
     owning category (trigger_sources_by_category; None = not known, counted as none) — the
-    scope cleanup removes this category's pairs from it, so they count as leftovers too. The
-    rest is what scope_counts reports for its scope (managed plans, Web-IO device, Web-IO
+    scope cleanup removes this category's pairs from it, so they count as leftovers too.
+    bridge_markers: titled KNX bridge markers, counted for KNX only (its cleanup resets them).
+    The rest is what scope_counts reports for its scope (managed plans, Web-IO device, Web-IO
     class). All zero means nothing is left to clean up.
     """
     scope = scope_of_class(webio_class)
     ref_type = scope_trigger_ref_type(scope)
     trigger_pairs = len((trigger_sources or {}).get(ref_type, [])) if ref_type is not None else 0
-    return {"commands": command_count, "trigger_pairs": trigger_pairs, **scope_counts(plan_map, webio_devices)[scope]}
+    return {
+        "commands": command_count,
+        "trigger_pairs": trigger_pairs,
+        "bridge_markers": bridge_markers if scope_includes_knx(scope) else 0,
+        **scope_counts(plan_map, webio_devices)[scope],
+    }
 
 
 def has_knx_artifacts(

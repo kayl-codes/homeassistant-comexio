@@ -73,3 +73,17 @@ def test_reset_candidates_skip_placed_and_non_bridge_markers() -> None:
     candidates, skipped = _knx_bridge_reset_candidates(POOL, placed_ids={24})
     assert candidates == [(20, True), (21, False), (22, True)]
     assert skipped == 1
+
+
+def test_reset_candidates_include_a_bridge_title_with_trailing_blanks() -> None:
+    """Regression: aiocomexio counts "... [K3] " as a bridge marker — the cleanup must reset it too,
+    or the import_disabled KNX repair would come back after every cleanup."""
+    candidates, skipped = _knx_bridge_reset_candidates([{"Id": 30, "Name": "Rollo [K3] ", "Type": 1}], set())
+    assert candidates == [(30, True)]
+    assert skipped == 0
+
+
+def test_element_refs_skip_malformed_elements() -> None:
+    """A non-object element in any plan must not break the poll (every plan is scanned for bridge markers)."""
+    plan = {"elements": {"5": None, "6": {"reference": {"type": 2, "ref_id": 7}}}}
+    assert ComexioAPI.function_plan_element_refs(plan) == [(2, 7)]

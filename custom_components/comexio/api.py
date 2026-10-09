@@ -343,8 +343,12 @@ def _knx_bridge_title(k_id: int, k_title: str) -> str:
 
 
 def _is_knx_bridge_title(name: Any) -> bool:
-    """True if name is a machine-given KNX bridge marker title ("... [K<id>]")."""
-    return isinstance(name, str) and bool(MARKER_KNX_BRIDGE_SUFFIX_RE.search(name))
+    """True if name is a machine-given KNX bridge marker title ("... [K<id>]").
+
+    Trailing blanks are stripped first, as aiocomexio's marker_kind does: the coordinator counts
+    bridge markers by that kind, so a title it counts must also be one the KNX cleanup resets.
+    """
+    return isinstance(name, str) and bool(MARKER_KNX_BRIDGE_SUFFIX_RE.search(name.rstrip()))
 
 
 def _knx_bridge_run_end(items: Any, start: int, min_len: int = MARKER_KNX_BRIDGE_BLOCK_SIZE) -> int:
@@ -3469,6 +3473,8 @@ class ComexioAPI:
         if not plan_data:
             return existing_by_ref, conn_endpoints
         for elem_id_str, elem in plan_data.get("elements", {}).items():
+            if not isinstance(elem, dict):
+                continue
             ref = elem.get("reference") or {}
             with suppress(TypeError, ValueError, KeyError):
                 existing_by_ref[(int(ref["type"]), int(ref["ref_id"]))] = int(elem_id_str)
