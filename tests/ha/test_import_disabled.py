@@ -391,3 +391,104 @@ async def test_a_poll_without_plan_list_judges_plans_by_the_last_one(
     issue = _issue(hass, MARKER_ISSUE)
     assert issue is not None
     assert issue.data["counts"]["plans"] == 1
+
+
+def _with_data(entry: MockConfigEntry, data: dict[str, Any], options: dict[str, Any]) -> MockConfigEntry:
+    """The fixture's entry with extra data (the config flow saves the import flags there)."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title=entry.title,
+        minor_version=entry.minor_version,
+        data={**entry.data, **data},
+        options=options,
+    )
+
+
+async def test_import_switched_off_in_the_config_flow_still_offers_the_repair(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The flag lives in entry.data only: the repair must not take the category for active."""
+    entry = _with_data(mock_config_entry, {"import_markers": False}, {})
+    await _setup(hass, entry)
+
+    result = await _run_repair(hass, "ignore")
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_IMPORT_DISABLED_IGNORED] == ["marker"]
+
+
+@pytest.mark.parametrize("flag_in_data", [False, True])
+async def test_a_stale_dialog_changes_nothing_once_the_import_is_on_again(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    monkeypatch: pytest.MonkeyPatch,
+    flag_in_data: bool,
+) -> None:
+    """Regression: opened while off, submitted after an options flow switched the import on.
+
+    flag_in_data: switched off in the config flow (entry.data) — options must win over it.
+    """
+    if flag_in_data:
+        entry = _with_data(mock_config_entry, {"import_markers": False}, {})
+    else:
+        entry = _with_options(mock_config_entry, {"import_markers": False})
+    await _setup(hass, entry)
+    scopes: list[str] = []
+
+    async def _run_cleanup(_self: ComexioRepairFlow, _coordinator: Any, _entry: Any, scope: str) -> None:
+        scopes.append(scope)
+
+    monkeypatch.setattr(ComexioRepairFlow, "_async_run_cleanup", _run_cleanup)
+    issue = _issue(hass, MARKER_ISSUE)
+    assert issue is not None
+    actions = ("cleanup", "ignore", "enable")
+    flows = []
+    for _ in actions:
+        flow = ComexioRepairFlow(MARKER_ISSUE, issue.data)
+        flow.hass = hass
+        await flow.async_step_init()
+        flows.append(flow)
+
+    hass.config_entries.async_update_entry(entry, options={"import_markers": True})
+    await hass.async_block_till_done()
+
+    for flow, action in zip(flows, actions, strict=True):
+        # As if a poll had left the issue standing (unreadable scrape, sync lock): the guard drops it.
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            MARKER_ISSUE,
+            is_fixable=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="import_disabled",
+            data=issue.data,
+        )
+        result = await flow.async_step_import_disabled({"action": action})
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "import_enabled"
+        assert _issue(hass, MARKER_ISSUE) is None
+    await hass.async_block_till_done()
+    assert scopes == []
+    assert CONF_IMPORT_DISABLED_IGNORED not in entry.options
+
+
+async def test_a_stale_dialog_is_refused_while_the_entry_reloads(
+    hass: HomeAssistant, markers_off_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """No coordinator yet (reload after the switch still running): import_enabled, not entry_not_found."""
+    await _setup(hass, markers_off_entry)
+    issue = _issue(hass, MARKER_ISSUE)
+    assert issue is not None
+    flow = ComexioRepairFlow(MARKER_ISSUE, issue.data)
+    flow.hass = hass
+    await flow.async_step_init()
+    hass.config_entries.async_update_entry(markers_off_entry, options={"import_markers": True})
+    await hass.async_block_till_done()
+    coordinator = hass.data[DOMAIN].pop(markers_off_entry.entry_id)
+
+    result = await flow.async_step_import_disabled({"action": "cleanup"})
+    hass.data[DOMAIN][markers_off_entry.entry_id] = coordinator  # for the unload at teardown
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "import_enabled"

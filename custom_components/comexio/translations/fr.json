@@ -447,6 +447,7 @@
           }
         },
         "abort": {
+          "import_enabled": "L'import de cette catégorie est de nouveau activé. Rien n'a été modifié.",
           "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois terminé.",
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
         }

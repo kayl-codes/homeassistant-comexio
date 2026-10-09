@@ -57,6 +57,7 @@ from .const import (
     SYNC_DURATION_WRITE,
     WEBIO_CLASS_KNX,
     WebioClass,
+    active_webio_classes,
     expand_ignored_marker_ids,
     prune_import_disabled_ignored,
     source_category,
@@ -294,6 +295,7 @@ async def async_setup_entry(hass: HomeAssistant, entry):
 
 
 ABORT_SYNC_RUNNING = "sync_running"
+ABORT_IMPORT_ENABLED = "import_enabled"
 
 
 def _sync_running(hass: HomeAssistant, entry_id: str | None) -> bool:
@@ -1097,8 +1099,16 @@ class ComexioRepairFlow(RepairsFlow):
 
         entry_id = self.issue_data["entry_id"]
         entry = self.hass.config_entries.async_get_entry(entry_id)
+        if entry is None:
+            return self.async_abort(reason="entry_not_found")
+        if category.key in active_webio_classes({**entry.data, **entry.options}):
+            # A dialog opened before the import was switched on again: cleaning up would delete an
+            # active category's artifacts, ignoring would re-add the choice the options flow pruned.
+            # Checked before the coordinator: the reload that switch triggers may still be running.
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason=ABORT_IMPORT_ENABLED)
         coordinator = self.hass.data.get(DOMAIN, {}).get(entry_id)
-        if entry is None or coordinator is None:
+        if coordinator is None:
             return self.async_abort(reason="entry_not_found")
         action = user_input["action"]
         if action != ACTION_IGNORE and _sync_running(self.hass, entry_id):

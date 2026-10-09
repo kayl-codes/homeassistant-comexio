@@ -447,6 +447,7 @@
           }
         },
         "abort": {
+          "import_enabled": "La importación de esta categoría vuelve a estar activada. No se ha cambiado nada.",
           "sync_running": "Ahora mismo se está ejecutando una sincronización, una comprobación de rango Web-IO o una recarga de la integración. No se ha cambiado nada — vuelve a abrir esta reparación cuando haya terminado.",
           "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado."
         }

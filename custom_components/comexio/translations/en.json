@@ -447,6 +447,7 @@
           }
         },
         "abort": {
+          "import_enabled": "The import of this category is switched on again. Nothing was changed.",
           "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished.",
           "entry_not_found": "The associated config entry could not be found — it may have been removed."
         }

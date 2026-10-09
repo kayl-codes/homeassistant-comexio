@@ -447,6 +447,7 @@
           }
         },
         "abort": {
+          "import_enabled": "Der Import dieser Kategorie ist wieder eingeschaltet. Es wurde nichts geändert.",
           "sync_running": "Gerade läuft ein Sync, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert — öffne diese Reparatur erneut, wenn er abgeschlossen ist.",
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt."
         }
