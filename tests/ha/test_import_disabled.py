@@ -187,6 +187,21 @@ async def test_options_flow_emptying_the_ignore_list_removes_it(
     assert CONF_IGNORED_MARKERS not in entry.options
 
 
+async def test_options_flow_keeps_a_submitted_ignore_list(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Counterpart of the emptying test: a flow that dropped the list on every save would pass that one."""
+    entry = _with_options(mock_config_entry, {CONF_IGNORED_MARKERS: "2"})
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {CONF_IGNORED_MARKERS: "1, 2"})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_IGNORED_MARKERS] == "1,2"  # normalized
+
+
 async def test_an_unreadable_scrape_keeps_the_issue(
     hass: HomeAssistant, markers_off_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:
