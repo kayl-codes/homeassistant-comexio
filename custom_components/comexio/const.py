@@ -97,6 +97,12 @@ CONF_KNX_PRERELEASE_CLEANUP_PENDING = "knx_prerelease_cleanup_pending"
 # Repair issue translation keys; the issue id is "{key}_{server_id}".
 ISSUE_UNINSTALL_CLEANUP = "uninstall_cleanup"
 ISSUE_KNX_PRERELEASE_CLEANUP = "knx_prerelease_cleanup"
+# One issue per source category whose import is switched off while its Web-IO commands,
+# managed plans or Web-IO device still exist on the server; id "{key}_{class}_{server_id}".
+ISSUE_IMPORT_DISABLED = "import_disabled"
+# Web-IO classes (values) the user chose "Ignore" for in that repair; a class leaves this
+# list again once its import is switched back on (see prune_import_disabled_ignored).
+CONF_IMPORT_DISABLED_IGNORED = "import_disabled_ignored"
 # Uninstall cleanup: update the running notification every N reset bridge markers.
 UNINSTALL_CLEANUP_PROGRESS_EVERY = 10
 
@@ -273,6 +279,28 @@ def active_webio_classes(conf: Mapping[str, Any]) -> tuple[WebioClass, ...]:
         for cls in WEBIO_CLASSES
         if conf.get(SOURCE_CATEGORIES[cls].import_conf_key, SOURCE_CATEGORIES[cls].import_default)
     )
+
+
+def import_disabled_issue_id(webio_class: str, server_id: str) -> str:
+    """Repair issue id of the "import switched off, leftovers on the server" issue of one class."""
+    return f"{ISSUE_IMPORT_DISABLED}_{WebioClass(webio_class).value}_{server_id}"
+
+
+def prune_import_disabled_ignored(options: Mapping[str, Any], data: Mapping[str, Any]) -> dict[str, Any]:
+    """options without the "ignore" choice of every class whose import is switched on again.
+
+    data is the entry's data: the config flow saves the import flags there, options override
+    them. The choice only covers the current opt-out: switching the import off again later
+    must raise the repair again. The key is dropped when no class is left in it.
+    """
+    pruned = dict(options)
+    active = {cls.value for cls in active_webio_classes({**data, **pruned})}
+    remaining = [value for value in pruned.get(CONF_IMPORT_DISABLED_IGNORED) or [] if value not in active]
+    if remaining:
+        pruned[CONF_IMPORT_DISABLED_IGNORED] = remaining
+    else:
+        pruned.pop(CONF_IMPORT_DISABLED_IGNORED, None)
+    return pruned
 
 
 def classify_audit_key(key: str) -> WebioClass:

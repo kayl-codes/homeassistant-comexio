@@ -94,13 +94,14 @@ def trigger_sources_by_category(
     KNX, not to the markers: KNX trigger pairs can sit in the plan via their bridge
     marker, and a partial "markers" cleanup must leave them alone just as a "knx"
     cleanup must remove them (else the bridge marker stays placed and cannot be reset).
+    Trailing blanks of a title are ignored, as by aiocomexio's marker_kind.
     """
     grouped: dict[int, list[tuple[int, int]]] = {}
     for ref_type, ref_id in refs:
         if ref_type not in trigger_types:
             continue
         owner = ref_type
-        if ref_type == _MARKER_REF_TYPE and MARKER_KNX_BRIDGE_SUFFIX_RE.search(marker_titles.get(ref_id, "")):
+        if ref_type == _MARKER_REF_TYPE and MARKER_KNX_BRIDGE_SUFFIX_RE.search(marker_titles.get(ref_id, "").rstrip()):
             owner = _KNX_REF_TYPE
         grouped.setdefault(owner, []).append((ref_type, ref_id))
     return grouped
@@ -142,6 +143,51 @@ def scope_counts(plan_map: dict[str, Any], webio_devices: dict[str, Any]) -> dic
             "classes": sum(1 for cls in classes if (webio_devices.get(cls) or {}).get("base_id")),
         }
     return counts
+
+
+def scope_of_class(webio_class: str) -> str:
+    """The partial cleanup scope that removes exactly one Web-IO class's part."""
+    cls = WebioClass(webio_class)
+    return next(scope for scope, scope_cls in _SCOPE_CLASS.items() if scope_cls == cls)
+
+
+def import_disabled_counts(
+    webio_class: str,
+    command_count: int,
+    plan_map: dict[str, Any],
+    webio_devices: dict[str, Any],
+    trigger_sources: dict[int, list[tuple[int, int]]] | None = None,
+    bridge_markers: int | None = 0,
+) -> dict[str, int | None]:
+    """What a category whose import is switched off still has on the server.
+
+    command_count: its Web-IO commands; trigger_sources: the shared trigger plan's sources by
+    owning category (trigger_sources_by_category) — the scope cleanup removes this category's
+    pairs from it, so they count as leftovers too. bridge_markers: titled KNX bridge markers,
+    counted for KNX only (its cleanup resets them). None for either means "not known yet" and
+    stays None in the result (shown as UNKNOWN_COUNT, never as 0). The rest is what
+    scope_counts reports for its scope (managed plans, Web-IO device, Web-IO class). No
+    truthy value means nothing known is left to clean up.
+    """
+    scope = scope_of_class(webio_class)
+    ref_type = scope_trigger_ref_type(scope)
+    trigger_pairs: int | None = 0
+    if ref_type is not None:
+        trigger_pairs = None if trigger_sources is None else len(trigger_sources.get(ref_type, []))
+    return {
+        "commands": command_count,
+        "trigger_pairs": trigger_pairs,
+        "bridge_markers": bridge_markers if scope_includes_knx(scope) else 0,
+        **scope_counts(plan_map, webio_devices)[scope],
+    }
+
+
+UNKNOWN_COUNT = "?"
+
+
+def count_placeholder(value: int | None) -> str:
+    """A leftover count as dialog text: UNKNOWN_COUNT while it is not known yet (None)."""
+    return UNKNOWN_COUNT if value is None else str(value)
 
 
 def has_knx_artifacts(

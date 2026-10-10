@@ -19,11 +19,14 @@ from .cleanup_scope import (
     CLEANUP_SCOPE_MARKER,
     CLEANUP_SCOPES,
     SKIPPED_KNX_BRIDGE_MARKERS,
+    count_placeholder,
     scope_includes_knx,
+    scope_of_class,
 )
 from .const import (
     CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
+    CONF_IMPORT_DISABLED_IGNORED,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
@@ -41,7 +44,9 @@ from .const import (
     ICON_RENAME,
     ICON_ROCKET,
     ICON_SYNC,
+    ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
+    ISSUE_UNINSTALL_CLEANUP,
     MARKER_READ_ONLY_SUFFIX,
     MARKER_TRIGGER_SUFFIXES,
     SOURCE_CATEGORIES,
@@ -53,7 +58,10 @@ from .const import (
     SYNC_DURATION_WRITE,
     WEBIO_CLASS_KNX,
     WebioClass,
+    active_webio_classes,
     expand_ignored_marker_ids,
+    prune_import_disabled_ignored,
+    source_category,
     uninstall_cleanup_notification_id,
     uninstall_cleanup_pending_notification_id,
 )
@@ -70,6 +78,8 @@ ACTION_KNX_TRIG = "trig"
 ACTION_KEEP = "keep"
 ACTION_DELETE = "delete"
 ACTION_PREVIEW = "preview"
+ACTION_CLEANUP = "cleanup"
+ACTION_ENABLE = "enable"
 
 
 def _is_knx_cluster_plan(plan_name: str) -> bool:
@@ -269,12 +279,24 @@ def _cleanup_result_message(result: dict, scope: str) -> str:
     return "\n".join(lines)
 
 
+def _import_disabled_title(action: str, label: str, is_de: bool) -> str:
+    """Result title of the import_disabled repair (de/en, like the other inline result titles)."""
+    titles = {
+        ACTION_CLEANUP: ("Aufräumen im Hintergrund gestartet", "Cleanup started in background"),
+        ACTION_ENABLE: (f"{label}-Import eingeschaltet", f"{label} import switched on"),
+        ACTION_IGNORE: ("Ignoriert", "Ignored"),
+    }
+    de, en = titles[action]
+    return de if is_de else en
+
+
 async def async_setup_entry(hass: HomeAssistant, entry):
     """Set up the repairs platform."""
     return True
 
 
 ABORT_SYNC_RUNNING = "sync_running"
+ABORT_IMPORT_ENABLED = "import_enabled"
 
 
 def _sync_running(hass: HomeAssistant, entry_id: str | None) -> bool:
@@ -335,6 +357,8 @@ class ComexioRepairFlow(RepairsFlow):
             return await self.async_step_orphaned_backups()
         if self.issue_id.startswith(f"{ISSUE_FUNCTION_PLAN_STOPPED}_"):
             return await self.async_step_function_plan_stopped()
+        if self.issue_id.startswith(f"{ISSUE_IMPORT_DISABLED}_"):
+            return await self.async_step_import_disabled()
 
         _LOGGER.debug("Routing to fallback async_step_select_action")
         return await self.async_step_select_action()
@@ -928,8 +952,12 @@ class ComexioRepairFlow(RepairsFlow):
     def _reraise_cleanup_issue(self, coordinator, scope: str) -> None:
         """The issue was deleted when the dialog was confirmed (and for the pre-release issue
         its trigger flag is long gone) — re-raise it so the retry the result message asks for
-        (or a retry after a crash) is one click away."""
+        (or a retry after a crash) is one click away. An import_disabled cleanup gets the
+        uninstall-cleanup issue preset to its scope: its leftovers (a class whose device is gone,
+        trigger pairs, KNX bridge markers) can be invisible to the import_disabled counters."""
         translation_key = self.issue_id.removesuffix(f"_{coordinator.server_id}")
+        if translation_key.startswith(f"{ISSUE_IMPORT_DISABLED}_"):
+            translation_key = ISSUE_UNINSTALL_CLEANUP
         coordinator.create_uninstall_cleanup_issue(
             translation_key,
             default_scope=scope,
@@ -1058,6 +1086,89 @@ class ComexioRepairFlow(RepairsFlow):
                 title="Comexio: reload after uninstall cleanup failed",
                 notification_id=f"comexio_cleanup_reload_{coordinator.server_id}",
             )
+
+    async def async_step_import_disabled(self, user_input=None):
+        """A category's import is switched off, but its Web-IO commands, plans or device remain.
+
+        Clean up runs that category's partial uninstall cleanup (see cleanup_scope), ignore
+        keeps everything until the import is switched on again, enable switches the import
+        back on. Defaults to ignore: the cleanup cannot be undone.
+        """
+        category = source_category(self.issue_data["webio_class"])
+        if user_input is None:
+            return self._import_disabled_form(category)
+
+        entry_id = self.issue_data["entry_id"]
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if entry is None:
+            return self.async_abort(reason="entry_not_found")
+        if category.key in active_webio_classes({**entry.data, **entry.options}):
+            # A dialog opened before the import was switched on again: cleaning up would delete an
+            # active category's artifacts, ignoring would re-add the choice the options flow pruned.
+            # Checked before the coordinator: the reload that switch triggers may still be running.
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason=ABORT_IMPORT_ENABLED)
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry_id)
+        if coordinator is None:
+            return self.async_abort(reason="entry_not_found")
+        action = user_input["action"]
+        if action != ACTION_IGNORE and _sync_running(self.hass, entry_id):
+            # Deleting what a running sync writes into, or reloading under it, leaves both half-done.
+            return self.async_abort(reason=ABORT_SYNC_RUNNING)
+
+        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        if action == ACTION_CLEANUP:
+            self.hass.async_create_task(self._async_run_cleanup(coordinator, entry, scope_of_class(category.key)))
+        elif action == ACTION_ENABLE:
+            self._import_disabled_enable(entry, category)
+        else:
+            self._import_disabled_ignore(entry, coordinator, category)
+        title = _import_disabled_title(action, category.label, self.hass.config.language == "de")
+        return self.async_create_entry(title=title, data={})
+
+    def _import_disabled_form(self, category):
+        """The import_disabled dialog: what is left on the server, and the three actions."""
+        counts = self.issue_data["counts"]
+        return self.async_show_form(
+            step_id="import_disabled",
+            description_placeholders={
+                "category": category.label,
+                **{
+                    key: count_placeholder(counts.get(key, 0))
+                    for key in ("commands", "plans", "trigger_pairs", "devices", "classes", "bridge_markers")
+                },
+            },
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action", default=ACTION_IGNORE): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[ACTION_CLEANUP, ACTION_IGNORE, ACTION_ENABLE],
+                            mode=SelectSelectorMode.LIST,
+                            translation_key="import_disabled_action",
+                        )
+                    )
+                }
+            ),
+        )
+
+    def _import_disabled_enable(self, entry: ConfigEntry, category) -> None:
+        """Switch the category's import back on; the reload this options write triggers
+        creates its entities again."""
+        new_options = {**entry.options, category.import_conf_key: True}
+        self.hass.config_entries.async_update_entry(
+            entry, options=prune_import_disabled_ignored(new_options, entry.data)
+        )
+
+    @staticmethod
+    def _import_disabled_ignore(entry: ConfigEntry, coordinator, category) -> None:
+        """Remember the ignore until the import is switched on again (prune_import_disabled_ignored)."""
+        new_options = dict(entry.options)
+        ignored = list(new_options.get(CONF_IMPORT_DISABLED_IGNORED) or [])
+        if category.key.value not in ignored:
+            ignored.append(category.key.value)
+        new_options[CONF_IMPORT_DISABLED_IGNORED] = ignored
+        # Nothing on the server or in HA changes, so no reload is needed (R2).
+        coordinator.request_options_update_without_reload(new_options)
 
     async def async_step_knx_dpt_suffix(self, user_input=None):
         """Handle the KNX DPT1.x ambiguous-classification repair flow.

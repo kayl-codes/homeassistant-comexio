@@ -798,8 +798,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         per_class: dict[str, dict[str, int]] = {}
         created_names: list[str] = []
         # Sync a class if the user opted into it, OR if its Web-IO device still exists on the
-        # server (a class deselected after a prior sync — its orphaned commands must still be
-        # delta-synced away; a full sync would otherwise never touch it). An opted-out class
+        # server (a class deselected after a prior sync — only its device IP is kept current;
+        # its commands are no orphans and are left to the import_disabled repair). An opted-out class
         # with no server device is skipped entirely — _decide_effective_action force-"recreate"s
         # any class with no device, so including it would create it on the live server.
         opted_in = set(self.coordinator.active_webio_classes)

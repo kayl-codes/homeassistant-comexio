@@ -99,6 +99,13 @@
         "keep": "📦 Conserver ces sauvegardes",
         "delete": "🗑️ Supprimer ces sauvegardes"
       }
+    },
+    "import_disabled_action": {
+      "options": {
+        "cleanup": "🧹 Nettoyer (supprimer function plans, appareil, classe et commandes Web-IO)",
+        "ignore": "🔇 Ignorer (tout conserver)",
+        "enable": "🔁 Réactiver l'import"
+      }
     }
   },
   "options": {
@@ -440,6 +447,22 @@
     "reference_catalog_unchecked": {
       "title": "Vérification des blocs fonctionnels Comexio non effectuée ({server_id})",
       "description": "L'intégration n'a pas pu vérifier quels blocs fonctionnels Comexio {version} fournit sur ce serveur ({reason}). Tant que la vérification n'aboutit pas, les fonctions qui placent le(s) bloc(s) **{blocks}** dans les plans fonctionnels (marqueurs déclencheurs `[TRIG]`) sont désactivées afin qu'aucun élément défectueux ne soit créé.\n\nCe n'est pas le signe d'un firmware incompatible. La vérification est relancée à chaque interrogation et cette réparation disparaît dès qu'elle aboutit. Si elle persiste, consultez le journal de Home Assistant et **[signalez-le sur GitHub]({issue_url})**."
+    },
+    "import_disabled": {
+      "title": "Import {category} désactivé — restes sur Comexio ({server_id})",
+      "fix_flow": {
+        "step": {
+          "import_disabled": {
+            "title": "Import {category} désactivé",
+            "description": "L'import **{category}** est désactivé, mais Comexio contient encore ce que l'intégration a créé pour lui : **{commands} commande(s) Web-IO**, {plans} function plan(s) géré(s), {trigger_pairs} paire(s) de déclenchement dans le plan de déclenchement commun, {devices} appareil(s) Web-IO, {classes} classe(s) Web-IO et {bridge_markers} marqueur(s) passerelle KNX titré(s). La synchronisation ne les compte pas comme orphelins et n'y touche pas.\n\n* **Nettoyer** supprime les function plans {category} (et leurs paires dans le plan de déclenchement commun), puis l'appareil et la classe Web-IO {category} avec toutes leurs commandes. Pour KNX, les titres des marqueurs passerelles sont aussi vidés. L'intégration est ensuite rechargée. Cette action est irréversible.\n* **Ignorer** conserve tout et ne redemande plus — jusqu'à ce que l'import soit réactivé puis à nouveau désactivé.\n* **Réactiver l'import** recrée les entités {category}.\n\nLes entités HA de cette catégorie ont déjà été supprimées lors de la désactivation de l'import."
+          }
+        },
+        "abort": {
+          "import_enabled": "L'import de cette catégorie est de nouveau activé. Rien n'a été modifié.",
+          "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois terminé.",
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
+        }
+      }
     }
   }
 }

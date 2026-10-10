@@ -33,7 +33,9 @@ from .cleanup_scope import (
     TRIGGER_PLAN_DELETE,
     TRIGGER_PLAN_KEEP,
     TRIGGER_PLAN_REMOVE_PAIRS,
+    count_placeholder,
     has_knx_artifacts,
+    import_disabled_counts,
     plans_in_scope,
     scope_counts,
     scope_includes_knx,
@@ -69,6 +71,7 @@ from .const import (
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_HOST,
+    CONF_IMPORT_DISABLED_IGNORED,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_KNX_PRERELEASE_CLEANUP_PENDING,
     CONF_PASSWORD,
@@ -111,6 +114,7 @@ from .const import (
     ICON_NETWORK,
     ICON_RENAME,
     ICON_WARNING,
+    ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     MARKER_READ_ONLY_SUFFIX,
@@ -147,6 +151,7 @@ from .const import (
     expand_ignored_marker_ids,
     function_plan_ids,
     fw_update_signal,
+    import_disabled_issue_id,
     io_audit_key,
     io_column_rows,
     parse_watchdog_user_plan_pick,
@@ -318,6 +323,19 @@ def _source_max_ids(raw_config: dict[str, Any]) -> tuple[int, int]:
     return max_id, knx_max_id
 
 
+def _leftovers_unknown(
+    webio_class: WebioClass, trigger_sources: dict[int, Any] | None, bridge_markers: int | None
+) -> bool:
+    """Whether part of what a switched-off category left on the server is not known yet.
+
+    trigger_sources None: the trigger plan's snapshot is not loaded (categories with trigger
+    pairs); bridge_markers None: the bridge markers' placement is unknown (KNX).
+    """
+    if trigger_sources is None and SOURCE_CATEGORIES[webio_class].supports_trigger_pairs:
+        return True
+    return bridge_markers is None and webio_class == WebioClass.KNX
+
+
 def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[str, Any]:
     """The parsed config narrowed to the categories the user imports (import_* options)."""
     import_markers = conf.get("import_markers", True)
@@ -380,6 +398,30 @@ def _build_com_audit_map(
             }
         )
     return com_map
+
+
+def _split_disabled_commands(
+    com_commands: dict[str, Any], active_classes: Iterable[WebioClass]
+) -> tuple[dict[str, Any], dict[WebioClass, int]]:
+    """(commands of imported classes, command count per class whose import is switched off).
+
+    A switched-off category has no HA source, so its commands would all count as orphans —
+    and deleting orphans would remove what the user may still want (see the import_disabled
+    repair). A command without a known class stays in the audit, as before.
+    """
+    active = set(active_classes)
+    kept: dict[str, Any] = {}
+    disabled: dict[WebioClass, int] = {}
+    for name, info in com_commands.items():
+        try:
+            cls = WebioClass(info.get("webioClass"))
+        except ValueError:
+            cls = None
+        if cls is None or cls in active:
+            kept[name] = info
+        else:
+            disabled[cls] = disabled.get(cls, 0) + 1
+    return kept, disabled
 
 
 def _add_audit_orphan(orphans: list[dict[str, Any]], mismatches: set[str], com: dict[str, Any]) -> None:
@@ -1022,9 +1064,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         repair issue (see _report_missing_webio_classes) and the poll ends early.
         """
         ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
-        com_map = _build_com_audit_map(final_data["webio_commands"], ha_map)
+        audited_commands, disabled_commands = _split_disabled_commands(
+            final_data["webio_commands"], active_webio_classes(conf)
+        )
+        com_map = _build_com_audit_map(audited_commands, ha_map)
 
         webio_devices = parsed_data.get("webio_devices", {})
+        marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
+        self._update_import_disabled_issues(conf, disabled_commands, webio_devices, marker_titles)
         if self._report_missing_webio_classes(conf, webio_devices):
             return False
 
@@ -1149,6 +1196,163 @@ class ComexioCoordinator(DataUpdateCoordinator):
             ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
             io_meta_by_key[key] = io
         return ha_map, io_meta_by_key
+
+    def _update_import_disabled_issues(
+        self,
+        conf: dict[str, Any],
+        disabled_commands: dict[WebioClass, int],
+        webio_devices: dict[str, Any],
+        marker_titles: dict[int, str],
+    ) -> None:
+        """Raise or clear the import_disabled repair issue of every Web-IO class.
+
+        Raised for a class whose import is switched off while its Web-IO commands, managed
+        plans, trigger pairs, Web-IO device/class or (KNX) resettable bridge markers still
+        exist, unless the user chose to ignore that. Left alone after an unreadable config
+        scrape (no commands then would look like "all cleaned up" and drop a still valid
+        issue), while no plan list was ever read (a plan deleted in Comexio would still
+        count), while a sync or cleanup holds _sync_lock (a cleanup's mid-run refresh would
+        raise the issue it is just working off again), and while the import flags differ from
+        the poll's conf (the reload of that options save re-polls). Nor cleared while the trigger
+        plan's snapshot or (KNX) the placement of the bridge markers is not known yet; raised
+        on the known leftovers meanwhile, the unknown counts shown as such (count_placeholder).
+        marker_titles ({id: title} of every marker) tells KNX bridge markers in the trigger
+        plan from plain markers.
+        """
+        if not self._last_poll_scraped or self._sync_lock.locked():
+            return
+        active = set(self.active_webio_classes)
+        if active != set(active_webio_classes(conf)):
+            # An import switched on or off during this poll: disabled_commands were split by the
+            # old flags. The options save reloads the entry; its first poll settles the issues.
+            _LOGGER.debug(
+                "[%s] Import flags changed during this poll — import_disabled issues left alone", self.server_id
+            )
+            return
+        plan_map = self._existing_managed_plans(conf)
+        if plan_map is None:
+            return
+        trigger_sources = self._cached_trigger_sources(plan_map, marker_titles)
+        bridge_markers = self._resettable_bridge_marker_count(plan_map)
+        # Read now, not from the poll's conf: Ignore saves without a reload (R2), so a choice made
+        # during this poll would otherwise raise the issue again until the next one.
+        ignored = set(self.config_entry.options.get(CONF_IMPORT_DISABLED_IGNORED) or [])
+        for cls in WEBIO_CLASSES:
+            issue_id = import_disabled_issue_id(cls, self.server_id)
+            counts = import_disabled_counts(
+                cls,
+                disabled_commands.get(cls, 0),
+                plan_map,
+                webio_devices,
+                trigger_sources,
+                bridge_markers,
+            )
+            if cls in active or cls.value in ignored:
+                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+                continue
+            if not any(counts.values()) and self._settle_empty_import_disabled_issue(
+                issue_id, _leftovers_unknown(cls, trigger_sources, bridge_markers)
+            ):
+                continue
+            _LOGGER.debug(
+                "[%s] %s import is switched off, but the server still has %s", self.server_id, cls.value, counts
+            )
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_IMPORT_DISABLED,
+                translation_placeholders={
+                    "server_id": self.server_id,
+                    "category": webio_class_label(cls),
+                    **{key: count_placeholder(value) for key, value in counts.items()},
+                },
+                data={"entry_id": self.config_entry.entry_id, "webio_class": cls.value, "counts": counts},
+            )
+
+    def _settle_empty_import_disabled_issue(self, issue_id: str, leftovers_unknown: bool) -> bool:
+        """Handle an import_disabled issue with no known leftover; False = update it with the new counts.
+
+        Nothing unknown either: cleared. Unknown pairs or bridge markers may be all that is
+        left, so a raised issue stays and is updated (its stale counts would read as current,
+        the unknown ones show as UNKNOWN_COUNT); they alone never raise a new one.
+        """
+        if not leftovers_unknown:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return True
+        return ir.async_get(self.hass).async_get_issue(DOMAIN, issue_id) is None
+
+    def _known_plan_ids(self) -> set[int] | None:
+        """Ids of every plan in Comexio: this poll's $Fubs read, else the last poll's; None if never read."""
+        plan_ids = self._polled_plan_ids
+        if plan_ids is None and (live_plans := self.live_plan_list()) is not None:
+            plan_ids = function_plan_ids(live_plans)
+        return plan_ids
+
+    def _existing_managed_plans(self, conf: dict[str, Any]) -> dict[str, Any] | None:
+        """The plan_map entries whose plan still exists in Comexio; None while no plan list is known."""
+        if (plan_ids := self._known_plan_ids()) is None:
+            return None
+        existing = {str(fub_id) for fub_id in plan_ids}
+        plan_map = conf.get(CONF_FUNCTION_PLAN_PLAN_MAP) or {}
+        return {name: fub_id for name, fub_id in plan_map.items() if str(fub_id) in existing}
+
+    def _resettable_bridge_marker_count(self, plan_map: dict[str, Any]) -> int | None:
+        """Titled KNX bridge markers a KNX cleanup would reset; None while their placement is unknown.
+
+        The cleanup deletes the KNX plans and the KNX pairs of the trigger plan, then resets only
+        bridge markers no other plan places (api.reset_knx_bridge_markers). One a user plan still
+        places keeps its title — counting it would raise the issue again after every cleanup.
+        plan_map: the managed plans still in Comexio (_existing_managed_plans).
+        """
+        if not self._knx_bridge_marker_ids:
+            return 0
+        if (plan_ids := self._known_plan_ids()) is None:
+            return None
+        cleaned = {str(fub_id) for fub_id in plans_in_scope(plan_map, CLEANUP_SCOPE_KNX).values()}
+        cleaned.add(str(plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)))
+        marker_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
+        placed: set[int] = set()
+        for fub_id in plan_ids:
+            if str(fub_id) in cleaned:
+                continue
+            if (snapshot := self.function_plan_plans.get(fub_id)) is None:
+                _LOGGER.debug(
+                    "[%s] Plan %s has no snapshot yet — bridge marker placement unknown", self.server_id, fub_id
+                )
+                return None
+            placed.update(
+                ref_id
+                for ref_type, ref_id in self.api.function_plan_element_refs(snapshot)
+                if ref_type == marker_ref_type
+            )
+        return len(self._knx_bridge_marker_ids - placed)
+
+    def _cached_trigger_sources(
+        self, plan_map: dict[str, Any], marker_titles: dict[int, str]
+    ) -> dict[int, list[tuple[int, int]]] | None:
+        """The shared trigger plan's sources by owning category, from its cached snapshot.
+
+        Empty when no trigger plan exists (plan_map holds only plans still in Comexio); None
+        while it exists but its snapshot is not loaded yet (first poll after a reload, before
+        the bulk load) — its pairs are unknown then, not zero.
+        """
+        if (fub_id := plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)) is None:
+            return {}
+        try:
+            snapshot = self.function_plan_plans.get(int(fub_id))
+        except (TypeError, ValueError):
+            _LOGGER.warning("[%s] Trigger plan id %r in the plan map is not a number", self.server_id, fub_id)
+            return {}
+        if snapshot is None:
+            return None
+        return trigger_sources_by_category(
+            self.api.function_plan_element_refs(snapshot),
+            marker_titles,
+            {int(cat.fub_module_type) for cat in trigger_pair_categories()},
+        )
 
     def _report_missing_webio_classes(self, conf: dict[str, Any], webio_devices: dict[str, Any]) -> bool:
         """Raise a repair issue if a Web-IO class is entirely missing on the server; True if one is.

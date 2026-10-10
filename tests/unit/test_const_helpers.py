@@ -3,14 +3,17 @@
 import pytest
 
 from custom_components.comexio.const import (
+    CONF_IMPORT_DISABLED_IGNORED,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     expand_ignored_marker_ids,
+    import_disabled_issue_id,
     io_column_rows,
     io_group_headers,
     io_sort_key,
     parse_ignored_marker_tokens,
+    prune_import_disabled_ignored,
     webio_class_name,
 )
 
@@ -67,3 +70,32 @@ def test_webio_class_name_suffixes() -> None:
         "HA [IO]",
         "HA [KNX]",
     ]
+
+
+def test_import_disabled_issue_id_names_the_class() -> None:
+    assert import_disabled_issue_id(WEBIO_CLASS_KNX, "srv") == "import_disabled_knx_srv"
+    assert import_disabled_issue_id("marker", "srv") == "import_disabled_marker_srv"
+
+
+@pytest.mark.parametrize(
+    ("options", "data", "expected"),
+    [
+        # KNX switched on again in the options: its "ignore" goes, the marker one stays.
+        (
+            {"import_knx": True, "import_markers": False, CONF_IMPORT_DISABLED_IGNORED: ["knx", "marker"]},
+            {},
+            ["marker"],
+        ),
+        # The import flag only in the entry data (as the config flow saves it) counts too.
+        ({CONF_IMPORT_DISABLED_IGNORED: ["knx"]}, {"import_knx": True}, None),
+        # Options override the data; markers default to on, KNX to off.
+        ({"import_knx": False, CONF_IMPORT_DISABLED_IGNORED: ["knx", "marker"]}, {"import_knx": True}, ["knx"]),
+        ({}, {}, None),
+    ],
+)
+def test_prune_import_disabled_ignored(options: dict, data: dict, expected: list[str] | None) -> None:
+    before = {key: list(value) if isinstance(value, list) else value for key, value in options.items()}
+    pruned = prune_import_disabled_ignored(options, data)
+    assert pruned.get(CONF_IMPORT_DISABLED_IGNORED) == expected
+    assert (CONF_IMPORT_DISABLED_IGNORED in pruned) is (expected is not None)
+    assert options == before  # the caller's options stay untouched
