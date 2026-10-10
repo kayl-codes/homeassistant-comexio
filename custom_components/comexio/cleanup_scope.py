@@ -34,8 +34,9 @@ TRIGGER_PLAN_DELETE = "delete"
 TRIGGER_PLAN_REMOVE_PAIRS = "remove_pairs"
 TRIGGER_PLAN_KEEP = "keep"
 
-# skipped-dict key for bridge markers the user wired into an own plan: reported, but no
-# retry can change that, so it does not make a run "incomplete".
+# skipped-dict key for bridge markers in use whose default value/store flag could not be read
+# (their title is kept rather than risk overwriting them): reported, but a retry reads the same
+# config, so it does not make a run "incomplete".
 SKIPPED_KNX_BRIDGE_MARKERS = "knx_bridge_markers"
 
 
@@ -157,15 +158,15 @@ def import_disabled_counts(
     plan_map: dict[str, Any],
     webio_devices: dict[str, Any],
     trigger_sources: dict[int, list[tuple[int, int]]] | None = None,
-    bridge_markers: int | None = 0,
+    bridge_markers: int = 0,
 ) -> dict[str, int | None]:
     """What a category whose import is switched off still has on the server.
 
     command_count: its Web-IO commands; trigger_sources: the shared trigger plan's sources by
     owning category (trigger_sources_by_category) — the scope cleanup removes this category's
-    pairs from it, so they count as leftovers too. bridge_markers: titled KNX bridge markers,
-    counted for KNX only (its cleanup resets them). None for either means "not known yet" and
-    stays None in the result (shown as UNKNOWN_COUNT, never as 0). The rest is what
+    pairs from it, so they count as leftovers too; None means "not known yet" and stays None in
+    the result (shown as UNKNOWN_COUNT, never as 0). bridge_markers: titled KNX bridge markers,
+    counted for KNX only (its cleanup blanks or normalizes every one of them). The rest is what
     scope_counts reports for its scope (managed plans, Web-IO device, Web-IO class). No
     truthy value means nothing known is left to clean up.
     """

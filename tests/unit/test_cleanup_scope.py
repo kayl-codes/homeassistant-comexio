@@ -189,12 +189,10 @@ def test_trigger_sources_by_category_ignores_trailing_blanks_of_a_bridge_title()
 
 
 def test_import_disabled_counts_keep_unknown_counts_unknown() -> None:
-    """Regression: an unloaded trigger plan or unknown bridge placement must not read as 0."""
+    """Regression: an unloaded trigger plan must not read as 0."""
     marker = import_disabled_counts(WebioClass.MARKER, 2, {}, {}, None)
     assert marker["trigger_pairs"] is None
-    knx = import_disabled_counts(WebioClass.KNX, 0, {}, {}, {}, None)
-    assert knx["bridge_markers"] is None
-    assert knx["trigger_pairs"] == 0
+    assert import_disabled_counts(WebioClass.KNX, 0, {}, {}, {})["trigger_pairs"] == 0
     assert import_disabled_counts(WebioClass.IO, 0, {}, {}, None)["trigger_pairs"] == 0  # IO has no pairs
     assert count_placeholder(None) == "?"
     assert count_placeholder(0) == "0"

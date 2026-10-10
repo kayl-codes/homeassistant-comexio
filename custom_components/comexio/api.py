@@ -4,8 +4,9 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 import logging
+import math
 import time
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -55,6 +56,7 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
+    MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
@@ -245,19 +247,23 @@ def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
     return refs
 
 
-def _placed_marker_ids_strict(all_plans: dict[int, dict]) -> set[int] | None:
+def _placed_marker_ids_strict(all_plans: dict[int, dict], ignored: Iterable[int] = ()) -> set[int] | None:
     """Fail-closed variant of _placed_marker_ids for marker_delete's force gate.
 
     _placed_marker_ids silently skips unreadable references — fine for picking free ids, but
     here a skipped reference would make a placed marker look unplaced and deletable. Any
     unreadable plan, element or marker reference returns None (placement unknown) instead.
+    Plans in `ignored` are still read strictly, only their placements are not counted: an
+    unreadable reference there may be a pair their own cleanup skipped and left in place.
     """
+    skip = set(ignored)
     placed: set[int] = set()
-    for plan_data in all_plans.values():
+    for fub_id, plan_data in all_plans.items():
         refs = _plan_marker_refs_strict(plan_data)
         if refs is None:
             return None
-        placed |= refs
+        if fub_id not in skip:
+            placed |= refs
     return placed
 
 
@@ -369,24 +375,78 @@ def _knx_bridge_run_end(items: Any, start: int, min_len: int = MARKER_KNX_BRIDGE
     return max(end, start + min_len)
 
 
-def _knx_bridge_reset_candidates(items: Any, placed_ids: set[int]) -> tuple[list[tuple[int, bool]], int]:
-    """Bridge-titled markers to reset (blank title) during a KNX cleanup.
+class KnxBridgeReset(NamedTuple):
+    """What the KNX cleanup does with one bridge marker (see _knx_bridge_reset_candidates)."""
 
-    Returns ([(marker_id, binary), ...] ascending, number of bridge markers skipped because
-    they are still placed in some function plan). A still-placed bridge marker is left alone:
-    it is either wired into a plan the cleanup did not delete or the user reused it.
+    marker_id: int
+    binary: bool
+    in_use: bool  # placed in a plan the cleanup keeps
+    title: str  # "" for an unused marker, else its title without any kind suffix
+    default: float = 0  # in use: its current default value, kept by the rename
+    store: bool = False  # in use: its current "store in memory" flag, kept by the rename
+
+
+def _strip_marker_kind_suffixes(name: str) -> str:
+    """name without every trailing kind suffix ("Rollo [TRIG] [K3]" -> "Rollo")."""
+    while (stripped := MARKER_KIND_SUFFIX_RE.sub("", name)) != name:
+        name = stripped
+    return name.strip()
+
+
+def _marker_form_binary(marker: Mapping[str, Any]) -> bool | None:
+    """True for a digital marker (Type 1), False for an analog one (Type 2), None if unreadable.
+
+    The marker save sends the type along too: a guessed type could turn a marker a plan uses
+    into the other kind (live, every marker carries an int Type).
     """
-    candidates: list[tuple[int, bool]] = []
-    skipped = 0
+    kind = marker.get("Type")
+    if isinstance(kind, bool) or kind not in (1, 2, "1", "2"):
+        return None
+    return str(kind) == "1"
+
+
+def _marker_form_values(marker: Mapping[str, Any]) -> tuple[float, bool] | None:
+    """A marker's default value and store flag from its raw config entry, or None if unreadable.
+
+    Comexio's marker save takes the whole form, so a rename sends both along; a value it
+    cannot read faithfully must not be replaced by a guess (that would overwrite the setting).
+    """
+    default, store = marker.get("DefaultValue"), marker.get("Store")
+    if _marker_form_binary(marker) is None:
+        return None
+    if isinstance(default, bool) or not isinstance(default, int | float) or not math.isfinite(default):
+        return None
+    if isinstance(store, bool) or not isinstance(store, int) or store not in (0, 1):
+        return None
+    return default, store == 1
+
+
+def _knx_bridge_reset_candidates(items: Any, placed_ids: set[int]) -> tuple[list[KnxBridgeReset], list[int]]:
+    """What a KNX cleanup does with each bridge-titled marker; markers are never deleted.
+
+    Unused (placed in no kept plan): the title is blanked, so _free_marker_ids reuses the id.
+    In use (a user wired it into an own plan): every kind suffix is stripped ("[K<id>]" and an
+    evaluated "[RO]"/"[TRIG]"/"[TP]"), so it stays as a plain marker, with its default value
+    and store flag kept; a title of only suffixes ends up blank, like an unnamed marker.
+    Returns (resets ascending by id, ids of in-use markers left alone because their type,
+    default value or store flag could not be read).
+    """
+    resets: list[KnxBridgeReset] = []
+    unreadable: list[int] = []
     for m in items:
         if not isinstance(m, dict) or not isinstance(m.get("Id"), int) or not _is_knx_bridge_title(m.get("Name")):
             continue
-        if m["Id"] in placed_ids:
-            skipped += 1
-            continue
         # Same default as _build_source_item: a marker without Type is digital.
-        candidates.append((m["Id"], str(m.get("Type", 1)) == "1"))
-    return sorted(candidates), skipped
+        binary = str(m.get("Type", 1)) == "1"
+        if m["Id"] not in placed_ids:
+            resets.append(KnxBridgeReset(m["Id"], binary, in_use=False, title=""))
+            continue
+        if (values := _marker_form_values(m)) is None:
+            unreadable.append(m["Id"])
+            continue
+        title = _strip_marker_kind_suffixes(m["Name"])
+        resets.append(KnxBridgeReset(m["Id"], binary, True, title, *values))
+    return sorted(resets), sorted(unreadable)
 
 
 def _stale_knx_bridge_marker_ids(items: Any, min_id: int, keep_titles: set[str]) -> set[int]:
@@ -2154,13 +2214,14 @@ class ComexioAPI:
             _LOGGER.info("create_marker: created marker M%s (binary=%s)", marker_id, binary)
         return marker_id
 
-    async def rename_marker(self, marker_id: int, name: str, binary: bool) -> bool:
+    async def rename_marker(self, marker_id: int, name: str, binary: bool, *, default: float, store: bool) -> bool:
         """Set an existing marker's title via Comexio's own save flow (after its uniqueness check).
 
-        Comexio's marker save takes the whole form, so this also resets the marker's default
-        value and "store in memory" flag to 0. Only safe to call on a marker whose current
-        state is already known (e.g. one just created via create_marker()). Do NOT call this on
-        a pre-existing user marker without first reading its live default/store_memory values.
+        Comexio's marker save takes the whole form, so this also sets the marker's default
+        value and "store in memory" flag to default/store — required, so no caller resets them
+        by accident: 0/False for a marker whose state is known (e.g. one just created via
+        create_marker()), the current values for a marker in use (raw config
+        "DefaultValue"/"Store", see _marker_form_values).
 
         binary: True for digital, False for analog — must match the marker's actual type; it
         is not looked up here.
@@ -2168,7 +2229,8 @@ class ComexioAPI:
         Returns True on success; False if the name is taken or the save was not confirmed.
         """
         if not await _succeeded(
-            f"Renaming marker M{marker_id}", lambda: self.client.rename_marker(int(marker_id), name, binary=binary)
+            f"Renaming marker M{marker_id}",
+            lambda: self.client.rename_marker(int(marker_id), name, binary=binary, default=default, store_memory=store),
         ):
             return False
         _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, name, binary)
@@ -2344,43 +2406,60 @@ class ComexioAPI:
         return plans
 
     async def reset_knx_bridge_markers(
-        self, progress_cb: Callable[[int, int], None] | None = None
-    ) -> tuple[list[int], list[int], int, str | None]:
-        """Blank the title of every unplaced KNX bridge marker ("... [K<id>]").
+        self, progress_cb: Callable[[int, int], None] | None = None, ignored_plan_ids: Iterable[int] = ()
+    ) -> tuple[list[int], list[int], list[int], list[int], str | None]:
+        """Undo every KNX bridge marker title ("... [K<id>]") — see _knx_bridge_reset_candidates.
 
         Part of the KNX cleanup: markers are never deleted (Comexio would not hand their ids
-        out again), only un-titled, so _free_marker_ids treats them as free and the next sync
-        rebuilds the bridge block compactly from its start. Clearing a title via isunique +
-        saveOne with name="" was verified live 2026-09-25 (M300: type and category kept).
-        Must run AFTER the KNX cluster plans were deleted — markers still placed in any plan
-        are skipped.
+        out again). An unused one gets a blank title, so _free_marker_ids treats it as free and
+        the next sync rebuilds the bridge block compactly from its start (clearing a title via
+        isunique + saveOne with name="" verified live 2026-09-25, M300: type and category kept).
+        One still placed in a plan becomes a plain marker: all kind suffixes stripped, default
+        value and store flag sent along unchanged (the save takes the whole form; verified live
+        2026-10-10). Must run AFTER the KNX cluster plans were deleted. ignored_plan_ids: plans
+        whose placements do not count as use (the shared trigger plan, once its KNX pairs were
+        removed — after a failed removal the caller skips this phase instead).
 
         Reads $Fubs from the same fresh config fetch (the cached plan list still contains the
-        plans deleted moments ago). Returns (reset ids, failed ids, skipped-as-placed count,
-        error) — error is set, and nothing is touched, when the config or any plan could not
-        be loaded: a missing plan would make the bridge markers wired into it look unplaced.
+        plans deleted moments ago). Returns (blanked ids, normalized ids, failed ids, in-use
+        ids left alone because their values were unreadable, error) — error is set, and nothing
+        is touched, when the config, any plan or any marker reference in a plan cannot be read
+        (fail closed, as marker_delete's force gate): a marker wired into it would look unused
+        and lose its default value and store flag along with its title.
         progress_cb(done, total) is called after every marker (one HTTP round trip each).
         """
         conf = await self.get_raw_config()
         fub_modules = conf.get("FubModules")
         fubs = conf.get("Fubs")
-        if not fub_modules or not isinstance(fubs, dict):
-            return [], [], 0, "could not fetch current Comexio config"
-        all_plans = await self._load_all_plans_verified(fubs)
+        items = self._marker_group_items(fub_modules.get("2")) if isinstance(fub_modules, dict) else None
+        if items is None or not isinstance(fubs, dict):
+            return [], [], [], [], "could not fetch current Comexio config"
+        all_plans = await self._load_all_plans_verified(fubs, strict=True)
         if all_plans is None:
-            return [], [], 0, "could not load every function plan"
+            return [], [], [], [], "could not load every function plan"
 
-        group = fub_modules.get("2")
-        items = group.values() if isinstance(group, dict) else (group or [])
-        candidates, skipped = _knx_bridge_reset_candidates(items, _placed_marker_ids(all_plans, 2))
-        reset: list[int] = []
+        placed = _placed_marker_ids_strict(all_plans, ignored={int(fub_id) for fub_id in ignored_plan_ids})
+        if placed is None:
+            return [], [], [], [], "unreadable marker reference in a function plan"
+        resets, unreadable = _knx_bridge_reset_candidates(items, placed)
+        blanked: list[int] = []
+        normalized: list[int] = []
         failed: list[int] = []
-        for i, (marker_id, binary) in enumerate(candidates, start=1):
-            (reset if await self.rename_marker(marker_id, "", binary) else failed).append(marker_id)
+        for i, it in enumerate(resets, start=1):
+            if not await self.rename_marker(it.marker_id, it.title, it.binary, default=it.default, store=it.store):
+                failed.append(it.marker_id)
+            else:
+                (normalized if it.in_use else blanked).append(it.marker_id)
             if progress_cb:
-                progress_cb(i, len(candidates))
-        _LOGGER.info("reset_knx_bridge_markers: reset=%d failed=%s skipped_placed=%d", len(reset), failed, skipped)
-        return reset, failed, skipped, None
+                progress_cb(i, len(resets))
+        _LOGGER.info(
+            "reset_knx_bridge_markers: blanked=%d normalized=%s failed=%s unreadable_in_use=%s",
+            len(blanked),
+            normalized,
+            failed,
+            unreadable,
+        )
+        return blanked, normalized, failed, unreadable, None
 
     async def _fill_marker_gap(self, current_highest_id: int, target_id: int) -> int:
         """Consume marker ids via blank create_marker() calls until the next created
@@ -2540,7 +2619,8 @@ class ComexioAPI:
                 _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, k_title)
                 return None
 
-        if not await self.rename_marker(marker_id, title, binary):
+        # A new, free (blank) or unwired marker: its old default/store flag must not carry over.
+        if not await self.rename_marker(marker_id, title, binary, default=0, store=False):
             _LOGGER.error(
                 "create_knx_bridge_marker: rename_marker failed for M%s -> '%s' (K%s)", marker_id, title, k_id
             )

@@ -122,7 +122,7 @@ _EMPTY_PLANS = {1: {"elements": {}}, 2: {"elements": {}}}
 async def test_a_titled_bridge_marker_alone_keeps_the_knx_issue(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:
-    """Regression: the KNX cleanup resets bridge marker titles — a marker left alone still needs it."""
+    """Regression: the KNX cleanup resets bridge marker titles — a titled one alone still needs it."""
     await _refresh_with_plans(hass, mock_config_entry, _EMPTY_PLANS)
 
     issue = _issue(hass, KNX_ISSUE)
@@ -142,20 +142,22 @@ async def test_a_titled_bridge_marker_alone_keeps_the_knx_issue(
     assert form["description_placeholders"]["bridge_markers"] == "1"
 
 
-async def test_a_bridge_marker_a_user_plan_places_raises_no_issue(
+async def test_a_bridge_marker_a_user_plan_places_still_counts(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:
-    """The cleanup leaves a still placed bridge marker alone — counting it would loop the repair."""
+    """The cleanup strips the suffixes of a placed bridge marker too — the issue offers it."""
     plans = {**_EMPTY_PLANS, 2: {"elements": {"10": {"reference": {"type": 2, "ref_id": 7}}}}}
     await _refresh_with_plans(hass, mock_config_entry, plans)
 
-    assert _issue(hass, KNX_ISSUE) is None
+    issue = _issue(hass, KNX_ISSUE)
+    assert issue is not None
+    assert issue.data["counts"]["bridge_markers"] == 1
 
 
-async def test_unknown_bridge_marker_placement_keeps_the_issue(
+async def test_bridge_marker_count_needs_no_plan_snapshots(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:
-    """A plan without a snapshot may place the marker: the issue stays until that is known."""
+    """Every titled bridge marker is cleaned up, placed or not: a missing snapshot leaves the count known."""
     coordinator = await _refresh_with_plans(hass, mock_config_entry, _EMPTY_PLANS)
     assert _issue(hass, KNX_ISSUE) is not None
 
@@ -164,8 +166,8 @@ async def test_unknown_bridge_marker_placement_keeps_the_issue(
 
     issue = _issue(hass, KNX_ISSUE)
     assert issue is not None
-    assert issue.data["counts"]["bridge_markers"] is None
-    assert issue.translation_placeholders["bridge_markers"] == "?"
+    assert issue.data["counts"]["bridge_markers"] == 1
+    assert issue.translation_placeholders["bridge_markers"] == "1"
 
 
 async def test_the_knx_issue_clears_once_the_bridge_title_is_gone(

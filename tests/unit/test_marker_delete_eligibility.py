@@ -148,3 +148,10 @@ def test_placed_marker_ids_strict_fails_closed(plan: dict) -> None:
     # Regression (review 2026-09-25): with force, any unreadable plan must make placement
     # unknown (None) instead of letting a placed marker pass as unplaced.
     assert _placed_marker_ids_strict({1: _plan(_ref(2, 4)), 2: plan}) is None
+
+
+def test_an_ignored_plan_does_not_count_but_is_still_read_strictly() -> None:
+    """Regression (Sourcery, PR #164): an unreadable reference in the ignored trigger plan may be
+    a KNX pair its cleanup skipped, so it must stop the KNX bridge marker reset too."""
+    assert _placed_marker_ids_strict({1: _plan(_ref(2, 4)), 2: _plan(_ref(2, 8))}, ignored={2}) == {4}
+    assert _placed_marker_ids_strict({1: _plan(_ref(2, 4)), 2: _plan(_ref(2, "x"))}, ignored={2}) is None
