@@ -64,6 +64,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Repeated calls stay quiet:** paths the plan card or a timer repeats (keepalive, retries, periodic ticks) report
   failures at debug level, without a persistent notification or repair each time — e.g.
   `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure.
+- **Repair flows read the current entry:** before a destructive action (cleanup, delete, reset), a repair flow
+  step reads the current config entry state (`options`/`data`) again instead of relying on `issue_data` alone —
+  the dialog may have been open while the user changed the options, so the issue data can be stale (#160).
 - **Blocking I/O:** no blocking calls in the event loop; Comexio serialises requests, so avoid needless round-trips.
 
 ## Tests
@@ -80,6 +83,16 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   test's `ENTRY_STEP_BY_ISSUE` (the step `async_step_init` routes it to; the test reads the issue_id from the
   raise site). A computed `translation_key` must come from a `self.` helper returning constants or from a
   parameter whose callers pass constants; `is_fixable` stays a literal `True`/`False`.
+- A test for an action that must leave Comexio and the entities untouched (ignore, cancel, abort) asserts what the
+  action does change — e.g. the saved ignore option, the dismissed issue — and that no deleting or writing method of
+  the API, the entity/device registry or the recorder ran: `assert_not_awaited()` for coroutines,
+  `assert_not_called()` for synchronous calls. Dismissing the action's own issue is the one expected issue-registry
+  write and is asserted, not forbidden.
+  An options-flow test asserts the stored value, not only that a key is absent (#160).
+- A test asserting that an issue is absent also proves the evaluating path ran, otherwise it passes without the fix
+  (#160): for a deletion in `tests/ha/`, the issue existed before and is gone after; in `tests/unit/`, where `ir` is
+  mocked, `async_delete_issue` was called with exactly that issue_id and a counter-case (the issue still applies)
+  asserts it was not; for an issue that is never raised, a concrete counter value or another result of the same run.
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
 - Test function parameters carry type annotations.
 
