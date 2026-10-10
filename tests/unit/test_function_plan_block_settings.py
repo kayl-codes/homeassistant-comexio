@@ -447,6 +447,11 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
     assert saved == {"104": SETTINGS["4"], "107": SETTINGS["7"]}
     assert notify.call_args.kwargs["title"].endswith("OK")
     assert f"Block settings: {backup_service.ICON_SUCCESS} 4 written" in notify.call_args.args[1]
+    # The restored snapshot itself is handed over (found by identity, not by its pre-restore slot),
+    # and a snapshot that is no longer stored is reported instead of silently not marked.
+    mark_args = coordinator.function_plan_backup.async_mark_restored.await_args.args
+    assert mark_args[0] == "auto" and mark_args[1] == 1 and mark_args[3] is snapshot
+    assert "auto[0] is no longer stored — not marked restored" in notify.call_args.args[1]
 
 
 # ---------------------------------------------------------------------------
