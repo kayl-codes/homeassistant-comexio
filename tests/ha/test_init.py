@@ -2,10 +2,11 @@
 
 import asyncio
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from homeassistant.components.webhook import DOMAIN as WEBHOOK_DOMAIN
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
+from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 import pytest
@@ -13,6 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.coordinator import ComexioCoordinator
 
 from .conftest import SERVER_ID
 
@@ -146,6 +148,83 @@ async def test_the_reference_monitor_judges_findings_by_the_polls_plan_list(
     coordinator.reference_monitor.check_plans({})
 
     assert coordinator.reference_monitor._unknown_refs == [("1", "3", "999")]  # plan 1 is in config_basic.json
+
+
+async def test_an_internal_options_write_skips_its_reload(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """R2: the listener run of an internal write is skipped, the write itself is kept."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+
+    with patch.object(coordinator, "async_reload_entry", AsyncMock()) as reload:
+        coordinator.request_options_update_without_reload({**mock_config_entry.options, "probe": 1})
+        await hass.async_block_till_done()
+
+    reload.assert_not_awaited()
+    assert mock_config_entry.options["probe"] == 1
+    assert coordinator.take_pending_reload_skip_options() is None  # consumed by the listener run
+
+
+async def test_an_unchanged_options_write_leaves_no_skip_behind(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Regression: an unchanged write runs no listener, so its skip must not swallow the next reload."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+
+    with patch.object(coordinator, "async_reload_entry", AsyncMock()) as reload:
+        coordinator.request_options_update_without_reload(dict(mock_config_entry.options))
+        assert coordinator.take_pending_reload_skip_options() is None
+        await hass.async_block_till_done()
+        reload.assert_not_awaited()
+
+        hass.config_entries.async_update_entry(
+            mock_config_entry, data={**mock_config_entry.data, CONF_PASSWORD: "changed"}
+        )
+        await hass.async_block_till_done()
+
+    reload.assert_awaited_once()
+
+
+async def test_an_unchanged_options_write_keeps_a_pending_skip(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The skip of an earlier write whose listener has not run yet survives an unchanged write."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+
+    with patch.object(coordinator, "async_reload_entry", AsyncMock()) as reload:
+        coordinator.request_options_update_without_reload({**mock_config_entry.options, "probe": 1})
+        coordinator.request_options_update_without_reload(dict(mock_config_entry.options))
+        await hass.async_block_till_done()
+
+    reload.assert_not_awaited()
+    assert mock_config_entry.options["probe"] == 1
+    assert coordinator.take_pending_reload_skip_options() is None  # consumed by the first write's listener run
+
+
+async def test_an_options_write_during_setup_leaves_no_skip_behind(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Regression: a write before the listener is registered runs none, so its skip must not outlive the setup."""
+
+    def _write_during_setup(coordinator: ComexioCoordinator) -> None:
+        coordinator.request_options_update_without_reload({**coordinator.config_entry.options, "probe": 1})
+
+    with patch.object(ComexioCoordinator, "check_knx_prerelease_cleanup", _write_during_setup):
+        await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert mock_config_entry.options["probe"] == 1
+    assert coordinator.take_pending_reload_skip_options() is None
+
+    with patch.object(coordinator, "async_reload_entry", AsyncMock()) as reload:
+        hass.config_entries.async_update_entry(
+            mock_config_entry, data={**mock_config_entry.data, CONF_PASSWORD: "changed"}
+        )
+        await hass.async_block_till_done()
+
+    reload.assert_awaited_once()
 
 
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])

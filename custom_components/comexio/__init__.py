@@ -229,6 +229,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # options, which must not trigger a reload of the entry that is still being set up.
     coordinator.check_knx_prerelease_cleanup()
 
+    # R2: an internal options write of the setup so far (first refresh, the check above) ran no
+    # listener, so its skip snapshot was never consumed — left pending, it would swallow the
+    # reload of the first unrelated listener run whose options happen to match.
+    coordinator.take_pending_reload_skip_options()
     entry.async_on_unload(entry.add_update_listener(update_listener))
     hass.data[DOMAIN][f"{entry.entry_id}_webhook"] = webhook_id
 
