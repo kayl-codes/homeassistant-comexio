@@ -711,8 +711,8 @@ class FunctionPlanBackupManager:
         restore's own pre_restore change backup is inserted at slot 0 first, which shifts every
         change slot by one (and may rotate the source out). Not by hash either — the snapshot a
         restore works with has its hash recomputed once block ids were translated (see
-        resolve_block_ids). Returns False if the snapshot is no longer stored (deleted or rotated
-        out while the restore ran).
+        resolve_block_ids). Returns False if the snapshot is not found in the history (deleted or
+        rotated out while the restore ran, or it carries no captured_at).
         """
         await self._async_ensure_loaded()
         data, store = (self._auto_data, self._auto_store) if kind == "auto" else (self._change_data, self._change_store)
@@ -724,8 +724,8 @@ class FunctionPlanBackupManager:
         )
         if slot is None:
             _LOGGER.info(
-                "[%s] Function Plan backup: restored %s snapshot of '%s' (fub=%s, captured %s) is no longer stored "
-                "— not marked restored",
+                "[%s] Function Plan backup: restored %s snapshot of '%s' (fub=%s, captured %s) not found in the "
+                "backup history (deleted, rotated out or without capture time) — not marked restored",
                 self._server_id,
                 kind,
                 plan_name,

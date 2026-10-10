@@ -815,7 +815,7 @@ def _restore_build_message(
     if promoted:
         promoted_line = f"Backup slot: promoted {kind}[{slot}] → {kind}[0] (now marked restored *)\n"
     elif promoted is False:
-        promoted_line = f"Backup slot: {kind}[{slot}] is no longer stored — not marked restored\n"
+        promoted_line = f"Backup slot: {kind}[{slot}] not found in the backup history — not marked restored\n"
     return (
         f"Restore of plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] "
         f"({snapshot.get('captured_at')}): **{status}**\n"
