@@ -211,6 +211,37 @@ async def test_ignore_keeps_everything_and_does_not_ask_again(
         getattr(api, name).assert_not_awaited()
 
 
+async def test_an_ignore_saved_during_a_poll_is_not_undone_by_it(
+    hass: HomeAssistant, markers_off_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Regression: Ignore triggers no reload, so a poll's options read before it must not raise the issue again."""
+    await _setup(hass, markers_off_entry)
+    assert _issue(hass, MARKER_ISSUE) is not None
+    coordinator = hass.data[DOMAIN][markers_off_entry.entry_id]
+    api = mock_comexio_api[-1]
+    api.get_raw_config.reset_mock()
+    config = api.get_raw_config.return_value
+
+    async def ignore_mid_poll(*_args: Any, **_kwargs: Any) -> Any:
+        coordinator.request_options_update_without_reload(
+            {**markers_off_entry.options, CONF_IMPORT_DISABLED_IGNORED: ["marker"]}
+        )
+        ir.async_delete_issue(hass, DOMAIN, MARKER_ISSUE)
+        return config
+
+    api.get_raw_config.side_effect = ignore_mid_poll
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    api.get_raw_config.assert_awaited()
+    assert coordinator.last_update_success
+    assert _issue(hass, MARKER_ISSUE) is None
+    # No reload undid or replaced anything: the ignore is still saved, the same coordinator runs.
+    assert markers_off_entry.options[CONF_IMPORT_DISABLED_IGNORED] == ["marker"]
+    assert markers_off_entry.state is ConfigEntryState.LOADED
+    assert hass.data[DOMAIN][markers_off_entry.entry_id] is coordinator
+
+
 async def test_enable_switches_the_import_on_and_drops_the_ignore(
     hass: HomeAssistant, markers_off_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:

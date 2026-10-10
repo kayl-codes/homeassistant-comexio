@@ -1225,8 +1225,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         trigger_sources = self._cached_trigger_sources(plan_map, marker_titles)
         bridge_markers = self._resettable_bridge_marker_count(plan_map)
-        active = set(active_webio_classes(conf))
-        ignored = set(conf.get(CONF_IMPORT_DISABLED_IGNORED) or [])
+        # Both read now, not from the poll's conf: Ignore saves without a reload (R2), so a choice
+        # made during this poll would otherwise raise the issue again until the next one — and
+        # Enable prunes the ignore at once, so a stale "import off" would raise it for a moment.
+        active = set(self.active_webio_classes)
+        ignored = set(self.config_entry.options.get(CONF_IMPORT_DISABLED_IGNORED) or [])
         for cls in WEBIO_CLASSES:
             issue_id = import_disabled_issue_id(cls, self.server_id)
             counts = import_disabled_counts(
