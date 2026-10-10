@@ -483,6 +483,14 @@ MARKER_INTERVAL_MAX_VALUE = 86400
 # because the block's boundary is now reused indefinitely instead of recomputed every call.
 MARKER_KNX_BRIDGE_BLOCK_SIZE = 50
 
+# One trailing title suffix a marker's kind is derived from: the KNX bridge "[K<id>]" or an
+# evaluated one ("[RO]", "[TRIG]", "[TP]"). The KNX cleanup strips all of them from a bridge
+# marker still in use, so it becomes a plain marker (a bridge title is "<KNX title> [K<id>]",
+# and the KNX title itself may end in "[RO]"/"[TRIG]").
+MARKER_KIND_SUFFIX_RE = re.compile(
+    r"\s*(?:\[K\d+\]|" + "|".join(re.escape(s) for s in (MARKER_READ_ONLY_SUFFIX, *MARKER_TRIGGER_SUFFIXES)) + r")\s*$"
+)
+
 # Phase 7 "API-Loopback" (see project_knx_write_path_design memory, "Phase 7" section): a
 # K-Element's read-path output already reaches an HA-webhook Web-IO command (the normal
 # source->Web-IO pair every category gets). This adds a SECOND Web-IO command per K-Element,

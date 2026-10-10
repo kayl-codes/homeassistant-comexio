@@ -3,6 +3,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 import contextlib
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import logging
 import pathlib
@@ -323,17 +324,12 @@ def _source_max_ids(raw_config: dict[str, Any]) -> tuple[int, int]:
     return max_id, knx_max_id
 
 
-def _leftovers_unknown(
-    webio_class: WebioClass, trigger_sources: dict[int, Any] | None, bridge_markers: int | None
-) -> bool:
+def _leftovers_unknown(webio_class: WebioClass, trigger_sources: dict[int, Any] | None) -> bool:
     """Whether part of what a switched-off category left on the server is not known yet.
 
-    trigger_sources None: the trigger plan's snapshot is not loaded (categories with trigger
-    pairs); bridge_markers None: the bridge markers' placement is unknown (KNX).
+    trigger_sources None: the trigger plan's snapshot is not loaded (categories with trigger pairs).
     """
-    if trigger_sources is None and SOURCE_CATEGORIES[webio_class].supports_trigger_pairs:
-        return True
-    return bridge_markers is None and webio_class == WebioClass.KNX
+    return trigger_sources is None and SOURCE_CATEGORIES[webio_class].supports_trigger_pairs
 
 
 def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[str, Any]:
@@ -469,6 +465,16 @@ async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str 
     except ValueError:
         # Fallback on unexpected format
         return True
+
+
+@dataclass
+class _BridgeMarkerResult:
+    """Outcome of the KNX cleanup's bridge marker phase (ids per outcome; error: phase not run)."""
+
+    reset: list[int] = field(default_factory=list)  # unused: title blanked
+    normalized: list[int] = field(default_factory=list)  # in use: kind suffixes stripped
+    failed: list[int] = field(default_factory=list)
+    error: str | None = None
 
 
 def _marker_reset_progress(report: Callable[[str], None], step: str) -> Callable[[int, int], None]:
@@ -1233,7 +1239,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if plan_map is None:
             return
         trigger_sources = self._cached_trigger_sources(plan_map, marker_titles)
-        bridge_markers = self._resettable_bridge_marker_count(plan_map)
+        # Every titled bridge marker: the KNX cleanup blanks or normalizes each one (in use or not).
+        bridge_markers = len(self._knx_bridge_marker_ids)
         # Read now, not from the poll's conf: Ignore saves without a reload (R2), so a choice made
         # during this poll would otherwise raise the issue again until the next one.
         ignored = set(self.config_entry.options.get(CONF_IMPORT_DISABLED_IGNORED) or [])
@@ -1251,7 +1258,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
                 continue
             if not any(counts.values()) and self._settle_empty_import_disabled_issue(
-                issue_id, _leftovers_unknown(cls, trigger_sources, bridge_markers)
+                issue_id, _leftovers_unknown(cls, trigger_sources)
             ):
                 continue
             _LOGGER.debug(
@@ -1298,37 +1305,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         existing = {str(fub_id) for fub_id in plan_ids}
         plan_map = conf.get(CONF_FUNCTION_PLAN_PLAN_MAP) or {}
         return {name: fub_id for name, fub_id in plan_map.items() if str(fub_id) in existing}
-
-    def _resettable_bridge_marker_count(self, plan_map: dict[str, Any]) -> int | None:
-        """Titled KNX bridge markers a KNX cleanup would reset; None while their placement is unknown.
-
-        The cleanup deletes the KNX plans and the KNX pairs of the trigger plan, then resets only
-        bridge markers no other plan places (api.reset_knx_bridge_markers). One a user plan still
-        places keeps its title — counting it would raise the issue again after every cleanup.
-        plan_map: the managed plans still in Comexio (_existing_managed_plans).
-        """
-        if not self._knx_bridge_marker_ids:
-            return 0
-        if (plan_ids := self._known_plan_ids()) is None:
-            return None
-        cleaned = {str(fub_id) for fub_id in plans_in_scope(plan_map, CLEANUP_SCOPE_KNX).values()}
-        cleaned.add(str(plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)))
-        marker_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
-        placed: set[int] = set()
-        for fub_id in plan_ids:
-            if str(fub_id) in cleaned:
-                continue
-            if (snapshot := self.function_plan_plans.get(fub_id)) is None:
-                _LOGGER.debug(
-                    "[%s] Plan %s has no snapshot yet — bridge marker placement unknown", self.server_id, fub_id
-                )
-                return None
-            placed.update(
-                ref_id
-                for ref_type, ref_id in self.api.function_plan_element_refs(snapshot)
-                if ref_type == marker_ref_type
-            )
-        return len(self._knx_bridge_marker_ids - placed)
 
     def _cached_trigger_sources(
         self, plan_map: dict[str, Any], marker_titles: dict[int, str]
@@ -2412,20 +2388,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
         devices, classes, failed_classes, skipped = await self._delete_webio_devices_and_classes(
             webio_classes_in_scope(scope)
         )
-        reset_markers: list[int] = []
-        failed_markers: list[int] = []
-        marker_reset_error: str | None = None
+        markers = _BridgeMarkerResult()
         if scope_includes_knx(scope):
             report(f"Step 3/{steps}: removing the KNX loopback Web-IO")
             await self._delete_knx_loopback_webio(devices, classes, failed_classes, skipped)
-            report(f"Step 4/{steps}: resetting KNX bridge markers (checking which are free)")
-            reset_markers, failed_markers, marker_reset_error = await self._reset_knx_bridge_markers(
-                skipped, _marker_reset_progress(report, f"Step 4/{steps}")
+            report(f"Step 4/{steps}: resetting KNX bridge markers (checking which are in use)")
+            trigger_id = full_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
+            markers = await self._reset_knx_bridge_markers(
+                skipped,
+                _marker_reset_progress(report, f"Step 4/{steps}"),
+                ignored_plan_ids=[int(trigger_id)]
+                if isinstance(trigger_id, int | str) and str(trigger_id).isdigit()
+                else [],
             )
 
         _LOGGER.info(
             "[%s] Uninstall cleanup (scope=%s): plans deleted=%s failed=%s, devices=%s, classes=%s, "
-            "failed_classes=%s, markers reset=%d failed=%s, skipped=%s",
+            "failed_classes=%s, markers reset=%d normalized=%d failed=%s, skipped=%s",
             self.server_id,
             scope,
             deleted_plans,
@@ -2433,8 +2412,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             devices,
             classes,
             failed_classes,
-            len(reset_markers),
-            failed_markers,
+            len(markers.reset),
+            len(markers.normalized),
+            markers.failed,
             skipped,
         )
         return {
@@ -2444,9 +2424,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "deleted_devices": devices,
             "deleted_classes": classes,
             "failed_classes": failed_classes,
-            "reset_markers": reset_markers,
-            "failed_markers": failed_markers,
-            "marker_reset_error": marker_reset_error,
+            "reset_markers": markers.reset,
+            "normalized_markers": markers.normalized,
+            "failed_markers": markers.failed,
+            "marker_reset_error": markers.error,
             "trigger_pairs_removed": trigger_pairs_removed,
             "skipped": skipped,
         }
@@ -2512,26 +2493,39 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return action, removed
 
     async def _reset_knx_bridge_markers(
-        self, skipped: dict[str, str], progress_cb: Callable[[int, int], None] | None = None
-    ) -> tuple[list[int], list[int], str | None]:
-        """Blank the KNX bridge marker titles as the last cleanup phase. Returns
-        (reset, failed, error). Plans/Web-IO are already gone at this point, so a connection
-        error must not escape and discard the result of those phases — it is returned as
-        error instead, and the user re-runs the KNX cleanup. Still-placed markers are
-        reported via skipped."""
+        self,
+        skipped: dict[str, str],
+        progress_cb: Callable[[int, int], None] | None = None,
+        ignored_plan_ids: Iterable[int] = (),
+    ) -> _BridgeMarkerResult:
+        """Undo the KNX bridge marker titles as the last cleanup phase (blank unused ones, strip
+        the suffixes of ones in use — see api.reset_knx_bridge_markers). Plans/Web-IO are
+        already gone at this point, so a connection error must not escape and discard the
+        result of those phases — it is returned as error instead, and the user re-runs the KNX
+        cleanup. In-use markers whose values could not be read are reported via skipped."""
         try:
-            reset, failed, placed, error = await self.api.reset_knx_bridge_markers(progress_cb)
+            reset, normalized, failed, unreadable, error = await self.api.reset_knx_bridge_markers(
+                progress_cb, ignored_plan_ids
+            )
         except (aiohttp.ClientError, TimeoutError) as err:
             _LOGGER.exception("[%s] Resetting the KNX bridge markers failed", self.server_id)
-            return [], [], f"connection error: {err}"
+            return _BridgeMarkerResult(error=f"connection error: {err}")
         except Exception:  # last phase: must not discard the earlier phases' result
             _LOGGER.exception("[%s] Resetting the KNX bridge markers failed unexpectedly", self.server_id)
-            return [], [], "unexpected error, see log"
+            return _BridgeMarkerResult(error="unexpected error, see log")
         if error:
             _LOGGER.error("[%s] Resetting the KNX bridge markers skipped: %s", self.server_id, error)
-        if placed:
-            skipped[SKIPPED_KNX_BRIDGE_MARKERS] = f"{placed} bridge marker(s) still placed in a plan"
-        return reset, failed, error
+        if unreadable:
+            ids = ", ".join(f"M{marker_id}" for marker_id in unreadable)
+            _LOGGER.warning(
+                "[%s] KNX bridge marker(s) in use kept their title (type, default value or store flag unreadable): %s",
+                self.server_id,
+                ids,
+            )
+            skipped[SKIPPED_KNX_BRIDGE_MARKERS] = (
+                f"bridge marker(s) in use kept their title (type, default value or store flag unreadable): {ids}"
+            )
+        return _BridgeMarkerResult(reset, normalized, failed, error)
 
     async def async_generate_plan_preview(
         self,

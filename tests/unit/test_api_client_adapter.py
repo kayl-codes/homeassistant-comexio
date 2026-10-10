@@ -769,7 +769,7 @@ _PLAN_WRITES_BOOL = [
     (lambda api: api.function_plan_run_fup(7), "run_function_plan"),
     (lambda api: api.function_plan_delete_elements([1, 2]), "delete_function_plan_elements"),
     (lambda api: api._function_plan_set_comment_width(4, "Note"), "save_function_plan_comment"),
-    (lambda api: api.rename_marker(12, "M12 Test", True), "rename_marker"),
+    (lambda api: api.rename_marker(12, "M12 Test", True, default=0, store=False), "rename_marker"),
     (lambda api: api.rename_knx_object(3, "K3 Test [RO]"), "rename_knx_object"),
 ]
 

@@ -264,7 +264,8 @@ def _cleanup_result_message(result: dict, scope: str) -> str:
     lines.extend(f"* {key}: {reason}" for key, reason in result["failed_classes"].items())
     if scope_includes_knx(scope):
         lines.append(
-            f"KNX bridge markers reset: {len(result.get('reset_markers', []))} "
+            f"KNX bridge markers reset: {len(result.get('reset_markers', []))}, "
+            f"in use, suffixes removed: {len(result.get('normalized_markers', []))} "
             f"(failed: {len(result.get('failed_markers', []))})"
         )
         if error := result.get("marker_reset_error"):
