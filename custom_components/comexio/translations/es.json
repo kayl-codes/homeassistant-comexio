@@ -304,7 +304,7 @@
         "step": {
           "statistics_cleanup": {
             "title": "Limpiar estadísticas",
-            "description": "**{count} orphaned long-term statistics** were found that no longer belong to any existing entity (leftovers from previous entity IDs).\n\nThey can be safely deleted. **Live sensors and their current history are not affected** — only the orphaned entries are removed.\n\nWould you like to delete them now?"
+            "description": "Se encontraron **{count} estadísticas a largo plazo huérfanas** que ya no pertenecen a ninguna entidad existente (restos de ID de entidad anteriores).\n\nSe pueden eliminar con seguridad. **Los sensores activos y su historial actual no se ven afectados**: solo se eliminan las entradas huérfanas.\n\n¿Desea eliminarlas ahora?"
           }
         },
         "abort": {

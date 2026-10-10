@@ -64,6 +64,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Repeated calls stay quiet:** paths the plan card or a timer repeats (keepalive, retries, periodic ticks) report
   failures at debug level, without a persistent notification or repair each time — e.g.
   `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure.
+- **Repair flows read the current entry:** before a destructive action (cleanup, delete, reset), a repair flow
+  step reads the current config entry state (`options`/`data`) again instead of relying on `issue_data` alone —
+  the dialog may have been open while the user changed the options, so the issue data can be stale (#160).
 - **Blocking I/O:** no blocking calls in the event loop; Comexio serialises requests, so avoid needless round-trips.
 
 ## Tests
@@ -80,6 +83,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   test's `ENTRY_STEP_BY_ISSUE` (the step `async_step_init` routes it to; the test reads the issue_id from the
   raise site). A computed `translation_key` must come from a `self.` helper returning constants or from a
   parameter whose callers pass constants; `is_fixable` stays a literal `True`/`False`.
+- A test for an action that deliberately does nothing (ignore, cancel, abort) also asserts that no deleting or
+  writing API method was awaited. An options-flow test asserts the stored value, not only that a key is absent
+  (#160).
+- A test asserting that an issue is absent or was deleted also proves the path ran — a call of
+  `async_delete_issue`/`async_create_issue` or a concrete counter value — otherwise it passes without the fix
+  (#160).
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
 - Test function parameters carry type annotations.
 
