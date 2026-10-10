@@ -1,6 +1,7 @@
 """Promoting the restored snapshot after an in-place restore (FunctionPlanBackupManager.async_mark_restored)."""
 
 import asyncio
+import copy
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -26,10 +27,11 @@ class FakeStore:
         self.key = key
 
     async def async_load(self) -> Any:
-        return FakeStore.saved.get(self.key)
+        # Copies on load and save: an assertion on FakeStore.saved only passes if the change was saved.
+        return copy.deepcopy(FakeStore.saved.get(self.key))
 
     async def async_save(self, data: Any) -> None:
-        FakeStore.saved[self.key] = data
+        FakeStore.saved[self.key] = copy.deepcopy(data)
 
 
 def _snap(n: int) -> dict[str, Any]:
