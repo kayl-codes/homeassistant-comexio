@@ -467,6 +467,9 @@ async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str 
         return True
 
 
+BRIDGE_MARKERS_WAIT_FOR_TRIGGER_PLAN = "trigger plan still holds KNX pairs — bridge markers left for the re-run"
+
+
 @dataclass
 class _BridgeMarkerResult:
     """Outcome of the KNX cleanup's bridge marker phase (ids per outcome; error: phase not run)."""
@@ -2393,14 +2396,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
             report(f"Step 3/{steps}: removing the KNX loopback Web-IO")
             await self._delete_knx_loopback_webio(devices, classes, failed_classes, skipped)
             report(f"Step 4/{steps}: resetting KNX bridge markers (checking which are in use)")
-            trigger_id = full_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
-            markers = await self._reset_knx_bridge_markers(
-                skipped,
-                _marker_reset_progress(report, f"Step 4/{steps}"),
-                ignored_plan_ids=[int(trigger_id)]
-                if isinstance(trigger_id, int | str) and str(trigger_id).isdigit()
-                else [],
-            )
+            if FUNCTION_PLAN_TRIGGER_PLAN_NAME in failed_plans:
+                # Its KNX pairs are still placed and are told apart from marker pairs only by the
+                # "[K<n>]" title (trigger_sources_by_category): blanking or stripping it now would
+                # hide them from the re-run that removes them, so the markers wait for that run.
+                markers = _BridgeMarkerResult(error=BRIDGE_MARKERS_WAIT_FOR_TRIGGER_PLAN)
+            else:
+                trigger_id = full_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
+                markers = await self._reset_knx_bridge_markers(
+                    skipped,
+                    _marker_reset_progress(report, f"Step 4/{steps}"),
+                    ignored_plan_ids=[int(trigger_id)]
+                    if isinstance(trigger_id, int | str) and str(trigger_id).isdigit()
+                    else [],
+                )
 
         _LOGGER.info(
             "[%s] Uninstall cleanup (scope=%s): plans deleted=%s failed=%s, devices=%s, classes=%s, "

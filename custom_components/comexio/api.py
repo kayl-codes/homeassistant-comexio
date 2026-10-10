@@ -2413,8 +2413,8 @@ class ComexioAPI:
         One still placed in a plan becomes a plain marker: all kind suffixes stripped, default
         value and store flag sent along unchanged (the save takes the whole form; verified live
         2026-10-10). Must run AFTER the KNX cluster plans were deleted. ignored_plan_ids: plans
-        whose placements do not count as use (the shared trigger plan — its KNX pairs belong to
-        the cleanup, even if removing them failed).
+        whose placements do not count as use (the shared trigger plan, once its KNX pairs were
+        removed — after a failed removal the caller skips this phase instead).
 
         Reads $Fubs from the same fresh config fetch (the cached plan list still contains the
         plans deleted moments ago). Returns (blanked ids, normalized ids, failed ids, in-use

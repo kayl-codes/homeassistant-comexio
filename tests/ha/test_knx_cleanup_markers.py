@@ -14,6 +14,7 @@ from custom_components.comexio.cleanup_scope import (
     SKIPPED_KNX_BRIDGE_MARKERS,
 )
 from custom_components.comexio.const import CONF_FUNCTION_PLAN_PLAN_MAP, DOMAIN, FUNCTION_PLAN_TRIGGER_PLAN_NAME
+from custom_components.comexio.coordinator import BRIDGE_MARKERS_WAIT_FOR_TRIGGER_PLAN
 
 
 async def _cleanup(
@@ -67,6 +68,32 @@ async def test_the_trigger_plan_is_no_use_of_a_bridge_marker(
     _result, reset = await _cleanup(hass, entry, monkeypatch, CLEANUP_SCOPE_KNX, ([], [], [], [], None))
 
     assert list(reset.await_args.args[1]) == ignored
+
+
+async def test_bridge_markers_wait_while_the_trigger_plan_keeps_its_knx_pairs(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed pair removal leaves pairs a re-run only finds by their "[K<n>]" bridge titles."""
+    entry = _entry_with_plan_map(mock_config_entry, {FUNCTION_PLAN_TRIGGER_PLAN_NAME: 7})
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    monkeypatch.setattr(coordinator, "_cleanup_trigger_plan", AsyncMock(return_value=("remove_pairs", -1)))
+    monkeypatch.setattr(coordinator, "_delete_managed_plans", AsyncMock(return_value=([], [])))
+    monkeypatch.setattr(coordinator, "_delete_webio_devices_and_classes", AsyncMock(return_value=([], [], {}, {})))
+    monkeypatch.setattr(coordinator, "_delete_knx_loopback_webio", AsyncMock())
+    coordinator.api.reset_knx_bridge_markers = reset = AsyncMock(return_value=([1], [], [], [], None))
+
+    result = await coordinator.async_uninstall_cleanup(CLEANUP_SCOPE_KNX)
+
+    reset.assert_not_awaited()
+    assert result["failed_plans"] == [FUNCTION_PLAN_TRIGGER_PLAN_NAME]
+    assert result["marker_reset_error"] == BRIDGE_MARKERS_WAIT_FOR_TRIGGER_PLAN
+    assert (result["reset_markers"], result["normalized_markers"]) == ([], [])
 
 
 async def test_the_cleanup_reports_each_bridge_marker_list_under_its_own_key(
