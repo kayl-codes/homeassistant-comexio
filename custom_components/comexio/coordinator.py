@@ -1223,10 +1223,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         count), while a sync or cleanup holds _sync_lock (a cleanup's mid-run refresh would
         raise the issue it is just working off again), and while the import flags differ from
         the poll's conf (the reload of that options save re-polls). Nor cleared while the trigger
-        plan's snapshot or (KNX) the placement of the bridge markers is not known yet; raised
-        on the known leftovers meanwhile, the unknown counts shown as such (count_placeholder).
-        marker_titles ({id: title} of every marker) tells KNX bridge markers in the trigger
-        plan from plain markers.
+        plan's snapshot is not known yet; raised on the known leftovers meanwhile, the unknown
+        counts shown as such (count_placeholder). The bridge markers count by their "[K<n>]"
+        title alone — the cleanup blanks or normalizes each readable one, placed or not, so their count
+        is never unknown. marker_titles ({id: title} of every marker) tells KNX bridge markers
+        in the trigger plan from plain markers.
         """
         if not self._last_poll_scraped or self._sync_lock.locked():
             return
@@ -1285,7 +1286,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _settle_empty_import_disabled_issue(self, issue_id: str, leftovers_unknown: bool) -> bool:
         """Handle an import_disabled issue with no known leftover; False = update it with the new counts.
 
-        Nothing unknown either: cleared. Unknown pairs or bridge markers may be all that is
+        Nothing unknown either: cleared. Unknown trigger pairs may be all that is
         left, so a raised issue stays and is updated (its stale counts would read as current,
         the unknown ones show as UNKNOWN_COUNT); they alone never raise a new one.
         """
@@ -2358,8 +2359,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cleanup_scope): the scope's HA-managed Function Plans (CONF_FUNCTION_PLAN_PLAN_MAP),
         then its Web-IO device instances, then their Web-IO device classes — in that order,
         since Comexio refuses to delete a device or class still in use. Scopes full/knx also
-        remove the KNX API-Loopback Web-IO and blank the titles of the KNX bridge markers,
-        so the next sync rebuilds the bridge block from scratch. Scopes marker/knx touch the
+        remove the KNX API-Loopback Web-IO and undo the KNX bridge marker titles: unused ones
+        are blanked, ones still placed in a plan (other than the trigger plan) only lose their
+        "[K<n>]" suffix and keep default value and store flag — skipped while the trigger plan
+        still holds KNX pairs, which a re-run finds only by those titles. So the next sync
+        rebuilds the bridge block from scratch. Scopes marker/knx touch the
         shared trigger plan only via _cleanup_trigger_plan (own pairs removed, the plan itself
         only when no other category's pairs remain in it). Best-effort per phase; a
         failure in one plan/class does not block the others, and failed plan deletions stay
@@ -2396,20 +2400,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             report(f"Step 3/{steps}: removing the KNX loopback Web-IO")
             await self._delete_knx_loopback_webio(devices, classes, failed_classes, skipped)
             report(f"Step 4/{steps}: resetting KNX bridge markers (checking which are in use)")
-            if FUNCTION_PLAN_TRIGGER_PLAN_NAME in failed_plans:
-                # Its KNX pairs are still placed and are told apart from marker pairs only by the
-                # "[K<n>]" title (trigger_sources_by_category): blanking or stripping it now would
-                # hide them from the re-run that removes them, so the markers wait for that run.
-                markers = _BridgeMarkerResult(error=BRIDGE_MARKERS_WAIT_FOR_TRIGGER_PLAN)
-            else:
-                trigger_id = full_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
-                markers = await self._reset_knx_bridge_markers(
-                    skipped,
-                    _marker_reset_progress(report, f"Step 4/{steps}"),
-                    ignored_plan_ids=[int(trigger_id)]
-                    if isinstance(trigger_id, int | str) and str(trigger_id).isdigit()
-                    else [],
-                )
+            markers = await self._bridge_marker_phase(
+                full_map, failed_plans, skipped, _marker_reset_progress(report, f"Step 4/{steps}")
+            )
 
         _LOGGER.info(
             "[%s] Uninstall cleanup (scope=%s): plans deleted=%s failed=%s, devices=%s, classes=%s, "
@@ -2500,6 +2493,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 return action, -1
             removed += count
         return action, removed
+
+    async def _bridge_marker_phase(
+        self,
+        full_map: dict[str, Any],
+        failed_plans: list[str],
+        skipped: dict[str, str],
+        progress_cb: Callable[[int, int], None],
+    ) -> _BridgeMarkerResult:
+        """The cleanup's bridge marker phase: skipped while the shared trigger plan still holds KNX
+        pairs, else resets the markers with the trigger plan's placements not counted as use."""
+        if FUNCTION_PLAN_TRIGGER_PLAN_NAME in failed_plans:
+            # Its KNX pairs are still placed and are told apart from marker pairs only by the
+            # "[K<n>]" title (trigger_sources_by_category): blanking or stripping it now would
+            # hide them from the re-run that removes them, so the markers wait for that run.
+            return _BridgeMarkerResult(error=BRIDGE_MARKERS_WAIT_FOR_TRIGGER_PLAN)
+        trigger_id = full_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
+        ignored = [int(trigger_id)] if isinstance(trigger_id, int | str) and str(trigger_id).isdigit() else []
+        return await self._reset_knx_bridge_markers(skipped, progress_cb, ignored_plan_ids=ignored)
 
     async def _reset_knx_bridge_markers(
         self,

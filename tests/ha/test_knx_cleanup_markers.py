@@ -30,7 +30,7 @@ async def _cleanup(
     await hass.async_block_till_done()
     coordinator = hass.data[DOMAIN][entry.entry_id]
     monkeypatch.setattr(coordinator, "_cleanup_trigger_plan", AsyncMock(return_value=("keep", 0)))
-    monkeypatch.setattr(coordinator, "_delete_managed_plans", AsyncMock(return_value=([], [])))
+    monkeypatch.setattr(coordinator, "_delete_managed_plans", AsyncMock(return_value=(["KNX 1"], [])))
     monkeypatch.setattr(coordinator, "_delete_webio_devices_and_classes", AsyncMock(return_value=([], [], {}, {})))
     monkeypatch.setattr(coordinator, "_delete_knx_loopback_webio", AsyncMock())
     reset = (
@@ -144,7 +144,7 @@ async def test_a_failing_bridge_marker_phase_keeps_the_earlier_results(
 
     assert result["marker_reset_error"] == error
     assert (result["reset_markers"], result["normalized_markers"], result["failed_markers"]) == ([], [], [])
-    assert result["deleted_plans"] == []  # the earlier phases' keys survive
+    assert result["deleted_plans"] == ["KNX 1"]  # the earlier phases' results survive
 
 
 async def test_a_cleanup_outside_knx_leaves_the_bridge_markers_alone(
