@@ -83,12 +83,13 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   test's `ENTRY_STEP_BY_ISSUE` (the step `async_step_init` routes it to; the test reads the issue_id from the
   raise site). A computed `translation_key` must come from a `self.` helper returning constants or from a
   parameter whose callers pass constants; `is_fixable` stays a literal `True`/`False`.
-- A test for an action that deliberately does nothing (ignore, cancel, abort) also asserts that no deleting or
-  writing method ran — `assert_not_awaited()` for coroutines, `assert_not_called()` for synchronous calls such as
-  `ir.async_delete_issue`. An options-flow test asserts the stored value, not only that a key is absent (#160).
-- A test asserting that an issue is absent or was deleted also proves the path ran — a call of
-  `async_delete_issue`/`async_create_issue` or a concrete counter value — otherwise it passes without the fix
-  (#160).
+- A test for an action that must leave Comexio and the entities untouched (ignore, cancel, abort) asserts what the
+  action does change — e.g. the saved ignore option, the dismissed issue — and that no deleting or writing method of
+  the API or the registries ran: `assert_not_awaited()` for coroutines, `assert_not_called()` for synchronous calls.
+  An options-flow test asserts the stored value, not only that a key is absent (#160).
+- A test asserting that an issue is absent also proves the evaluating path ran, otherwise it passes without the fix
+  (#160): for a deletion, the issue existed before and is gone after, or `async_delete_issue` was called for it; for
+  an issue that is never raised, a concrete counter value or another result of the same run.
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
 - Test function parameters carry type annotations.
 
