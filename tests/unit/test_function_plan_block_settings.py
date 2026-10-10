@@ -432,8 +432,10 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
     api.function_plan_save_block_settings = AsyncMock(side_effect=save)
     coordinator = SimpleNamespace(
         server_id=SERVER_ID,
-        async_function_plan_change_backup=AsyncMock(),
-        function_plan_backup=SimpleNamespace(async_mark_restored=AsyncMock(return_value=False)),
+        async_function_plan_change_backup=AsyncMock(side_effect=lambda *_a: order.append("pre_restore")),
+        function_plan_backup=SimpleNamespace(
+            async_mark_restored=AsyncMock(side_effect=lambda *_a: order.append("mark") or False)
+        ),
     )
     snapshot = _snapshot(plan, SETTINGS) | {"hash": "h"}
 
@@ -442,11 +444,19 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
             backup_service._restore_plan_in_place(MagicMock(), coordinator, api, 1, snapshot, "auto", 0, lambda _p: "h")
         )
 
-    assert order == ["run_fup", "save", "save"]
+    # The source is promoted only after the pre_restore backup has shifted the history.
+    assert order == ["pre_restore", "run_fup", "save", "save", "mark"]
     saved = {call.args[0]: call.args[1] for call in api.function_plan_save_block_settings.await_args_list}
     assert saved == {"104": SETTINGS["4"], "107": SETTINGS["7"]}
     assert notify.call_args.kwargs["title"].endswith("OK")
     assert f"Block settings: {backup_service.ICON_SUCCESS} 4 written" in notify.call_args.args[1]
+    # The restored snapshot itself is handed over (found by identity, not by its pre-restore slot),
+    # and a snapshot that is not found in the history is reported instead of silently not marked.
+    mark_args = coordinator.function_plan_backup.async_mark_restored.await_args.args
+    assert mark_args[0] == "auto"
+    assert mark_args[1] == 1
+    assert mark_args[3] is snapshot
+    assert "auto[0] not found in the backup history — not marked restored" in notify.call_args.args[1]
 
 
 # ---------------------------------------------------------------------------

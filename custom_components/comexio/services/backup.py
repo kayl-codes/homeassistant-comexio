@@ -434,9 +434,9 @@ async def _restore_plan_in_place(
         # Skipped for identity_was_mismatched (force_override onto a DIFFERENT plan): this
         # snapshot's own (fub_id, plan_name) key no longer describes what's now live, so its
         # backup history is left exactly where it was.
-        promoted = False
+        promoted: bool | None = None  # None: not attempted (see the gate below)
         if content_ok and not identity_was_mismatched:
-            promoted = await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, slot)
+            promoted = await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, snapshot)
 
         msg = _restore_build_message(
             plan_name,
@@ -782,7 +782,7 @@ def _restore_build_message(
     identity_was_mismatched: bool,
     was_active: bool,
     duration: float,
-    promoted: bool = False,
+    promoted: bool | None = None,
     auto_start: bool = True,
 ) -> str:
     """Human-readable persistent_notification body for a restore result."""
@@ -811,7 +811,11 @@ def _restore_build_message(
     if apply["comment_warnings"]:
         shown = apply["comment_warnings"][:5]
         comment_line += "\n".join(f"{ICON_WARNING} {w}" for w in shown) + "\n"
-    promoted_line = f"Backup slot: promoted {kind}[{slot}] → {kind}[0] (now marked restored *)\n" if promoted else ""
+    promoted_line = ""
+    if promoted:
+        promoted_line = f"Backup slot: promoted {kind}[{slot}] → {kind}[0] (now marked restored *)\n"
+    elif promoted is False:
+        promoted_line = f"Backup slot: {kind}[{slot}] not found in the backup history — not marked restored\n"
     return (
         f"Restore of plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] "
         f"({snapshot.get('captured_at')}): **{status}**\n"

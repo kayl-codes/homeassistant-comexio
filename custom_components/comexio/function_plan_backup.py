@@ -696,7 +696,7 @@ class FunctionPlanBackupManager:
             )
         return removed
 
-    async def async_mark_restored(self, kind: str, fub_id: int, plan_name: str, slot: int) -> bool:
+    async def async_mark_restored(self, kind: str, fub_id: int, plan_name: str, snapshot: Mapping[str, Any]) -> bool:
         """Promote a just-restored snapshot to slot 0 of its own kind-array and flag it.
 
         Called right after a restore that leaves the live plan matching this snapshot (see
@@ -705,13 +705,33 @@ class FunctionPlanBackupManager:
         write, the existing entry is moved to the front (no new storage) and stamped with
         "restored_at". captured_at is deliberately left untouched: it still records when this
         content was ORIGINALLY captured, not when it was restored. format_backup_label() shows
-        a trailing "*" for any entry carrying restored_at. Returns False if the slot is gone
-        (e.g. deleted or rotated out between resolving the restore target and finishing it).
+        a trailing "*" for any entry carrying restored_at.
+
+        The entry is found by its captured_at, not by the slot the restore was started from: the
+        restore's own pre_restore change backup is inserted at slot 0 first, which shifts every
+        change slot by one (and may rotate the source out). Not by hash either — the snapshot a
+        restore works with has its hash recomputed once block ids were translated (see
+        resolve_block_ids). Returns False if the snapshot is not found in the history (deleted or
+        rotated out while the restore ran, or it carries no captured_at).
         """
         await self._async_ensure_loaded()
         data, store = (self._auto_data, self._auto_store) if kind == "auto" else (self._change_data, self._change_store)
-        history = data.get(str(fub_id), {}).get(plan_name)
-        if not history or not (0 <= slot < len(history)):
+        history = data.get(str(fub_id), {}).get(plan_name) or []
+        captured_at = snapshot.get("captured_at")
+        slot = next(
+            (i for i, entry in enumerate(history) if captured_at and entry.get("captured_at") == captured_at),
+            None,
+        )
+        if slot is None:
+            _LOGGER.info(
+                "[%s] Function Plan backup: restored %s snapshot of '%s' (fub=%s, captured %s) not found in the "
+                "backup history (deleted, rotated out or without capture time) — not marked restored",
+                self._server_id,
+                kind,
+                plan_name,
+                fub_id,
+                captured_at,
+            )
             return False
         snap = history.pop(slot)
         snap["restored_at"] = dt_util.utcnow().isoformat()
