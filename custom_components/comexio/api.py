@@ -247,19 +247,23 @@ def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
     return refs
 
 
-def _placed_marker_ids_strict(all_plans: dict[int, dict]) -> set[int] | None:
+def _placed_marker_ids_strict(all_plans: dict[int, dict], ignored: Iterable[int] = ()) -> set[int] | None:
     """Fail-closed variant of _placed_marker_ids for marker_delete's force gate.
 
     _placed_marker_ids silently skips unreadable references — fine for picking free ids, but
     here a skipped reference would make a placed marker look unplaced and deletable. Any
     unreadable plan, element or marker reference returns None (placement unknown) instead.
+    Plans in `ignored` are still read strictly, only their placements are not counted: an
+    unreadable reference there may be a pair their own cleanup skipped and left in place.
     """
+    skip = set(ignored)
     placed: set[int] = set()
-    for plan_data in all_plans.values():
+    for fub_id, plan_data in all_plans.items():
         refs = _plan_marker_refs_strict(plan_data)
         if refs is None:
             return None
-        placed |= refs
+        if fub_id not in skip:
+            placed |= refs
     return placed
 
 
@@ -2434,8 +2438,7 @@ class ComexioAPI:
         if all_plans is None:
             return [], [], [], [], "could not load every function plan"
 
-        ignored = {int(fub_id) for fub_id in ignored_plan_ids}
-        placed = _placed_marker_ids_strict({fub_id: p for fub_id, p in all_plans.items() if fub_id not in ignored})
+        placed = _placed_marker_ids_strict(all_plans, ignored={int(fub_id) for fub_id in ignored_plan_ids})
         if placed is None:
             return [], [], [], [], "unreadable marker reference in a function plan"
         resets, unreadable = _knx_bridge_reset_candidates(items, placed)

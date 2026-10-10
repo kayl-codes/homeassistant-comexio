@@ -2361,7 +2361,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         since Comexio refuses to delete a device or class still in use. Scopes full/knx also
         remove the KNX API-Loopback Web-IO and undo the KNX bridge marker titles: unused ones
         are blanked, ones still placed in a plan (other than the trigger plan) only lose their
-        "[K<n>]" suffix and keep default value and store flag — skipped while the trigger plan
+        trailing kind suffixes ("[K<n>]" and an evaluated "[RO]"/"[TRIG]"/"[TP]") and keep
+        default value and store flag — skipped while the trigger plan
         still holds KNX pairs, which a re-run finds only by those titles. So the next sync
         rebuilds the bridge block from scratch. Scopes marker/knx touch the
         shared trigger plan only via _cleanup_trigger_plan (own pairs removed, the plan itself

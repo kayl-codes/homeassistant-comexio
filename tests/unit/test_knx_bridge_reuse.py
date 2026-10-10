@@ -159,7 +159,10 @@ def test_marker_form_values_read_only_what_can_be_sent_back_faithfully(
     assert _marker_form_values(marker) == expected
 
 
-def test_reset_markers_keep_the_values_of_one_in_use_and_ignore_the_trigger_plan(comexio_api: ComexioAPI) -> None:
+@pytest.mark.parametrize("trigger_plan_id", [1, "1"])  # plan_map ids may come back as strings
+def test_reset_markers_keep_the_values_of_one_in_use_and_ignore_the_trigger_plan(
+    comexio_api: ComexioAPI, trigger_plan_id: int | str
+) -> None:
     """A placement in the trigger plan is no use (its KNX pairs belong to the cleanup); one elsewhere is."""
     markers = {
         "20": {"Id": 20, "Name": "Switch A [K1]", "Type": 1, "DefaultValue": 1, "Store": 1},
@@ -174,7 +177,9 @@ def test_reset_markers_keep_the_values_of_one_in_use_and_ignore_the_trigger_plan
     progress: list[tuple[int, int]] = []
 
     result = asyncio.run(
-        comexio_api.reset_knx_bridge_markers(lambda done, total: progress.append((done, total)), ignored_plan_ids=[1])
+        comexio_api.reset_knx_bridge_markers(
+            lambda done, total: progress.append((done, total)), ignored_plan_ids=[trigger_plan_id]
+        )
     )
 
     assert result == ([20], [], [21], [], None)
@@ -184,6 +189,24 @@ def test_reset_markers_keep_the_values_of_one_in_use_and_ignore_the_trigger_plan
     ]
     assert progress == [(1, 2), (2, 2)]
     comexio_api._load_all_plans_verified.assert_awaited_once_with({"1": {}, "2": {}}, strict=True)
+
+
+def test_reset_markers_touch_nothing_when_the_trigger_plan_holds_an_unreadable_reference(
+    comexio_api: ComexioAPI,
+) -> None:
+    """Regression (Sourcery, PR #164): the trigger plan's cleanup skips a reference it cannot read,
+    so it may still wire a bridge marker that a re-run only finds by its "[K<n>]" title."""
+    markers = {"20": {"Id": 20, "Name": "Switch A [K1]", "Type": 1, "DefaultValue": 1, "Store": 1}}
+    comexio_api.get_raw_config = AsyncMock(return_value={"FubModules": {"2": markers}, "Fubs": {"1": {}}})
+    comexio_api._load_all_plans_verified = AsyncMock(  # type: ignore[method-assign]
+        return_value={1: {"elements": {"1": {"reference": {"type": 2, "ref_id": "x"}}}, "connections": {}}}
+    )
+    comexio_api.rename_marker = AsyncMock()  # type: ignore[method-assign]
+
+    result = asyncio.run(comexio_api.reset_knx_bridge_markers(ignored_plan_ids=[1]))
+
+    assert result == ([], [], [], [], "unreadable marker reference in a function plan")
+    comexio_api.rename_marker.assert_not_awaited()
 
 
 def test_reset_markers_touch_nothing_when_a_plan_is_missing(comexio_api: ComexioAPI) -> None:
