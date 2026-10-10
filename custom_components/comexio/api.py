@@ -3468,16 +3468,10 @@ class ComexioAPI:
 
         Keys are normalized to int — the raw JSON may carry type/ref_id as strings.
         """
-        existing_by_ref: dict[tuple[int, int], int] = {}
         conn_endpoints: list[set[int]] = []
         if not plan_data:
-            return existing_by_ref, conn_endpoints
-        for elem_id_str, elem in plan_data.get("elements", {}).items():
-            if not isinstance(elem, dict):
-                continue
-            ref = elem.get("reference") or {}
-            with suppress(TypeError, ValueError, KeyError):
-                existing_by_ref[(int(ref["type"]), int(ref["ref_id"]))] = int(elem_id_str)
+            return {}, conn_endpoints
+        existing_by_ref = ComexioAPI._function_plan_element_index(plan_data)
         for conn in (plan_data.get("connections") or {}).values():
             endpoints: set[int] = set()
             outputs = conn.get("output") or []
@@ -3488,6 +3482,18 @@ class ComexioAPI:
                     endpoints.add(int(endpoint["FubElementId"]))
             conn_endpoints.append(endpoints)
         return existing_by_ref, conn_endpoints
+
+    @staticmethod
+    def _function_plan_element_index(plan_data: dict | None) -> dict[tuple[int, int], int]:
+        """{(ref_type, ref_id): element id} of every element in plan_data, keys normalized to int."""
+        existing_by_ref: dict[tuple[int, int], int] = {}
+        for elem_id_str, elem in ((plan_data or {}).get("elements") or {}).items():
+            if not isinstance(elem, dict):
+                continue
+            ref = elem.get("reference") or {}
+            with suppress(TypeError, ValueError, KeyError):
+                existing_by_ref[(int(ref["type"]), int(ref["ref_id"]))] = int(elem_id_str)
+        return existing_by_ref
 
     async def fetch_marker_titles(self) -> dict[int, str] | None:
         """Current marker titles {id: title} from a fresh config fetch; None if it failed."""
@@ -3503,10 +3509,12 @@ class ComexioAPI:
 
     @staticmethod
     def function_plan_element_refs(plan_data: dict | None) -> list[tuple[int, int]]:
-        """(ref_type, ref_id) of every element in plan_data — public view of the index
-        _function_plan_existing_refs builds, for callers outside the API."""
-        existing_by_ref, _ = ComexioAPI._function_plan_existing_refs(plan_data)
-        return list(existing_by_ref)
+        """(ref_type, ref_id) of every element in plan_data, for callers outside the API.
+
+        Elements only: the poll scans every plan with it, so a malformed connection (which the
+        write paths must still fail on before changing anything) has no say here.
+        """
+        return list(ComexioAPI._function_plan_element_index(plan_data))
 
     @staticmethod
     def _function_plan_find_connection_by_source(plan_data: dict | None, src_elem_id: int) -> tuple[int, dict] | None:

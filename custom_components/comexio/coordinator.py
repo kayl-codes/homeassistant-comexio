@@ -1243,10 +1243,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if cls in active or cls.value in ignored:
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
                 continue
-            if not any(counts.values()):
-                # Unknown pairs or bridge markers may be all that is left — keep the issue then.
-                if not _leftovers_unknown(cls, trigger_sources, bridge_markers):
-                    ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            if not any(counts.values()) and self._settle_empty_import_disabled_issue(
+                issue_id, _leftovers_unknown(cls, trigger_sources, bridge_markers)
+            ):
                 continue
             _LOGGER.debug(
                 "[%s] %s import is switched off, but the server still has %s", self.server_id, cls.value, counts
@@ -1265,6 +1264,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 },
                 data={"entry_id": self.config_entry.entry_id, "webio_class": cls.value, "counts": counts},
             )
+
+    def _settle_empty_import_disabled_issue(self, issue_id: str, leftovers_unknown: bool) -> bool:
+        """Handle an import_disabled issue with no known leftover; False = update it with the new counts.
+
+        Nothing unknown either: cleared. Unknown pairs or bridge markers may be all that is
+        left, so a raised issue stays and is updated (its stale counts would read as current,
+        the unknown ones show as UNKNOWN_COUNT); they alone never raise a new one.
+        """
+        if not leftovers_unknown:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return True
+        return ir.async_get(self.hass).async_get_issue(DOMAIN, issue_id) is None
 
     def _known_plan_ids(self) -> set[int] | None:
         """Ids of every plan in Comexio: this poll's $Fubs read, else the last poll's; None if never read."""

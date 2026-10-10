@@ -522,7 +522,33 @@ async def test_an_unloaded_trigger_plan_does_not_clear_the_issue(
     mock_comexio_api[-1].get_raw_config.return_value = config
     await coordinator.async_refresh()
 
-    assert _issue(hass, MARKER_ISSUE) is not None
+    issue = _issue(hass, MARKER_ISSUE)
+    assert issue is not None
+    # Updated, not left on the last poll's counts: the pairs read "?" instead of the stale 0.
+    assert issue.data["counts"]["trigger_pairs"] is None
+    assert issue.translation_placeholders["trigger_pairs"] == "?"
+
+
+async def test_unknown_leftovers_alone_raise_no_issue(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    api_returns: dict[str, Any],
+    mock_comexio_api: list[ComexioAPI],
+) -> None:
+    """Nothing known is left and the trigger plan is not loaded: "?" alone is no reason to raise it."""
+    config = load_json_fixture("config_basic.json")
+    del config["WebDevices"]["30"]
+    api_returns["get_raw_config"] = config
+    entry = _with_options(
+        mock_config_entry, {"import_markers": False, CONF_FUNCTION_PLAN_PLAN_MAP: {FUNCTION_PLAN_TRIGGER_PLAN_NAME: 2}}
+    )
+    await _setup(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator.function_plan_plans.pop(2, None)
+    ir.async_delete_issue(hass, DOMAIN, MARKER_ISSUE)
+    await coordinator.async_refresh()
+
+    assert _issue(hass, MARKER_ISSUE) is None
 
 
 async def test_a_deleted_trigger_plan_counts_no_pairs(

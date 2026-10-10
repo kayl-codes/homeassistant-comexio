@@ -85,5 +85,8 @@ def test_reset_candidates_include_a_bridge_title_with_trailing_blanks() -> None:
 
 def test_element_refs_skip_malformed_elements() -> None:
     """A non-object element in any plan must not break the poll (every plan is scanned for bridge markers)."""
-    plan = {"elements": {"5": None, "6": {"reference": {"type": 2, "ref_id": 7}}}}
+    plan = {
+        "elements": {"5": None, "6": {"reference": {"type": 2, "ref_id": 7}}},
+        "connections": {"1": None, "2": "broken"},
+    }
     assert ComexioAPI.function_plan_element_refs(plan) == [(2, 7)]
