@@ -4381,7 +4381,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         honors the skip if entry.options still equals new_options when it runs; if another
         write landed in between (e.g. a concurrent user options-flow save), it reloads
         anyway instead of silently dropping that write.
+
+        Unchanged options are not written at all: HA schedules no listener run for them, so a
+        snapshot set here would outlive this call and swallow the reload of the next, unrelated
+        listener run whose options happen to match (e.g. a data-only entry update). A snapshot
+        still pending from an earlier, real write is left untouched for its own listener run.
         """
+        if new_options == self.config_entry.options:
+            return
         self._skip_next_listener_reload_options = new_options.copy()
         self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
 
