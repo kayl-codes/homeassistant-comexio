@@ -1,7 +1,7 @@
 """A category whose import is switched off while its Web-IO commands still exist (import_disabled repair)."""
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
@@ -162,7 +162,10 @@ async def test_unknown_bridge_marker_placement_keeps_the_issue(
     del coordinator.function_plan_plans[2]
     await coordinator.async_refresh()
 
-    assert _issue(hass, KNX_ISSUE) is not None
+    issue = _issue(hass, KNX_ISSUE)
+    assert issue is not None
+    assert issue.data["counts"]["bridge_markers"] is None
+    assert issue.translation_placeholders["bridge_markers"] == "?"
 
 
 async def test_the_knx_issue_clears_once_the_bridge_title_is_gone(
@@ -203,8 +206,11 @@ async def test_ignore_keeps_everything_and_does_not_ask_again(
     assert markers_off_entry.options[CONF_IMPORT_DISABLED_IGNORED] == ["marker"]
     assert markers_off_entry.options["import_markers"] is False
     coordinator = hass.data[DOMAIN][markers_off_entry.entry_id]
-    await coordinator.async_refresh()
+    with patch.object(ir, "async_delete_issue", wraps=ir.async_delete_issue) as delete:
+        await coordinator.async_refresh()
     assert coordinator.last_update_success
+    # The poll re-evaluated the ignored category (and dropped its issue), it did not just skip it.
+    assert any(call.args[2] == MARKER_ISSUE for call in delete.call_args_list)
     assert _issue(hass, MARKER_ISSUE) is None
     api = mock_comexio_api[-1]
     for name in _DESTRUCTIVE_API_METHODS:
@@ -230,16 +236,48 @@ async def test_an_ignore_saved_during_a_poll_is_not_undone_by_it(
         return config
 
     api.get_raw_config.side_effect = ignore_mid_poll
-    await coordinator.async_refresh()
+    with patch.object(ir, "async_delete_issue", wraps=ir.async_delete_issue) as delete:
+        await coordinator.async_refresh()
     await hass.async_block_till_done()
 
     api.get_raw_config.assert_awaited()
+    # Deleted by the callback and again by the poll, which saw the ignore saved during it.
+    assert [call.args[2] for call in delete.call_args_list].count(MARKER_ISSUE) == 2
     assert coordinator.last_update_success
     assert _issue(hass, MARKER_ISSUE) is None
     # No reload undid or replaced anything: the ignore is still saved, the same coordinator runs.
     assert markers_off_entry.options[CONF_IMPORT_DISABLED_IGNORED] == ["marker"]
     assert markers_off_entry.state is ConfigEntryState.LOADED
     assert hass.data[DOMAIN][markers_off_entry.entry_id] is coordinator
+
+
+async def test_an_import_switched_during_a_poll_leaves_the_issue_to_the_reload(
+    hass: HomeAssistant, markers_off_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Regression: the poll split the commands by its old flags, so it must not judge the issue by the new ones."""
+    await _setup(hass, markers_off_entry)
+    before = _issue(hass, MARKER_ISSUE)
+    assert before is not None
+    coordinator = hass.data[DOMAIN][markers_off_entry.entry_id]
+    api = mock_comexio_api[-1]
+    config = api.get_raw_config.return_value
+
+    async def enable_mid_poll(*_args: Any, **_kwargs: Any) -> Any:
+        coordinator.request_options_update_without_reload({**markers_off_entry.options, "import_markers": True})
+        return config
+
+    api.get_raw_config.side_effect = enable_mid_poll
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    after = _issue(hass, MARKER_ISSUE)
+    assert after is not None
+    assert after.data == before.data
+
+    # The next poll (standing in for the reload's first one) judges by the new flags and drops it.
+    api.get_raw_config.side_effect = None
+    await coordinator.async_refresh()
+    assert _issue(hass, MARKER_ISSUE) is None
 
 
 async def test_enable_switches_the_import_on_and_drops_the_ignore(

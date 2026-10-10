@@ -1211,8 +1211,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         exist, unless the user chose to ignore that. Left alone after an unreadable config
         scrape (no commands then would look like "all cleaned up" and drop a still valid
         issue), while no plan list was ever read (a plan deleted in Comexio would still
-        count), and while a sync or cleanup holds _sync_lock (a cleanup's mid-run refresh
-        would raise the issue it is just working off again). Nor cleared while the trigger
+        count), while a sync or cleanup holds _sync_lock (a cleanup's mid-run refresh would
+        raise the issue it is just working off again), and while the import flags differ from
+        the poll's conf (the reload of that options save re-polls). Nor cleared while the trigger
         plan's snapshot or (KNX) the placement of the bridge markers is not known yet; raised
         on the known leftovers meanwhile, the unknown counts shown as such (count_placeholder).
         marker_titles ({id: title} of every marker) tells KNX bridge markers in the trigger
@@ -1220,15 +1221,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         if not self._last_poll_scraped or self._sync_lock.locked():
             return
+        active = set(self.active_webio_classes)
+        if active != set(active_webio_classes(conf)):
+            # An import switched on or off during this poll: disabled_commands were split by the
+            # old flags. The options save reloads the entry; its first poll settles the issues.
+            _LOGGER.debug(
+                "[%s] Import flags changed during this poll — import_disabled issues left alone", self.server_id
+            )
+            return
         plan_map = self._existing_managed_plans(conf)
         if plan_map is None:
             return
         trigger_sources = self._cached_trigger_sources(plan_map, marker_titles)
         bridge_markers = self._resettable_bridge_marker_count(plan_map)
-        # Both read now, not from the poll's conf: Ignore saves without a reload (R2), so a choice
-        # made during this poll would otherwise raise the issue again until the next one — and
-        # Enable prunes the ignore at once, so a stale "import off" would raise it for a moment.
-        active = set(self.active_webio_classes)
+        # Read now, not from the poll's conf: Ignore saves without a reload (R2), so a choice made
+        # during this poll would otherwise raise the issue again until the next one.
         ignored = set(self.config_entry.options.get(CONF_IMPORT_DISABLED_IGNORED) or [])
         for cls in WEBIO_CLASSES:
             issue_id = import_disabled_issue_id(cls, self.server_id)
