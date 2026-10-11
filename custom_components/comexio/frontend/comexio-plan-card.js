@@ -1865,8 +1865,13 @@ class ComexioPlanCard extends HTMLElement {
     this._hass
       .callService("comexio", "function_plan_preview_start", this._previewServiceData(), undefined, false, true)
       .then((result) => {
-        this._previewStarted = result?.response?.success === true;
-        this._previewInstance = this._previewStarted ? (result.response.instance ?? null) : null;
+        const response = result?.response;
+        this._previewStarted = response?.success === true;
+        this._previewInstance = this._previewStarted ? (response.instance ?? null) : null;
+        if (!this._previewStarted) {
+          // Not armed (no plan selected, plan not loadable): the next keepalive retries the start.
+          console.warn("comexio-plan-card: function_plan_preview_start not armed", response?.error);
+        }
       })
       .catch((err) => {
         console.warn("comexio-plan-card: function_plan_preview_start failed", err);
@@ -1890,7 +1895,12 @@ class ComexioPlanCard extends HTMLElement {
       .callService("comexio", "function_plan_preview_start", data, undefined, false, true)
       .then((result) => {
         const response = result?.response;
-        if (response?.success !== true || !this.isConnected) {
+        if (response?.success !== true) {
+          // E.g. the instance is not loaded (reloading, Comexio offline): the next keepalive retries.
+          console.warn("comexio-plan-card: function_plan_preview_start keepalive not answered", response?.error);
+          return;
+        }
+        if (!this.isConnected) {
           return;
         }
         const reloaded = !retryStart && !!response.instance && response.instance !== this._previewInstance;

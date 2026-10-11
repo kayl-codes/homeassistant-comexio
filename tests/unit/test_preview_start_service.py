@@ -13,8 +13,10 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.services import misc
 
 
-def _run_start(*, armed: bool, selection: bool, render: AsyncMock | None = None) -> tuple[dict, AsyncMock]:
-    coordinator = _follow_coordinator(following=False, preview_armed=armed)
+def _run_start(
+    *, armed: bool, selection: bool, render: AsyncMock | None = None, coordinator: object | None = None
+) -> tuple[dict, AsyncMock]:
+    coordinator = coordinator or _follow_coordinator(following=False, preview_armed=armed)
     render = render or AsyncMock()
     call = SimpleNamespace(data={})
     with (
@@ -42,7 +44,7 @@ def test_an_armed_preview_is_left_alone() -> None:
 
 def test_nothing_to_preview_is_reported() -> None:
     result, render = _run_start(armed=False, selection=False)
-    assert result["success"] is False
+    assert result == {"success": False, "error": "No plan is selected for the preview."}
     render.assert_not_called()
 
 
@@ -87,6 +89,64 @@ def test_a_reloaded_entry_answers_the_keepalive_as_a_new_instance(monkeypatch: p
     assert before_reload.preview_armed is False
 
     assert _keepalive_instance(after_reload) != opened
+
+
+def _real_coordinator(monkeypatch: pytest.MonkeyPatch) -> ComexioCoordinator:
+    """A real coordinator, so a renamed preview_instance_id attribute cannot hide behind a test double."""
+    monkeypatch.setattr(coordinator_module, "async_call_later", MagicMock())
+    return ComexioCoordinator(MagicMock(), MagicMock(), MagicMock())
+
+
+def test_the_preview_instance_id_is_a_non_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    instance = _real_coordinator(monkeypatch).preview_instance_id
+    assert isinstance(instance, str)
+    assert instance
+
+
+def test_every_successful_answer_names_the_real_coordinators_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fresh start, already armed and keepalive all carry the coordinator's own preview_instance_id."""
+    coordinator = _real_coordinator(monkeypatch)
+    expected = coordinator.preview_instance_id
+
+    fresh, _ = _run_start(armed=False, selection=True, coordinator=coordinator)
+    assert fresh == {"success": True, "already_armed": False, "instance": expected}
+
+    coordinator._preview_plan_cache = _armed_cache(1)
+    armed, render = _run_start(armed=True, selection=True, coordinator=coordinator)
+    assert armed == {"success": True, "already_armed": True, "instance": expected}
+    render.assert_not_called()
+
+    assert _keepalive_instance(coordinator) == expected
+
+
+def test_the_instance_survives_a_stop_and_a_restart_after_an_auto_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a new coordinator (a reload) may change the id — else every keepalive would restart the preview."""
+    coordinator = _real_coordinator(monkeypatch)
+    opened = coordinator.preview_instance_id
+
+    coordinator._preview_plan_cache = _armed_cache(1)
+    assert coordinator.stop_preview() is True
+    assert _keepalive_instance(coordinator) == opened
+
+    coordinator._preview_plan_cache = _armed_cache(1)
+    asyncio.run(coordinator._async_auto_stop_preview(None))
+    restarted, render = _run_start(armed=False, selection=True, coordinator=coordinator)
+    assert restarted == {"success": True, "already_armed": False, "instance": opened}
+    render.assert_awaited_once()
+
+
+def test_an_unresolved_instance_answers_the_start_without_an_instance() -> None:
+    call = SimpleNamespace(data={})
+    with patch.object(misc, "_async_get_service_context", AsyncMock(return_value=None)):
+        result = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+    assert result == {"success": False, "error": misc._INSTANCE_NOT_RESOLVED_ERR}
+
+
+def test_an_unresolved_instance_answers_the_keepalive_without_an_instance() -> None:
+    call = SimpleNamespace(data={"keepalive": True})
+    with patch.object(misc, "_resolve_coordinator", MagicMock(return_value=None)):
+        result = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+    assert result == {"success": False, "error": misc._INSTANCE_NOT_RESOLVED_ERR}
 
 
 def test_closing_the_card_ends_the_following() -> None:
