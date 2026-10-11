@@ -255,6 +255,22 @@ def test_get_raw_config_failed_re_login_is_empty(comexio_api: ComexioAPI, client
     _fail(client, "login", ComexioAuthenticationError("rejected"))
     assert asyncio.run(comexio_api.get_raw_config()) == {}
     assert comexio_api.last_login_error == "rejected"
+    assert comexio_api.config_relogin_unreachable is False  # Comexio answered
+
+
+def test_get_raw_config_unanswered_re_login_is_flagged_for_this_fetch_only(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """A lapsed session whose re-login gets no reply (e.g. Comexio still rebooting) marks the fetch unreachable."""
+    _fail(client, "get_raw_config", ComexioAuthenticationError("lapsed"))
+    _fail(client, "login", _connection_error())
+    assert asyncio.run(comexio_api.get_raw_config()) == {}
+    assert comexio_api.config_relogin_unreachable is True
+
+    client.get_raw_config = AsyncMock(return_value=RawConfig({"FubModules": {"2": {}}}, {}, {}, None))
+    asyncio.run(comexio_api.get_raw_config())
+    assert comexio_api.config_relogin_unreachable is False
+    assert comexio_api.last_login_error == "connection"  # left stale, hence the per-fetch flag
 
 
 def test_get_raw_config_keeps_io_types_and_version(comexio_api: ComexioAPI, client: MagicMock) -> None:

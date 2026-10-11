@@ -3,13 +3,15 @@
 import asyncio
 import contextlib
 import logging
+import time
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from aiocomexio import ComexioAuthenticationError, ComexioConnectionError
+from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioResponseError
 import pytest
 
-from custom_components.comexio import coordinator as coordinator_module, sensor as sensor_module
+from custom_components.comexio import coordinator as coordinator_module, plan_watchdog, sensor as sensor_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
@@ -18,6 +20,7 @@ from custom_components.comexio.const import (
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
+    FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
     PLAN_TRANSITION_STARTING,
     PLAN_TRANSITION_STOPPING,
     function_plan_ids,
@@ -25,7 +28,7 @@ from custom_components.comexio.const import (
     plan_watch_signal,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
-from custom_components.comexio.plan_watchdog import start_action_id
+from custom_components.comexio.plan_watchdog import ManagedPlanWatchdog, start_action_id
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
 
@@ -187,9 +190,17 @@ class _FakeCoordinator(SimpleNamespace):
     plan_transition = ComexioCoordinator.plan_transition
     async_plan_transition = ComexioCoordinator.async_plan_transition
     _async_watchdog_start_plan = ComexioCoordinator._async_watchdog_start_plan
+    _async_watchdog_auto_start_plan = ComexioCoordinator._async_watchdog_auto_start_plan
     async_start_managed_plan = ComexioCoordinator.async_start_managed_plan
     is_watched_plan = ComexioCoordinator.is_watched_plan
     async_handle_notification_action = ComexioCoordinator.async_handle_notification_action
+    note_comexio_unreachable = ComexioCoordinator.note_comexio_unreachable
+    _note_comexio_reachable = ComexioCoordinator._note_comexio_reachable
+    _in_plan_watch_boot_grace = ComexioCoordinator._in_plan_watch_boot_grace
+    _plan_watch_held = ComexioCoordinator._plan_watch_held
+    _watchdog_grace_run_state = ComexioCoordinator._watchdog_grace_run_state
+    comexio_unreachable = ComexioCoordinator.comexio_unreachable
+    _async_bus_load_emergency_reboot = ComexioCoordinator._async_bus_load_emergency_reboot
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
@@ -218,6 +229,8 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _watchdog_lock=asyncio.Lock(),
         _plan_transitions={},
         _unresolved_watch_picks=frozenset(),
+        _comexio_unreachable=False,
+        _plan_watch_grace_until=None,
         config_entry=SimpleNamespace(options={}),
         plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=False)),
     )
@@ -902,3 +915,230 @@ def test_setup_judgement_waits_while_a_sync_runs(api: ComexioAPI) -> None:
     asyncio.run(setup_during_sync())
     coordinator.plan_watchdog.async_check.assert_not_called()
     coordinator.async_update_listeners.assert_not_called()
+
+
+def _watched_coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
+    return _coordinator(
+        api, config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}), **overrides
+    )
+
+
+def _check_args(coordinator: _FakeCoordinator) -> tuple[Any, bool]:
+    """run_state and auto_start of the last watchdog check."""
+    call = coordinator.plan_watchdog.async_check.call_args
+    return call.args[1], call.kwargs["auto_start"]
+
+
+def test_after_an_outage_the_watchdog_only_clears_plans_for_a_while(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A rebooting Comexio starts its plans itself: in the boot grace none is judged stopped or started."""
+    caplog.set_level(logging.INFO)
+    coordinator = _watched_coordinator(api)
+    api.client.get_function_plan_run_states = AsyncMock(side_effect=ComexioConnectionError("down"))
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert coordinator._in_plan_watch_boot_grace() is False  # no grace while still unreachable
+
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    run_state, auto_start = _check_args(coordinator)
+    assert auto_start is False
+    assert (run_state(19), run_state(43)) == (None, True)  # stopped keeps the last verdict, running clears it
+    assert coordinator._in_plan_watch_boot_grace() is True
+    assert caplog.text.count("answers again after an outage") == 1
+
+    coordinator._plan_watch_grace_until = time.monotonic() - 1  # grace over
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    run_state, auto_start = _check_args(coordinator)
+    assert auto_start is True
+    assert run_state(19) is False
+    assert coordinator._plan_watch_grace_until is None
+    assert "reports and starts stopped plans again" in caplog.text
+
+
+def test_an_outage_during_the_grace_starts_it_again(api: ComexioAPI) -> None:
+    coordinator = _watched_coordinator(api, _plan_watch_grace_until=time.monotonic() + 5)
+    api.client.get_function_plan_run_states = AsyncMock(side_effect=TimeoutError())
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert coordinator.comexio_unreachable is True
+
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    read_started = time.monotonic()
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    read_done = time.monotonic()
+    # The full grace again, counted from the read that answered.
+    grace_until = coordinator._plan_watch_grace_until
+    assert read_started + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC <= grace_until
+    assert grace_until <= read_done + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC
+
+
+@pytest.mark.parametrize(("login_error", "outage"), [("connection", True), ("rejected", False)])
+def test_a_run_state_relogin_without_reply_counts_as_an_outage(api: ComexioAPI, login_error: str, outage: bool) -> None:
+    """The fetch's lapsed session is no outage, but a re-login that gets no reply is."""
+    api.client.get_function_plan_run_states = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+
+    async def fail() -> bool:
+        api.last_login_error = login_error
+        return False
+
+    api.login = AsyncMock(side_effect=fail)
+    coordinator = _coordinator(api)
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    api.login.assert_awaited_once()
+    assert coordinator.comexio_unreachable is outage
+    assert coordinator._plan_run_state_relogin_refused is not outage
+
+
+def test_while_comexio_is_unreachable_the_watchdog_only_clears_plans(api: ComexioAPI) -> None:
+    """No grace deadline runs yet, but a check from setup or the switch must not judge stale states."""
+    coordinator = _watched_coordinator(api, _comexio_unreachable=True)
+    asyncio.run(coordinator.async_initial_plan_watch())
+    run_state, auto_start = _check_args(coordinator)
+    assert auto_start is False
+    assert run_state == coordinator._watchdog_grace_run_state  # bound methods: equal, never identical
+    assert coordinator._plan_watch_grace_until is None  # the grace starts with the next read, not here
+
+
+@pytest.mark.parametrize(("unreachable", "grace_left"), [(True, None), (False, 5.0)], ids=["unreachable", "boot grace"])
+def test_a_queued_auto_start_is_not_sent_in_an_outage(
+    api: ComexioAPI, unreachable: bool, grace_left: float | None
+) -> None:
+    """An outage noted while an earlier start awaited Comexio stops the later starts of the same check."""
+    coordinator = _coordinator(
+        api,
+        _comexio_unreachable=unreachable,
+        _plan_watch_grace_until=None if grace_left is None else time.monotonic() + grace_left,
+    )
+    api.function_plan_run_fup_outcome = AsyncMock(return_value=True)
+    assert asyncio.run(coordinator._async_watchdog_auto_start_plan(19)) is None
+    api.function_plan_run_fup_outcome.assert_not_awaited()
+
+    # A start from the repair or push is the user's own call and still goes out.
+    api.login = AsyncMock(return_value=True)
+    coordinator.plan_watchdog = SimpleNamespace(async_plan_started=AsyncMock())
+    coordinator._async_refresh_plan_run_states = AsyncMock()
+    assert asyncio.run(coordinator.async_start_managed_plan(19)) is True
+    api.function_plan_run_fup_outcome.assert_awaited_once_with(19)
+
+
+def test_an_outage_during_an_auto_start_defers_the_queued_ones(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real watchdog check: once the first start notes an outage, the later plans are not started."""
+    monkeypatch.setattr(plan_watchdog, "ir", MagicMock())
+    monkeypatch.setattr(plan_watchdog, "persistent_notification", MagicMock())
+    coordinator = _coordinator(api)
+    sent: list[int] = []
+
+    async def no_reply(fub_id: int) -> None:
+        sent.append(fub_id)
+        coordinator.note_comexio_unreachable()
+
+    api.function_plan_run_fup_outcome = no_reply
+    hass = MagicMock()
+    hass.config.language = "en"
+    watchdog = ManagedPlanWatchdog(
+        hass,
+        entry_id="e1",
+        server_id="iosrv1",
+        start_plan=coordinator._async_watchdog_auto_start_plan,
+        notify_targets=list,
+    )
+    asyncio.run(watchdog.async_check({19: "Test1", 43: "Test2"}, lambda _fub_id: False))
+    assert sent == [19]
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_an_accepted_emergency_reboot_counts_as_an_outage(api: ComexioAPI, accepted: bool) -> None:
+    coordinator = _coordinator(
+        api,
+        _notify_watchdog=MagicMock(),
+        _async_persist_watchdog_event=AsyncMock(),
+        _watchdog_cooldown_until=None,
+    )
+    api.system_emergency_reboot = AsyncMock(return_value=accepted)
+    asyncio.run(coordinator._async_bus_load_emergency_reboot())
+    assert coordinator.comexio_unreachable is accepted
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ComexioResponseError("HTTP 500", status=500), ComexioAuthenticationError("lapsed"), None],
+    ids=["http error", "lapsed session", "answer without states"],
+)
+def test_an_answering_comexio_starts_no_boot_grace(api: ComexioAPI, error: Exception | None) -> None:
+    """Only an unreachable Comexio may have rebooted; an answer with an error or odd data says nothing."""
+    coordinator = _watched_coordinator(api)
+    api.client.get_function_plan_run_states = AsyncMock(side_effect=error, return_value={})
+    api.login = AsyncMock(return_value=True)
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert coordinator.comexio_unreachable is False
+    assert coordinator._plan_run_state_fail_streak == 1  # the fetch did fail
+
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    assert coordinator._in_plan_watch_boot_grace() is False
+    assert _check_args(coordinator)[1] is True
+
+
+@pytest.mark.parametrize(
+    ("error", "next_scraped", "grace"),
+    [
+        (TimeoutError(), True, True),
+        (ComexioConnectionError("down"), True, True),
+        (TimeoutError(), False, False),
+        (ValueError("bug"), True, False),
+    ],
+    ids=["timeout, then scraped", "connection error, then scraped", "timeout, then unscraped", "other error"],
+)
+def test_full_poll_outage_starts_the_boot_grace_with_the_next_scraped_poll(
+    api: ComexioAPI, error: Exception, next_scraped: bool, grace: bool
+) -> None:
+    coordinator = _coordinator(api)
+
+    async def failing() -> dict:
+        coordinator._last_poll_scraped = False
+        coordinator._polled_plan_ids = None
+        raise error
+
+    async def answering() -> dict:
+        coordinator._last_poll_scraped = next_scraped
+        coordinator._polled_plan_ids = None
+        return {}
+
+    coordinator._async_fetch_and_audit = failing
+    poll = ComexioCoordinator._async_update_data(coordinator)
+    with pytest.raises(type(error)):
+        asyncio.run(poll)
+    assert coordinator._plan_watch_grace_until is None
+
+    coordinator._async_fetch_and_audit = answering
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    assert (coordinator._plan_watch_grace_until is not None) is grace
+    assert coordinator._in_plan_watch_boot_grace() is grace
+
+
+class _StopAfterFetch(Exception):
+    """Ends _async_fetch_parsed_config right after the config fetch."""
+
+
+@pytest.mark.parametrize("relogin_unreachable", [True, False])
+def test_a_poll_whose_relogin_got_no_reply_counts_as_an_outage(api: ComexioAPI, relogin_unreachable: bool) -> None:
+    """get_raw_config answers {} when the re-login of a lapsed session (e.g. after a reboot) gets no reply.
+
+    A last_login_error left over from an earlier login says nothing about this poll.
+    """
+    coordinator = _coordinator(api, marker_states={}, knx_states={})
+
+    async def fetch() -> dict:
+        api.config_relogin_unreachable = relogin_unreachable
+        return {}
+
+    api.get_raw_config = fetch
+    api.last_login_error = "connection"
+    api.get_live_states = AsyncMock(side_effect=_StopAfterFetch)
+    fetch_parsed = ComexioCoordinator._async_fetch_parsed_config(coordinator, {})
+    with pytest.raises(_StopAfterFetch):
+        asyncio.run(fetch_parsed)
+    assert coordinator.comexio_unreachable is relogin_unreachable
