@@ -315,6 +315,68 @@ def test_a_failed_config_fetch_drops_the_block_settings(
     assert comexio_api.block_settings is None
 
 
+def _block_page(value: str, version: str) -> RawConfig:
+    """A config page whose element 104 has in_0 = value, read on Comexio firmware version."""
+    table = {"FubBaseConfig": {"1": {"FubElementId": 104, "Name": "in_0", "Value": value}}}
+    return RawConfig(table, {"1": {"unit": version}}, {}, version)
+
+
+def _run_overlapping_fetches(comexio_api: ComexioAPI, client: MagicMock, older_outcome: RawConfig | Exception) -> None:
+    """Two config fetches overlap; the newer one finishes first, the older one only afterwards."""
+
+    async def run() -> None:
+        older_may_finish = asyncio.Event()
+
+        async def older_fetch() -> RawConfig:
+            await older_may_finish.wait()
+            if isinstance(older_outcome, Exception):
+                raise older_outcome
+            return older_outcome
+
+        async def newer_fetch() -> RawConfig:
+            return _block_page("26", "11.0.3")
+
+        fetches = iter([older_fetch, newer_fetch])
+
+        async def fetch() -> RawConfig:
+            return await next(fetches)()
+
+        client.get_raw_config = AsyncMock(side_effect=fetch)
+        older = asyncio.create_task(comexio_api.get_raw_config())
+        await asyncio.sleep(0)  # the older fetch is waiting for its page ...
+        await comexio_api.get_raw_config()  # ... while the newer one completes
+        older_may_finish.set()
+        with contextlib.suppress(aiohttp.ClientError):
+            await older
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "older_outcome",
+    [_block_page("10", "11.0.2"), ComexioDataError("an error page"), _connection_error()],
+    ids=["older-page", "older-scrape-error", "older-transport-error"],
+)
+def test_an_older_config_fetch_finishing_last_keeps_the_newer_tables(
+    comexio_api: ComexioAPI, client: MagicMock, older_outcome: RawConfig | Exception
+) -> None:
+    """(bw): an older fetch finishing after a newer one must not put its page back or drop the newer table."""
+    _run_overlapping_fetches(comexio_api, client, older_outcome)
+
+    assert comexio_api.block_settings == {"104": {"in_0": "26"}}
+    assert (comexio_api.io_types, comexio_api.comexio_version) == ({"1": {"unit": "11.0.3"}}, "11.0.3")
+
+
+def test_the_next_config_fetch_after_an_overlap_takes_its_page_again(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    _run_overlapping_fetches(comexio_api, client, _block_page("10", "11.0.2"))
+
+    client.get_raw_config = AsyncMock(return_value=_block_page("30", "11.0.4"))
+    asyncio.run(comexio_api.get_raw_config())
+    assert (comexio_api.block_settings, comexio_api.comexio_version) == ({"104": {"in_0": "30"}}, "11.0.4")
+
+
 @pytest.mark.parametrize(
     ("answer", "saved"), [({"saved": 1}, True), ({"saved": "1"}, True), ({"saved": 0}, False), ({}, False)]
 )

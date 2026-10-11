@@ -18,6 +18,7 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     CreatedFunctionPlan,
+    RawConfig,
     config as comexio_config,
     webio as comexio_webio,
 )
@@ -563,13 +564,19 @@ class ComexioAPI:
         # Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
         self.comexio_version: str | None = None
         # Block settings of every plan element ($FubBaseConfig, see function_plan_block_settings)
-        # from the last config fetch; None when that fetch failed or did not carry a readable
+        # from the newest config fetch; None when that fetch failed or did not carry a readable
         # table, so a backup then stores none rather than an ever older copy.
         self.block_settings: BlockSettings | None = None
         # Block settings saves Comexio confirmed so far — a config fetch during which one completed
         # may carry the table from before it and must not overwrite the cache the save updated.
         # A refused or failed save changed nothing on Comexio, so it does not count.
         self._block_settings_saves_confirmed: int = 0
+        # Config fetches started so far, and the generation of the newest one whose outcome was
+        # applied. Two overlapping fetches (a poll and a service's own fetch) can finish out of
+        # order — the older one must not put its page's block settings, io_types or firmware
+        # version back over the newer one's, nor drop the newer table on its own failure.
+        self._config_fetches_started: int = 0
+        self._config_fetch_applied: int = 0
         # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
         # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
         self.reference_check: ReferenceCheck | None = None
@@ -868,6 +875,8 @@ class ComexioAPI:
         """
         run_state_mark = self._run_state_mark
         saves_before = self._block_settings_saves_confirmed
+        self._config_fetches_started += 1
+        generation = self._config_fetches_started
         self.config_relogin_unreachable = False
         try:
             try:
@@ -877,16 +886,38 @@ class ComexioAPI:
                 if not await self._full_login():
                     _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
                     self.config_relogin_unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
-                    self.block_settings = None
+                    self._drop_block_settings(generation)
                     return {}
                 raw = await self.client.get_raw_config()
         except ComexioConnectionError as err:
-            self.block_settings = None
+            self._drop_block_settings(generation)
             _raise_transport_error(err)
         except ComexioError as err:
             _LOGGER.error("Failed to fetch the Comexio configuration: %s", err)
-            self.block_settings = None
+            self._drop_block_settings(generation)
             return {}
+        if self._claim_config_fetch(generation):
+            self._apply_config_page(raw, saves_before)
+        else:
+            _LOGGER.debug("Config fetch finished after a newer one — keeping the newer page's tables")
+        if isinstance(fubs := raw.variables.get("Fubs"), dict):
+            self._fetch_marks.append((fubs, run_state_mark))
+        return raw.variables
+
+    def _claim_config_fetch(self, generation: int) -> bool:
+        """Whether this fetch's outcome may be applied: no fetch started after it was applied yet."""
+        if generation <= self._config_fetch_applied:
+            return False
+        self._config_fetch_applied = generation
+        return True
+
+    def _drop_block_settings(self, generation: int) -> None:
+        """A failed fetch drops the block settings — unless a newer fetch already applied its own."""
+        if self._claim_config_fetch(generation):
+            self.block_settings = None
+
+    def _apply_config_page(self, raw: RawConfig, saves_before: int) -> None:
+        """Take io_types, comexio_version and the block settings from a fetched config page."""
         self.io_types = raw.io_types
         self.io_input_types = raw.io_input_types
         if raw.comexio_version:
@@ -898,15 +929,10 @@ class ComexioAPI:
             # overlapping save brings the whole table up to date. A save still running now
             # applies its values to the table taken here once Comexio confirms it.
             _LOGGER.debug("Block settings: config fetch overlapped a save — keeping the cached table")
-        else:
-            if block_settings is None and self.block_settings is not None:
-                _LOGGER.warning(
-                    "Comexio's config page no longer carries $FubBaseConfig — block settings are not backed up"
-                )
-            self.block_settings = block_settings
-        if isinstance(fubs := raw.variables.get("Fubs"), dict):
-            self._fetch_marks.append((fubs, run_state_mark))
-        return raw.variables
+            return
+        if block_settings is None and self.block_settings is not None:
+            _LOGGER.warning("Comexio's config page no longer carries $FubBaseConfig — block settings are not backed up")
+        self.block_settings = block_settings
 
     async def get_knx_dpt_catalog(self) -> dict[str, Any]:
         """Fetch $KnxPoints/$KnxDevices/$KnxDpt from the KNX admin page.
