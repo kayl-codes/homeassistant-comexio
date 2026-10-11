@@ -1939,10 +1939,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not names:
             if previous:
                 _LOGGER.info("[%s] Function Plan bulk load leaves no listed plan out anymore", self.server_id)
-            if previous or not omitted:
-                # Also with nothing reported before once no plan is left out: a reload since the
-                # notification started the count afresh. A plan still left out keeps it until its count is back.
-                persistent_notification.async_dismiss(self.hass, notification_id)
+            # Also with nothing reported before: a reload since the notification started the counts afresh,
+            # so it may name a plan that loads again. A plan still left out is named again once its count is back.
+            persistent_notification.async_dismiss(self.hass, notification_id)
             return
         if names == previous:
             return
@@ -2220,16 +2219,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         or fetched one by one, and a bulk load can leave a plan out (see _track_omitted_plans). Reading
         such a snapshot as every plan drops the unnamed markers wired only in the missing plans from the
         entities (#155). A seeded entry counts as missing: wiring written since is not in it. Without a
-        plan list from the poll, the bulk load's snapshot counts as complete.
+        plan list from the poll nothing is complete: the bulk load asks only for the plans api.fub_data
+        holds by then, i.e. those HA created or looked up.
         """
         live = self.live_plan_list()
-        if live == {}:
+        if live is None:
+            return False
+        if not live:
             return True
         plans = self.function_plan_plans
-        if not (self._function_plan_snapshot_from_bulk and plans):
-            return False
-        return live is None or all(
-            fid in plans and not plans[fid].get(_SEEDED_EMPTY_PLAN_MARKER) for fid in function_plan_ids(live)
+        return (
+            self._function_plan_snapshot_from_bulk
+            and bool(plans)
+            and all(fid in plans and not plans[fid].get(_SEEDED_EMPTY_PLAN_MARKER) for fid in function_plan_ids(live))
         )
 
     def _referenced_marker_ids(self) -> set[str] | None:

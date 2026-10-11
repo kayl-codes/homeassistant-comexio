@@ -736,7 +736,8 @@ def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
 
 def function_plan_ids(fub_data: Mapping[str, Any]) -> set[int]:
     """Plan ids in a $Fubs listing (api.fub_data), skipping keys that are no plain number."""
-    return {int(fid) for fid in fub_data if str(fid).isdigit()}
+    # isascii+isdecimal, not isdigit: "²".isdigit() is True but int("²") raises.
+    return {int(fid) for fid in fub_data if str(fid).isascii() and str(fid).isdecimal()}
 
 
 def watchdog_user_plan_pick(fub_id: int, name: str) -> str:

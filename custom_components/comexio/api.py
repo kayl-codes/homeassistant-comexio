@@ -4618,10 +4618,13 @@ class ComexioAPI:
         return 1, warnings
 
     def function_plan_name(self, fub_id: int) -> str:
-        """Display name of a Function Plan for logging/reporting; falls back to the id."""
-        return next(
-            (fd.get("Name", str(fub_id)) for fid, fd in self._fub_data.items() if int(fid) == fub_id), str(fub_id)
-        )
+        """Display name of a Function Plan for logging/reporting; falls back to the id.
+
+        Tolerates a malformed $Fubs entry (key no plain number, metadata no dict): callers run inside
+        the backup cycle, which a name lookup must not abort.
+        """
+        meta = next((fd for fid, fd in self._fub_data.items() if fid in (fub_id, str(fub_id))), None)
+        return str((meta.get("Name") if isinstance(meta, dict) else None) or fub_id)
 
     @staticmethod
     def _find_source_element_id(elements: dict[str, Any], source_id: int, ref_type: int = 2) -> str | None:

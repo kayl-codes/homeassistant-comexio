@@ -159,7 +159,7 @@ def test_out_of_band_lookup_after_a_poll_takes_the_fresh_state(api: ComexioAPI) 
 
 
 def test_plan_ids_and_unique_id() -> None:
-    assert function_plan_ids({"19": {}, "43": {}, "x": {}}) == {19, 43}
+    assert function_plan_ids({"19": {}, "43": {}, "x": {}, "²": {}}) == {19, 43}
     assert function_plan_run_state_unique_id("IOSRV1", 19) == "comexio_iosrv1_fub19"
 
 

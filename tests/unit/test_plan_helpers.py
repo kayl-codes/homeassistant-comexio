@@ -166,3 +166,23 @@ def test_resolve_or_create_element(
 
     assert resolved == result
     assert add_element.await_count == (0 if existing is not None else 1)
+
+
+@pytest.mark.parametrize(
+    ("fub_data", "name"),
+    [
+        ({"8": {"Name": "Pumps"}}, "Pumps"),
+        ({8: {"Name": "Pumps"}}, "Pumps"),
+        ({"x": {"Name": "Odd"}, "²": {"Name": "Odd"}, "8": {"Name": "Pumps"}}, "Pumps"),
+        ({"8": "no dict"}, "8"),
+        ({"8": {}}, "8"),
+        ({"8": {"Name": None}}, "8"),
+        ({}, "8"),
+    ],
+    ids=["named", "int-key", "key-no-number", "metadata-no-dict", "unnamed", "name-none", "unlisted"],
+)
+def test_a_malformed_plan_list_falls_back_to_the_plan_id(comexio_api: ComexioAPI, fub_data: dict, name: str) -> None:
+    """The backup cycle names left-out plans with it: a malformed $Fubs entry must not raise."""
+    comexio_api._fub_data = fub_data
+
+    assert comexio_api.function_plan_name(8) == name

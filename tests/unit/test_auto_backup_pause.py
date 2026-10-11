@@ -326,9 +326,8 @@ def test_a_plan_the_bulk_load_keeps_leaving_out_is_reported_once(caplog: pytest.
         assert "'Broken' (8)" in create.call_args.args[1]
         assert "'Pumps'" not in create.call_args.args[1]
         # The working load is no outage: plan 7 is still backed up, the fail streak stays at 0.
-        assert (
-            coordinator.function_plan_backup.async_auto_backup.await_count == FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD + 1
-        )
+        backed_up = [c.args[0] for c in coordinator.function_plan_backup.async_auto_backup.await_args_list]
+        assert backed_up == [PLANS] * (FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD + 1)
         assert coordinator._bulk_load_fail_streak == 0
 
         dismiss.reset_mock()
@@ -434,16 +433,21 @@ def test_a_working_load_after_a_reload_dismisses_a_left_out_notification(caplog:
     assert "leaves no listed plan out anymore" not in caplog.text  # nothing was reported in this run
 
 
-def test_a_plan_still_left_out_after_a_reload_keeps_the_notification() -> None:
-    """After a reload the count starts afresh: the notification stays while the plan is still left out."""
+def test_a_plan_still_left_out_after_a_reload_is_named_again_once_its_count_is_back() -> None:
+    """After a reload the counts start afresh, so the notification may name a plan that loads again: it goes."""
     coordinator = _omitting_coordinator()  # fresh after the reload: nothing reported
     with (
         patch.object(coordinator_module.persistent_notification, "async_create") as create,
         patch.object(coordinator_module.persistent_notification, "async_dismiss") as dismiss,
     ):
         _cycle(coordinator)
-    assert (coordinator.hass, OMITTED_NOTIFICATION_ID) not in [c.args for c in dismiss.call_args_list]
-    assert not _omitted_creates(create)  # nor renewed before the count is back
+        dismiss.assert_any_call(coordinator.hass, OMITTED_NOTIFICATION_ID)
+        assert not _omitted_creates(create)  # not before the count is back
+
+        for _ in range(FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD - 1):
+            _cycle(coordinator)
+    assert len(_omitted_creates(create)) == 1
+    assert "'Broken' (8)" in create.call_args.args[1]
 
 
 def test_a_left_out_plan_renamed_meanwhile_updates_the_notification() -> None:

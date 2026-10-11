@@ -149,7 +149,8 @@ def _snapshot_coordinator(live_plans: dict | None) -> ComexioCoordinator:
     coordinator._function_plan_snapshot_from_bulk = True  # the last backup cycle loaded it
     coordinator._last_bulk_snapshot_fub_ids = frozenset(DELETED_PLAN)
     coordinator._last_referenced_marker_ids = {"253"}
-    coordinator._last_referenced_markers_from_snapshot = True
+    # Before the first plan list no snapshot is complete, so the last poll read the stored backups' markers.
+    coordinator._last_referenced_markers_from_snapshot = live_plans is not None
     coordinator._lp_missing_recheck_pending = False
     coordinator._async_audit_orphaned_backups = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
@@ -656,11 +657,11 @@ def test_a_plan_created_after_the_bulk_load_makes_the_snapshot_incomplete() -> N
     assert coordinator._referenced_marker_ids() is None
 
 
-def test_a_bulk_snapshot_counts_as_complete_before_the_first_poll() -> None:
-    """Without a plan list there is nothing it could lack: the bulk load's snapshot is all there is."""
+def test_a_bulk_snapshot_before_the_first_poll_is_incomplete() -> None:
+    """Without a plan list the bulk load asked only for the plans HA created or looked up: no full snapshot."""
     coordinator = _snapshot_coordinator(None)
 
-    assert coordinator._referenced_marker_ids() == {"253"}
+    assert coordinator._referenced_marker_ids() is None
 
 
 def test_a_snapshot_with_a_plan_the_poll_no_longer_lists_is_complete() -> None:
