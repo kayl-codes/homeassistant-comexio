@@ -938,8 +938,13 @@ def test_an_outage_during_the_grace_starts_it_again(api: ComexioAPI) -> None:
     assert coordinator.comexio_unreachable is True
 
     api.client.get_function_plan_run_states = AsyncMock(return_value={19: False, 43: True})
+    read_started = time.monotonic()
     asyncio.run(coordinator._async_refresh_plan_run_states())
-    assert coordinator._plan_watch_grace_until > time.monotonic() + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC - 60
+    read_done = time.monotonic()
+    # The full grace again, counted from the read that answered.
+    grace_until = coordinator._plan_watch_grace_until
+    assert read_started + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC <= grace_until
+    assert grace_until <= read_done + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC
 
 
 @pytest.mark.parametrize(("login_error", "outage"), [("connection", True), ("rejected", False)])

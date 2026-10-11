@@ -310,17 +310,20 @@ async def test_setup_after_an_unreachable_attempt_starts_the_watchdog_boot_grace
     await _setup(hass, mock_config_entry)
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
     assert mock_config_entry.entry_id in hass.data[SETUP_UNREACHABLE_ENTRIES]
-    failed_attempt_done = time.monotonic()
 
     api_returns["login"] = True
+    reload_started = time.monotonic()
     await hass.config_entries.async_reload(mock_config_entry.entry_id)
     await hass.async_block_till_done()
+    reload_done = time.monotonic()
 
     assert mock_config_entry.state is ConfigEntryState.LOADED
     coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
     assert coordinator._in_plan_watch_boot_grace() is True
-    # The grace runs from the first successful read, not from the failed attempt.
-    assert coordinator._plan_watch_grace_until >= failed_attempt_done + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC
+    # The full grace runs from the first successful read, not from the failed attempt.
+    grace_until = coordinator._plan_watch_grace_until
+    assert reload_started + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC <= grace_until
+    assert grace_until <= reload_done + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC
     assert mock_config_entry.entry_id not in hass.data[SETUP_UNREACHABLE_ENTRIES]
     # Auto-starts go through the outage-aware wrapper; repair and push starts do not.
     assert coordinator.plan_watchdog._start_plan == coordinator._async_watchdog_auto_start_plan
