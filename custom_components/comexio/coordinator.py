@@ -119,6 +119,7 @@ from .const import (
     ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
+    LOGIN_ERROR_CONNECTION,
     MARKER_READ_ONLY_SUFFIX,
     PLAN_TRANSITION_STARTING,
     RANGE_CHECK_CHECKED,
@@ -757,7 +758,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             hass,
             entry_id=entry.entry_id,
             server_id=self.server_id,
-            start_plan=self._async_watchdog_start_plan,
+            start_plan=self._async_watchdog_auto_start_plan,
             notify_targets=self._plan_watchdog_notify_targets,
         )
         # fub_id → PLAN_TRANSITION_* while HA itself starts/stops the plan (async_plan_transition).
@@ -3838,11 +3839,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
         if self.managed_plan_start_blocked:
             return False
-        in_grace = self._in_plan_watch_boot_grace()
+        in_grace = self._plan_watch_held()
         self._warn_unresolved_watch_picks()
         user_plans = self._watched_user_plan_names()
-        # In the boot grace a plan seen running still clears its verdict, but no plan is judged
-        # stopped anew or started: a booting Comexio starts its plans itself.
+        # In an outage and the boot grace after it a plan seen running still clears its verdict,
+        # but no plan is judged stopped anew or started: a booting Comexio starts its plans itself.
         stopped_changed = await self.plan_watchdog.async_check(
             {**user_plans, **self._managed_plan_names()},
             self._watchdog_grace_run_state if in_grace else self._watchdog_run_state,
@@ -3884,6 +3885,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_watch_grace_until = None
         _LOGGER.info("[%s] Function plan watchdog reports and starts stopped plans again", self.server_id)
         return False
+
+    def _plan_watch_held(self) -> bool:
+        """Whether Comexio is unreachable or the boot grace after it runs: no plan is judged stopped or started."""
+        return self._comexio_unreachable or self._in_plan_watch_boot_grace()
 
     def _watchdog_grace_run_state(self, fub_id: int) -> bool | None:
         """_watchdog_run_state in the boot grace: only "running" counts, anything else keeps the last verdict."""
@@ -3930,6 +3935,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
             return await self.api.function_plan_run_fup_outcome(fub_id)
+
+    async def _async_watchdog_auto_start_plan(self, fub_id: int) -> bool | None:
+        """_async_watchdog_start_plan for the auto-start, which stays off in an outage and the boot grace after it.
+
+        Re-checked per start: an outage noted while an earlier start awaited Comexio stops the later
+        ones of the same check (None: deferred). A start from a repair or push is the user's own call.
+        """
+        if self._plan_watch_held():
+            return None
+        return await self._async_watchdog_start_plan(fub_id)
 
     async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool:
         """Start a stopped managed plan from its repair or push; False if Comexio did not confirm it."""
@@ -4050,6 +4065,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         if self._plan_run_state_relogin_refused or await self.api.login():
             return
+        if self.api.last_login_error == LOGIN_ERROR_CONNECTION:
+            # The fetch's own error was the lapsed session, but the re-login got no reply: an outage too.
+            self.note_comexio_unreachable()
         if self.api.last_login_error == "rejected":
             self._plan_run_state_relogin_refused = True
             _LOGGER.warning(
