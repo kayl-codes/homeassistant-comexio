@@ -872,6 +872,12 @@ class ComexioAPI:
         server answered but the scrape failed (HTTP error status, failed re-login, no parseable
         $FubModules) — callers check for FubModules. A transport failure raises
         aiohttp.ClientError / TimeoutError.
+
+        Overlapping fetches: only a fetch started after the last applied one updates io_types,
+        comexio_version and block_settings; an older one finishing last still returns its own
+        page. Its caller then pairs that page with the newer fetch's io_types / comexio_version —
+        accepted, as those only change with a Comexio firmware update, whose reboot fails the
+        older fetch instead of answering it.
         """
         run_state_mark = self._run_state_mark
         saves_before = self._block_settings_saves_confirmed
@@ -899,6 +905,7 @@ class ComexioAPI:
         if self._claim_config_fetch(generation):
             self._apply_config_page(raw, saves_before)
         else:
+            # Still returns this page (see the docstring) and marks its $Fubs below.
             _LOGGER.debug("Config fetch finished after a newer one — keeping the newer page's tables")
         if isinstance(fubs := raw.variables.get("Fubs"), dict):
             self._fetch_marks.append((fubs, run_state_mark))
@@ -912,7 +919,11 @@ class ComexioAPI:
         return True
 
     def _drop_block_settings(self, generation: int) -> None:
-        """A failed fetch drops the block settings — unless a newer fetch already applied its own."""
+        """A failed fetch drops the block settings — unless a newer fetch already applied its own.
+
+        The newest outcome wins also as a failure: an older fetch finishing afterwards with a valid
+        page is discarded entirely (io_types and comexio_version too); the next poll catches up.
+        """
         if self._claim_config_fetch(generation):
             self.block_settings = None
 
