@@ -1,6 +1,7 @@
 """Setup, setup failures and unload of a config entry."""
 
 import asyncio
+import time
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -13,7 +14,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import DOMAIN, SETUP_UNREACHABLE_ENTRIES
+from custom_components.comexio.const import DOMAIN, FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC, SETUP_UNREACHABLE_ENTRIES
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 from .conftest import SERVER_ID
@@ -309,6 +310,7 @@ async def test_setup_after_an_unreachable_attempt_starts_the_watchdog_boot_grace
     await _setup(hass, mock_config_entry)
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
     assert mock_config_entry.entry_id in hass.data[SETUP_UNREACHABLE_ENTRIES]
+    failed_attempt_done = time.monotonic()
 
     api_returns["login"] = True
     await hass.config_entries.async_reload(mock_config_entry.entry_id)
@@ -317,7 +319,11 @@ async def test_setup_after_an_unreachable_attempt_starts_the_watchdog_boot_grace
     assert mock_config_entry.state is ConfigEntryState.LOADED
     coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
     assert coordinator._in_plan_watch_boot_grace() is True
+    # The grace runs from the first successful read, not from the failed attempt.
+    assert coordinator._plan_watch_grace_until >= failed_attempt_done + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC
     assert mock_config_entry.entry_id not in hass.data[SETUP_UNREACHABLE_ENTRIES]
+    # Auto-starts go through the outage-aware wrapper; repair and push starts do not.
+    assert coordinator.plan_watchdog._start_plan == coordinator._async_watchdog_auto_start_plan
 
 
 async def test_a_plain_setup_starts_no_watchdog_boot_grace(

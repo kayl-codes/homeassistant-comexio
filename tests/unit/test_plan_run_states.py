@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioResponseError
 import pytest
 
-from custom_components.comexio import coordinator as coordinator_module, sensor as sensor_module
+from custom_components.comexio import coordinator as coordinator_module, plan_watchdog, sensor as sensor_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
@@ -28,7 +28,7 @@ from custom_components.comexio.const import (
     plan_watch_signal,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
-from custom_components.comexio.plan_watchdog import start_action_id
+from custom_components.comexio.plan_watchdog import ManagedPlanWatchdog, start_action_id
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
 
@@ -989,6 +989,33 @@ def test_a_queued_auto_start_is_not_sent_in_an_outage(
     coordinator._async_refresh_plan_run_states = AsyncMock()
     assert asyncio.run(coordinator.async_start_managed_plan(19)) is True
     api.function_plan_run_fup_outcome.assert_awaited_once_with(19)
+
+
+def test_an_outage_during_an_auto_start_defers_the_queued_ones(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real watchdog check: once the first start notes an outage, the later plans are not started."""
+    monkeypatch.setattr(plan_watchdog, "ir", MagicMock())
+    monkeypatch.setattr(plan_watchdog, "persistent_notification", MagicMock())
+    coordinator = _coordinator(api)
+    sent: list[int] = []
+
+    async def no_reply(fub_id: int) -> None:
+        sent.append(fub_id)
+        coordinator.note_comexio_unreachable()
+
+    api.function_plan_run_fup_outcome = no_reply
+    hass = MagicMock()
+    hass.config.language = "en"
+    watchdog = ManagedPlanWatchdog(
+        hass,
+        entry_id="e1",
+        server_id="iosrv1",
+        start_plan=coordinator._async_watchdog_auto_start_plan,
+        notify_targets=list,
+    )
+    asyncio.run(watchdog.async_check({19: "Test1", 43: "Test2"}, lambda _fub_id: False))
+    assert sent == [19]
 
 
 @pytest.mark.parametrize("accepted", [True, False])
