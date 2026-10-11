@@ -463,19 +463,70 @@ def test_the_repair_report_follows_a_plan_the_load_misses_and_brings_back(
     with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
         monitor.check_plans({7: CLEAN_PLAN})  # the bulk load missed plan 8
         assert marked in _report_body(issue_registry)
-        assert not caplog.records  # a plan the load missed: the same findings, nothing new to log
         monitor.check_plans({7: CLEAN_PLAN, 8: plan_8})  # back, checked again
         assert "8/4: 5 998\n" in _report_body(issue_registry)
         assert marked not in _report_body(issue_registry)
 
     assert monitor._unknown_refs == [CARRIED_REF]
-    # (bv) The log takes back its "carried over" once — no repeated WARNING of the same findings.
+    assert not caplog.records  # the log never called plan 8 carried over: nothing to take back
+
+
+PLAN_7_FINDING = {"elements": {"3": {"reference": {"type": 5, "ref_id": 999}}}, "connections": {}}
+PLAN_8_FINDING = {"elements": {"4": {"reference": {"type": 5, "ref_id": 998}}}, "connections": {}}
+CHECKED_AGAIN = "not checked before were checked again"
+
+
+def test_a_flapping_load_takes_back_only_what_the_log_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """(bv) Review: a plan that silently drops out and comes back was never reported — no take-back for it.
+
+    Only after a findings line actually called plan 8 carried over does its next check log one take-back.
+    """
+    monitor = _monitor(None, listed={"7": {}, "8": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+    monitor.check_plans({7: CLEAN_PLAN, 8: PLAN_8_FINDING})
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        for _ in range(3):
+            monitor.check_plans({7: CLEAN_PLAN})  # plan 8 missed: carried over, unchanged — not logged
+            monitor.check_plans({7: CLEAN_PLAN, 8: PLAN_8_FINDING})
+        assert not caplog.records
+
+        monitor.check_plans({7: PLAN_7_FINDING})  # new finding while plan 8 is out: logged as carried over
+        monitor.check_plans({7: PLAN_7_FINDING, 8: PLAN_8_FINDING})  # plan 8 back: taken back once
+        for _ in range(2):
+            monitor.check_plans({7: PLAN_7_FINDING})
+            monitor.check_plans({7: PLAN_7_FINDING, 8: PLAN_8_FINDING})
+
     assert [(record.levelno, record.getMessage()) for record in caplog.records] == [
         (
+            logging.WARNING,
+            "[srv] Function plans: 2 element(s) reference a block type unknown to Comexio 11.1.4 "
+            "(shown as 'Configuration fault' in the editor): 7/3: 5 999, "
+            f"8/4: 5 998{reference_monitor.CARRIED_OVER_SUFFIX}; 1 listed plan(s) not loaded and not checked",
+        ),
+        (
             logging.INFO,
-            "[srv] Function plans: 1 plan(s) not checked before were checked again, findings unchanged "
-            "(confirmed: 8/4: 5 998)",
-        )
+            f"[srv] Function plans: 1 plan(s) {CHECKED_AGAIN}, findings unchanged (confirmed: 8/4: 5 998)",
+        ),
+    ]
+
+
+def test_carried_over_findings_checked_again_are_confirmed_once(caplog: pytest.LogCaptureFixture) -> None:
+    """(bv) Two plans checked again are confirmed; a carried-over finding still not re-checked is not."""
+    monitor = _monitor(None, listed={"7": {}, "8": {}, "9": {}, "10": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+    monitor._unknown_refs = [CARRIED_REF, ("10", "5", "997")]
+    monitor.check_plans({7: PLAN_7_FINDING})  # logs 8/4 and 10/5 as carried over, 8, 9, 10 as not loaded
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: PLAN_7_FINDING, 8: PLAN_8_FINDING, 9: CLEAN_PLAN})
+        monitor.check_plans({7: PLAN_7_FINDING, 8: PLAN_8_FINDING, 9: CLEAN_PLAN})  # nothing checked anew
+
+    assert [record.getMessage() for record in caplog.records] == [
+        f"[srv] Function plans: 2 plan(s) {CHECKED_AGAIN}, findings unchanged (confirmed: 8/4: 5 998); "
+        "1 listed plan(s) not loaded and not checked"
     ]
 
 
@@ -491,22 +542,39 @@ def test_a_clean_plan_checked_again_takes_back_its_not_checked_note(caplog: pyte
         monitor.check_plans({7: CLEAN_PLAN, 8: CLEAN_PLAN})  # nothing checked anew: no second line
 
     assert [record.getMessage() for record in caplog.records] == [
-        "[srv] Function plans: 1 plan(s) not checked before were checked again, findings unchanged; "
+        f"[srv] Function plans: 1 plan(s) {CHECKED_AGAIN}, findings unchanged; "
         "1 listed plan(s) not loaded and not checked"
     ]
 
 
-def test_a_plan_the_load_misses_is_not_logged_as_checked_again(caplog: pytest.LogCaptureFixture) -> None:
-    """Only plans actually judged this poll are taken back — a plan dropping out of the load logs nothing."""
+def test_changed_findings_of_a_plan_checked_again_log_only_the_findings(caplog: pytest.LogCaptureFixture) -> None:
+    """(bv) Review: the findings line already covers the plan checked again — no extra take-back line."""
     monitor = _monitor(None, listed={"7": {}, "8": {}})
     monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
-    monitor.check_plans({7: CLEAN_PLAN, 8: CLEAN_PLAN})
+    monitor.check_plans({7: CLEAN_PLAN})  # logs plan 8 as not loaded and not checked
 
     caplog.clear()
     with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
-        monitor.check_plans({7: CLEAN_PLAN})
+        monitor.check_plans({7: CLEAN_PLAN, 8: PLAN_8_FINDING})
 
-    assert not caplog.records
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert CHECKED_AGAIN not in caplog.records[0].getMessage()
+
+
+def test_a_catalog_without_loaded_plans_still_counts_as_checked(caplog: pytest.LogCaptureFixture) -> None:
+    """(bv) checked is not loaded_ids: with a catalog but nothing loaded, plans are "not loaded", not uncatalogued."""
+    monitor = _monitor(None, listed={"8": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+    monitor._unknown_refs = [CARRIED_REF, ("9", "5", "997")]  # plan 9 deleted: its finding goes
+
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({})
+
+    assert (
+        caplog.records[-1]
+        .getMessage()
+        .endswith(f"8/4: 5 998{reference_monitor.CARRIED_OVER_SUFFIX}; 1 listed plan(s) not loaded and not checked")
+    )
 
 
 def test_a_carried_over_finding_goes_when_the_poll_no_longer_lists_its_plan(
@@ -618,20 +686,59 @@ def test_issue_report_without_a_check() -> None:
     assert "Reference check did not run" in body
 
 
-@pytest.mark.parametrize("reason", [REASON_CHECK_FAILED, REASON_NO_LIVE_CATALOG])
-def test_issue_report_without_a_check_names_the_version_and_the_reason(reason: str) -> None:
+@pytest.mark.parametrize(
+    ("reason", "shown"),
+    [(REASON_CHECK_FAILED, "check failed"), (REASON_NO_LIVE_CATALOG, REASON_NO_LIVE_CATALOG)],
+    ids=["failed", "no-catalog"],
+)
+def test_issue_report_without_a_check_names_the_version_and_the_reason(reason: str, shown: str) -> None:
     """(bv) No check carries a version, but the API knows it; the report also says why the check did not run."""
     context = IssueContext(
         "0.11.0-rc1", "2026.9.1", ("fub_base:x (not checked)",), comexio_version="11.2.0", check_not_run=reason
     )
     _, body = build_issue_report(None, REFERENCE_REQUIRED, context)
     assert "- Comexio: 11.2.0" in body
-    assert f"Reference check did not run ({reason}) — see the Home Assistant log." in body
+    # Review: no "see log" twice — the line ends with its own pointer to the log.
+    assert f"Reference check did not run ({shown}) — see the Home Assistant log." in body.split("\n")
+
+
+def test_issue_report_without_a_check_or_reason_keeps_the_plain_line() -> None:
+    """(bv) Without a known reason the line stays as before — no empty parentheses."""
+    _, body = build_issue_report(None, REFERENCE_REQUIRED, IssueContext(None, None, ("fub_base:x",)))
+    assert "Reference check did not run — see the Home Assistant log." in body.split("\n")
+    assert "(" not in body
+    assert "- Comexio: ?" in body.split("\n")
+
+
+def test_the_version_of_the_check_wins_over_the_api_version(raw: dict[str, Any]) -> None:
+    """(bv) The check's own version is what the findings refer to; the API's is only the fallback."""
+    references = _references(raw)
+    del raw["FubModules"]["5"][str(FLANKE_ID)]
+    check = reconcile(references, raw, "11.1.4")
+    context = IssueContext(None, None, ("fub_base:x",), comexio_version="11.2.0")
+    _, body = build_issue_report(check, REFERENCE_REQUIRED, context)
+    assert "- Comexio: 11.1.4" in body.split("\n")
+    assert "11.2.0" not in body
+
+
+def test_the_reason_survives_a_report_refresh_from_check_plans(raw: dict[str, Any], issue_registry: MagicMock) -> None:
+    """(bv) check_plans refreshes the Repair with new plan findings — the report keeps why the check did not run."""
+    monitor = _monitor(_references(raw), listed={"7": {}})
+    monitor._hass.async_add_executor_job = AsyncMock(side_effect=OSError("disk"))
+    asyncio.run(monitor.async_check(raw))
+    monitor._unknown_refs = [UNKNOWN_REF, CARRIED_REF]  # plan 8 is not listed any more: its finding goes
+
+    monitor.check_plans({7: CLEAN_PLAN})
+
+    assert issue_registry.async_create_issue.call_count == 2
+    assert "Reference check did not run (check failed) — see the Home Assistant log." in _report_body(
+        issue_registry
+    ).split("\n")
 
 
 @pytest.mark.parametrize(
     ("catalog_fails", "reason"),
-    [(True, REASON_CHECK_FAILED), (False, REASON_NO_LIVE_CATALOG)],
+    [(True, "check failed"), (False, REASON_NO_LIVE_CATALOG)],
     ids=["failed", "no-catalog"],
 )
 def test_the_unchecked_repair_report_names_the_version_and_the_reason(

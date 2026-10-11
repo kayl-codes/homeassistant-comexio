@@ -54,6 +54,7 @@ CARRIED_OVER_SUFFIX = " (carried over, not re-checked)"
 ISSUE_URL_MAX_CHARS = 7000
 ISSUE_LIST_LIMIT = 30
 ISSUE_TRUNCATED_LINE = "_… truncated — please attach the Home Assistant log._"
+SEE_LOG_SUFFIX = ", see log"
 
 
 class ReferenceCatalogMonitor:
@@ -79,6 +80,8 @@ class ReferenceCatalogMonitor:
         self._integration_version: str | None = None
         self._unknown_refs: list[tuple[str, str, str]] | None = None
         self._unchecked_plans: frozenset[str] = frozenset()
+        # Plans the last findings log line called "not checked"/"carried over" and not yet taken back.
+        self._logged_unchecked: frozenset[str] = frozenset()
         self._missing_catalog_polls = 0
 
     @property
@@ -264,34 +267,44 @@ class ReferenceCatalogMonitor:
         self._unknown_refs = found
         # A plan the load missed or brought back changes only the carried-over marks: the report
         # follows at once (async_check may keep the last result without rebuilding it), the findings
-        # log does not — the same findings are no change worth repeating. A plan checked again only
-        # gets one INFO line that takes back its earlier "not checked"/"carried over".
+        # log does not — the same findings are no change worth repeating. Only a plan a log line called
+        # "not checked"/"carried over" gets, once checked again, one INFO line taking that back.
         marks_changed = _carried_over(found, unchecked) != _carried_over(previous_refs, previous_unchecked)
         if self._blocked and (findings_changed or marks_changed):
             # Add the plan findings to the pre-filled report, keeping why the check didn't run.
             self._update_issue(self._blocked, self._check_not_run)
-        self._log_plan_change(found, unchecked, findings_changed, previous_unchecked & loaded_ids, bool(live_ids))
+        self._log_plan_change(found, unchecked, findings_changed, loaded_ids, checked=bool(live_ids))
 
     def _log_plan_change(
         self,
         found: list[tuple[str, str, str]],
         unchecked: set[str],
         findings_changed: bool,
-        rechecked: Collection[str],
+        loaded_ids: set[str],
         checked: bool,
     ) -> None:
-        """Log changed findings; else, after a check, take back an earlier "not checked"/"carried over" once."""
+        """Log changed findings; else take back a logged "not checked"/"carried over" once its plans are loaded.
+
+        checked is not the same as loaded_ids: with a catalog but no plan loaded, the plans are still
+        judged as "not loaded", not as "no catalog". Without a catalog loaded_ids is empty, so nothing
+        is taken back.
+        """
         if findings_changed:
             self._log_plan_findings(found, unchecked, checked=checked)
-        elif checked:
-            self._log_rechecked_plans(found, rechecked, unchecked)
+        else:
+            self._log_rechecked_plans(found, self._logged_unchecked & loaded_ids, unchecked)
 
     def _log_rechecked_plans(
-        self, found: list[tuple[str, str, str]], rechecked: Collection[str], unchecked: set[str]
+        self, found: list[tuple[str, str, str]], rechecked: frozenset[str], unchecked: set[str]
     ) -> None:
-        """Take back an earlier "not checked"/"carried over" once those plans are checked again, findings unchanged."""
+        """Take back a logged "not checked"/"carried over" once those plans are checked again, findings unchanged.
+
+        Only plans a log line called unchecked: a plan that silently dropped out of a load and came
+        back was never reported, so there is nothing to take back (a flapping bulk load stays quiet).
+        """
         if not rechecked:
             return
+        self._logged_unchecked -= rechecked
         confirmed = [format_plan_ref(ref) for ref in found if ref[0] in rechecked][:UNKNOWN_REFS_LOG_LIMIT]
         _LOGGER.info(
             "[%s] Function plans: %d plan(s) not checked before were checked again, findings unchanged%s%s",
@@ -303,6 +316,7 @@ class ReferenceCatalogMonitor:
 
     def _log_plan_findings(self, found: list[tuple[str, str, str]], unchecked: set[str], checked: bool) -> None:
         """Log the changed findings; never claim a check for plans that weren't judged this time."""
+        self._logged_unchecked = _reported_unchecked(found, unchecked, checked)
         if not found and unchecked and not checked:
             _LOGGER.info(
                 "[%s] Function plans: findings of deleted plans dropped; the remaining plans are not checked "
@@ -352,6 +366,18 @@ class IssueContext:
 
 def _not_loaded_note(unchecked: Collection[str], checked: bool) -> str:
     return f"; {len(unchecked)} listed plan(s) not loaded and not checked" if checked and unchecked else ""
+
+
+def _reported_unchecked(found: list[tuple[str, str, str]], unchecked: Collection[str], checked: bool) -> frozenset[str]:
+    """The plans a findings log line (_log_plan_findings) names as not checked.
+
+    After a check, or without findings, the line covers every unchecked plan ("not loaded and not
+    checked" / "remaining plans are not checked"); without a catalog only the carried-over findings
+    are marked.
+    """
+    if checked or not found:
+        return frozenset(unchecked)
+    return frozenset(ref[0] for ref in found if ref[0] in unchecked)
 
 
 def _carried_over(refs: Iterable[tuple[str, str, str]], unchecked: Collection[str]) -> set[tuple[str, str, str]]:
@@ -420,7 +446,8 @@ def build_issue_report(
         *[f"- `{label}`" for label in context.blocked],
     ]
     if check is None:
-        reason = f" ({context.check_not_run})" if context.check_not_run else ""
+        # The reason may say "see log" itself (REASON_CHECK_FAILED); the line ends with that already.
+        reason = f" ({context.check_not_run.removesuffix(SEE_LOG_SUFFIX)})" if context.check_not_run else ""
         lines += ["", f"Reference check did not run{reason} — see the Home Assistant log."]
     else:
         lines += [
