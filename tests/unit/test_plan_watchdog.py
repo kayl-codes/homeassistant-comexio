@@ -408,3 +408,14 @@ def test_deleted_watched_plan_is_not_logged_as_running_again(ir: MagicMock, capl
 )
 def test_parse_start_action(action: Any, expected: int | None) -> None:
     assert parse_start_action(SERVER_ID, action) == expected
+
+
+def test_without_auto_start_a_stopped_plan_only_keeps_its_repair(ir: MagicMock) -> None:
+    """The coordinator's boot grace: nothing is started, whatever the switches say."""
+    watchdog, started = _watchdog([True])
+    watchdog.auto_restart = True
+    watchdog.stopped = {34: "HA - Marker 1"}
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=None, p42=None), auto_start=False))
+    assert started == []
+    assert watchdog.stopped == {34: "HA - Marker 1"}  # unknown keeps the verdict, no new one for 42
+    assert set(ir.async_get.return_value.issues) == {(DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))}

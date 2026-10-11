@@ -12,7 +12,7 @@ import socket
 import time
 from typing import Any
 
-from aiocomexio import ComexioAuthenticationError, ComexioDataError, ComexioError
+from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -107,6 +107,7 @@ from .const import (
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
     FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC,
     ICON_ADD,
     ICON_DELETE,
@@ -178,6 +179,9 @@ from .plan_watchdog import ManagedPlanWatchdog, parse_start_action
 from .reference_monitor import ReferenceCatalogMonitor
 
 _LOGGER = logging.getLogger(__name__)
+
+# Errors that mean Comexio could not be reached at all (not: answered with an error or odd data).
+UNREACHABLE_ERRORS = (ComexioConnectionError, aiohttp.ClientError, TimeoutError)
 
 # Matches the "(ID <n>)" suffix format.format_plan_label() appends to a plan select-option
 # label, letting get_active_function_plan_fub_id() resolve the fub_id directly instead of
@@ -760,6 +764,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_transitions: dict[int, str] = {}
         # Watchdog picks Comexio no longer has under their name, already warned about.
         self._unresolved_watch_picks: frozenset[tuple[int, str]] = frozenset()
+        # Set when Comexio could not be reached; the first successful read after it starts the
+        # watchdog's boot grace (time.monotonic() deadline, FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC).
+        self._comexio_unreachable = False
+        self._plan_watch_grace_until: float | None = None
         # Two counters: the fail streak tracks the run-state endpoint itself (logging, reset only
         # by a working fetch); the stale count tracks failures since the last fresh state (sensor
         # availability, also reset by a full poll, whose $Fubs brings every Active flag).
@@ -811,8 +819,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._full_poll_running = True
         try:
             data = await self._async_fetch_and_audit()
+        except UNREACHABLE_ERRORS:
+            self.note_comexio_unreachable()
+            raise
         finally:
             self._full_poll_running = False
+        if self._last_poll_scraped:
+            self._note_comexio_reachable()
         # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
         # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
         if self._polled_plan_ids is not None:
@@ -955,6 +968,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         run_state_mark = self.api.run_state_mark()
         raw_config = await self.api.get_raw_config()
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
+        if self.api.config_relogin_unreachable:
+            # The re-login after a lapsed session (e.g. a reboot) got no reply.
+            self.note_comexio_unreachable()
         # aiocomexio decodes each page variable on its own, so $FubModules alone does not
         # prove $Fubs was read; an empty plan list still decodes to a dict.
         if isinstance(fubs := raw_config.get("Fubs"), dict):
@@ -3695,6 +3711,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # the answer format changed (e.g. new firmware) — no fresh state, not a success.
                 raise ComexioDataError("no plan's run state could be read")
         except (ComexioError, aiohttp.ClientError, TimeoutError) as err:
+            if isinstance(err, UNREACHABLE_ERRORS):
+                self.note_comexio_unreachable()
             await self._async_plan_run_state_fetch_failed(err, session)
             return
         finally:
@@ -3709,6 +3727,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         self._plan_run_state_fail_streak = 0
         self._plan_run_state_stale_count = 0
+        self._note_comexio_reachable()
         # A dropped answer counts no misses either: its omissions may predate the plan list written meanwhile.
         state_changed = self._apply_fetched_run_states(states, run_state_mark, cache_epoch)
         missed_out = self.api.fub_cache_epoch() == cache_epoch and self._count_missed_plan_run_states(fub_ids, states)
@@ -3819,14 +3838,56 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
         if self.managed_plan_start_blocked:
             return False
+        in_grace = self._in_plan_watch_boot_grace()
         self._warn_unresolved_watch_picks()
         user_plans = self._watched_user_plan_names()
+        # In the boot grace a plan seen running still clears its verdict, but no plan is judged
+        # stopped anew or started: a booting Comexio starts its plans itself.
         stopped_changed = await self.plan_watchdog.async_check(
-            {**user_plans, **self._managed_plan_names()}, self._watchdog_run_state, user_plans.keys()
+            {**user_plans, **self._managed_plan_names()},
+            self._watchdog_grace_run_state if in_grace else self._watchdog_run_state,
+            user_plans.keys(),
+            auto_start=not in_grace,
         )
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
         return stopped_changed
+
+    def note_comexio_unreachable(self) -> None:
+        """Comexio could not be reached (or HA rebooted it): the next successful read starts the boot grace."""
+        self._comexio_unreachable = True
+
+    @property
+    def comexio_unreachable(self) -> bool:
+        """Whether Comexio could not be reached and has not answered a read since."""
+        return self._comexio_unreachable
+
+    def _note_comexio_reachable(self) -> None:
+        """A successful read; right after an outage it starts the watchdog's boot grace."""
+        if not self._comexio_unreachable:
+            return
+        self._comexio_unreachable = False
+        self._plan_watch_grace_until = time.monotonic() + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC
+        _LOGGER.info(
+            "[%s] Comexio answers again after an outage; for %s min the function plan watchdog neither reports "
+            "stopped plans nor starts them, since a rebooting Comexio starts them itself",
+            self.server_id,
+            FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC // 60,
+        )
+
+    def _in_plan_watch_boot_grace(self) -> bool:
+        """Whether the boot grace after an outage still runs (FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC); logs its end."""
+        if self._plan_watch_grace_until is None:
+            return False
+        if time.monotonic() < self._plan_watch_grace_until:
+            return True
+        self._plan_watch_grace_until = None
+        _LOGGER.info("[%s] Function plan watchdog reports and starts stopped plans again", self.server_id)
+        return False
+
+    def _watchdog_grace_run_state(self, fub_id: int) -> bool | None:
+        """_watchdog_run_state in the boot grace: only "running" counts, anything else keeps the last verdict."""
+        return True if self._watchdog_run_state(fub_id) is True else None
 
     async def async_initial_plan_watch(self) -> None:
         """First watchdog judgement right after setup, not only with the first run-state poll.
@@ -4238,6 +4299,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             if await self.api.system_emergency_reboot():
                 self._watchdog_cooldown_until = now + timedelta(seconds=EMERGENCY_REBOOT_COOLDOWN_SEC)
+                self.note_comexio_unreachable()
                 return
 
             _LOGGER.error(

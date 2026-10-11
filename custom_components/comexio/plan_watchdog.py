@@ -176,11 +176,14 @@ class ManagedPlanWatchdog:
         managed: Mapping[int, str],
         run_state: Callable[[int], bool | None],
         user_plans: Collection[int] = (),
+        *,
+        auto_start: bool = True,
     ) -> bool:
         """Judge the watched plans; True if the set of stopped plans changed.
 
         managed holds every watched plan; user_plans names the ones that are user plans, which
-        follow the user-plan auto-start switch instead of the HA-plan one.
+        follow the user-plan auto-start switch instead of the HA-plan one. auto_start=False
+        starts nothing, whatever the switches say.
         """
         if self._checking:
             return False
@@ -193,7 +196,9 @@ class ManagedPlanWatchdog:
             self._track_running(managed, run_state)
             stopped = next_stopped_plans(managed, run_state, previous)
             self._log_transitions(previous, stopped, managed)
-            to_start = {fub_id: name for fub_id, name in stopped.items() if self._auto_start_enabled(fub_id)}
+            to_start = {
+                fub_id: name for fub_id, name in stopped.items() if auto_start and self._auto_start_enabled(fub_id)
+            }
             auto_started: dict[int, str] = {}
             if to_start:
                 auto_started = await self._async_auto_start(to_start)

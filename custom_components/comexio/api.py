@@ -56,6 +56,7 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
+    LOGIN_ERROR_CONNECTION,
     MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
@@ -606,6 +607,9 @@ class ComexioAPI:
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
         self.last_login_error: str | None = None
+        # Set by get_raw_config when its re-login of a lapsed session got no reply (e.g. Comexio
+        # still rebooting); reset by every call, so it never outlives the fetch it describes.
+        self.config_relogin_unreachable = False
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -805,7 +809,7 @@ class ComexioAPI:
                 logged_in = await client.is_logged_in()
             except (ComexioConnectionError, ComexioResponseError) as err:
                 _LOGGER.warning("Comexio admin session check failed: %s", err)
-                self.last_login_error = "connection"
+                self.last_login_error = LOGIN_ERROR_CONNECTION
                 return False
             except ComexioDataError as err:
                 _LOGGER.warning("Comexio admin session check gave an unexpected answer, logging in again: %s", err)
@@ -846,7 +850,7 @@ class ComexioAPI:
             return False
         except ComexioError as err:
             _LOGGER.warning("Comexio login failed: %s", err)
-            self.last_login_error = "connection"
+            self.last_login_error = LOGIN_ERROR_CONNECTION
             return False
         _LOGGER.info("Successfully logged into Comexio Admin interface")
         self.last_login_error = None
@@ -864,6 +868,7 @@ class ComexioAPI:
         """
         run_state_mark = self._run_state_mark
         saves_before = self._block_settings_saves_confirmed
+        self.config_relogin_unreachable = False
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -871,6 +876,7 @@ class ComexioAPI:
                 _LOGGER.warning("Comexio admin session is no longer logged in — logging in again")
                 if not await self._full_login():
                     _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
+                    self.config_relogin_unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
                     self.block_settings = None
                     return {}
                 raw = await self.client.get_raw_config()
