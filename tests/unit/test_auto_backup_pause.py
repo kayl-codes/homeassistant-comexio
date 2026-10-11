@@ -271,14 +271,18 @@ def test_bulk_loads_that_time_out_count_as_failed_loads() -> None:
     assert coordinator._bulk_load_pending is False
 
 
-def test_a_cycle_timing_out_after_the_load_is_no_failed_load() -> None:
+def test_a_cycle_timing_out_after_the_load_is_no_failed_load(caplog: pytest.LogCaptureFixture) -> None:
     coordinator = _coordinator()
     coordinator.function_plan_backup.async_auto_backup = AsyncMock(side_effect=_hang)
-    with patch.object(coordinator_module.persistent_notification, "async_create") as create:
+    with (
+        patch.object(coordinator_module.persistent_notification, "async_create") as create,
+        caplog.at_level(logging.WARNING),
+    ):
         _timed_out_cycles(coordinator, FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD)
     # Every cycle got past the load and timed out inside the auto backup.
     assert (
         coordinator.function_plan_backup.async_auto_backup.await_count == FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD
     )
+    assert caplog.text.count("backup cycle aborted") == FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD
     create.assert_not_called()
     assert coordinator._bulk_load_fail_streak == 0
