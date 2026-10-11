@@ -599,9 +599,17 @@ def test_auto_backup_held_back_after_its_awaits_stores_nothing(stores: dict[str,
     """A restore that starts while the store loads: asked once more before the history changes."""
     manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
     fub_data = {"1": {"Name": "Lights"}}
+    restoring = False
+    fub_base = manager._async_fub_base
+
+    async def restore_starts_meanwhile() -> dict:
+        nonlocal restoring
+        restoring = True
+        return await fub_base()
 
     async def run() -> tuple[list, list]:
-        held = await manager.async_auto_backup({1: plan}, fub_data, held_back=lambda: True)
+        with patch.object(manager, "_async_fub_base", restore_starts_meanwhile):
+            held = await manager.async_auto_backup({1: plan}, fub_data, held_back=lambda: restoring)
         return held, await manager.async_auto_backup({1: plan}, fub_data, held_back=lambda: False)
 
     held, stored = asyncio.run(run())

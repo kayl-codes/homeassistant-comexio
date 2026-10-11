@@ -64,6 +64,7 @@ def test_a_cycle_backs_up_the_loaded_plans() -> None:
     coordinator = _coordinator()
     _cycle(coordinator)
     coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
+    assert coordinator.function_plan_backup.async_auto_backup.await_args.args[0] == PLANS
 
 
 def test_a_cycle_during_a_restore_loads_and_backs_up_nothing() -> None:
@@ -275,5 +276,9 @@ def test_a_cycle_timing_out_after_the_load_is_no_failed_load() -> None:
     coordinator.function_plan_backup.async_auto_backup = AsyncMock(side_effect=_hang)
     with patch.object(coordinator_module.persistent_notification, "async_create") as create:
         _timed_out_cycles(coordinator, FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD)
+    # Every cycle got past the load and timed out inside the auto backup.
+    assert (
+        coordinator.function_plan_backup.async_auto_backup.await_count == FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD
+    )
     create.assert_not_called()
     assert coordinator._bulk_load_fail_streak == 0
