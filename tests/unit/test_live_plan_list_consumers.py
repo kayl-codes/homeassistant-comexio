@@ -620,15 +620,16 @@ def test_the_first_bulk_load_completes_the_snapshot() -> None:
 @pytest.mark.parametrize(
     "bulk_load", [AsyncMock(return_value={}), AsyncMock(side_effect=OSError("timeout"))], ids=["empty", "failed"]
 )
-def test_a_snapshot_emptied_by_deleted_plans_is_incomplete_once_a_plan_is_seeded(bulk_load: AsyncMock) -> None:
-    """Plan 7 was deleted, plan 8 created by another tool: a seed of plan 9 alone is no complete snapshot."""
+def test_a_snapshot_emptied_by_deleted_plans_is_incomplete_once_a_plan_is_cached(bulk_load: AsyncMock) -> None:
+    """Plan 7 was deleted, plan 8 created by another tool: plan 9 looked up alone is no complete snapshot."""
     coordinator = _snapshot_coordinator({"8": {"Name": "Other"}})
     coordinator.api.function_plan_load_all_plans = bulk_load
     asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
     assert coordinator.function_plan_plans == {}
 
-    coordinator.api.fub_data["9"] = {"Name": "HA - Marker 1-50"}
-    coordinator.function_plan_plans[9] = {"elements": {}, "connections": {}, "_seeded_empty": True}
+    # Plan 8 deleted too and plan 9 cached as the only listed one: only the reset flag still says incomplete.
+    coordinator.api.fub_data = {"9": {"Name": "Lookup"}}
+    coordinator.function_plan_plans[9] = {"elements": {}, "connections": {}}
 
     assert coordinator._referenced_marker_ids() is None
 
@@ -676,3 +677,35 @@ def test_no_plan_left_is_a_complete_snapshot_without_a_bulk_load() -> None:
     coordinator.function_plan_plans = {}
 
     assert coordinator._referenced_marker_ids() == set()
+
+
+def test_a_working_bulk_load_leaving_every_listed_plan_out_is_no_complete_snapshot() -> None:
+    """The kept wiring of plan 7 stays for the audits, but the poll reads its markers from the stored backup."""
+    coordinator = _snapshot_coordinator({"7": {"Name": "User"}})
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator.function_plan_plans == DELETED_PLAN
+    assert coordinator._referenced_marker_ids() is None
+
+
+def test_a_failed_bulk_load_keeps_the_last_snapshot_complete() -> None:
+    """An outage replaces nothing: the last full snapshot is still the best source."""
+    coordinator = _snapshot_coordinator({"7": {"Name": "User"}})
+    coordinator.api.function_plan_load_all_plans = AsyncMock(side_effect=OSError("timeout"))
+
+    asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
+
+    assert coordinator._referenced_marker_ids() == {"253"}
+
+
+def test_a_seeded_plan_in_a_bulk_snapshot_makes_it_incomplete() -> None:
+    """A plan seeded during the load may be wired since: its empty placeholder does not cover it."""
+    coordinator = _snapshot_coordinator({"7": {"Name": "User"}, "9": {"Name": "HA - Marker 1-50"}})
+    coordinator.function_plan_plans[9] = {"elements": {}, "connections": {}, "_seeded_empty": True}
+
+    assert coordinator._referenced_marker_ids() is None
+
+    coordinator.function_plan_plans[9] = {"elements": {}, "connections": {}}  # the next bulk load delivers it
+
+    assert coordinator._referenced_marker_ids() == {"253"}

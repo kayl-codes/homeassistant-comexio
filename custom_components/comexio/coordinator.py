@@ -204,7 +204,8 @@ _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 # entry the same as real data (accurate, since it genuinely was empty at seed time) — but
 # _load_function_plan_check_data() must NOT: its contract is "cache miss -> live fetch", and a
 # seeded entry can already be stale by the time it's consulted (real wiring written afterward,
-# e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache).
+# e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache). For the same
+# reason _function_plan_snapshot_complete() counts a seeded entry as a missing plan.
 _SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
 
 _UNINSTALL_CLEANUP_LOG = "[%s] Uninstall cleanup: %s"
@@ -1810,6 +1811,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self._track_omitted_plans(requested - loaded.keys())
             plans = self._drop_plans_deleted_meanwhile(loaded)
             if not plans:
+                if not load_failed and self.live_plan_list():
+                    # It left every listed plan out: the wirings kept for the audits are no full snapshot anymore.
+                    self._function_plan_snapshot_from_bulk = False
                 # A failed load is logged above, and plans all deleted meanwhile are no fault.
                 await self._async_finish_cycle_without_plans(reason_known=load_failed or bool(loaded))
                 return
@@ -2215,14 +2219,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         build on: before the first bulk load the snapshot holds only plans seeded by _create_managed_plan
         or fetched one by one, and a bulk load can leave a plan out (see _track_omitted_plans). Reading
         such a snapshot as every plan drops the unnamed markers wired only in the missing plans from the
-        entities (#155). Without a plan list from the poll, the bulk load's snapshot counts as complete.
+        entities (#155). A seeded entry counts as missing: wiring written since is not in it. Without a
+        plan list from the poll, the bulk load's snapshot counts as complete.
         """
         live = self.live_plan_list()
         if live == {}:
             return True
-        if not (self._function_plan_snapshot_from_bulk and self.function_plan_plans):
+        plans = self.function_plan_plans
+        if not (self._function_plan_snapshot_from_bulk and plans):
             return False
-        return live is None or function_plan_ids(live) <= self.function_plan_plans.keys()
+        return live is None or all(
+            fid in plans and not plans[fid].get(_SEEDED_EMPTY_PLAN_MARKER) for fid in function_plan_ids(live)
+        )
 
     def _referenced_marker_ids(self) -> set[str] | None:
         """Return marker IDs (type-2 element ref_ids) present in any existing plan.
