@@ -1,4 +1,6 @@
-# Copilot instructions — homeassistant-comexio
+# Review checklist — homeassistant-comexio
+
+The local review agents check every diff against these rules before a push.
 
 HACS custom integration (`custom_components/comexio/`, domain `comexio`) for the Comexio IO-Server, a local
 building-automation controller. Python ≥ 3.12, minimum Home Assistant 2026.8.0. Parsing, scraping and Web-IO
@@ -94,6 +96,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   mocked, `async_delete_issue` was called with exactly that issue_id and a counter-case (the issue still applies)
   asserts it was not; for an issue that is never raised, a concrete counter value or another result of the same run.
 - Flag deleted or loosened assertions and snapshot updates that are not explained in the PR.
+- Every test fails when the path it targets is missing. Assert that path's own signal — a log line, a flag, the
+  arguments a mock received, the data actually stored — not only a call count that other paths reach too. A test
+  of a race or timeout switches the state during the await it targets (e.g. inside the mocked call) and proves the
+  timeout fired; a quick check is to break the target path (raise the timeout, drop the guard) and see it fail
+  (#168).
 - Test function parameters carry type annotations.
 
 ## GitHub Actions
