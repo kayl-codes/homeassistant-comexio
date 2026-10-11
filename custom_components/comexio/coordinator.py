@@ -571,6 +571,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.last_changed_plans: list[dict[str, Any]] = []
         # Backup cycles in a row whose bulk load failed (see _track_bulk_load_result).
         self._bulk_load_fail_streak = 0
+        # A bulk load is running: a cycle timeout that cancels it counts as a failed load.
+        self._bulk_load_pending = False
         # Restores running now, and a counter bumped by each one: the auto backup holds back
         # while one runs or ran during its cycle (see pause_auto_backup).
         self._auto_backup_pauses = 0
@@ -1759,6 +1761,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
                 FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC,
             )
+            if self._bulk_load_pending:
+                # A load that never returns stops the auto backups as surely as one that fails.
+                self._bulk_load_pending = False
+                self._track_bulk_load_result(f"timed out after {FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC}s")
 
     async def _async_function_plan_backup_cycle_locked(self) -> None:
         """Body of the backup cycle, bounded by the outer timeout in the caller."""
@@ -1773,6 +1779,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             pause_generation = self._auto_backup_pause_generation
             requested = function_plan_ids(self.api.fub_data)
             load_error: str | None = None
+            # Reset after the try, not in a finally: the cycle timeout's handler must still see it set.
+            self._bulk_load_pending = True
             try:
                 loaded = await self.api.function_plan_load_all_plans(raise_errors=True)
             except ComexioError as err:
@@ -1787,6 +1795,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 )
                 loaded = {}
                 load_error = f"unexpected {type(err).__name__}, see the log"
+            self._bulk_load_pending = False
             load_failed = load_error is not None
             self._track_bulk_load_result(load_error)
             plans = self._drop_plans_deleted_meanwhile(loaded)
@@ -1805,7 +1814,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # the snapshot async_mark_restored promotes. The next cycle catches up.
                 _LOGGER.debug("[%s] Function Plan auto backup skipped: a restore ran meanwhile", self.server_id)
             else:
-                await self._async_auto_backup_plans(plans, fub_data, plan_format)
+                await self._async_auto_backup_plans(plans, fub_data, plan_format, pause_generation)
             try:
                 await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
             except Exception:
@@ -1819,7 +1828,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.async_update_listeners()
 
     async def _async_auto_backup_plans(
-        self, plans: dict[int, dict], fub_data: dict, plan_format: dict[str, tuple[str, int, str]]
+        self,
+        plans: dict[int, dict],
+        fub_data: dict,
+        plan_format: dict[str, tuple[str, int, str]],
+        pause_generation: int,
     ) -> None:
         """Rotate the auto backups of the freshly loaded plans (failures are logged, never raised)."""
         markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
@@ -1833,6 +1846,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 webio_by_id=webio_by_id,
                 ios_by_id=ios_by_id,
                 block_settings=self.api.block_settings,
+                # Asked again after the store's awaits: a restore may start in between.
+                held_back=lambda: self._auto_backup_held_back(pause_generation),
             )
             await self._async_refresh_service_descriptions()
         except Exception:

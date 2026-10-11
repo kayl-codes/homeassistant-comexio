@@ -104,6 +104,7 @@ def test_a_backup_cycle_without_plans_still_audits_the_orphaned_backups() -> Non
     coordinator._auto_backup_pauses = 0
     coordinator._auto_backup_pause_generation = 0
     coordinator._bulk_load_fail_streak = 0
+    coordinator._bulk_load_pending = False
     coordinator.hass = MagicMock()
     coordinator.scraped_plan_ids = None
     coordinator.function_plan_plans = {}
@@ -132,6 +133,7 @@ def _snapshot_coordinator(live_plans: dict | None) -> ComexioCoordinator:
     coordinator._auto_backup_pauses = 0
     coordinator._auto_backup_pause_generation = 0
     coordinator._bulk_load_fail_streak = 0
+    coordinator._bulk_load_pending = False
     coordinator.hass = MagicMock()
     coordinator.scraped_plan_ids = None if live_plans is None else set()
     coordinator.api = SimpleNamespace(
@@ -553,6 +555,7 @@ def test_a_failed_bulk_load_shows_the_reset_changed_plans_at_once() -> None:
     coordinator._auto_backup_pauses = 0
     coordinator._auto_backup_pause_generation = 0
     coordinator._bulk_load_fail_streak = 0
+    coordinator._bulk_load_pending = False
     coordinator.hass = MagicMock()
     coordinator.scraped_plan_ids = None
     coordinator.function_plan_plans = {}

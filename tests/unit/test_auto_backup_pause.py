@@ -1,6 +1,7 @@
 """The auto backup holds back during an in-place restore, and a lasting bulk-load outage is reported once."""
 
 import asyncio
+from collections.abc import Callable
 import contextlib
 import logging
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ def _coordinator(load: AsyncMock | None = None) -> ComexioCoordinator:
     coordinator._auto_backup_pauses = 0
     coordinator._auto_backup_pause_generation = 0
     coordinator._bulk_load_fail_streak = 0
+    coordinator._bulk_load_pending = False
     coordinator.scraped_plan_ids = {7}
     coordinator.api = SimpleNamespace(
         function_plan_load_all_plans=load or AsyncMock(return_value=dict(PLANS)),
@@ -224,3 +226,54 @@ def test_an_unexpected_bulk_load_error_counts_too() -> None:
             _cycle(coordinator)
     create.assert_called_once()
     assert "unexpected OSError" in create.call_args.args[1]
+
+
+def test_a_restore_starting_inside_the_auto_backup_is_seen_before_the_history_changes() -> None:
+    held_back_answers: list[bool] = []
+
+    async def auto_backup(*_: object, held_back: Callable[[], bool], **__: object) -> list:
+        held_back_answers.append(held_back())
+        with coordinator.pause_auto_backup():  # the store awaits, a restore starts
+            held_back_answers.append(held_back())
+        held_back_answers.append(held_back())  # ... and has ended again before the history changes
+        return []
+
+    coordinator = _coordinator()
+    coordinator.function_plan_backup.async_auto_backup = AsyncMock(side_effect=auto_backup)
+    _cycle(coordinator)
+    assert held_back_answers == [False, True, True]
+    # The cycle goes on without a changed plan to show.
+    assert coordinator.last_changed_plans == []
+    coordinator.function_plan_backup.async_backfill_block_keys.assert_awaited_once()
+
+
+def _timed_out_cycles(coordinator: ComexioCoordinator, count: int) -> None:
+    async def run() -> None:
+        for _ in range(count):
+            await coordinator._async_function_plan_backup_cycle()
+
+    with patch.object(coordinator_module, "FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC", 0.01):
+        asyncio.run(run())
+
+
+async def _hang(*_: object, **__: object) -> dict:
+    await asyncio.sleep(1)
+    return dict(PLANS)
+
+
+def test_bulk_loads_that_time_out_count_as_failed_loads() -> None:
+    coordinator = _coordinator(AsyncMock(side_effect=_hang))
+    with patch.object(coordinator_module.persistent_notification, "async_create") as create:
+        _timed_out_cycles(coordinator, FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD)
+    create.assert_called_once()
+    assert "(last error: timed out after 0.01s)" in create.call_args.args[1]
+    assert coordinator._bulk_load_pending is False
+
+
+def test_a_cycle_timing_out_after_the_load_is_no_failed_load() -> None:
+    coordinator = _coordinator()
+    coordinator.function_plan_backup.async_auto_backup = AsyncMock(side_effect=_hang)
+    with patch.object(coordinator_module.persistent_notification, "async_create") as create:
+        _timed_out_cycles(coordinator, FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD)
+    create.assert_not_called()
+    assert coordinator._bulk_load_fail_streak == 0
