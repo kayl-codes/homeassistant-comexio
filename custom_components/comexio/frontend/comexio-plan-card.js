@@ -50,7 +50,10 @@ const _PREVIEW_STOP_GRACE_MS = 2000;
 // While open, the card renews the backend's follow window (coordinator.preview_following, 15 min)
 // with a keepalive well inside it: a frozen orphaned-plan render arms no poll, so without it
 // 'Plan'/'Backup' changes (e.g. the neighbour row after "delete all") stopped reaching the preview.
-const _PREVIEW_KEEPALIVE_MS = 5 * 60 * 1000;
+// The keepalive is also how the card notices a config-entry reload (see _sendPreviewKeepalive), so
+// its interval is the longest an open card goes without live values after a reload or sync. It
+// costs no Comexio request, only a service call that renews the window.
+const _PREVIEW_KEEPALIVE_MS = 30 * 1000;
 
 // Backoff for re-fetching a preview image whose fetch failed: first retry after the minimum,
 // doubled per consecutive failure up to the maximum, until a fetch succeeds. Without it a

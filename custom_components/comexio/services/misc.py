@@ -376,7 +376,7 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
 def _preview_keepalive(hass: HomeAssistant, call: ServiceCall) -> dict:
     """preview_start's keepalive: renew the open card's follow window — no render, no Comexio request.
 
-    Repeats every few minutes per open card, so it logs at debug level and stays quiet (no
+    Repeats every 30 s per open card, so it logs at debug level and stays quiet (no
     notification) while no instance is loaded, e.g. with Comexio offline at startup.
     """
     started = time.monotonic()
