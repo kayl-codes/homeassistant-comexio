@@ -121,7 +121,7 @@ async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
     coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
     assert coordinator._last_referenced_markers_from_snapshot is False  # no bulk load yet: stored backup
     plan = {"elements": {}, "connections": {}}
-    coordinator.function_plan_plans = {1: plan, 9: plan}
+    coordinator.function_plan_plans = {1: plan, 2: plan, 9: plan}
     coordinator._function_plan_snapshot_from_bulk = True  # as a backup cycle's bulk load leaves it
     audit_webio = coordinator._async_audit_webio
     seen: list[set[int]] = []
@@ -134,7 +134,7 @@ async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
         await coordinator.async_refresh()
         await hass.async_block_till_done()
 
-    assert seen == [{1}]  # plan 1 is still in config_basic.json's $Fubs
+    assert seen == [{1, 2}]  # plans 1 and 2 are still in config_basic.json's $Fubs
     assert coordinator._last_referenced_markers_from_snapshot is True
 
 

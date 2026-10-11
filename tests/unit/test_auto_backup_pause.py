@@ -33,7 +33,7 @@ def _coordinator(load: AsyncMock | None = None) -> ComexioCoordinator:
     coordinator._bulk_load_fail_streak = 0
     coordinator._bulk_load_pending = False
     coordinator._plan_omit_streaks = {}
-    coordinator._omitted_plans_reported = frozenset()
+    coordinator._omitted_plans_reported = ""
     coordinator._function_plan_snapshot_from_bulk = False
     coordinator.scraped_plan_ids = {7}
     coordinator.api = SimpleNamespace(
@@ -432,6 +432,29 @@ def test_a_working_load_after_a_reload_dismisses_a_left_out_notification(caplog:
         _cycle(coordinator)
     dismiss.assert_any_call(coordinator.hass, OMITTED_NOTIFICATION_ID)
     assert "leaves no listed plan out anymore" not in caplog.text  # nothing was reported in this run
+
+
+def test_a_plan_still_left_out_after_a_reload_keeps_the_notification() -> None:
+    """After a reload the count starts afresh: the notification stays while the plan is still left out."""
+    coordinator = _omitting_coordinator()  # fresh after the reload: nothing reported
+    with (
+        patch.object(coordinator_module.persistent_notification, "async_create") as create,
+        patch.object(coordinator_module.persistent_notification, "async_dismiss") as dismiss,
+    ):
+        _cycle(coordinator)
+    assert (coordinator.hass, OMITTED_NOTIFICATION_ID) not in [c.args for c in dismiss.call_args_list]
+    assert not _omitted_creates(create)  # nor renewed before the count is back
+
+
+def test_a_left_out_plan_renamed_meanwhile_updates_the_notification() -> None:
+    coordinator = _omitting_coordinator()
+    with patch.object(coordinator_module.persistent_notification, "async_create") as create:
+        for _ in range(FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD):
+            _cycle(coordinator)
+        coordinator.api.fub_data["8"]["Name"] = "Broken 2"
+        _cycle(coordinator)
+    assert len(_omitted_creates(create)) == 2
+    assert "'Broken 2' (8)" in _omitted_creates(create)[-1].args[1]
 
 
 def test_a_left_out_plan_counts_before_the_first_poll() -> None:
