@@ -174,6 +174,8 @@ class ReferenceCatalogMonitor:
             blocked=tuple(self._blocked),
             unknown_plan_refs=tuple(self._unknown_refs or ()),
             unchecked_plans=self._unchecked_plans,
+            comexio_version=self._api.comexio_version,
+            check_not_run=self._check_not_run,
         )
         title, body = build_issue_report(self._api.reference_check, REFERENCE_REQUIRED, context)
         return github_issue_url(ISSUE_TRACKER_URL, title, body)
@@ -261,14 +263,43 @@ class ReferenceCatalogMonitor:
         findings_changed = found != self._unknown_refs
         self._unknown_refs = found
         # A plan the load missed or brought back changes only the carried-over marks: the report
-        # follows at once (async_check may keep the last result without rebuilding it), the log
-        # does not — the same findings are no change worth a log line.
+        # follows at once (async_check may keep the last result without rebuilding it), the findings
+        # log does not — the same findings are no change worth repeating. A plan checked again only
+        # gets one INFO line that takes back its earlier "not checked"/"carried over".
         marks_changed = _carried_over(found, unchecked) != _carried_over(previous_refs, previous_unchecked)
         if self._blocked and (findings_changed or marks_changed):
             # Add the plan findings to the pre-filled report, keeping why the check didn't run.
             self._update_issue(self._blocked, self._check_not_run)
+        self._log_plan_change(found, unchecked, findings_changed, previous_unchecked & loaded_ids, bool(live_ids))
+
+    def _log_plan_change(
+        self,
+        found: list[tuple[str, str, str]],
+        unchecked: set[str],
+        findings_changed: bool,
+        rechecked: Collection[str],
+        checked: bool,
+    ) -> None:
+        """Log changed findings; else, after a check, take back an earlier "not checked"/"carried over" once."""
         if findings_changed:
-            self._log_plan_findings(found, unchecked, checked=bool(live_ids))
+            self._log_plan_findings(found, unchecked, checked=checked)
+        elif checked:
+            self._log_rechecked_plans(found, rechecked, unchecked)
+
+    def _log_rechecked_plans(
+        self, found: list[tuple[str, str, str]], rechecked: Collection[str], unchecked: set[str]
+    ) -> None:
+        """Take back an earlier "not checked"/"carried over" once those plans are checked again, findings unchanged."""
+        if not rechecked:
+            return
+        confirmed = [format_plan_ref(ref) for ref in found if ref[0] in rechecked][:UNKNOWN_REFS_LOG_LIMIT]
+        _LOGGER.info(
+            "[%s] Function plans: %d plan(s) not checked before were checked again, findings unchanged%s%s",
+            self._server_id,
+            len(rechecked),
+            f" (confirmed: {', '.join(confirmed)})" if confirmed else "",
+            _not_loaded_note(unchecked, checked=True),
+        )
 
     def _log_plan_findings(self, found: list[tuple[str, str, str]], unchecked: set[str], checked: bool) -> None:
         """Log the changed findings; never claim a check for plans that weren't judged this time."""
@@ -279,7 +310,7 @@ class ReferenceCatalogMonitor:
                 self._server_id,
             )
             return
-        not_loaded = f"; {len(unchecked)} listed plan(s) not loaded and not checked" if checked and unchecked else ""
+        not_loaded = _not_loaded_note(unchecked, checked)
         if not found:
             _LOGGER.info(
                 "[%s] Function plans: no elements with unknown block types in the loaded plans%s",
@@ -315,6 +346,12 @@ class IssueContext:
     blocked: tuple[str, ...]
     unknown_plan_refs: tuple[tuple[str, str, str], ...] = ()
     unchecked_plans: frozenset[str] = frozenset()
+    comexio_version: str | None = None  # the API's, for the report when no check carries one
+    check_not_run: str | None = None  # why the check did not run (REASON_CHECK_FAILED / REASON_NO_LIVE_CATALOG)
+
+
+def _not_loaded_note(unchecked: Collection[str], checked: bool) -> str:
+    return f"; {len(unchecked)} listed plan(s) not loaded and not checked" if checked and unchecked else ""
 
 
 def _carried_over(refs: Iterable[tuple[str, str, str]], unchecked: Collection[str]) -> set[tuple[str, str, str]]:
@@ -377,13 +414,14 @@ def build_issue_report(
         "### Versions",
         f"- Integration: {context.integration_version or '?'}",
         f"- Home Assistant: {context.ha_version or '?'}",
-        f"- Comexio: {(check.comexio_version if check else None) or '?'}",
+        f"- Comexio: {(check.comexio_version if check else None) or context.comexio_version or '?'}",
         "",
         "### Blocked",
         *[f"- `{label}`" for label in context.blocked],
     ]
     if check is None:
-        lines += ["", "Reference check did not run — see the Home Assistant log."]
+        reason = f" ({context.check_not_run})" if context.check_not_run else ""
+        lines += ["", f"Reference check did not run{reason} — see the Home Assistant log."]
     else:
         lines += [
             "",

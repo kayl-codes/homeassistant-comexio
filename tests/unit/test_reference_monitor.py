@@ -463,11 +463,49 @@ def test_the_repair_report_follows_a_plan_the_load_misses_and_brings_back(
     with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
         monitor.check_plans({7: CLEAN_PLAN})  # the bulk load missed plan 8
         assert marked in _report_body(issue_registry)
+        assert not caplog.records  # a plan the load missed: the same findings, nothing new to log
         monitor.check_plans({7: CLEAN_PLAN, 8: plan_8})  # back, checked again
         assert "8/4: 5 998\n" in _report_body(issue_registry)
         assert marked not in _report_body(issue_registry)
 
     assert monitor._unknown_refs == [CARRIED_REF]
+    # (bv) The log takes back its "carried over" once — no repeated WARNING of the same findings.
+    assert [(record.levelno, record.getMessage()) for record in caplog.records] == [
+        (
+            logging.INFO,
+            "[srv] Function plans: 1 plan(s) not checked before were checked again, findings unchanged "
+            "(confirmed: 8/4: 5 998)",
+        )
+    ]
+
+
+def test_a_clean_plan_checked_again_takes_back_its_not_checked_note(caplog: pytest.LogCaptureFixture) -> None:
+    """(bv) "2 listed plan(s) not loaded and not checked" is taken back once those plans are checked, still clean."""
+    monitor = _monitor(None, listed={"7": {}, "8": {}, "9": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+    monitor.check_plans({7: CLEAN_PLAN})
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: CLEAN_PLAN, 8: CLEAN_PLAN})
+        monitor.check_plans({7: CLEAN_PLAN, 8: CLEAN_PLAN})  # nothing checked anew: no second line
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "[srv] Function plans: 1 plan(s) not checked before were checked again, findings unchanged; "
+        "1 listed plan(s) not loaded and not checked"
+    ]
+
+
+def test_a_plan_the_load_misses_is_not_logged_as_checked_again(caplog: pytest.LogCaptureFixture) -> None:
+    """Only plans actually judged this poll are taken back — a plan dropping out of the load logs nothing."""
+    monitor = _monitor(None, listed={"7": {}, "8": {}})
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+    monitor.check_plans({7: CLEAN_PLAN, 8: CLEAN_PLAN})
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: CLEAN_PLAN})
+
     assert not caplog.records
 
 
@@ -578,6 +616,37 @@ def test_issue_report_without_a_check() -> None:
     title, body = build_issue_report(None, REFERENCE_REQUIRED, _issue_context(["fub_base:x (not checked)"]))
     assert "x (not checked)" in title
     assert "Reference check did not run" in body
+
+
+@pytest.mark.parametrize("reason", [REASON_CHECK_FAILED, REASON_NO_LIVE_CATALOG])
+def test_issue_report_without_a_check_names_the_version_and_the_reason(reason: str) -> None:
+    """(bv) No check carries a version, but the API knows it; the report also says why the check did not run."""
+    context = IssueContext(
+        "0.11.0-rc1", "2026.9.1", ("fub_base:x (not checked)",), comexio_version="11.2.0", check_not_run=reason
+    )
+    _, body = build_issue_report(None, REFERENCE_REQUIRED, context)
+    assert "- Comexio: 11.2.0" in body
+    assert f"Reference check did not run ({reason}) — see the Home Assistant log." in body
+
+
+@pytest.mark.parametrize(
+    ("catalog_fails", "reason"),
+    [(True, REASON_CHECK_FAILED), (False, REASON_NO_LIVE_CATALOG)],
+    ids=["failed", "no-catalog"],
+)
+def test_the_unchecked_repair_report_names_the_version_and_the_reason(
+    raw: dict[str, Any], issue_registry: MagicMock, catalog_fails: bool, reason: str
+) -> None:
+    """(bv) The Repair shows the API's Comexio version — the report it links must not say "Comexio: ?"."""
+    monitor = _monitor(_references(raw))
+    if catalog_fails:
+        monitor._hass.async_add_executor_job = AsyncMock(side_effect=OSError("disk"))
+    for _ in range(REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE):
+        asyncio.run(monitor.async_check({**raw, "FubModules": {**raw["FubModules"], "5": []}}))
+
+    body = _report_body(issue_registry)
+    assert "- Comexio: 11.1.4" in body
+    assert f"Reference check did not run ({reason})" in body
 
 
 def test_issue_report_without_a_check_keeps_the_carried_over_findings() -> None:
