@@ -462,6 +462,9 @@ FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC = 300
 # Backup cycles in a row (one per full poll) whose bulk load of the plans failed before a persistent
 # notification says the automatic backups have stopped. Shown once per outage, dismissed when a load works again.
 FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD = 3
+# Working bulk loads in a row that left out a plan the poll still lists before a persistent notification
+# names it (Comexio skips a plan it cannot deliver without an error). Dismissed once every plan loads again.
+FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD = 3
 
 # Operation durations for progress calculation (seconds)
 SYNC_DURATION_DELETE = 4

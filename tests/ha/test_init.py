@@ -122,6 +122,7 @@ async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
     assert coordinator._last_referenced_markers_from_snapshot is False  # no bulk load yet: stored backup
     plan = {"elements": {}, "connections": {}}
     coordinator.function_plan_plans = {1: plan, 9: plan}
+    coordinator._function_plan_snapshot_from_bulk = True  # as a backup cycle's bulk load leaves it
     audit_webio = coordinator._async_audit_webio
     seen: list[set[int]] = []
 
