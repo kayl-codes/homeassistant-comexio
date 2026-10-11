@@ -209,8 +209,10 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_run_state_last_fetch=0.0,
         _plan_run_state_fetching=False,
         _plan_run_state_relogin_refused=False,
-        scraped_plan_ids=None,
+        # A poll has read the plan list: before that the watchdog judges nothing (#155).
+        scraped_plan_ids=function_plan_ids(api.fub_data),
         plan_scrape_generation=0,
+        _plan_watch_deferred=False,
         hass=None,
         async_update_listeners=MagicMock(),
         _watchdog_lock=asyncio.Lock(),
@@ -455,7 +457,9 @@ def test_refused_relogin_is_not_retried_every_tick(api: ComexioAPI, caplog: pyte
 def test_only_a_full_poll_that_read_fubs_publishes_the_plan_list(
     api: ComexioAPI, polled, scraped: bool, fails: bool
 ) -> None:
-    coordinator = _coordinator(api, _plan_run_state_stale_count=5, _plan_run_state_relogin_refused=True)
+    coordinator = _coordinator(
+        api, scraped_plan_ids=None, _plan_run_state_stale_count=5, _plan_run_state_relogin_refused=True
+    )
 
     async def fetch() -> dict:
         coordinator._last_poll_scraped = scraped
@@ -762,14 +766,36 @@ def test_a_plan_dropping_out_of_the_watchdog_is_warned_once(api: ComexioAPI, cap
     assert "'Alt' (ID 43)" in caplog.text
 
 
-def test_no_plan_list_warns_of_no_lost_pick(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
-    """A failed plan fetch must not read as every watched plan gone."""
-    api._fub_data.clear()
+def test_the_watchdog_waits_for_the_first_full_plan_list(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture, dispatched: list[str]
+) -> None:
+    """#155: before a poll read the plan list, the cache holds only plans HA created or looked up.
+
+    A failed plan fetch must not read as every watched plan gone either (no "no longer watches").
+
+    Judging by it would drop the picks missing from it without a word and clear their repairs:
+    the watchdog judges nothing until the list is read, and says so once.
+    """
+    api._fub_data.pop("43")  # the picked user plan is missing from the partial cache
     options = {CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Licht"]}
-    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
-    with caplog.at_level(logging.WARNING):
-        asyncio.run(coordinator.async_watch_managed_plans())
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options), scraped_plan_ids=None)
+
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(coordinator.async_watch_managed_plans()) is False
+        assert asyncio.run(coordinator.async_watch_managed_plans()) is False
+
+    coordinator.plan_watchdog.async_check.assert_not_called()
+    assert dispatched == []
+    assert caplog.text.count("waits for the first poll that reads the plan list") == 1
     assert "no longer watches" not in caplog.text
+
+    # The first poll that reads the plan list ends the wait: the pick is judged with the managed plan.
+    api._fub_data["43"] = dict(FUBS["43"])
+    coordinator.scraped_plan_ids = {19, 43}
+    asyncio.run(coordinator.async_watch_managed_plans())
+    watched, _, user_plans = coordinator.plan_watchdog.async_check.call_args.args
+    assert set(watched) == {19, 43}
+    assert set(user_plans) == {43}
 
 
 def test_a_push_for_a_reused_id_starts_nothing(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:

@@ -1,7 +1,7 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -94,6 +94,7 @@ from .const import (
     FIRMWARE_CHECK_HOUR,
     FIRMWARE_CHECK_MINUTE,
     FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC,
+    FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD,
     FUNCTION_PLAN_FUB_ID_AUTO,
     FUNCTION_PLAN_KNX_CLUSTER_SIZE,
     FUNCTION_PLAN_LAYOUT_COMMENT_Y,
@@ -563,6 +564,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.ha_address = HaAddressResolver(hass)
         self._function_plan_backup_lock: asyncio.Lock = asyncio.Lock()
         self.last_changed_plans: list[dict[str, Any]] = []
+        # Backup cycles in a row whose bulk load failed (see _track_bulk_load_result).
+        self._bulk_load_fail_streak = 0
+        # Restores running now, and a counter bumped by each one: the auto backup holds back
+        # while one runs or ran during its cycle (see pause_auto_backup).
+        self._auto_backup_pauses = 0
+        self._auto_backup_pause_generation = 0
+        # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
+        self._plan_watch_deferred = False
         # Bulk snapshot of every live plan's elements/connections, refreshed each backup
         # cycle — lets function_plan_search answer instantly instead of a fresh ~11s
         # live fetch per plan (Comexio serializes requests server-side regardless of
@@ -1737,25 +1746,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def _async_function_plan_backup_cycle_locked(self) -> None:
         """Body of the backup cycle, bounded by the outer timeout in the caller."""
         async with self._function_plan_backup_lock:
+            if self._auto_backup_pauses:
+                # Before the reset below: a skipped cycle leaves the last result shown as it is.
+                _LOGGER.debug("[%s] Function Plan backup cycle skipped: a restore is in progress", self.server_id)
+                return
             # Reset up front so a failed/empty cycle never leaves a stale result from a
             # previous poll behind — ComexioPlanChangedSensor must reflect *this* cycle only.
             self.last_changed_plans = []
+            pause_generation = self._auto_backup_pause_generation
             requested = function_plan_ids(self.api.fub_data)
+            load_error: str | None = None
             try:
                 loaded = await self.api.function_plan_load_all_plans(raise_errors=True)
-                load_failed = False
             except ComexioError as err:
                 _LOGGER.warning(
                     "[%s] Function Plan bulk load failed: %s — keeping the plans still listed", self.server_id, err
                 )
                 loaded = {}
-                load_failed = True
-            except Exception:
+                load_error = str(err) or type(err).__name__
+            except Exception as err:
                 _LOGGER.exception(
                     "[%s] Function Plan bulk load failed — keeping the plans still listed", self.server_id
                 )
                 loaded = {}
-                load_failed = True
+                load_error = f"unexpected {type(err).__name__}, see the log"
+            load_failed = load_error is not None
+            self._track_bulk_load_result(load_error)
             plans = self._drop_plans_deleted_meanwhile(loaded)
             if not plans:
                 # A failed load is logged above, and plans all deleted meanwhile are no fault.
@@ -1767,21 +1783,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self._async_recheck_after_snapshot_update()
             fub_data = self.api.fub_data
             plan_format = self._current_plan_format(fub_data)
-            markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
-            try:
-                self.last_changed_plans = await self.function_plan_backup.async_auto_backup(
-                    plans,
-                    fub_data,
-                    plan_format=plan_format,
-                    comexio_version=self.api.comexio_version,
-                    markers_by_id=markers_by_id,
-                    webio_by_id=webio_by_id,
-                    ios_by_id=ios_by_id,
-                    block_settings=self.api.block_settings,
-                )
-                await self._async_refresh_service_descriptions()
-            except Exception:
-                _LOGGER.exception("[%s] Function Plan auto backup failed", self.server_id)
+            if self._auto_backup_held_back(pause_generation):
+                # The load may hold a plan the restore just rewrote: stored now, it would duplicate
+                # the snapshot async_mark_restored promotes. The next cycle catches up.
+                _LOGGER.debug("[%s] Function Plan auto backup skipped: a restore ran meanwhile", self.server_id)
+            else:
+                await self._async_auto_backup_plans(plans, fub_data, plan_format)
             try:
                 await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
             except Exception:
@@ -1793,6 +1800,76 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self._async_audit_orphaned_backups()
             # Refresh diagnostic entities (backup summary sensor) without a full data update
             self.async_update_listeners()
+
+    async def _async_auto_backup_plans(
+        self, plans: dict[int, dict], fub_data: dict, plan_format: dict[str, tuple[str, int, str]]
+    ) -> None:
+        """Rotate the auto backups of the freshly loaded plans (failures are logged, never raised)."""
+        markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
+        try:
+            self.last_changed_plans = await self.function_plan_backup.async_auto_backup(
+                plans,
+                fub_data,
+                plan_format=plan_format,
+                comexio_version=self.api.comexio_version,
+                markers_by_id=markers_by_id,
+                webio_by_id=webio_by_id,
+                ios_by_id=ios_by_id,
+                block_settings=self.api.block_settings,
+            )
+            await self._async_refresh_service_descriptions()
+        except Exception:
+            _LOGGER.exception("[%s] Function Plan auto backup failed", self.server_id)
+
+    @contextlib.contextmanager
+    def pause_auto_backup(self) -> Iterator[None]:
+        """Hold the automatic backup back while a restore rewrites a plan; resumed afterwards in any case.
+
+        An auto backup between the restore's run_fup and async_mark_restored would store the
+        restored content as an extra auto entry and push an older one out of the auto slots.
+        """
+        self._auto_backup_pauses += 1
+        self._auto_backup_pause_generation += 1
+        try:
+            yield
+        finally:
+            self._auto_backup_pauses -= 1
+
+    def _auto_backup_held_back(self, generation: int) -> bool:
+        """Whether a restore runs now or ran since the backup cycle read `generation`."""
+        return bool(self._auto_backup_pauses) or generation != self._auto_backup_pause_generation
+
+    def _track_bulk_load_result(self, error: str | None) -> None:
+        """Count failed bulk loads in a row: notify once when the auto backups have stopped, dismiss on recovery."""
+        notification_id = f"comexio_function_plan_bulk_load_{self.server_id}"
+        if error is None:
+            if self._bulk_load_fail_streak:
+                _LOGGER.info(
+                    "[%s] Function Plan bulk load works again after %s failed cycle(s)",
+                    self.server_id,
+                    self._bulk_load_fail_streak,
+                )
+            # Also with no streak: a reload since the notification started the count afresh.
+            persistent_notification.async_dismiss(self.hass, notification_id)
+            self._bulk_load_fail_streak = 0
+            return
+        self._bulk_load_fail_streak += 1
+        if self._bulk_load_fail_streak != FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD:
+            return
+        _LOGGER.warning(
+            "[%s] Function Plan bulk load failed %s times in a row — no automatic backups until it works again",
+            self.server_id,
+            self._bulk_load_fail_streak,
+        )
+        persistent_notification.async_create(
+            self.hass,
+            f"The function plans of Comexio '{self.server_id}' could not be loaded {self._bulk_load_fail_streak} "
+            f"times in a row (last error: {error}). No automatic backups are taken until a load works again; "
+            "existing backups are kept. Check the connection to Comexio and the Home Assistant log. "
+            "This message disappears by itself once a load succeeds.",
+            title="Comexio function plan backups stopped",
+            notification_id=notification_id,
+        )
 
     async def _async_audit_orphaned_backups(self) -> None:
         """Raise or clear the repairs of deleted plans' backups (failures are logged, never raised)."""
@@ -3818,6 +3895,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_watch_managed_plans(self) -> bool:
         """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
         if self.managed_plan_start_blocked:
+            return False
+        if self.live_plan_list() is None:
+            # Until a poll read the whole plan list, the cache holds only the plans HA created or looked
+            # up: judging by it would drop every other watched plan without a word and clear its repair.
+            # Logged once: the list never turns None again, and a list that stays unreadable is
+            # reported by _track_plan_list_read.
+            if not self._plan_watch_deferred:
+                _LOGGER.info(
+                    "[%s] Function plan watchdog waits for the first poll that reads the plan list", self.server_id
+                )
+                self._plan_watch_deferred = True
             return False
         self._warn_unresolved_watch_picks()
         user_plans = self._watched_user_plan_names()
