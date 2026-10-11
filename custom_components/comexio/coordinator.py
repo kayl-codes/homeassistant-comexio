@@ -11,6 +11,7 @@ import re
 import socket
 import time
 from typing import Any
+import uuid
 
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
@@ -739,6 +740,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # every new arm (a fresh plan view never inherits a previous session's extension).
         self._preview_auto_stop_cancel: Any = None
         self._preview_auto_stop_minutes: int = _PREVIEW_AUTO_STOP_DEFAULT_MINUTES
+        # Identifies this coordinator to an open plan card (function_plan_preview_start returns it
+        # with every start and keepalive). A config-entry reload creates a new coordinator that has
+        # nothing armed; the card notices the changed id and re-sends the opening start, so its live
+        # values resume. A preview auto-stopped on the SAME coordinator keeps the id, so the
+        # keepalive never re-arms it (the auto-stop stays in force for a forgotten tab).
+        self.preview_instance_id: str = uuid.uuid4().hex
         # Extension firmware check: {name -> raw entry} from the last successful
         # checkextension_fwupdate call (see async_start_firmware_update_check). Empty until
         # the first check actually runs, which only happens once per comexio_version change.

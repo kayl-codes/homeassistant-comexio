@@ -30,13 +30,13 @@ def _run_start(*, armed: bool, selection: bool, render: AsyncMock | None = None)
 
 def test_opening_the_card_renders_the_selection() -> None:
     result, render = _run_start(armed=False, selection=True)
-    assert result == {"success": True, "already_armed": False}
+    assert result == {"success": True, "already_armed": False, "instance": _INSTANCE}
     render.assert_awaited_once()
 
 
 def test_an_armed_preview_is_left_alone() -> None:
     result, render = _run_start(armed=True, selection=True)
-    assert result == {"success": True, "already_armed": True}
+    assert result == {"success": True, "already_armed": True, "instance": _INSTANCE}
     render.assert_not_called()
 
 
@@ -57,10 +57,36 @@ def test_the_open_cards_keepalive_renews_the_following_without_a_render() -> Non
         patch.object(plan_preview, "async_render_selected_preview", render),
     ):
         result = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
-    assert result == {"success": True, "keepalive": True}
+    assert result == {"success": True, "keepalive": True, "instance": _INSTANCE}
     assert coordinator.preview_following is True
     render.assert_not_called()
     assert resolve.call_args.kwargs == {"quiet": True}
+
+
+def _keepalive_instance(coordinator: object) -> str:
+    call = SimpleNamespace(data={"keepalive": True})
+    with patch.object(misc, "_resolve_coordinator", MagicMock(return_value=coordinator)):
+        result = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+    return result["instance"]
+
+
+def test_a_reloaded_entry_answers_the_keepalive_as_a_new_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(ba): after a config-entry reload the open card's keepalive must reveal the new, unarmed coordinator.
+
+    The card compares the instance against its opening start's answer and re-sends that start, so the
+    live values resume. An auto-stop on the same coordinator keeps the instance: the keepalive must not
+    re-arm a preview the auto-stop ended (a forgotten browser tab).
+    """
+    monkeypatch.setattr(coordinator_module, "async_call_later", MagicMock())
+    before_reload, after_reload = (ComexioCoordinator(MagicMock(), MagicMock(), MagicMock()) for _ in range(2))
+    opened = _keepalive_instance(before_reload)
+
+    before_reload._preview_plan_cache = _armed_cache(1)
+    asyncio.run(before_reload._async_auto_stop_preview(None))
+    assert _keepalive_instance(before_reload) == opened
+    assert before_reload.preview_armed is False
+
+    assert _keepalive_instance(after_reload) != opened
 
 
 def test_closing_the_card_ends_the_following() -> None:
@@ -106,8 +132,12 @@ class _PreviewCoordinator(SimpleNamespace):
         self.preview_following = False
 
 
+_INSTANCE = "coordinator-1"
+
+
 def _follow_coordinator(*, following: bool, preview_armed: bool = False) -> _PreviewCoordinator:
     return _PreviewCoordinator(
+        preview_instance_id=_INSTANCE,
         preview_armed=preview_armed,
         preview_following=following,
         server_id="iosrv1",
