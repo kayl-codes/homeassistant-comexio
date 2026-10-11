@@ -22,7 +22,9 @@ from .const import (
     CONF_USERNAME,
     CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
+    LOGIN_ERROR_CONNECTION,
     MOBILE_APP_NOTIFICATION_ACTION_EVENT,
+    SETUP_UNREACHABLE_ENTRIES,
     SOURCE_CATEGORIES,
     STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC,
     STATISTICS_UNIT_FIX_START_DELAY_SEC,
@@ -87,9 +89,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # restores last known-good data instead of leaving DPT3.x composite pairs untagged.
     await coordinator.async_load_knx_dpt_catalog()
 
+    if entry.entry_id in _setup_unreachable_entries(hass):
+        # The last attempt could not reach Comexio, which may still be booting: the first refresh starts the grace.
+        coordinator.note_comexio_unreachable()
+
     try:
         if not await api.login():
-            if api.last_login_error == "connection":
+            if api.last_login_error == LOGIN_ERROR_CONNECTION:
                 _LOGGER.warning(
                     "Comexio login failed due to a connection problem for %s — will retry", entry.data[CONF_HOST]
                 )
@@ -100,7 +106,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     except Exception:
         # Close the session on any setup failure to prevent leaks on retry (ConfigEntryNotReady)
         api.close()
+        # A rejected login proves Comexio answers, even with the flag carried over from the last attempt.
+        _track_setup_outage(
+            hass,
+            entry.entry_id,
+            api.last_login_error == LOGIN_ERROR_CONNECTION
+            or (coordinator.comexio_unreachable and api.last_login_error is None),
+        )
         raise
+    _track_setup_outage(hass, entry.entry_id, False)
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
@@ -464,6 +478,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.async_check_orphaned_statistics(conf)
 
     return True
+
+
+def _setup_unreachable_entries(hass: HomeAssistant) -> set[str]:
+    """Entry ids whose last setup attempt could not reach Comexio (see SETUP_UNREACHABLE_ENTRIES)."""
+    return hass.data.setdefault(SETUP_UNREACHABLE_ENTRIES, set())
+
+
+def _track_setup_outage(hass: HomeAssistant, entry_id: str, unreachable: bool) -> None:
+    """Remember for the next setup attempt whether this one could not reach Comexio."""
+    if unreachable:
+        _setup_unreachable_entries(hass).add(entry_id)
+    else:
+        _setup_unreachable_entries(hass).discard(entry_id)
 
 
 def _migrate_webio_range_check_entity_id(hass: HomeAssistant, server_id: str) -> None:

@@ -1,6 +1,7 @@
 """Setup, setup failures and unload of a config entry."""
 
 import asyncio
+import time
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -13,7 +14,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.const import DOMAIN, FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC, SETUP_UNREACHABLE_ENTRIES
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 from .conftest import SERVER_ID
@@ -294,3 +295,67 @@ async def test_setup_auth_failed_offers_reauth(
 
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
+
+
+@pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])
+async def test_setup_after_an_unreachable_attempt_starts_the_watchdog_boot_grace(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+) -> None:
+    """Comexio still booting at HA start: the attempt that reaches it starts the grace, a new coordinator or not."""
+    api_returns["login"] = False
+    await _setup(hass, mock_config_entry)
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert mock_config_entry.entry_id in hass.data[SETUP_UNREACHABLE_ENTRIES]
+
+    api_returns["login"] = True
+    reload_started = time.monotonic()
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    reload_done = time.monotonic()
+
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator._in_plan_watch_boot_grace() is True
+    # The full grace runs from the first successful read, not from the failed attempt.
+    grace_until = coordinator._plan_watch_grace_until
+    assert reload_started + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC <= grace_until
+    assert grace_until <= reload_done + FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC
+    assert mock_config_entry.entry_id not in hass.data[SETUP_UNREACHABLE_ENTRIES]
+    # Auto-starts go through the outage-aware wrapper; repair and push starts do not.
+    assert coordinator.plan_watchdog._start_plan == coordinator._async_watchdog_auto_start_plan
+
+
+async def test_a_plain_setup_starts_no_watchdog_boot_grace(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """An HA start alone says nothing about Comexio: the watchdog judges right away."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator._in_plan_watch_boot_grace() is False
+    assert coordinator.comexio_unreachable is False
+
+
+@pytest.mark.logged_exception  # HA logs the reload's ConfigEntryAuthFailed with its traceback
+@pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])
+async def test_a_rejected_login_after_an_unreachable_attempt_ends_the_carried_outage(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+) -> None:
+    """Comexio answering with "rejected" is reachable: the reauth that follows starts no boot grace."""
+    api_returns["login"] = False
+    await _setup(hass, mock_config_entry)
+    assert mock_config_entry.entry_id in hass.data[SETUP_UNREACHABLE_ENTRIES]
+
+    api_attributes["last_login_error"] = "rejected"
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
+    assert mock_config_entry.entry_id not in hass.data[SETUP_UNREACHABLE_ENTRIES]

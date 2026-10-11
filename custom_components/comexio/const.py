@@ -705,6 +705,15 @@ FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC = 600
 # Minimum gap after a refused auto-start before the next attempt: a check can follow within seconds
 # (switch turned on, fast preview polling), which would use up both attempts on a short-lived refusal.
 FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC = 60
+# After Comexio was unreachable (a poll or run-state fetch failed to connect, or HA's own emergency
+# reboot) the watchdog waits this long from the first successful read before judging the plans
+# again: a booting Comexio starts its plans itself, so a stopped plan then is no fault.
+FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC = 600
+# hass.data key: entry ids whose last setup attempt could not reach Comexio, so the retry that
+# succeeds starts the boot grace above (each attempt builds a new coordinator).
+SETUP_UNREACHABLE_ENTRIES = f"{DOMAIN}_setup_unreachable"
+# ComexioAPI.last_login_error when the server could not be reached or answered garbage.
+LOGIN_ERROR_CONNECTION = "connection"
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
