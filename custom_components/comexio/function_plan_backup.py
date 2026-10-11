@@ -14,7 +14,7 @@ block settings of its elements, which Comexio keeps outside the plan (function_p
 Snapshots live under .storage/ and are therefore included in Home Assistant's own backups.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 import logging
 import re
@@ -444,6 +444,7 @@ class FunctionPlanBackupManager:
         webio_by_id: dict[str, Any] | None = None,
         ios_by_id: dict[str, Any] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
+        held_back: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         """Rotate in snapshots for all plans whose wiring or block settings changed since the last auto backup.
 
@@ -454,6 +455,8 @@ class FunctionPlanBackupManager:
         referenced_label_metadata.
         block_settings: every element's block settings (ComexioAPI.block_settings); None when they
         could not be read, so only a changed wiring makes a new snapshot then.
+        held_back: asked once more right before the history changes (after the awaits below); True
+        stores nothing — a restore started meanwhile (see ComexioCoordinator.pause_auto_backup).
         Returns one {fub_id, plan_name, captured_at} entry per plan that produced a new
         snapshot this call — feeds the "changed plans" diagnostic sensor, whose whole point
         is to let a user confirm that an intentional edit changed exactly the plan(s) they
@@ -461,6 +464,9 @@ class FunctionPlanBackupManager:
         """
         await self._async_ensure_loaded()
         fub_base = await self._async_fub_base()
+        if held_back is not None and held_back():
+            _LOGGER.debug("[%s] Function Plan auto backup skipped: a restore started meanwhile", self._server_id)
+            return []
         changed_identities: list[dict[str, Any]] = []
         for fub_id, plan_data in plans.items():
             key = str(fub_id)

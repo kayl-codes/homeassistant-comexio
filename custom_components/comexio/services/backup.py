@@ -1407,7 +1407,11 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         # of relying solely on the lock rejection above.
         coordinator.async_update_listeners()
         try:
-            await _run_function_plan_restore(hass, call, coordinator, api, plan_hash)
+            # No auto backup while a restore rewrites or rebuilds a plan: in place it would store the
+            # restored content next to the snapshot async_mark_restored promotes, for a new plan or a
+            # copy a half-built plan — each pushing an older entry out of the auto slots.
+            with coordinator.pause_auto_backup():
+                await _run_function_plan_restore(hass, call, coordinator, api, plan_hash)
         finally:
             coordinator.async_update_listeners()
 

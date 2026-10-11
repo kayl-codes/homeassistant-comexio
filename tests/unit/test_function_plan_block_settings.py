@@ -593,3 +593,26 @@ def test_a_block_without_hidden_pins_is_not_repointed(plan: dict[str, Any]) -> N
     elements, rendered = expand_autohide_blocks(plan["elements"], {"fub_base": {"5": {"in_hide": []}}}, SETTINGS)
     assert elements["4"]["reference"]["ref_id"] == 5
     assert "5:expanded" not in rendered["fub_base"]
+
+
+def test_auto_backup_held_back_after_its_awaits_stores_nothing(stores: dict[str, Any], plan: dict[str, Any]) -> None:
+    """A restore that starts while the store loads: asked once more before the history changes."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+    restoring = False
+    fub_base = manager._async_fub_base
+
+    async def restore_starts_meanwhile() -> dict:
+        nonlocal restoring
+        restoring = True
+        return await fub_base()
+
+    async def run() -> tuple[list, list]:
+        with patch.object(manager, "_async_fub_base", restore_starts_meanwhile):
+            held = await manager.async_auto_backup({1: plan}, fub_data, held_back=lambda: restoring)
+        return held, await manager.async_auto_backup({1: plan}, fub_data, held_back=lambda: False)
+
+    held, stored = asyncio.run(run())
+    assert held == []
+    assert len(stored) == 1
+    assert len(stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"]) == 1
