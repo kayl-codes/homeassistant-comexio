@@ -734,10 +734,19 @@ def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
     return f"comexio_{server_id}_fub{fub_id}".lower()
 
 
+def function_plan_id(fid: Any) -> int | None:
+    """Plan id of a $Fubs key (api.fub_data), None for a key that is no plan id as str(fub_id) spells it.
+
+    Only the canonical spelling counts ("08" does not): every lookup goes by fub_data.get(str(fub_id)).
+    """
+    text = str(fid)
+    # isascii+isdecimal, not isdigit: "²".isdigit() is True but int("²") raises.
+    return int(text) if text.isascii() and text.isdecimal() and str(int(text)) == text else None
+
+
 def function_plan_ids(fub_data: Mapping[str, Any]) -> set[int]:
     """Plan ids in a $Fubs listing (api.fub_data), skipping keys that are no plain number."""
-    # isascii+isdecimal, not isdigit: "²".isdigit() is True but int("²") raises.
-    return {int(fid) for fid in fub_data if str(fid).isascii() and str(fid).isdecimal()}
+    return {fub_id for fid in fub_data if (fub_id := function_plan_id(fid)) is not None}
 
 
 def watchdog_user_plan_pick(fub_id: int, name: str) -> str:

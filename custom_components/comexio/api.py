@@ -63,6 +63,8 @@ from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     category_by_fub_module_type,
+    function_plan_id,
+    function_plan_ids,
     io_column_rows,
     io_sort_key,
     is_valid_entity_name_schema,
@@ -1956,10 +1958,12 @@ class ComexioAPI:
         Returns {fub_id: {"elements": {...}, "connections": {...}}}, {} on failure — or, with
         raise_errors=True, raises the ComexioError, so a caller can tell a failure from no plans.
         """
-        fub_ids = {int(fid) for fid in self._fub_data}
+        fub_ids = function_plan_ids(self._fub_data)
+        if bad_keys := [fid for fid in self._fub_data if function_plan_id(fid) is None]:
+            _LOGGER.warning("function_plan_load_all_plans: $Fubs key(s) %r are no plan id — not loaded", bad_keys)
         if not fub_ids:
             # No plan in Comexio is a normal state; the coordinator's backup cycle reports it.
-            _LOGGER.debug("function_plan_load_all_plans: self._fub_data is empty — nothing to load")
+            _LOGGER.debug("function_plan_load_all_plans: no plan id in self._fub_data — nothing to load")
             return {}
 
         t_start = time.monotonic()
@@ -4621,9 +4625,12 @@ class ComexioAPI:
         """Display name of a Function Plan for logging/reporting; falls back to the id.
 
         Tolerates a malformed $Fubs entry (key no plain number, metadata no dict): callers run inside
-        the backup cycle, which a name lookup must not abort.
+        the backup cycle, which a name lookup must not abort. Keys count as in function_plan_ids.
         """
-        meta = next((fd for fid, fd in self._fub_data.items() if fid in (fub_id, str(fub_id))), None)
+        wanted = function_plan_id(fub_id)
+        meta = next(
+            (fd for fid, fd in self._fub_data.items() if wanted is not None and function_plan_id(fid) == wanted), None
+        )
         return str((meta.get("Name") if isinstance(meta, dict) else None) or fub_id)
 
     @staticmethod

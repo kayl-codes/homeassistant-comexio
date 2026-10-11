@@ -605,6 +605,18 @@ def test_load_all_plans_asks_only_for_cached_plans(comexio_api: ComexioAPI, clie
     client.load_all_function_plans.assert_awaited_once_with({1, 4}, strict=True)
 
 
+def test_load_all_plans_skips_a_key_that_is_no_plain_number(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A malformed $Fubs key must not abort the bulk load — the backup cycle of every valid plan rides on it."""
+    comexio_api._fub_data = {"1": {}, "x": {}, "²": {}, "04": {}, "4": {}}
+    client.load_all_function_plans = AsyncMock(return_value={})
+    asyncio.run(comexio_api.function_plan_load_all_plans(strict=True))
+    client.load_all_function_plans.assert_awaited_once_with({1, 4}, strict=True)
+    # A plan under such a key gets no backup: say which keys were left out.
+    assert "['x', '²', '04']" in caplog.text
+
+
 def test_load_all_plans_failure_is_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
     comexio_api._fub_data = {"1": {}}
     _fail(client, "load_all_function_plans", HTTP_ERROR)
