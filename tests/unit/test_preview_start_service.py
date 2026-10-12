@@ -10,15 +10,21 @@ import pytest
 
 from custom_components.comexio import coordinator as coordinator_module, plan_preview
 from custom_components.comexio.coordinator import ComexioCoordinator
-from custom_components.comexio.services import misc
+from custom_components.comexio.services import misc, plan_actions
 
 
 def _run_start(
-    *, armed: bool, selection: bool, render: AsyncMock | None = None, coordinator: object | None = None
+    *,
+    armed: bool,
+    selection: bool,
+    render: AsyncMock | None = None,
+    coordinator: object | None = None,
+    data: dict | None = None,
+    still_following: bool = True,
 ) -> tuple[dict, AsyncMock]:
     coordinator = coordinator or _follow_coordinator(following=False, preview_armed=armed)
     render = render or AsyncMock()
-    call = SimpleNamespace(data={})
+    call = SimpleNamespace(data=data or {})
     with (
         patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
         patch.object(misc, "preview_selection_available", return_value=selection),
@@ -26,7 +32,7 @@ def _run_start(
     ):
         result = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
     # Whatever the card finds, its later Plan/Backup picks follow until it closes.
-    assert coordinator.preview_following is True
+    assert coordinator.preview_following is still_following
     return result, render
 
 
@@ -162,11 +168,11 @@ def test_an_unresolved_instance_answers_the_keepalive_without_an_instance() -> N
 
 def test_closing_the_card_ends_the_following() -> None:
     coordinator = _follow_coordinator(following=True)
-    coordinator.stop_preview = MagicMock(return_value=False)
+    coordinator.stop_preview_for_closed_cards = MagicMock(return_value=False)
     with patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))):
         asyncio.run(misc._handle_function_plan_preview_stop(SimpleNamespace(), SimpleNamespace(data={})))  # type: ignore[arg-type]
     assert coordinator.preview_following is False
-    coordinator.stop_preview.assert_called_once_with()
+    coordinator.stop_preview_for_closed_cards.assert_called_once_with()
 
 
 def test_an_opened_card_follows_within_the_auto_stop_window_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,6 +182,10 @@ def test_an_opened_card_follows_within_the_auto_stop_window_only(monkeypatch: py
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator._preview_plan_cache = None
     coordinator._preview_following_until = 0.0
+    coordinator._preview_cards = {}
+    coordinator._preview_cards_dropped = {}
+    coordinator._preview_card_sweep_cancel = None
+    coordinator.preview_stop_generation = 0
     assert coordinator.preview_following is False
     coordinator.start_preview_following()
     assert coordinator.preview_following is True
@@ -262,11 +272,23 @@ def test_a_start_waiting_behind_a_failed_render_renders_itself() -> None:
 
 
 class _PreviewCoordinator(SimpleNamespace):
-    def start_preview_following(self) -> None:
-        self.preview_following = True
+    @property
+    def preview_card_open(self) -> bool:
+        return self.preview_following
 
-    def end_preview_following(self) -> None:
+    def start_preview_following(self, card_id: str | None = None) -> bool:
+        self.preview_following = True
+        return False
+
+    def end_preview_following(self, card_id: str | None = None) -> bool:
         self.preview_following = False
+        self.preview_stop_generation += 1
+        return True
+
+    def stop_preview(self) -> bool:
+        self.stops.append(self.preview_armed)
+        self.preview_armed = False
+        return True
 
 
 _INSTANCE = "coordinator-1"
@@ -280,6 +302,8 @@ def _follow_coordinator(*, following: bool, preview_armed: bool = False) -> _Pre
         server_id="iosrv1",
         preview_follow_lock=asyncio.Lock(),
         preview_follow_generation=0,
+        preview_stop_generation=0,
+        stops=[],
     )
 
 
@@ -504,3 +528,457 @@ def test_an_armed_re_render_takes_the_poll_values_of_its_own_plan() -> None:
     asyncio.run(ComexioCoordinator._render_armed_preview(coordinator, cache, {"c1": 1}))  # type: ignore[arg-type]
     assert published == [1]
     assert coordinator._connection_values == {"c1": 1}
+
+
+def _cards_coordinator(monkeypatch: pytest.MonkeyPatch, now: list[float]) -> ComexioCoordinator:
+    monkeypatch.setattr(coordinator_module.time, "monotonic", lambda: now[0])
+    return _real_coordinator(monkeypatch)
+
+
+def _run_stop(coordinator: object, data: dict) -> dict:
+    call = SimpleNamespace(data=data)
+    with patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))):
+        return asyncio.run(misc._handle_function_plan_preview_stop(SimpleNamespace(), call))  # type: ignore[arg-type]
+
+
+def test_one_card_closing_leaves_another_open_cards_preview_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (Sourcery, #171): the stop was coordinator-wide, so closing one card froze the other's live values."""
+    now = [1000.0]
+    coordinator = _cards_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("card-a")
+    coordinator.start_preview_following("card-b")
+    coordinator._preview_plan_cache = _armed_cache(1)
+
+    assert _run_stop(coordinator, {"card_id": "card-a"}) == {"success": True, "stopped": False}
+    assert coordinator.preview_armed is True
+    assert coordinator.preview_following is True
+    assert coordinator.preview_stop_generation == 0
+
+    assert _run_stop(coordinator, {"card_id": "card-b"}) == {"success": True}
+    assert coordinator.preview_armed is False
+    assert coordinator.preview_following is False
+    assert coordinator.preview_stop_generation == 1
+
+
+def test_a_card_gone_without_a_stop_does_not_keep_the_preview_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed browser tab sends no stop: once its keepalives stay away, the last open card's stop disarms."""
+    now = [1000.0]
+    coordinator = _cards_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("closed-tab")
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC - 1
+    coordinator.start_preview_following("card-b")
+    assert coordinator.end_preview_following("card-b") is False  # the tab is still within its keepalive window
+    coordinator.start_preview_following("card-b")
+    now[0] += 1
+    assert coordinator.end_preview_following("card-b") is True
+
+
+def test_a_stop_without_a_card_id_ends_the_preview_for_every_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An older cached card or a script: the stop stays coordinator-wide, as before card ids existed."""
+    now = [1000.0]
+    coordinator = _cards_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("card-a")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    assert _run_stop(coordinator, {}) == {"success": True}
+    assert coordinator.preview_armed is False
+
+
+def test_the_auto_stop_ends_the_preview_for_every_open_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    coordinator = _cards_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("card-a")
+    coordinator.start_preview_following("card-b")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    asyncio.run(coordinator._async_auto_stop_preview(None))
+    assert coordinator.preview_armed is False
+    assert coordinator.preview_following is False
+    assert coordinator._preview_cards == {}
+    assert coordinator.preview_stop_generation == 1
+
+
+def test_start_and_keepalive_register_the_calling_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    coordinator = _cards_coordinator(monkeypatch, now)
+    _run_start(armed=False, selection=False, coordinator=coordinator, data={"card_id": "card-a"})
+    call = SimpleNamespace(data={"keepalive": True, "card_id": "card-b"})
+    with patch.object(misc, "_resolve_coordinator", MagicMock(return_value=coordinator)):
+        asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+    assert set(coordinator._preview_cards) == {"card-a", "card-b"}
+
+
+def _close_the_last_card_while_rendering() -> AsyncMock:
+    async def render(c: _PreviewCoordinator) -> None:
+        c.end_preview_following()  # the last card's stop lands while Comexio answers
+        c.preview_armed = True
+
+    return AsyncMock(side_effect=render)
+
+
+def test_a_start_whose_card_closed_during_the_render_disarms_and_says_so() -> None:
+    """Review (#171): the stop found nothing armed yet, so the render armed a poll no card shows, reporting success."""
+    coordinator = _follow_coordinator(following=False)
+    result, _ = _run_start(
+        armed=False,
+        selection=True,
+        render=_close_the_last_card_while_rendering(),
+        coordinator=coordinator,
+        still_following=False,
+    )
+    assert result == {"success": False, "error": "The preview was stopped while it rendered.", "instance": _INSTANCE}
+    assert coordinator.preview_armed is False
+    assert coordinator.stops == [True]
+
+
+def _follow_with(render: AsyncMock) -> _PreviewCoordinator:
+    coordinator = _follow_coordinator(following=True)
+    with (
+        patch.object(plan_preview, "preview_selection_available", return_value=True),
+        patch.object(plan_preview, "async_render_selected_preview", render),
+    ):
+        asyncio.run(plan_preview.async_follow_selection(coordinator))  # type: ignore[arg-type]
+    return coordinator
+
+
+def test_a_follow_whose_card_closed_during_the_render_disarms() -> None:
+    coordinator = _follow_with(_close_the_last_card_while_rendering())
+    assert coordinator.preview_armed is False
+    assert coordinator.stops == [True]
+
+
+def test_an_undisturbed_follow_keeps_its_preview_armed() -> None:
+    async def render(c: _PreviewCoordinator) -> None:
+        c.preview_armed = True
+
+    coordinator = _follow_with(AsyncMock(side_effect=render))
+    assert coordinator.preview_armed is True
+    assert coordinator.stops == []
+
+
+def test_the_svg_visualize_renders_under_the_selection_lock_and_supersedes_queued_follows() -> None:
+    """Review (#171): it armed outside the lock, so a queued selection follow could overwrite it, or it a newer one."""
+    coordinator = _follow_coordinator(following=True)
+    seen: list[tuple[bool, int]] = []
+
+    async def generate(*_args: object) -> str:
+        seen.append((coordinator.preview_follow_lock.locked(), coordinator.preview_follow_generation))
+        return "/local/preview.svg"
+
+    coordinator.async_generate_plan_preview = AsyncMock(side_effect=generate)
+    coordinator.snapshot_block_settings_for_source = MagicMock(return_value=None)
+    source = (coordinator, None, 3, "Plan", {}, {}, "live", None)
+    call = SimpleNamespace(data={"format": "svg"}, return_response=True)
+    with (
+        patch.object(plan_actions, "_resolve_visualize_live_source", AsyncMock(return_value=source)),
+        patch.object(plan_actions.persistent_notification, "async_create"),
+    ):
+        result = asyncio.run(plan_actions.handle_function_plan_visualize(SimpleNamespace(), call))  # type: ignore[arg-type]
+    assert result == {"plan_name": "Plan", "url": "/local/preview.svg"}
+    assert seen == [(True, 1)]
+
+
+class _Timers:
+    """async_call_later stand-in: records each timer so a test fires it when its time has come."""
+
+    def __init__(self) -> None:
+        self.pending: list[tuple[float, object]] = []
+
+    def __call__(self, _hass: object, delay: float, action: object) -> MagicMock:
+        entry = (delay, action)
+        self.pending.append(entry)
+        return MagicMock(side_effect=lambda: self.pending.remove(entry) if entry in self.pending else None)
+
+    def sweeps(self, coordinator: ComexioCoordinator) -> list[float]:
+        return [d for d, a in self.pending if a == coordinator._async_sweep_preview_cards]
+
+    def fire_sweep(self, coordinator: ComexioCoordinator) -> None:
+        entry = next(e for e in self.pending if e[1] == coordinator._async_sweep_preview_cards)
+        self.pending.remove(entry)
+        asyncio.run(coordinator._async_sweep_preview_cards(None))
+
+
+def _timed_coordinator(monkeypatch: pytest.MonkeyPatch, now: list[float]) -> tuple[ComexioCoordinator, _Timers]:
+    monkeypatch.setattr(coordinator_module.time, "monotonic", lambda: now[0])
+    timers = _Timers()
+    monkeypatch.setattr(coordinator_module, "async_call_later", timers)
+    return ComexioCoordinator(MagicMock(), MagicMock(), MagicMock()), timers
+
+
+def test_a_card_reloaded_without_a_stop_does_not_hold_the_preview_past_its_keepalive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review (#171): F5 sends no stop; the old card's id must not keep the poll running once the new card closes."""
+    now = [1000.0]
+    coordinator, timers = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("before-f5")
+    now[0] += 10
+    coordinator.start_preview_following("after-f5")
+    coordinator._preview_plan_cache = _armed_cache(1)
+
+    assert _run_stop(coordinator, {"card_id": "after-f5"}) == {"success": True, "stopped": False}
+    assert timers.sweeps(coordinator) == [coordinator_module.PREVIEW_CARD_ALIVE_SEC - 10]
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC - 10
+    timers.fire_sweep(coordinator)
+    assert coordinator.preview_armed is False
+    assert coordinator.preview_card_open is False
+    assert coordinator.preview_stop_generation == 1
+
+
+def test_the_sweep_waits_while_the_remaining_card_keeps_answering(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    coordinator, timers = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("card-a")
+    coordinator.start_preview_following("card-b")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    _run_stop(coordinator, {"card_id": "card-b"})
+
+    now[0] += 100
+    coordinator.start_preview_following("card-a")  # card-a's keepalive
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC - 100
+    timers.fire_sweep(coordinator)
+    assert coordinator.preview_armed is True
+    assert timers.sweeps(coordinator) == [100]  # re-checks when card-a's latest keepalive runs out
+
+    assert _run_stop(coordinator, {"card_id": "card-a"}) == {"success": True}
+    assert timers.sweeps(coordinator) == []
+    assert coordinator.preview_armed is False
+
+
+def test_a_stalled_card_is_told_to_rearm_after_another_cards_stop_disarmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (#171): a frozen background tab, dropped as gone, must not stay open without live values."""
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("frozen-tab")
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    coordinator.start_preview_following("card-b")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    assert _run_stop(coordinator, {"card_id": "card-b"}) == {"success": True}
+
+    call = SimpleNamespace(data={"keepalive": True, "card_id": "frozen-tab"})
+    with patch.object(misc, "_resolve_coordinator", MagicMock(return_value=coordinator)):
+        first = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+        second = asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
+    assert first["rearm"] is True
+    assert "rearm" not in second  # told once; its re-sent start does the rest
+
+
+def test_a_dropped_card_is_not_told_to_rearm_while_the_preview_still_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("frozen-tab")
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    coordinator.start_preview_following("card-b")
+    coordinator.start_preview_following("card-c")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    assert _run_stop(coordinator, {"card_id": "card-b"}) == {"success": True, "stopped": False}
+    assert coordinator.start_preview_following("frozen-tab") is False
+
+
+def test_the_auto_stop_is_not_undone_by_a_dropped_cards_rearm(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("frozen-tab")
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    coordinator.start_preview_following("card-b")
+    coordinator.start_preview_following("card-c")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    _run_stop(coordinator, {"card_id": "card-b"})  # drops frozen-tab, card-c keeps the preview
+    asyncio.run(coordinator._async_auto_stop_preview(None))
+    assert coordinator.start_preview_following("frozen-tab") is False
+
+
+def test_a_stop_from_an_unknown_card_after_a_restart_disarms(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After an HA restart no card is registered yet: a surviving card's stop must still disarm."""
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    coordinator._preview_plan_cache = _armed_cache(1)
+    assert _run_stop(coordinator, {"card_id": "survivor"}) == {"success": True}
+    assert coordinator.preview_armed is False
+    assert coordinator.preview_stop_generation == 1
+
+
+@pytest.mark.parametrize("card_id", ["", None])
+def test_a_missing_card_id_registers_no_card(monkeypatch: pytest.MonkeyPatch, card_id: str | None) -> None:
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    _run_start(armed=False, selection=False, coordinator=coordinator, data={"card_id": card_id})
+    assert coordinator._preview_cards == {}
+
+
+def test_one_cards_stop_during_another_cards_render_keeps_the_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the last card's stop may disarm a render: a stop while another card is alive changes nothing."""
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("card-a")
+
+    async def render(c: ComexioCoordinator) -> None:
+        assert c.end_preview_following("card-a") is False
+        c._preview_plan_cache = _armed_cache(1)
+
+    result, _ = _run_start(
+        armed=False,
+        selection=True,
+        render=AsyncMock(side_effect=render),
+        coordinator=coordinator,
+        data={"card_id": "card-b"},
+    )
+    assert result["success"] is True
+    assert coordinator.preview_armed is True
+    assert coordinator.preview_stop_generation == 0
+
+
+def test_a_card_reopened_during_the_render_keeps_what_it_armed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (#171): the last card closed, a new one opened before the render ended — its preview must stay armed."""
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+
+    async def render(c: ComexioCoordinator) -> None:
+        assert c.end_preview_following("card-a") is True
+        c.start_preview_following("card-b")
+        c._preview_plan_cache = _armed_cache(1)
+
+    result, _ = _run_start(
+        armed=False,
+        selection=True,
+        render=AsyncMock(side_effect=render),
+        coordinator=coordinator,
+        data={"card_id": "card-a"},
+    )
+    assert result["success"] is True
+    assert coordinator.preview_armed is True
+
+
+def test_an_auto_stop_during_the_opening_render_disarms(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+
+    async def render(c: ComexioCoordinator) -> None:
+        c._preview_plan_cache = _armed_cache(1)
+        await c._async_auto_stop_preview(None)
+        c._preview_plan_cache = _armed_cache(1)  # the render's own arm lands after the auto-stop
+
+    result, _ = _run_start(
+        armed=False,
+        selection=True,
+        render=AsyncMock(side_effect=render),
+        coordinator=coordinator,
+        data={"card_id": "card-a"},
+        still_following=False,
+    )
+    assert result["success"] is False
+    assert coordinator.preview_armed is False
+
+
+def test_a_start_stopped_while_rendering_logs_quietly(caplog: pytest.LogCaptureFixture) -> None:
+    """Leaving the dashboard during the first render is routine: no warning in the HA log."""
+    coordinator = _follow_coordinator(following=False)
+    with caplog.at_level(logging.DEBUG, logger=misc.__name__):
+        _run_start(
+            armed=False,
+            selection=True,
+            render=_close_the_last_card_while_rendering(),
+            coordinator=coordinator,
+            still_following=False,
+        )
+    assert [r.levelno for r in caplog.records if r.name == misc.__name__ and r.levelno >= logging.WARNING] == []
+
+
+def test_a_follow_queued_before_a_visualize_never_renders_after_it() -> None:
+    """The svg visualize is the newest request: a selection follow that waited on the lock must not overwrite it."""
+    coordinator = _follow_coordinator(following=True)
+    order: list[str] = []
+    follow_render = AsyncMock(side_effect=lambda _c: order.append("follow"))
+
+    async def scenario() -> None:
+        await coordinator.preview_follow_lock.acquire()  # a render in progress
+        with (
+            patch.object(plan_preview, "preview_selection_available", return_value=True),
+            patch.object(plan_preview, "async_render_selected_preview", follow_render),
+            patch.object(plan_actions, "_resolve_visualize_live_source", AsyncMock(return_value=source)),
+            patch.object(plan_actions.persistent_notification, "async_create"),
+        ):
+            follow = asyncio.ensure_future(plan_preview.async_follow_selection(coordinator))  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            visualize = asyncio.ensure_future(plan_actions.handle_function_plan_visualize(SimpleNamespace(), call))  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            coordinator.preview_follow_lock.release()
+            await asyncio.gather(follow, visualize)
+
+    async def generate(*_args: object) -> str:
+        order.append("visualize")
+        return "/local/preview.svg"
+
+    coordinator.async_generate_plan_preview = AsyncMock(side_effect=generate)
+    coordinator.snapshot_block_settings_for_source = MagicMock(return_value=None)
+    source = (coordinator, None, 3, "Plan", {}, {}, "live", None)
+    call = SimpleNamespace(data={"format": "svg"}, return_response=True)
+    asyncio.run(scenario())
+    assert order[-1] == "visualize"
+
+
+def _drop_frozen_tab_and_close_b(coordinator: ComexioCoordinator, now: list[float], *, keep_c: bool) -> dict:
+    coordinator.start_preview_following("frozen-tab")
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    coordinator.start_preview_following("card-b")
+    if keep_c:
+        coordinator.start_preview_following("card-c")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    return _run_stop(coordinator, {"card_id": "card-b"})
+
+
+def test_a_sweep_survives_a_disarm_that_ends_no_following(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (#171): an orphaned-plan render or the poll breaker disarms, a follow re-arms: the sweep still runs."""
+    now = [1000.0]
+    coordinator, timers = _timed_coordinator(monkeypatch, now)
+    _drop_frozen_tab_and_close_b(coordinator, now, keep_c=True)
+    assert len(timers.sweeps(coordinator)) == 1
+    coordinator.stop_preview()  # e.g. the 'Backup' selector switched to a deleted plan's frozen render
+    assert len(timers.sweeps(coordinator)) == 1
+    coordinator._preview_plan_cache = _armed_cache(1)  # a follow back to a live plan re-arms
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    timers.fire_sweep(coordinator)
+    assert coordinator.preview_armed is False
+
+
+def test_a_dropped_card_does_not_undo_an_auto_stop_after_its_drop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (#171): the last card's stop found it already auto-stopped, so the frozen tab resumes nothing."""
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("frozen-tab")
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    coordinator.start_preview_following("card-b")
+    assert _run_stop(coordinator, {"card_id": "card-b"}) == {
+        "success": False,
+        "error": "No live plan preview is currently armed.",
+    }
+    assert coordinator.start_preview_following("frozen-tab") is False
+
+
+def test_a_dropped_card_does_not_undo_the_poll_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    _drop_frozen_tab_and_close_b(coordinator, now, keep_c=False)
+    coordinator._preview_plan_cache = _armed_cache(1)  # re-armed by a follow, then
+    coordinator._disarm_preview_cache()  # the poll breaker disarms
+    assert coordinator.start_preview_following("frozen-tab") is False
+
+
+def test_drops_are_forgotten_after_the_auto_stop_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each page load brings a new card id: the drops of reloaded pages must not pile up for HA's lifetime."""
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    _drop_frozen_tab_and_close_b(coordinator, now, keep_c=True)
+    assert set(coordinator._preview_cards_dropped) == {"frozen-tab"}
+    now[0] += coordinator_module._PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60 + 1
+    coordinator.start_preview_following("card-c")
+    assert coordinator.end_preview_following("card-c") is True
+    assert coordinator._preview_cards_dropped == {}
+
+
+def test_shutdown_cancels_a_pending_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    coordinator, timers = _timed_coordinator(monkeypatch, now)
+    _drop_frozen_tab_and_close_b(coordinator, now, keep_c=True)
+    coordinator._knx_dpt_reload_cancel = None
+    with patch.object(coordinator_module.DataUpdateCoordinator, "async_shutdown", AsyncMock()):
+        asyncio.run(coordinator.async_shutdown())
+    assert timers.sweeps(coordinator) == []

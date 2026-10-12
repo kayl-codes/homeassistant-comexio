@@ -362,6 +362,9 @@ class ComexioPlanCard extends HTMLElement {
     this._logPaused = false; // pause button: drop incoming events (deliberately NOT persisted)
     this._analysisHighlightIds = new Set(); // element ids highlighted from a clicked finding
     this._stopPreviewTimer = null; // pending function_plan_preview_stop grace timer (#75)
+    // This card's id in preview start/keepalive/stop: its stop leaves a second open card's preview running.
+    // getRandomValues, not randomUUID: the latter needs a secure context, HA often runs on plain http.
+    this._cardId = Array.from(crypto.getRandomValues(new Uint32Array(4)), (n) => n.toString(16)).join("");
     this._startPreviewPending = false; // function_plan_preview_start owed once hass is known
     this._previewStarted = false; // the backend answered the open's preview_start with success
     this._previewInstance = null; // coordinator id from that start's answer (backend preview_instance_id)
@@ -1867,7 +1870,11 @@ class ComexioPlanCard extends HTMLElement {
     // same way the backup-restore call does, so a routine open/close doesn't hit the
     // ambiguous-instance path and post a spurious "ERROR" notification (#75).
     const configEntryId = this._hass?.entities?.[this._config.entity]?.config_entry_id;
-    return configEntryId ? { config_entry: configEntryId } : {};
+    const data = { card_id: this._cardId };
+    if (configEntryId) {
+      data.config_entry = configEntryId;
+    }
+    return data;
   }
 
   _startPreviewIfPending() {
@@ -1954,7 +1961,9 @@ class ComexioPlanCard extends HTMLElement {
         this._keepaliveInstance = response.instance;
         const retryDue = retryStart && (newInstance || Date.now() >= this._startRetryAfter);
         const reloaded = !retryStart && !!response.instance && response.instance !== this._previewInstance;
-        if (retryDue || reloaded) {
+        // This card's keepalives stalled (a frozen background tab) and another card's stop disarmed meanwhile.
+        const rearm = !retryStart && response.rearm === true;
+        if (retryDue || reloaded || rearm) {
           this._startPreviewPending = true;
           this._startPreviewIfPending();
         }

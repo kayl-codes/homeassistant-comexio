@@ -21,7 +21,7 @@ from homeassistant.helpers import entity_registry as er
 
 from ..const import DOMAIN, MarkerKind, webio_class_name
 from ..coordinator import ComexioCoordinator
-from ..plan_preview import async_render_opened_preview, preview_selection_available
+from ..plan_preview import PreviewStoppedError, async_render_opened_preview, preview_selection_available
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -328,6 +328,13 @@ async def _handle_function_plan_preview_extend(hass: HomeAssistant, call: Servic
 # preview_instance_id. The plan card compares it across keepalives — a changed id means the config
 # entry was reloaded and nothing is armed any more, so the card re-sends its opening start.
 _PREVIEW_INSTANCE_KEY = "instance"
+# Keepalive answer key, only when true: see coordinator.start_preview_following.
+_PREVIEW_REARM_KEY = "rearm"
+
+
+def _preview_card_id(call: ServiceCall) -> str | None:
+    """The calling plan card's own id (start, keepalive, stop) — None from an older card or a script."""
+    return str(call.data.get("card_id") or "") or None
 
 
 async def _handle_function_plan_preview_start(hass: HomeAssistant, call: ServiceCall) -> dict:
@@ -354,7 +361,7 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
     coordinator, _api, _fub_id = ctx
 
     instance = coordinator.preview_instance_id
-    coordinator.start_preview_following()
+    coordinator.start_preview_following(_preview_card_id(call))
     if coordinator.preview_armed:
         _LOGGER.debug(
             "Function Plan Preview Start: a plan preview is already armed (Duration: %.3fs)",
@@ -366,6 +373,12 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
         return {"success": False, "error": "No plan is selected for the preview.", _PREVIEW_INSTANCE_KEY: instance}
     try:
         rendered = await async_render_opened_preview(coordinator)
+    except PreviewStoppedError as err:
+        _LOGGER.debug(
+            "Function Plan Preview Start: the card closed while it rendered (Duration: %.1fs)",
+            time.monotonic() - started,
+        )
+        return {"success": False, "error": str(err), _PREVIEW_INSTANCE_KEY: instance}
     except HomeAssistantError as err:
         _LOGGER.warning(
             "Function Plan Preview Start: preview not armed (Duration: %.1fs): %s", time.monotonic() - started, err
@@ -391,30 +404,38 @@ def _preview_keepalive(hass: HomeAssistant, call: ServiceCall) -> dict:
     coordinator = _resolve_coordinator(hass, call, _TITLE_PREVIEW_START_ERR, quiet=True)
     if coordinator is None:
         return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
-    coordinator.start_preview_following()
+    rearm = coordinator.start_preview_following(_preview_card_id(call))
     _LOGGER.debug(
-        "Function Plan Preview Start: keepalive (config_entry=%s, Duration: %.3fs)",
+        "Function Plan Preview Start: keepalive (config_entry=%s, rearm=%s, Duration: %.3fs)",
         call.data.get("config_entry"),
+        rearm,
         time.monotonic() - started,
     )
-    return {"success": True, "keepalive": True, _PREVIEW_INSTANCE_KEY: coordinator.preview_instance_id}
+    answer = {"success": True, "keepalive": True, _PREVIEW_INSTANCE_KEY: coordinator.preview_instance_id}
+    if rearm:
+        # Dropped as gone while another card's stop disarmed: the card re-sends its start.
+        answer[_PREVIEW_REARM_KEY] = True
+    return answer
 
 
 async def _handle_function_plan_preview_stop(hass: HomeAssistant, call: ServiceCall) -> dict:
-    """Immediately disarm the currently armed live plan preview (#75).
+    """Immediately disarm the currently armed live plan preview (#75) — unless another plan card is open.
 
     Called by the plan card's disconnectedCallback when it leaves the DOM, so the Stufe-2
     poll stops right away instead of continuing until the auto-stop window elapses — see
-    coordinator.stop_preview. No fub_id/entity targeting, same single-instance resolution
-    as function_plan_debug_session.
+    coordinator.stop_preview. With the card's card_id, a second card still open on the same
+    instance keeps its live values (coordinator.end_preview_following). No fub_id/entity
+    targeting, same single-instance resolution as function_plan_debug_session.
     """
     ctx = await _async_get_service_context(hass, call, _TITLE_PREVIEW_STOP_ERR, resolve_plan=False, do_login=False)
     if ctx is None:
         return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
     coordinator, _api, _fub_id = ctx
 
-    coordinator.end_preview_following()
-    stopped = coordinator.stop_preview()
+    if not coordinator.end_preview_following(_preview_card_id(call)):
+        _LOGGER.debug("Function Plan Preview Stop: another plan card is still open, the preview keeps running")
+        return {"success": True, "stopped": False}
+    stopped = coordinator.stop_preview_for_closed_cards()
     if not stopped:
         # Expected/frequent: the card's disconnectedCallback grace timer fires after the preview
         # was already stopped some other way (auto-stop, a second card's disconnect) — not worth
