@@ -462,6 +462,9 @@ FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC = 300
 # Backup cycles in a row (one per full poll) whose bulk load of the plans failed before a persistent
 # notification says the automatic backups have stopped. Shown once per outage, dismissed when a load works again.
 FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD = 3
+# Working bulk loads in a row that left out a plan the poll still lists before a persistent notification
+# names it (Comexio skips a plan it cannot deliver without an error). Dismissed once every plan loads again.
+FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD = 3
 
 # Operation durations for progress calculation (seconds)
 SYNC_DURATION_DELETE = 4
@@ -731,9 +734,19 @@ def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
     return f"comexio_{server_id}_fub{fub_id}".lower()
 
 
+def function_plan_id(fid: Any) -> int | None:
+    """Plan id of a $Fubs key (api.fub_data), None for a key that is no plan id as str(fub_id) spells it.
+
+    Only the canonical spelling counts ("08" does not): every lookup goes by fub_data.get(str(fub_id)).
+    """
+    text = str(fid)
+    # isascii+isdecimal, not isdigit: "²".isdigit() is True but int("²") raises.
+    return int(text) if text.isascii() and text.isdecimal() and str(int(text)) == text else None
+
+
 def function_plan_ids(fub_data: Mapping[str, Any]) -> set[int]:
     """Plan ids in a $Fubs listing (api.fub_data), skipping keys that are no plain number."""
-    return {int(fid) for fid in fub_data if str(fid).isdigit()}
+    return {fub_id for fid in fub_data if (fub_id := function_plan_id(fid)) is not None}
 
 
 def watchdog_user_plan_pick(fub_id: int, name: str) -> str:

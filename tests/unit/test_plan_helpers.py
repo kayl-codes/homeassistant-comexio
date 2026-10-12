@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import WebioClass, source_category
+from custom_components.comexio.const import WebioClass, function_plan_id, source_category
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 PREFIX = "HA"
@@ -166,3 +166,56 @@ def test_resolve_or_create_element(
 
     assert resolved == result
     assert add_element.await_count == (0 if existing is not None else 1)
+
+
+@pytest.mark.parametrize(
+    ("fub_data", "name"),
+    [
+        ({"8": {"Name": "Pumps"}}, "Pumps"),
+        ({8: {"Name": "Pumps"}}, "Pumps"),
+        ({"x": {"Name": "Odd"}, "²": {"Name": "Odd"}, "8": {"Name": "Pumps"}}, "Pumps"),
+        ({"8": "no dict"}, "8"),
+        ({"8": {}}, "8"),
+        ({"8": {"Name": None}}, "8"),
+        ({"08": {"Name": "Pumps"}}, "8"),
+        ({"18": {"Name": "Other"}, "80": {"Name": "Other"}}, "8"),
+        ({}, "8"),
+    ],
+    ids=[
+        "named",
+        "int-key",
+        "key-no-number",
+        "metadata-no-dict",
+        "unnamed",
+        "name-none",
+        "not-canonical",
+        "other-plans",
+        "unlisted",
+    ],
+)
+def test_a_malformed_plan_list_falls_back_to_the_plan_id(comexio_api: ComexioAPI, fub_data: dict, name: str) -> None:
+    """The backup cycle names left-out plans with it: a malformed $Fubs entry must not raise."""
+    comexio_api._fub_data = fub_data
+
+    assert comexio_api.function_plan_name(8) == name
+
+
+@pytest.mark.parametrize(
+    ("fid", "fub_id"),
+    [
+        ("8", 8),
+        (8, 8),
+        ("0", 0),
+        ("08", None),
+        ("", None),
+        (" 8", None),
+        ("+8", None),
+        ("-1", None),
+        ("²", None),
+        ("８", None),
+        ("x", None),
+    ],
+)
+def test_only_a_canonical_plan_key_is_a_plan_id(fid: object, fub_id: int | None) -> None:
+    """Every lookup goes by fub_data.get(str(fub_id)): a key in any other spelling is no plan id."""
+    assert function_plan_id(fid) == fub_id

@@ -102,6 +102,7 @@ from .const import (
     FUNCTION_PLAN_LAYOUT_Y_STEP,
     FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
+    FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD,
     FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC,
@@ -203,7 +204,8 @@ _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 # entry the same as real data (accurate, since it genuinely was empty at seed time) — but
 # _load_function_plan_check_data() must NOT: its contract is "cache miss -> live fetch", and a
 # seeded entry can already be stale by the time it's consulted (real wiring written afterward,
-# e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache).
+# e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache). For the same
+# reason _function_plan_snapshot_complete() counts a seeded entry as a missing plan.
 _SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
 
 _UNINSTALL_CLEANUP_LOG = "[%s] Uninstall cleanup: %s"
@@ -573,6 +575,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._bulk_load_fail_streak = 0
         # A bulk load is running: a cycle timeout that cancels it counts as a failed load.
         self._bulk_load_pending = False
+        # Working bulk loads in a row that left out each still-listed plan, and the plans the
+        # notification names now, as rendered there ("" for none; see _track_omitted_plans).
+        self._plan_omit_streaks: dict[int, int] = {}
+        self._omitted_plans_reported = ""
         # Restores running now, and a counter bumped by each one: the auto backup holds back
         # while one runs or ran during its cycle (see pause_auto_backup).
         self._auto_backup_pauses = 0
@@ -584,6 +590,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # live fetch per plan (Comexio serializes requests server-side regardless of
         # client-side concurrency, so per-call fetching doesn't parallelize away).
         self.function_plan_plans: dict[int, dict] = {}
+        # Set once a bulk load filled the snapshot above; before that it holds only the plans HA
+        # created or looked up one by one (see _function_plan_snapshot_complete).
+        self._function_plan_snapshot_from_bulk = False
         # Set when the audit's wiring check was skipped because the bulk snapshot above
         # wasn't loaded yet — re-run once the backup cycle has loaded it (see _audit_wired_pairs
         # / _async_function_plan_backup_cycle).
@@ -1782,7 +1791,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Reset after the try, not in a finally: the cycle timeout's handler must still see it set.
             self._bulk_load_pending = True
             try:
-                loaded = await self.api.function_plan_load_all_plans(raise_errors=True)
+                # strict: an entry without an elements collection is a broken answer, not an empty plan
+                # (Comexio sends an empty plan as "elements": []) — left out, it is reported, not saved empty.
+                loaded = await self.api.function_plan_load_all_plans(strict=True, raise_errors=True)
             except ComexioError as err:
                 _LOGGER.warning(
                     "[%s] Function Plan bulk load failed: %s — keeping the plans still listed", self.server_id, err
@@ -1798,13 +1809,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._bulk_load_pending = False
             load_failed = load_error is not None
             self._track_bulk_load_result(load_error)
+            if not load_failed:
+                self._track_omitted_plans(requested - loaded.keys())
             plans = self._drop_plans_deleted_meanwhile(loaded)
             if not plans:
+                if not load_failed and self.live_plan_list():
+                    # It left every listed plan out: the wirings kept for the audits are no full snapshot anymore.
+                    self._function_plan_snapshot_from_bulk = False
                 # A failed load is logged above, and plans all deleted meanwhile are no fault.
                 await self._async_finish_cycle_without_plans(reason_known=load_failed or bool(loaded))
                 return
             # The load could not deliver a plan created meanwhile (e.g. a managed plan seeded by a sync).
             self.function_plan_plans = {**self._plans_added_meanwhile(requested), **plans}
+            self._function_plan_snapshot_from_bulk = True
             self.reference_monitor.check_plans(self.function_plan_plans)
             await self._async_recheck_after_snapshot_update()
             fub_data = self.api.fub_data
@@ -1900,6 +1917,51 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "existing backups are kept. Check the connection to Comexio and the Home Assistant log. "
             "This message disappears by itself once a load succeeds.",
             title="Comexio function plan backups stopped",
+            notification_id=notification_id,
+        )
+
+    def _track_omitted_plans(self, omitted: set[int]) -> None:
+        """Count the working bulk loads in a row that left a still-listed plan out: notify, dismiss once all load.
+
+        Comexio skips a plan it cannot deliver (e.g. a malformed entry) without an error, so the load
+        counts as working while that plan gets no automatic backup.
+        """
+        live = self.live_plan_list()
+        if live is not None:
+            omitted &= function_plan_ids(live)  # a plan deleted meanwhile was not left out
+        self._plan_omit_streaks = {fid: self._plan_omit_streaks.get(fid, 0) + 1 for fid in omitted}
+        # Rendered, not as ids: a reported plan renamed meanwhile updates the notification too.
+        names = ", ".join(
+            f"'{self.api.function_plan_name(fid)}' ({fid})"
+            for fid, streak in sorted(self._plan_omit_streaks.items())
+            if streak >= FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD
+        )
+        previous, self._omitted_plans_reported = self._omitted_plans_reported, names
+        notification_id = f"comexio_function_plan_omitted_{self.server_id}"
+        if not names:
+            if previous:
+                _LOGGER.info("[%s] Function Plan bulk load leaves no listed plan out anymore", self.server_id)
+            # Also with nothing reported before: a reload since the notification started the counts afresh,
+            # so it may name a plan that loads again. A plan still left out is named again once its count is back.
+            persistent_notification.async_dismiss(self.hass, notification_id)
+            return
+        if names == previous:
+            return
+        _LOGGER.warning(
+            "[%s] Function Plan bulk load left out %s %s times in a row — no automatic backups of them",
+            self.server_id,
+            names,
+            FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD,
+        )
+        persistent_notification.async_create(
+            self.hass,
+            f"Comexio '{self.server_id}' left these function plans out of at least "
+            f"{FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD} plan loads in a row: {names}. They get no automatic "
+            "backups until Comexio delivers them again; their existing backups are kept. Until then unnamed "
+            "markers are read from the stored backups, so one wired only in these plans since may lack its "
+            "entity. Check these plans in "
+            "Comexio and the Home Assistant log. This message disappears by itself once every plan loads again.",
+            title="Comexio function plans left out of backups",
             notification_id=notification_id,
         )
 
@@ -2128,6 +2190,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         changed = force or kept.keys() != self.function_plan_plans.keys()
         if changed:
             self.function_plan_plans = kept
+            if not kept:
+                # A plan created from here on is all the snapshot holds until the next bulk load.
+                self._function_plan_snapshot_from_bulk = False
         # Also with an unchanged snapshot: the findings carried over for a plan outside it follow the
         # plan list, so a deleted one drops them and the not-checked marks stay current. Logs only changes.
         self.reference_monitor.check_plans(kept)
@@ -2148,15 +2213,38 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         return bool(self.function_plan_plans) or self.live_plan_list() == {}
 
+    def _function_plan_snapshot_complete(self) -> bool:
+        """Whether function_plan_plans holds every listed plan, from a bulk load — {} while no plan is left (#140).
+
+        Stricter than _function_plan_snapshot_loaded, which per-plan checks like _relevant_plans_loaded
+        build on: before the first bulk load the snapshot holds only plans seeded by _create_managed_plan
+        or fetched one by one, and a bulk load can leave a plan out (see _track_omitted_plans). Reading
+        such a snapshot as every plan drops the unnamed markers wired only in the missing plans from the
+        entities (#155). A seeded entry counts as missing: wiring written since is not in it. Without a
+        plan list from the poll nothing is complete: the bulk load asks only for the plans api.fub_data
+        holds by then, i.e. those HA created or looked up.
+        """
+        live = self.live_plan_list()
+        if live is None:
+            return False
+        if not live:
+            return True
+        plans = self.function_plan_plans
+        return (
+            self._function_plan_snapshot_from_bulk
+            and bool(plans)
+            and all(fid in plans and not plans[fid].get(_SEEDED_EMPTY_PLAN_MARKER) for fid in function_plan_ids(live))
+        )
+
     def _referenced_marker_ids(self) -> set[str] | None:
         """Return marker IDs (type-2 element ref_ids) present in any existing plan.
 
         Built from the bulk snapshot of the backup cycle, same as _wired_source_webio_pairs;
-        returns None while that snapshot is not loaded yet. Unlike the WebIO check this
-        does NOT require the element to participate in a connection — a marker merely
+        returns None while it lacks a listed plan — a few plans HA created or looked up are not all.
+        Unlike the WebIO check this does NOT require the element to participate in a connection — a marker merely
         placed in a plan already needs its type/live value resolved in the preview.
         """
-        if not self._function_plan_snapshot_loaded():
+        if not self._function_plan_snapshot_complete():
             return None
         referenced: set[str] = set()
         for plan_data in self.function_plan_plans.values():
