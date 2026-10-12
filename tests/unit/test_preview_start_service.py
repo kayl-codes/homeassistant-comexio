@@ -185,6 +185,7 @@ def test_an_opened_card_follows_within_the_auto_stop_window_only(monkeypatch: py
     coordinator._preview_cards = {}
     coordinator._preview_cards_dropped = {}
     coordinator._preview_card_sweep_cancel = None
+    coordinator._preview_auto_stop_minutes = coordinator_module._PREVIEW_AUTO_STOP_DEFAULT_MINUTES
     coordinator.preview_stop_generation = 0
     assert coordinator.preview_following is False
     coordinator.start_preview_following()
@@ -774,6 +775,7 @@ def test_a_dropped_card_is_not_told_to_rearm_while_the_preview_still_runs(monkey
 
 
 def test_the_auto_stop_is_not_undone_by_a_dropped_cards_rearm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (Sourcery, #171): the frozen tab's keepalive after an auto-stop must not ask for a new start."""
     now = [1000.0]
     coordinator, _ = _timed_coordinator(monkeypatch, now)
     coordinator.start_preview_following("frozen-tab")
@@ -782,8 +784,33 @@ def test_the_auto_stop_is_not_undone_by_a_dropped_cards_rearm(monkeypatch: pytes
     coordinator.start_preview_following("card-c")
     coordinator._preview_plan_cache = _armed_cache(1)
     _run_stop(coordinator, {"card_id": "card-b"})  # drops frozen-tab, card-c keeps the preview
+    assert "frozen-tab" in coordinator._preview_cards_dropped
     asyncio.run(coordinator._async_auto_stop_preview(None))
-    assert coordinator.start_preview_following("frozen-tab") is False
+    assert coordinator.preview_armed is False
+    assert "rearm" not in _keepalive(coordinator, "frozen-tab")
+
+
+def test_a_dropped_card_is_remembered_while_an_extended_preview_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (Sourcery, #171): an extended preview outlasts the default window, its dropped cards must too."""
+    now = [1000.0]
+    coordinator, _ = _timed_coordinator(monkeypatch, now)
+    coordinator._preview_plan_cache = _armed_cache(1)
+    assert coordinator.set_preview_auto_stop_extension(60) is True
+    coordinator.start_preview_following("frozen-tab")
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    coordinator.start_preview_following("card-b")
+    coordinator.start_preview_following("card-c")
+    _run_stop(coordinator, {"card_id": "card-b"})  # drops frozen-tab
+    now[0] += 30 * 60  # past the default window, within the extension
+    coordinator.start_preview_following("card-c")
+    assert _run_stop(coordinator, {"card_id": "card-c"}) == {"success": True}
+    assert _keepalive(coordinator, "frozen-tab")["rearm"] is True
+
+
+def _keepalive(coordinator: object, card_id: str) -> dict:
+    call = SimpleNamespace(data={"keepalive": True, "card_id": card_id})
+    with patch.object(misc, "_resolve_coordinator", MagicMock(return_value=coordinator)):
+        return asyncio.run(misc._handle_function_plan_preview_start(SimpleNamespace(), call))  # type: ignore[arg-type]
 
 
 def test_a_stop_from_an_unknown_card_after_a_restart_disarms(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -939,7 +966,7 @@ def test_a_sweep_survives_a_disarm_that_ends_no_following(monkeypatch: pytest.Mo
     assert coordinator.preview_armed is False
 
 
-def test_a_dropped_card_does_not_undo_an_auto_stop_after_its_drop(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_last_stop_that_disarmed_nothing_gives_no_rearm(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review (#171): the last card's stop found it already auto-stopped, so the frozen tab resumes nothing."""
     now = [1000.0]
     coordinator, _ = _timed_coordinator(monkeypatch, now)

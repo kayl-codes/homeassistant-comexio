@@ -3259,8 +3259,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if now - seen >= PREVIEW_CARD_ALIVE_SEC:
                 del self._preview_cards[card]
                 self._preview_cards_dropped[card] = now
-        # Each page load brings a new card id: forget drops older than a preview could run unattended.
-        forget_before = now - _PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60
+        # Each page load brings a new card id: forget drops older than a preview could run unattended,
+        # also while it is extended past the default (function_plan_preview_extend).
+        forget_before = now - max(_PREVIEW_AUTO_STOP_DEFAULT_MINUTES, self._preview_auto_stop_minutes) * 60
         self._preview_cards_dropped = {c: t for c, t in self._preview_cards_dropped.items() if t >= forget_before}
         if not self._preview_cards:
             return False
