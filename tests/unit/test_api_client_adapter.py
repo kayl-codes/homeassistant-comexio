@@ -1322,6 +1322,86 @@ def test_create_fup_tells_the_listener(comexio_api: ComexioAPI, client: MagicMoc
     listener.assert_called_once_with()  # a failed create changes no plan
 
 
+def _plan_list_from_before_the_create(comexio_api: ComexioAPI, client: MagicMock) -> dict[str, Any]:
+    """A config page whose fetch began before create_fup created plan 8, so it does not list it."""
+    client.get_raw_config = AsyncMock(return_value=_block_page("26", "11.0.3"))
+    page = asyncio.run(comexio_api.get_raw_config())
+    client.create_function_plan = AsyncMock(return_value=CreatedFunctionPlan(8, NEW_PLAN))
+    asyncio.run(comexio_api.create_fup("HA - IO"))
+    assert "8" not in page["Fubs"]
+    return page
+
+
+def test_a_plan_list_older_than_create_fup_keeps_the_new_plan(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Regression: the older page replaced the cache, and the new plan was gone until the next poll.
+    page = _plan_list_from_before_the_create(comexio_api, client)
+
+    comexio_api.parse_config(page)
+
+    assert comexio_api.fub_data["8"] == NEW_PLAN
+    assert set(page["Fubs"]) <= set(comexio_api.fub_data)
+
+
+def test_a_plan_list_fetched_after_create_fup_is_the_word_on_the_new_plan(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """A fetch begun after the create that does not list the plan (deleted in Studio) drops it for good."""
+    older = _plan_list_from_before_the_create(comexio_api, client)
+    client.get_raw_config = AsyncMock(return_value=_block_page("27", "11.0.3"))
+    newer = asyncio.run(comexio_api.get_raw_config())
+
+    comexio_api.parse_config(newer)
+    assert "8" not in comexio_api.fub_data
+    comexio_api.parse_config(older)
+    assert "8" not in comexio_api.fub_data
+
+
+def test_a_plan_deleted_after_create_fup_is_not_kept_listed(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    page = _plan_list_from_before_the_create(comexio_api, client)
+    client.delete_function_plan = AsyncMock()
+    assert asyncio.run(comexio_api.delete_fup(8))
+
+    comexio_api.parse_config(page)
+
+    assert "8" not in comexio_api.fub_data
+
+
+def test_a_plan_list_older_than_create_fup_keeps_the_refreshed_entry(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    page = _plan_list_from_before_the_create(comexio_api, client)
+    renamed = {**NEW_PLAN, "Name": "HA - IO renamed"}
+    comexio_api.update_fub_cache_entry(8, renamed)
+
+    comexio_api.parse_config(page)
+
+    assert comexio_api.fub_data["8"] == renamed
+
+
+def test_a_plan_list_older_than_create_fup_that_lists_the_plan_keeps_its_entry(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Comexio answered the older fetch after the create: the page's own entry wins."""
+    page = _plan_list_from_before_the_create(comexio_api, client)
+    listed = {**NEW_PLAN, "Name": "HA - IO as listed"}
+    page["Fubs"]["8"] = listed
+
+    comexio_api.parse_config(page)
+
+    assert comexio_api.fub_data["8"] is listed
+    assert comexio_api.fub_data is page["Fubs"]
+
+
+def test_a_failed_delete_keeps_the_created_plan_listed(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    page = _plan_list_from_before_the_create(comexio_api, client)
+    _fail(client, "delete_function_plan", ComexioRequestRejectedError("plan is in use"))
+    assert not asyncio.run(comexio_api.delete_fup(8))
+
+    comexio_api.parse_config(page)
+
+    assert comexio_api.fub_data["8"] == NEW_PLAN
+
+
 def test_create_fup_finds_a_plan_created_without_id(comexio_api: ComexioAPI, client: MagicMock) -> None:
     # Regression (p): the plan exists once Comexio confirmed it — None read as "name in use" before.
     comexio_api.update_fub_cache_entry(3, {"Id": 3, "Name": "HA - IO"})  # an older namesake

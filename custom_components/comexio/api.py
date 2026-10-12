@@ -614,6 +614,9 @@ class ComexioAPI:
         self._fetch_marks: deque[tuple[dict[str, Any], int, int]] = deque(maxlen=FUNCTION_PLAN_FETCH_MARK_SLOTS)
         # Generation of the config fetch whose plan list _fub_data holds (0: none known yet).
         self._fub_data_generation = 0
+        # Plans create_fup cached itself: fub_id_str → (entry, fetches started before the create). A
+        # plan list from a fetch that began before the create may not list the plan yet (_with_created_fubs).
+        self._created_fubs: dict[str, tuple[dict[str, Any], int]] = {}
         # Bumped with every fetched plan list or plan written into the cache (fub_cache_epoch): a
         # run-state answer whose fetch began before such a write may be older than its Active flags.
         self._fub_cache_epoch = 0
@@ -755,11 +758,33 @@ class ComexioAPI:
                 return False
             self._fub_data_generation = generation
             run_state_mark = mark if run_state_mark is None else max(run_state_mark, mark)
+            fubs = self._with_created_fubs(fubs, generation)
         self._fub_data = fubs
         self._fub_cache_epoch += 1
         if run_state_mark is not None:
             self.apply_fub_run_states(self._ha_run_states_since(run_state_mark))
         return True
+
+    def _with_created_fubs(self, fubs: dict[str, Any], generation: int) -> dict[str, Any]:
+        """fubs plus the plans create_fup cached after config fetch `generation` began and fubs lacks.
+
+        Such a plan keeps its current cache entry (update_fub_cache_entry may have refreshed it).
+        A plan created before that fetch began is forgotten here: its page is the newer word on it.
+        """
+        self._created_fubs = {key: created for key, created in self._created_fubs.items() if created[1] >= generation}
+        missing = {
+            key: self._fub_data.get(key, entry)
+            for key, (entry, _started) in self._created_fubs.items()
+            if key not in fubs
+        }
+        if not missing:
+            return fubs
+        _LOGGER.debug(
+            "Plan list of config fetch %d lacks the plan(s) %s created since it began — keeping them",
+            generation,
+            sorted(missing),
+        )
+        return {**fubs, **missing}
 
     def run_state_mark(self) -> int:
         """Mark to take before a config or run-state fetch; pass it on as `since` when applying the result."""
@@ -1357,9 +1382,12 @@ class ComexioAPI:
     async def delete_fup(self, fub_id: int) -> bool:
         """Delete an entire function plan (not just elements within it); False if that failed."""
         _LOGGER.info("delete_fup: deleting Function Plan fub_id=%s", fub_id)
-        return await _succeeded(
+        deleted = await _succeeded(
             f"Deleting function plan {fub_id}", lambda: self.client.delete_function_plan(int(fub_id))
         )
+        if deleted:
+            self._created_fubs.pop(str(fub_id), None)  # no older plan list may keep it listed then
+        return deleted
 
     async def update_webio_device_ip(self, device_id: str | int, ha_address: str, webio_name: str) -> bool:
         """
@@ -2180,6 +2208,7 @@ class ComexioAPI:
             return None
         _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, created.fub_id)
         self._fub_data[str(created.fub_id)] = created.fubs_entry
+        self._created_fubs[str(created.fub_id)] = (created.fubs_entry, self._config_fetches_started)
         if self.run_state_listener is not None:
             self.run_state_listener()
         return created.fub_id
