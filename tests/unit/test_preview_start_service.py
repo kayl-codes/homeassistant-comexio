@@ -1009,3 +1009,58 @@ def test_shutdown_cancels_a_pending_sweep(monkeypatch: pytest.MonkeyPatch) -> No
     with patch.object(coordinator_module.DataUpdateCoordinator, "async_shutdown", AsyncMock()):
         asyncio.run(coordinator.async_shutdown())
     assert timers.sweeps(coordinator) == []
+
+
+def test_a_lone_card_gone_without_a_stop_is_swept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (Sourcery, #171): with no stop at all, a closed tab's card must not stay registered and polling."""
+    now = [1000.0]
+    coordinator, timers = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("closed-tab")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    assert timers.sweeps(coordinator) == [coordinator_module.PREVIEW_CARD_ALIVE_SEC]
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    timers.fire_sweep(coordinator)
+    assert coordinator._preview_cards == {}
+    assert coordinator.preview_armed is False
+    assert coordinator.preview_card_open is False
+    assert _keepalive(coordinator, "closed-tab")["rearm"] is True  # a frozen tab that wakes up resumes
+
+
+def test_keepalives_do_not_reschedule_a_pending_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep stays due when the oldest card runs out, not pushed back by a newer card's keepalive."""
+    now = [1000.0]
+    coordinator, timers = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("card-a")
+    now[0] += 10
+    coordinator.start_preview_following("card-b")
+    now[0] += 20
+    coordinator.start_preview_following("card-b")
+    assert timers.sweeps(coordinator) == [coordinator_module.PREVIEW_CARD_ALIVE_SEC]
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC - 30
+    timers.fire_sweep(coordinator)
+    assert set(coordinator._preview_cards) == {"card-b"}
+    assert timers.sweeps(coordinator) == [30]
+
+
+def test_a_lone_unarmed_card_gone_without_a_stop_ends_the_following(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A card that armed nothing (empty selection, failed render) and vanished: following ends, no rearm."""
+    now = [1000.0]
+    coordinator, timers = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("closed-tab")
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    timers.fire_sweep(coordinator)
+    assert coordinator.preview_following is False
+    assert coordinator.preview_stop_generation == 1
+    assert coordinator._preview_cards_disarm_generation is None
+    assert coordinator.start_preview_following("closed-tab") is False
+
+
+def test_a_sweep_that_disarms_logs_at_info(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    now = [1000.0]
+    coordinator, timers = _timed_coordinator(monkeypatch, now)
+    coordinator.start_preview_following("closed-tab")
+    coordinator._preview_plan_cache = _armed_cache(1)
+    now[0] += coordinator_module.PREVIEW_CARD_ALIVE_SEC
+    with caplog.at_level(logging.INFO, logger=coordinator_module.__name__):
+        timers.fire_sweep(coordinator)
+    assert [r.levelno for r in caplog.records if "no open plan card answered" in r.getMessage()] == [logging.INFO]

@@ -3229,9 +3229,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not card_id:
             return False
         self._preview_cards[card_id] = now
-        if self._preview_cards_dropped.pop(card_id, None) is None:
-            return False
-        return self._preview_cards_disarm_generation == self._preview_cache_generation
+        was_dropped = self._preview_cards_dropped.pop(card_id, None) is not None
+        if self._preview_card_sweep_cancel is None:
+            # A card gone without its stop (closed tab, reload) is swept, not kept until the auto-stop.
+            self._prune_preview_cards()
+        return was_dropped and self._preview_cards_disarm_generation == self._preview_cache_generation
 
     def end_preview_following(self, card_id: str | None = None) -> bool:
         """A plan card closed (function_plan_preview_stop), or with card_id None every card (auto-stop).
@@ -3284,13 +3286,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._preview_card_sweep_cancel = None
 
     async def _async_sweep_preview_cards(self, _now: Any) -> None:
-        """The cards that held the preview past a stop: disarm once the last of them went silent."""
+        """The open plan cards: disarm once the last of them went silent (a closed tab sends no stop)."""
         self._preview_card_sweep_cancel = None
         if self._prune_preview_cards():
             return
-        _LOGGER.debug("[%s] Plan preview stopped: no open plan card answers any more", self.server_id)
         self._end_all_preview_following()
-        self.stop_preview_for_closed_cards()
+        if self.stop_preview_for_closed_cards():
+            _LOGGER.info(
+                "[%s] Live plan preview stopped: no open plan card answered for %s s (a card that wakes up resumes it)",
+                self.server_id,
+                PREVIEW_CARD_ALIVE_SEC,
+            )
 
     def stop_preview_for_closed_cards(self) -> bool:
         """stop_preview once the last plan card closed (its stop, or the sweep): remembered for rearm."""
