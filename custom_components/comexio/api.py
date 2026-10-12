@@ -577,9 +577,10 @@ class ComexioAPI:
         # version back over the newer one's, nor drop the newer table on its own failure.
         self._config_fetches_started: int = 0
         self._config_fetch_applied: int = 0
-        # The page of that applied fetch, None if it failed: what an overtaken fetch returns instead
-        # of its own older page.
-        self._config_page: dict[str, Any] | None = None
+        # The page of the newest fetch that applied a page, and its generation: what an overtaken
+        # fetch returns instead of its own older page. A failed fetch leaves both as they are.
+        self._config_page: dict[str, Any] = {}
+        self._config_page_generation: int = 0
         # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
         # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
         self.reference_check: ReferenceCheck | None = None
@@ -878,9 +879,11 @@ class ComexioAPI:
         aiohttp.ClientError / TimeoutError.
 
         Overlapping fetches: only a fetch started after the last applied one updates io_types,
-        comexio_version and block_settings. An older one finishing last returns the newer applied
-        page instead of its own, so its caller never parses older plan metadata over the cache —
-        or its own page if the newer fetch failed, as nothing fresher was read.
+        comexio_version and block_settings. An older one finishing last returns the newest page any
+        fetch applied instead of its own, so its caller never parses older plan metadata over the
+        cache — or its own page if every newer fetch failed, as nothing fresher was read. A fetch
+        that fails itself still reports its failure, even after a newer one succeeded: it ended
+        later, so it is the newer word on whether Comexio answers.
         """
         run_state_mark = self._run_state_mark
         saves_before = self._block_settings_saves_confirmed
@@ -915,9 +918,9 @@ class ComexioAPI:
         """Apply a fetched page unless a newer fetch overtook it; the page its caller gets (see get_raw_config)."""
         if self._claim_config_fetch(generation, raw.variables):
             self._apply_config_page(raw, saves_before)
-        elif self._config_page is not None:
+        elif self._config_page_generation > generation:
             _LOGGER.debug(
-                "Config fetch %d overtaken by %d — returning the newer page", generation, self._config_fetch_applied
+                "Config fetch %d overtaken by %d — returning the newer page", generation, self._config_page_generation
             )
             return self._config_page
         else:
@@ -935,7 +938,8 @@ class ComexioAPI:
         if generation <= self._config_fetch_applied:
             return False
         self._config_fetch_applied = generation
-        self._config_page = page
+        if page is not None:
+            self._config_page, self._config_page_generation = page, generation
         return True
 
     def _drop_block_settings(self, generation: int) -> None:

@@ -454,17 +454,15 @@ def test_a_discarded_config_fetch_returns_the_newer_page(comexio_api: ComexioAPI
     assert not any(fubs is OLDER_PAGE.variables["Fubs"] for fubs in marked)
 
 
-def test_a_stale_failure_does_not_hide_the_newest_page_from_an_overtaken_fetch(
-    comexio_api: ComexioAPI, client: MagicMock
-) -> None:
-    """Three fetches finish newest first: the middle one's failure must not make the oldest return its own page."""
-    newest = _block_page("30", "11.0.4")
+def _run_three_fetches(
+    comexio_api: ComexioAPI, client: MagicMock, outcomes: list[RawConfig | Exception], finish_order: tuple[int, ...]
+) -> list[Any]:
+    """Three config fetches start in turn (outcomes in start order), then finish in finish_order; their results."""
 
     async def run() -> list[Any]:
-        may_finish = [asyncio.Event() for _ in range(3)]
-        entered = [asyncio.Event() for _ in range(3)]
-        outcomes: list[RawConfig | Exception] = [OLDER_PAGE, ComexioDataError("an error page"), newest]
-        order = iter(range(3))
+        may_finish = [asyncio.Event() for _ in outcomes]
+        entered = [asyncio.Event() for _ in outcomes]
+        order = iter(range(len(outcomes)))
 
         async def fetch() -> RawConfig:
             index = next(order)
@@ -476,20 +474,45 @@ def test_a_stale_failure_does_not_hide_the_newest_page_from_an_overtaken_fetch(
 
         client.get_raw_config = AsyncMock(side_effect=fetch)
         tasks = []
-        for index in range(3):
+        for index in range(len(outcomes)):
             tasks.append(asyncio.create_task(comexio_api.get_raw_config()))
             await entered[index].wait()
-        results: list[Any] = [None] * 3
-        for index in (2, 1, 0):
+        results: list[Any] = [None] * len(outcomes)
+        for index in finish_order:
             may_finish[index].set()
             results[index] = await tasks[index]
         return results
 
-    oldest, middle, newer = asyncio.run(run())
+    return asyncio.run(run())
 
-    assert (oldest, middle, newer) == (newest.variables, {}, newest.variables)
-    assert oldest is newest.variables
-    assert _api_state(comexio_api) == _page_state(newest)
+
+NEWEST_PAGE = _block_page("30", "11.0.4")
+
+
+def test_a_stale_failure_does_not_hide_the_newest_page_from_an_overtaken_fetch(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Three fetches finish newest first: the middle one's failure must not make the oldest return its own page."""
+    outcomes: list[RawConfig | Exception] = [OLDER_PAGE, ComexioDataError("an error page"), NEWEST_PAGE]
+
+    oldest, middle, newest = _run_three_fetches(comexio_api, client, outcomes, (2, 1, 0))
+
+    assert (middle, newest) == ({}, NEWEST_PAGE.variables)
+    assert oldest is NEWEST_PAGE.variables
+    assert _api_state(comexio_api) == _page_state(NEWEST_PAGE)
+
+
+def test_a_newest_failure_keeps_the_newer_parsed_page_for_an_overtaken_fetch(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """The middle page is applied and parsed, then the newest fetch fails: the oldest still gets the middle page."""
+    outcomes: list[RawConfig | Exception] = [OLDER_PAGE, NEWER_PAGE, ComexioDataError("an error page")]
+
+    oldest, middle, newest = _run_three_fetches(comexio_api, client, outcomes, (1, 2, 0))
+
+    assert (middle, newest) == (NEWER_PAGE.variables, {})
+    assert oldest is NEWER_PAGE.variables
+    assert _api_state(comexio_api) == (None, *_page_state(NEWER_PAGE)[1:])
 
 
 @pytest.mark.parametrize("older_finishes_first", [False, True], ids=["older-last", "older-first"])
