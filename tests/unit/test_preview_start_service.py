@@ -579,9 +579,13 @@ def test_a_stop_without_a_card_id_ends_the_preview_for_every_card(monkeypatch: p
     now = [1000.0]
     coordinator = _cards_coordinator(monkeypatch, now)
     coordinator.start_preview_following("card-a")
+    coordinator.start_preview_following("card-b")
     coordinator._preview_plan_cache = _armed_cache(1)
     assert _run_stop(coordinator, {}) == {"success": True}
     assert coordinator.preview_armed is False
+    assert coordinator.preview_following is False
+    assert coordinator._preview_cards == {}
+    assert coordinator._preview_cards_dropped == {}
 
 
 def test_the_auto_stop_ends_the_preview_for_every_open_card(monkeypatch: pytest.MonkeyPatch) -> None:

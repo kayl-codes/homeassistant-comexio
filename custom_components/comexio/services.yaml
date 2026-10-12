@@ -665,7 +665,8 @@ function_plan_preview_stop:
       name: Card ID
       description: >
         Sent by the plan card: identifies it, so one card closing leaves the preview of another
-        open card running.
+        open card running. Without it (a script, an automation) the stop ends the preview for every
+        open card.
       required: false
       selector:
         text:
