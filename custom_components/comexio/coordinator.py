@@ -11,6 +11,7 @@ import re
 import socket
 import time
 from typing import Any
+import uuid
 
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
@@ -124,6 +125,7 @@ from .const import (
     LOGIN_ERROR_CONNECTION,
     MARKER_READ_ONLY_SUFFIX,
     PLAN_TRANSITION_STARTING,
+    PREVIEW_CARD_ALIVE_SEC,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -731,6 +733,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # time.monotonic() until which an opened plan card follows the selection without an armed preview
         # (see preview_following); 0.0 while no card is open.
         self._preview_following_until: float = 0.0
+        # Open plan cards by card_id -> time.monotonic() of their last start/keepalive. One card's
+        # preview_stop disarms only once no other card is alive (see end_preview_following).
+        self._preview_cards: dict[str, float] = {}
+        # Cards dropped as gone (keepalive away too long) -> time.monotonic() of the drop: one that turns
+        # out alive (a frozen background tab) is told to re-send its start (start_preview_following).
+        self._preview_cards_dropped: dict[str, float] = {}
+        # _preview_cache_generation right after the last card's stop disarmed the preview; any arm or
+        # other disarm since (auto-stop, poll breaker) bumps the generation, and no dropped card re-arms.
+        self._preview_cards_disarm_generation: int | None = None
+        # While another card held the preview past a stop: disarms once the last of them goes silent.
+        self._preview_card_sweep_cancel: Any = None
+        # Counts the times the preview's following ended (last card closed, auto-stop): a start whose
+        # render overlapped one must not report an armed preview (see plan_preview.async_render_opened_preview).
+        self.preview_stop_generation: int = 0
         self._preview_refresh_cancel: Any = None
         # Stufe 2: last fetched {connection_id: value} for the armed live plan (see
         # _async_poll_connection_values) and the timer driving that poll. Cleared/stopped
@@ -748,6 +764,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # every new arm (a fresh plan view never inherits a previous session's extension).
         self._preview_auto_stop_cancel: Any = None
         self._preview_auto_stop_minutes: int = _PREVIEW_AUTO_STOP_DEFAULT_MINUTES
+        # Identifies this coordinator to an open plan card (function_plan_preview_start returns it
+        # with every start and keepalive). A config-entry reload creates a new coordinator that has
+        # nothing armed; the card notices the changed id and re-sends the opening start, so its live
+        # values resume. A preview auto-stopped on the SAME coordinator keeps the id, so the
+        # keepalive never re-arms it (the auto-stop stays in force for a forgotten tab).
+        self.preview_instance_id: str = uuid.uuid4().hex
         # Extension firmware check: {name -> raw entry} from the last successful
         # checkextension_fwupdate call (see async_start_firmware_update_check). Empty until
         # the first check actually runs, which only happens once per comexio_version change.
@@ -3276,15 +3298,100 @@ class ComexioCoordinator(DataUpdateCoordinator):
         orphaned-plan render, an empty selection or a failed opening render arm nothing while the
         card still shows them. The window bounds that, as a closed browser tab sends no preview_stop.
         """
-        return self.preview_armed or time.monotonic() < self._preview_following_until
+        return self.preview_armed or self.preview_card_open
 
-    def start_preview_following(self) -> None:
-        """A plan card opened (function_plan_preview_start): its selection changes follow."""
-        self._preview_following_until = time.monotonic() + _PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60
+    @property
+    def preview_card_open(self) -> bool:
+        """Whether a plan card opened or renewed its following within the window — armed preview or not."""
+        return time.monotonic() < self._preview_following_until
 
-    def end_preview_following(self) -> None:
-        """The plan card closed (function_plan_preview_stop) or its preview auto-stopped."""
+    def start_preview_following(self, card_id: str | None = None) -> bool:
+        """A plan card opened or is still open (function_plan_preview_start): its selection changes follow.
+
+        Returns True when this card had been dropped as gone (its keepalives stalled, e.g. a frozen
+        background tab) and the last remaining card's stop disarmed the preview, with nothing armed or
+        disarmed since: the card must re-send its start. An auto-stop or the poll breaker stays in force.
+        """
+        now = time.monotonic()
+        self._preview_following_until = now + _PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60
+        if not card_id:
+            return False
+        self._preview_cards[card_id] = now
+        was_dropped = self._preview_cards_dropped.pop(card_id, None) is not None
+        if self._preview_card_sweep_cancel is None:
+            # A card gone without its stop (closed tab, reload) is swept, not kept until the auto-stop.
+            self._prune_preview_cards()
+        return was_dropped and self._preview_cards_disarm_generation == self._preview_cache_generation
+
+    def end_preview_following(self, card_id: str | None = None) -> bool:
+        """A plan card closed (function_plan_preview_stop), or with card_id None every card (auto-stop).
+
+        Returns False while another plan card is still alive (keepalive within _PREVIEW_CARD_ALIVE_SECONDS):
+        its preview keeps running and following, and a sweep disarms once the last of them goes silent
+        (a closed tab or a reloaded page sends no stop). Otherwise the following ends and True tells the
+        caller to disarm. A stop without card_id (an older card, a script) ends it for every card, as before.
+        """
+        if card_id:
+            self._preview_cards.pop(card_id, None)
+            self._preview_cards_dropped.pop(card_id, None)
+        else:
+            self._preview_cards.clear()
+            self._preview_cards_dropped.clear()
+        if self._prune_preview_cards():
+            return False
+        self._end_all_preview_following()
+        return True
+
+    def _prune_preview_cards(self) -> bool:
+        """Drop the cards whose keepalive stayed away too long; True while any card is still alive."""
+        now = time.monotonic()
+        for card, seen in list(self._preview_cards.items()):
+            if now - seen >= PREVIEW_CARD_ALIVE_SEC:
+                del self._preview_cards[card]
+                self._preview_cards_dropped[card] = now
+        # Each page load brings a new card id: forget drops older than a preview could run unattended,
+        # also while it is extended past the default (function_plan_preview_extend).
+        forget_before = now - max(_PREVIEW_AUTO_STOP_DEFAULT_MINUTES, self._preview_auto_stop_minutes) * 60
+        self._preview_cards_dropped = {c: t for c, t in self._preview_cards_dropped.items() if t >= forget_before}
+        if not self._preview_cards:
+            return False
+        if self._preview_card_sweep_cancel is not None:
+            self._preview_card_sweep_cancel()
+        oldest = min(self._preview_cards.values())
+        self._preview_card_sweep_cancel = async_call_later(
+            self.hass, oldest + PREVIEW_CARD_ALIVE_SEC - now, self._async_sweep_preview_cards
+        )
+        return True
+
+    def _end_all_preview_following(self) -> None:
+        self._cancel_preview_card_sweep()
         self._preview_following_until = 0.0
+        self.preview_stop_generation += 1
+
+    def _cancel_preview_card_sweep(self) -> None:
+        if self._preview_card_sweep_cancel is not None:
+            self._preview_card_sweep_cancel()
+            self._preview_card_sweep_cancel = None
+
+    async def _async_sweep_preview_cards(self, _now: Any) -> None:
+        """The open plan cards: disarm once the last of them went silent (a closed tab sends no stop)."""
+        self._preview_card_sweep_cancel = None
+        if self._prune_preview_cards():
+            return
+        self._end_all_preview_following()
+        if self.stop_preview_for_closed_cards():
+            _LOGGER.info(
+                "[%s] Live plan preview stopped: no open plan card answered for %s s (a card that wakes up resumes it)",
+                self.server_id,
+                PREVIEW_CARD_ALIVE_SEC,
+            )
+
+    def stop_preview_for_closed_cards(self) -> bool:
+        """stop_preview once the last plan card closed (its stop, or the sweep): remembered for rearm."""
+        if not self.stop_preview():
+            return False
+        self._preview_cards_disarm_generation = self._preview_cache_generation
+        return True
 
     def stop_preview(self) -> bool:
         """Disarm the currently armed preview immediately (function_plan_preview_stop service).
@@ -3385,6 +3492,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Cancel a pending preview refresh before the coordinator shuts down."""
         self._stop_connection_poll()
+        self._cancel_preview_card_sweep()
         # A pending KNX auto-tag reload belongs to this instance — the new one after a reload
         # re-detects anything still untagged on its own first poll.
         if self._knx_dpt_reload_cancel is not None:

@@ -676,6 +676,9 @@ def bus_load_signal(server_id: str) -> str:
 FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC = 60
 FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC = 5
 FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC = 10
+# An open plan card counts as gone once its keepalive (every 30 s) stays away this long. Generous on
+# purpose: browsers throttle timers in background tabs to about once a minute.
+PREVIEW_CARD_ALIVE_SEC = 150
 # Consecutive failed run-state fetches before the plan run-state sensors turn unavailable
 # instead of showing the last known state forever.
 FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD = 3

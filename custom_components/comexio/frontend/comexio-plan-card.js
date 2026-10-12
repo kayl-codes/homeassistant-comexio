@@ -34,7 +34,7 @@ import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-pl
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.48";
+const CARD_VERSION = "0.9.49";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -50,7 +50,15 @@ const _PREVIEW_STOP_GRACE_MS = 2000;
 // While open, the card renews the backend's follow window (coordinator.preview_following, 15 min)
 // with a keepalive well inside it: a frozen orphaned-plan render arms no poll, so without it
 // 'Plan'/'Backup' changes (e.g. the neighbour row after "delete all") stopped reaching the preview.
-const _PREVIEW_KEEPALIVE_MS = 5 * 60 * 1000;
+// The keepalive is also how the card notices a config-entry reload (see _sendPreviewKeepalive), so
+// in a visible tab its interval is the longest an open card goes without live values after a reload
+// or sync. Browsers throttle timers in background tabs (to about once a minute), so a hidden card
+// notices later; it sends a keepalive at once when its tab becomes visible again. It costs no
+// Comexio request, only a service call that renews the window.
+const _PREVIEW_KEEPALIVE_MS = 30 * 1000;
+// A start the same instance answered "not armed" (no plan selected, render failed) is retried at
+// this pace, not on every keepalive: each full start logs on the backend.
+const _PREVIEW_START_RETRY_MS = 5 * 60 * 1000;
 
 // Backoff for re-fetching a preview image whose fetch failed: first retry after the minimum,
 // doubled per consecutive failure up to the maximum, until a fetch succeeds. Without it a
@@ -356,9 +364,24 @@ class ComexioPlanCard extends HTMLElement {
     this._logPaused = false; // pause button: drop incoming events (deliberately NOT persisted)
     this._analysisHighlightIds = new Set(); // element ids highlighted from a clicked finding
     this._stopPreviewTimer = null; // pending function_plan_preview_stop grace timer (#75)
+    // This card's id in preview start/keepalive/stop: its stop leaves a second open card's preview running.
+    // getRandomValues, not randomUUID: the latter needs a secure context, HA often runs on plain http.
+    this._cardId = Array.from(crypto.getRandomValues(new Uint32Array(4)), (n) => n.toString(16)).join("");
     this._startPreviewPending = false; // function_plan_preview_start owed once hass is known
     this._previewStarted = false; // the backend answered the open's preview_start with success
+    this._previewInstance = null; // coordinator id from that start's answer (backend preview_instance_id)
     this._keepaliveTimer = null; // periodic function_plan_preview_start keepalive while connected
+    // A tab shown again sends its keepalive at once instead of on the next (throttled) tick.
+    this._onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        this._sendPreviewKeepalive();
+      }
+    };
+    this._keepaliveInstance = null; // instance named by the last answered keepalive or start
+    this._startsInFlight = 0; // full starts still awaiting their answer (a render can outlast a keepalive)
+    this._keepaliveDeferred = false; // a keepalive answered during a start: re-sent once the starts settle
+    this._startRetryAfter = 0; // Date.now() before which an unarmed start is not retried on that instance
+    this._keepaliveWarned = false; // a failing keepalive warns once until one is answered again
   }
 
   setConfig(config) {
@@ -1828,11 +1851,15 @@ class ComexioPlanCard extends HTMLElement {
       // A fresh open, not a reattach: arm the live preview right away — the counterpart of the
       // stop below — instead of only after a plan switch.
       this._previewStarted = false;
+      this._previewInstance = null;
+      this._keepaliveInstance = null;
+      this._startRetryAfter = 0;
       this._startPreviewPending = true;
       this._startPreviewIfPending();
     }
     if (!this._minimal && !this._keepaliveTimer) {
       this._keepaliveTimer = setInterval(() => this._sendPreviewKeepalive(), _PREVIEW_KEEPALIVE_MS);
+      document.addEventListener("visibilitychange", this._onVisibilityChange);
     }
     // Mirror disconnectedCallback's _setDebugSession(false): without this, the backend stays on
     // the slow 2s cadence after any detach/reattach cycle instead of resuming the 0.5s debug
@@ -1852,7 +1879,11 @@ class ComexioPlanCard extends HTMLElement {
     // same way the backup-restore call does, so a routine open/close doesn't hit the
     // ambiguous-instance path and post a spurious "ERROR" notification (#75).
     const configEntryId = this._hass?.entities?.[this._config.entity]?.config_entry_id;
-    return configEntryId ? { config_entry: configEntryId } : {};
+    const data = { card_id: this._cardId };
+    if (configEntryId) {
+      data.config_entry = configEntryId;
+    }
+    return data;
   }
 
   _startPreviewIfPending() {
@@ -1860,13 +1891,45 @@ class ComexioPlanCard extends HTMLElement {
       return;
     }
     this._startPreviewPending = false;
-    this._hass
-      .callService("comexio", "function_plan_preview_start", this._previewServiceData(), undefined, false, true)
-      .then((result) => {
-        this._previewStarted = result?.response?.success === true;
-      })
-      .catch((err) => {
-        console.warn("comexio-plan-card: function_plan_preview_start failed", err);
+    this._startsInFlight += 1;
+    this._callPreviewStart(this._previewServiceData())
+      .then(
+        (result) => {
+          const response = result?.response;
+          if (response?.instance) {
+            // Also on "not armed": the keepalive treats only another instance as new.
+            this._keepaliveInstance = response.instance;
+          }
+          this._previewStarted = response?.success === true;
+          this._previewInstance = this._previewStarted ? (response.instance ?? null) : null;
+          if (this._previewStarted && response.already_armed === false && !this.isConnected && !this._stopPreviewTimer) {
+            // Detached while this start rendered, and the grace stop already ran and found nothing
+            // armed: stop what this start armed, or the poll runs on with no card open.
+            this._callPreviewStop(this._hass, this._previewServiceData());
+          }
+          if (!this._previewStarted) {
+            // Not armed (no plan selected, plan not loadable): a keepalive retries the start — at once
+            // on a new instance, on the same one only after _PREVIEW_START_RETRY_MS.
+            this._startRetryAfter = Date.now() + _PREVIEW_START_RETRY_MS;
+            console.warn("comexio-plan-card: function_plan_preview_start not armed", response?.error);
+          }
+        },
+        (err) => {
+          // Rejected (connection lost, HA restarting): retried like an unarmed start, not on every keepalive.
+          // Only the service call's rejection: an error in the handler above must not pose as one.
+          this._previewStarted = false;
+          this._previewInstance = null;
+          this._startRetryAfter = Date.now() + _PREVIEW_START_RETRY_MS;
+          console.warn("comexio-plan-card: function_plan_preview_start failed", err);
+        },
+      )
+      .finally(() => {
+        this._startsInFlight -= 1;
+        if (this._startsInFlight === 0 && this._keepaliveDeferred) {
+          // E.g. a reload's new instance seen while the start awaited the old one: decide now, not a tick later.
+          this._keepaliveDeferred = false;
+          this._sendPreviewKeepalive();
+        }
       });
   }
 
@@ -1878,18 +1941,51 @@ class ComexioPlanCard extends HTMLElement {
     // The open's start failed (entry reloading, Comexio offline at startup): a keepalive never
     // renders or arms, so once the quiet keepalive finds the instance loaded again, the full start
     // is retried — not before, as that start notifies about a missing instance every time.
-    const retryStart = !this._previewStarted;
-    this._hass
-      .callService("comexio", "function_plan_preview_start", data, undefined, false, retryStart)
+    // A config-entry reload replaces the backend coordinator with one that has nothing armed, and a
+    // keepalive alone never arms: its answer then names a different instance than the open's start,
+    // so the full start is re-sent and the live values resume. A preview auto-stopped by the same
+    // coordinator keeps its instance — the keepalive leaves that auto-stop in force.
+    this._callPreviewStart(data)
       .then((result) => {
-        if (retryStart && result?.response?.success === true && this.isConnected) {
+        const response = result?.response;
+        if (response?.success !== true) {
+          // E.g. the instance is not loaded (reloading, Comexio offline): the next keepalive retries.
+          this._warnKeepaliveOnce("not answered", response?.error);
+          return;
+        }
+        this._keepaliveWarned = false;
+        if (!this.isConnected) {
+          return;
+        }
+        if (this._startsInFlight > 0) {
+          // A start still awaiting its answer (a slow render) settles the state first; none alongside
+          // it. Its settling re-sends this keepalive, so an instance change is acted on right after.
+          this._keepaliveDeferred = true;
+          return;
+        }
+        const retryStart = !this._previewStarted;
+        const newInstance = response.instance !== this._keepaliveInstance;
+        this._keepaliveInstance = response.instance;
+        const retryDue = retryStart && (newInstance || Date.now() >= this._startRetryAfter);
+        const reloaded = !retryStart && !!response.instance && response.instance !== this._previewInstance;
+        // This card's keepalives stalled (a frozen background tab) and another card's stop disarmed meanwhile.
+        const rearm = !retryStart && response.rearm === true;
+        if (retryDue || reloaded || rearm) {
           this._startPreviewPending = true;
           this._startPreviewIfPending();
         }
       })
       .catch((err) => {
-        console.warn("comexio-plan-card: function_plan_preview_start keepalive failed", err);
+        this._warnKeepaliveOnce("failed", err);
       });
+  }
+
+  // Every 30 s while the entry is unloaded or Comexio is offline: one console warning per outage.
+  _warnKeepaliveOnce(what, detail) {
+    if (!this._keepaliveWarned) {
+      this._keepaliveWarned = true;
+      console.warn(`comexio-plan-card: function_plan_preview_start keepalive ${what}`, detail);
+    }
   }
 
   disconnectedCallback() {
@@ -1897,6 +1993,7 @@ class ComexioPlanCard extends HTMLElement {
     if (this._keepaliveTimer) {
       clearInterval(this._keepaliveTimer);
       this._keepaliveTimer = null;
+      document.removeEventListener("visibilitychange", this._onVisibilityChange);
     }
     if (this._minimal) {
       return; // trigger-only card never armed a plan/debug/preview session to begin with
@@ -1920,10 +2017,29 @@ class ComexioPlanCard extends HTMLElement {
       if (!hass) {
         return;
       }
-      hass.callService("comexio", "function_plan_preview_stop", data).catch((err) => {
-        console.warn("comexio-plan-card: function_plan_preview_stop failed", err);
-      });
+      this._callPreviewStop(hass, data);
     }, _PREVIEW_STOP_GRACE_MS);
+  }
+
+  _callPreviewStart(data) {
+    // Straight to the connection, as _searchAllPlans: the start's and keepalive's answers (instance,
+    // rearm) drive the reload recovery, and hass.callService() does not reliably forward return_response.
+    // Inside the chain, so even a synchronous throw arrives as a rejection (and _startsInFlight settles).
+    return Promise.resolve().then(() =>
+      this._hass.connection.sendMessagePromise({
+        type: "call_service",
+        domain: "comexio",
+        service: "function_plan_preview_start",
+        service_data: data,
+        return_response: true,
+      }),
+    );
+  }
+
+  _callPreviewStop(hass, data) {
+    hass.callService("comexio", "function_plan_preview_stop", data).catch((err) => {
+      console.warn("comexio-plan-card: function_plan_preview_stop failed", err);
+    });
   }
 
   // Exclude filter: comma-separated patterns in COMMAND notation (M107, BASE#UL1 — same

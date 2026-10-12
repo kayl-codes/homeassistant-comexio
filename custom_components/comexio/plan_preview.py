@@ -104,15 +104,37 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
     )
 
 
-async def async_render_opened_preview(coordinator: ComexioCoordinator) -> None:
+class PreviewStoppedError(HomeAssistantError):
+    """The last plan card closed (or the auto-stop fired) while the opening render ran — routine, not a failure."""
+
+
+def _stopped_meanwhile(coordinator: ComexioCoordinator, stops: int) -> bool:
+    """The following ended since `stops` and no card reopened it: what a render armed meanwhile must go."""
+    return coordinator.preview_stop_generation != stops and not coordinator.preview_card_open
+
+
+async def async_render_opened_preview(coordinator: ComexioCoordinator) -> bool:
     """The plan card opened: render the current selection, in turn with the selection follows.
 
     Under the follows' lock, so a selection changed while this render awaits Comexio is rendered
-    after it rather than overwritten by it. Raises HomeAssistantError like async_render_selected_preview.
+    after it rather than overwritten by it. Returns False without a render when a start or follow
+    ahead of it in the lock armed the preview meanwhile (two cards recovering from the same reload).
+    The generation counts only once the lock is held, so a follow queued before it still renders.
+    Raises HomeAssistantError like async_render_selected_preview, and PreviewStoppedError when the
+    last plan card closed (or the auto-stop fired) while it waited or rendered and none opened since:
+    what it armed then is disarmed again, so neither a poll runs on without a card nor the card is
+    told a stopped preview is armed.
     """
-    coordinator.preview_follow_generation += 1
+    stops = coordinator.preview_stop_generation
     async with coordinator.preview_follow_lock:
+        if coordinator.preview_armed:
+            return False
+        coordinator.preview_follow_generation += 1
         await async_render_selected_preview(coordinator)
+    if _stopped_meanwhile(coordinator, stops):
+        coordinator.stop_preview()
+        raise PreviewStoppedError("The preview was stopped while it rendered.")
+    return True
 
 
 def async_follow_selection(coordinator: ComexioCoordinator) -> Coroutine[Any, Any, None]:
@@ -140,7 +162,11 @@ async def _async_follow_current_selection(coordinator: ComexioCoordinator) -> No
     try:
         if not coordinator.preview_following or not preview_selection_available(coordinator):
             return
+        stops = coordinator.preview_stop_generation
         await async_render_selected_preview(coordinator)
+        if _stopped_meanwhile(coordinator, stops):
+            # The last card closed while this follow rendered: no poll without a card to show it.
+            coordinator.stop_preview()
     except HomeAssistantError as err:
         _LOGGER.warning("[%s] Plan preview not updated to the new selection: %s", coordinator.server_id, err)
     except Exception:

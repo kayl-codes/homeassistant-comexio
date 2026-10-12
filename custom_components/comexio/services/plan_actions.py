@@ -224,9 +224,13 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
 
     if fmt == "svg":
         block_settings = coordinator.snapshot_block_settings_for_source(fub_id, plan_name, source)
-        preview_url = await coordinator.async_generate_plan_preview(
-            fub_id, plan_name, elements, connections, source, label_metadata, block_settings
-        )
+        # In turn with the card's selection renders and re-renders (plan_preview), and as the newest
+        # request it supersedes selection follows still queued, so none of them overwrites it.
+        async with coordinator.preview_follow_lock:
+            coordinator.preview_follow_generation += 1
+            preview_url = await coordinator.async_generate_plan_preview(
+                fub_id, plan_name, elements, connections, source, label_metadata, block_settings
+            )
         persistent_notification.async_create(
             hass,
             f"Preview for '{plan_name}' updated — see the Preview image.",

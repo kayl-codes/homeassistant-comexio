@@ -777,7 +777,7 @@ function_plan_preview_stop:
     Internal — called by the plan card when it leaves the page (navigation/close).
     Immediately stops the currently displayed live plan preview's wire-value poll
     instead of waiting for the auto-stop window to elapse. No effect without a live
-    preview on display.
+    preview on display, or while another plan card is still open.
   fields:
     config_entry:
       name: Comexio instance
@@ -786,6 +786,15 @@ function_plan_preview_stop:
       selector:
         config_entry:
           integration: comexio
+    card_id:
+      name: Card ID
+      description: >
+        Sent by the plan card: identifies it, so one card closing leaves the preview of another
+        open card running. Without it (a script, an automation) the stop ends the preview for every
+        open card.
+      required: false
+      selector:
+        text:
 
 function_plan_search:
   name: Function Plan Search
