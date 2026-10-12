@@ -368,6 +368,7 @@ class ComexioPlanCard extends HTMLElement {
     this._keepaliveTimer = null; // periodic function_plan_preview_start keepalive while connected
     this._keepaliveInstance = null; // instance named by the last answered keepalive or start
     this._startsInFlight = 0; // full starts still awaiting their answer (a render can outlast a keepalive)
+    this._keepaliveDeferred = false; // a keepalive answered during a start: re-sent once the starts settle
     this._startRetryAfter = 0; // Date.now() before which an unarmed start is not retried on that instance
     this._keepaliveWarned = false; // a failing keepalive warns once until one is answered again
   }
@@ -1904,6 +1905,11 @@ class ComexioPlanCard extends HTMLElement {
       )
       .finally(() => {
         this._startsInFlight -= 1;
+        if (this._startsInFlight === 0 && this._keepaliveDeferred) {
+          // E.g. a reload's new instance seen while the start awaited the old one: decide now, not a tick later.
+          this._keepaliveDeferred = false;
+          this._sendPreviewKeepalive();
+        }
       });
   }
 
@@ -1929,8 +1935,13 @@ class ComexioPlanCard extends HTMLElement {
           return;
         }
         this._keepaliveWarned = false;
-        if (!this.isConnected || this._startsInFlight > 0) {
-          // A start still awaiting its answer (a slow render) settles the state; none alongside it.
+        if (!this.isConnected) {
+          return;
+        }
+        if (this._startsInFlight > 0) {
+          // A start still awaiting its answer (a slow render) settles the state first; none alongside
+          // it. Its settling re-sends this keepalive, so an instance change is acted on right after.
+          this._keepaliveDeferred = true;
           return;
         }
         const retryStart = !this._previewStarted;
