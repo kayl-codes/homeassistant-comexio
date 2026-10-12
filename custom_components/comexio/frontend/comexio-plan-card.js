@@ -1887,6 +1887,11 @@ class ComexioPlanCard extends HTMLElement {
           }
           this._previewStarted = response?.success === true;
           this._previewInstance = this._previewStarted ? (response.instance ?? null) : null;
+          if (this._previewStarted && response.already_armed === false && !this.isConnected && !this._stopPreviewTimer) {
+            // Detached while this start rendered, and the grace stop already ran and found nothing
+            // armed: stop what this start armed, or the poll runs on with no card open.
+            this._callPreviewStop(this._hass, this._previewServiceData());
+          }
           if (!this._previewStarted) {
             // Not armed (no plan selected, plan not loadable): a keepalive retries the start — at once
             // on a new instance, on the same one only after _PREVIEW_START_RETRY_MS.
@@ -1995,10 +2000,14 @@ class ComexioPlanCard extends HTMLElement {
       if (!hass) {
         return;
       }
-      hass.callService("comexio", "function_plan_preview_stop", data).catch((err) => {
-        console.warn("comexio-plan-card: function_plan_preview_stop failed", err);
-      });
+      this._callPreviewStop(hass, data);
     }, _PREVIEW_STOP_GRACE_MS);
+  }
+
+  _callPreviewStop(hass, data) {
+    hass.callService("comexio", "function_plan_preview_stop", data).catch((err) => {
+      console.warn("comexio-plan-card: function_plan_preview_stop failed", err);
+    });
   }
 
   // Exclude filter: comma-separated patterns in COMMAND notation (M107, BASE#UL1 — same
