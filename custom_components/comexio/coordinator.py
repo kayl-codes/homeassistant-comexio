@@ -1791,7 +1791,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Reset after the try, not in a finally: the cycle timeout's handler must still see it set.
             self._bulk_load_pending = True
             try:
-                loaded = await self.api.function_plan_load_all_plans(raise_errors=True)
+                # strict: an entry without an elements collection is a broken answer, not an empty plan
+                # (Comexio sends an empty plan as "elements": []) — left out, it is reported, not saved empty.
+                loaded = await self.api.function_plan_load_all_plans(strict=True, raise_errors=True)
             except ComexioError as err:
                 _LOGGER.warning(
                     "[%s] Function Plan bulk load failed: %s — keeping the plans still listed", self.server_id, err

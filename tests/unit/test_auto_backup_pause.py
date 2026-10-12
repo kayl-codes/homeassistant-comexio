@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioError
+from aiocomexio.function_plan import plan_payload_has_elements
 import pytest
 
 from custom_components.comexio import coordinator as coordinator_module
@@ -338,6 +339,27 @@ def test_a_plan_the_bulk_load_keeps_leaving_out_is_reported_once(caplog: pytest.
         dismiss.assert_any_call(coordinator.hass, OMITTED_NOTIFICATION_ID)
         assert caplog.text.count("leaves no listed plan out anymore") == 1
         assert coordinator._plan_omit_streaks == {}
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [{"connections": []}, {"elements": None, "connections": []}, "garbage"],
+    ids=["no-key", "null", "no-object"],
+)
+def test_a_plan_without_an_elements_collection_is_left_out_not_backed_up_empty(broken: object) -> None:
+    """Review: loaded leniently, a broken entry became an empty plan — saved empty, never reported as left out."""
+    # Comexio sends an empty plan as "elements": [] (checked live) — only plan 8 lacks the collection.
+    bulk_answer = {7: {"elements": [], "connections": []}, 8: broken}
+
+    async def load(strict: bool = False, raise_errors: bool = False) -> dict:
+        # aiocomexio's own check, so the fake cannot drift from what strict drops.
+        return {fub_id: plan for fub_id, plan in bulk_answer.items() if not strict or plan_payload_has_elements(plan)}
+
+    coordinator = _omitting_coordinator()
+    coordinator.api.function_plan_load_all_plans = AsyncMock(side_effect=load)
+    _cycle(coordinator)
+    assert coordinator._plan_omit_streaks == {8: 1}
+    assert list(coordinator.function_plan_backup.async_auto_backup.await_args.args[0]) == [7]
 
 
 def test_a_failed_bulk_load_neither_counts_nor_clears_a_left_out_plan() -> None:

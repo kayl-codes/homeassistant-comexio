@@ -372,7 +372,7 @@ def test_a_failed_bulk_load_is_logged_once_not_warned_about_again(
     with caplog.at_level(logging.DEBUG):
         asyncio.run(coordinator._async_function_plan_backup_cycle_locked())
 
-    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(raise_errors=True)
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(strict=True, raise_errors=True)
     assert [r.levelno for r in caplog.records if r.levelno >= logging.WARNING] == [level]
 
 
