@@ -127,6 +127,7 @@ class ReferenceCatalogMonitor:
         REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE polls without a catalog, so a partial first
         fetch right after setup doesn't flash a Repair that the next poll removes again. Counted in
         polls, not time: the scan interval can be up to a day, which only this setup case waits for.
+        A Repair already up (a failed check) gets the new reason at once: nothing left to flash.
         """
         previous = self._api.reference_check
         if previous is not None and previous.comexio_version == self._api.comexio_version:
@@ -142,7 +143,11 @@ class ReferenceCatalogMonitor:
         )
         self._api.reference_check = None
         checked_before = self._fingerprint is not None  # set by _log on every successful check
-        if checked_before or self._missing_catalog_polls >= REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE:
+        if (
+            checked_before
+            or self._issue_active
+            or self._missing_catalog_polls >= REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE
+        ):
             self._update_issue(unresolved(None, REFERENCE_REQUIRED, REASON_NO_LIVE_CATALOG), REASON_NO_LIVE_CATALOG)
 
     def _log(self, check: ReferenceCheck) -> None:
@@ -249,6 +254,8 @@ class ReferenceCatalogMonitor:
         live_ids = check.fub_base_ids if check is not None else None
         listed = self._listed_plans() if self._listed_plans is not None else None
         present_plans = plans if listed is None else listed
+        # A deleted plan is never checked again; its id, reused by a new plan, must not be taken back.
+        self._logged_unchecked &= {str(fub_id) for fub_id in present_plans}
         # Not judged this time: listed plans the bulk load missed, or every present plan without a catalog.
         loaded_ids = {str(fub_id) for fub_id in plans} if live_ids else set()
         unchecked = {str(fub_id) for fub_id in present_plans} - loaded_ids
@@ -373,11 +380,11 @@ def _reported_unchecked(found: list[tuple[str, str, str]], unchecked: Collection
 
     After a check, or without findings, the line covers every unchecked plan ("not loaded and not
     checked" / "remaining plans are not checked"); without a catalog only the carried-over findings
-    are marked.
+    the line shows are marked — not those cut off by UNKNOWN_REFS_LOG_LIMIT.
     """
     if checked or not found:
         return frozenset(unchecked)
-    return frozenset(ref[0] for ref in found if ref[0] in unchecked)
+    return frozenset(ref[0] for ref in found[:UNKNOWN_REFS_LOG_LIMIT] if ref[0] in unchecked)
 
 
 def _carried_over(refs: Iterable[tuple[str, str, str]], unchecked: Collection[str]) -> set[tuple[str, str, str]]:

@@ -202,6 +202,23 @@ def test_after_a_successful_check_a_missing_catalog_repairs_at_once(
     assert monitor._api.reference_check is None
 
 
+def test_a_missing_catalog_after_a_failed_check_updates_the_reason_at_once(
+    raw: dict[str, Any], issue_registry: MagicMock
+) -> None:
+    """(bv) Review: a Repair already up for a failed check must not keep that reason until the threshold."""
+    references = _references(raw)
+    monitor = _monitor(references)
+    monitor._hass.async_add_executor_job = AsyncMock(side_effect=[OSError("disk"), references])
+    asyncio.run(monitor.async_check(raw))
+    assert _issue_kwargs(issue_registry)["translation_placeholders"]["reason"] == REASON_CHECK_FAILED
+
+    asyncio.run(monitor.async_check({**raw, "FubModules": {**raw["FubModules"], "5": []}}))
+
+    assert REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE > 1  # else the threshold alone would refresh it
+    assert _issue_kwargs(issue_registry)["translation_placeholders"]["reason"] == REASON_NO_LIVE_CATALOG
+    assert f"Reference check did not run ({REASON_NO_LIVE_CATALOG})" in _report_body(issue_registry)
+
+
 def test_recovery_is_logged(raw: dict[str, Any], issue_registry: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
     monitor = _monitor(_references(raw))
     broken = {**raw, "FubModules": {**raw["FubModules"], "5": dict(raw["FubModules"]["5"])}}
@@ -559,6 +576,46 @@ def test_changed_findings_of_a_plan_checked_again_log_only_the_findings(caplog: 
 
     assert [record.levelno for record in caplog.records] == [logging.WARNING]
     assert CHECKED_AGAIN not in caplog.records[0].getMessage()
+
+
+def test_a_deleted_plan_whose_id_is_reused_is_not_taken_back(caplog: pytest.LogCaptureFixture) -> None:
+    """(bv) Review: plan 8 logged as not loaded, then deleted; a new plan reusing id 8 was never reported."""
+    listed: dict[str, Any] = {"7": {}, "8": {}}
+    monitor = _monitor(None, listed=listed)
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+    monitor.check_plans({7: CLEAN_PLAN})  # logs plan 8 as not loaded and not checked
+    del listed["8"]
+    monitor.check_plans({7: CLEAN_PLAN})  # plan 8 deleted: findings unchanged, nothing logged
+
+    caplog.clear()
+    listed["8"] = {}  # Comexio hands id 8 to a new plan
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({7: CLEAN_PLAN, 8: CLEAN_PLAN})
+
+    assert not caplog.records
+
+
+def test_carried_over_findings_cut_from_the_log_line_are_not_taken_back(caplog: pytest.LogCaptureFixture) -> None:
+    """(bv) Review: without a catalog the line shows UNKNOWN_REFS_LOG_LIMIT findings; only those were reported."""
+    limit = reference_monitor.UNKNOWN_REFS_LOG_LIMIT
+    plan_ids = [str(fub_id) for fub_id in range(10, 12 + limit)]  # two plans more than the line shows
+    refs = [(fub_id, "1", "999") for fub_id in plan_ids]
+    monitor = _monitor(None, listed=dict.fromkeys(plan_ids, {}))
+    monitor._unknown_refs = [*refs, ("99", "1", "999")]  # plan 99 deleted: the findings change, a line is logged
+    monitor.check_plans({})
+    assert monitor._logged_unchecked == frozenset(plan_ids[:limit])
+
+    monitor._api.reference_check = SimpleNamespace(fub_base_ids={1})
+    plan = {"elements": {"1": {"reference": {"type": 5, "ref_id": 999}}}, "connections": {}}
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=reference_monitor.__name__):
+        monitor.check_plans({int(fub_id): plan for fub_id in plan_ids})
+
+    assert [record.getMessage() for record in caplog.records] == [
+        f"[srv] Function plans: {limit} plan(s) {CHECKED_AGAIN}, findings unchanged (confirmed: "
+        + ", ".join(f"{fub_id}/1: 5 999" for fub_id in plan_ids[:limit])
+        + ")"
+    ]
 
 
 def test_a_catalog_without_loaded_plans_still_counts_as_checked(caplog: pytest.LogCaptureFixture) -> None:
