@@ -608,9 +608,12 @@ class ComexioAPI:
         self._ha_run_states: dict[str, tuple[bool, int]] = {}
         # fub_id_str → time.monotonic() of HA's own last stop of the plan (ha_stopped_within).
         self._ha_stopped_at: dict[str, float] = {}
-        # (fetched $Fubs dict, run_state_mark taken before its get_raw_config fetch): lets every
-        # path that writes a fetched plan list or plan into the cache apply that guard on its own.
-        self._fetch_marks: deque[tuple[dict[str, Any], int]] = deque(maxlen=FUNCTION_PLAN_FETCH_MARK_SLOTS)
+        # (fetched $Fubs dict, run_state_mark taken before its get_raw_config fetch, that fetch's
+        # generation): lets every path that writes a fetched plan list or plan into the cache apply
+        # that guard on its own, and parse_config skip a plan list older than the cached one.
+        self._fetch_marks: deque[tuple[dict[str, Any], int, int]] = deque(maxlen=FUNCTION_PLAN_FETCH_MARK_SLOTS)
+        # Generation of the config fetch whose plan list _fub_data holds (0: none known yet).
+        self._fub_data_generation = 0
         # Bumped with every fetched plan list or plan written into the cache (fub_cache_epoch): a
         # run-state answer whose fetch began before such a write may be older than its Active flags.
         self._fub_cache_epoch = 0
@@ -730,19 +733,33 @@ class ComexioAPI:
 
     def _fetch_mark(self, matches: Callable[[dict[str, Any]], bool]) -> int | None:
         """run_state_mark taken before the newest remembered fetch whose $Fubs matches, None if unknown."""
-        return next((mark for fubs, mark in reversed(self._fetch_marks) if matches(fubs)), None)
+        return next((mark for fubs, mark, _generation in reversed(self._fetch_marks) if matches(fubs)), None)
 
-    def _replace_fub_data(self, fubs: dict[str, Any], run_state_mark: int | None = None) -> None:
+    def _replace_fub_data(self, fubs: dict[str, Any], run_state_mark: int | None = None) -> bool:
         """Make a fetched plan list the cache, keeping the run states HA caused since its fetch began.
 
-        run_state_mark defaults to the mark get_raw_config() remembered for this $Fubs dict.
+        A caller parses its page only after further awaits, so a newer fetch's page may already be
+        cached: a plan list from an older fetch is skipped then (False). Of run_state_mark and the
+        mark get_raw_config() remembered for this $Fubs dict the later one counts — the page already
+        shows every run state HA caused before its own fetch began.
         """
-        if run_state_mark is None:
-            run_state_mark = self._fetch_mark(lambda known: known is fubs)
+        known = next(((mark, gen) for listed, mark, gen in reversed(self._fetch_marks) if listed is fubs), None)
+        if known is not None:
+            mark, generation = known
+            if generation < self._fub_data_generation:
+                _LOGGER.debug(
+                    "Plan list of config fetch %d is older than the cached one of %d — keeping the cache",
+                    generation,
+                    self._fub_data_generation,
+                )
+                return False
+            self._fub_data_generation = generation
+            run_state_mark = mark if run_state_mark is None else max(run_state_mark, mark)
         self._fub_data = fubs
         self._fub_cache_epoch += 1
         if run_state_mark is not None:
             self.apply_fub_run_states(self._ha_run_states_since(run_state_mark))
+        return True
 
     def run_state_mark(self) -> int:
         """Mark to take before a config or run-state fetch; pass it on as `since` when applying the result."""
@@ -880,10 +897,10 @@ class ComexioAPI:
 
         Overlapping fetches: only a fetch started after the last applied one updates io_types,
         comexio_version and block_settings. An older one finishing last returns the newest page any
-        fetch applied instead of its own, so its caller never parses older plan metadata over the
-        cache — or its own page if every newer fetch failed, as nothing fresher was read. A fetch
-        that fails itself still reports its failure, even after a newer one succeeded: it ended
-        later, so it is the newer word on whether Comexio answers.
+        fetch applied instead of its own — or its own page if every newer fetch failed, as nothing
+        fresher was read. A caller that parses an older page after a newer one keeps the newer plan
+        and paper metadata (parse_config). A fetch that fails itself still reports its failure, even
+        after a newer one succeeded: it ended later, so it is the newer word on whether Comexio answers.
         """
         run_state_mark = self._run_state_mark
         saves_before = self._block_settings_saves_confirmed
@@ -930,7 +947,7 @@ class ComexioAPI:
                 self._config_fetch_applied,
             )
         if isinstance(fubs := raw.variables.get("Fubs"), dict):
-            self._fetch_marks.append((fubs, run_state_mark))
+            self._fetch_marks.append((fubs, run_state_mark, generation))
         return raw.variables
 
     def _claim_config_fetch(self, generation: int, page: dict[str, Any] | None) -> bool:
@@ -1140,17 +1157,18 @@ class ComexioAPI:
         than one merged dict — see get_live_states' docstring for why merging them would be
         unsafe (markers and KNX objects share the same plain numeric id space).
         run_state_mark (run_state_mark() taken before conf was fetched) keeps the run states HA
-        caused since then over the older Active flags in conf; without it, the mark
-        get_raw_config() remembered for conf does.
+        caused since then over the older Active flags in conf; the mark get_raw_config()
+        remembered for conf counts instead if it is later or run_state_mark is missing. A conf
+        from an older fetch than the cached plan list leaves the plan and paper caches alone.
         """
         # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection).
         # aiocomexio decodes each page variable on its own: a config whose $Fubs/$Paper did not
         # decode keeps the last known cache — wiping it would turn every plan's run-state sensor
         # unavailable and empty the plan selector until the next poll. An empty plan list still
         # decodes to a dict and replaces the cache.
-        if isinstance(fubs := conf.get("Fubs"), dict):
-            self._replace_fub_data(fubs, run_state_mark)
-        if isinstance(paper := conf.get("Paper"), dict):
+        # A page older than the cached plan list leaves $Paper alone too: both come from one page.
+        newest = not isinstance(fubs := conf.get("Fubs"), dict) or self._replace_fub_data(fubs, run_state_mark)
+        if newest and isinstance(paper := conf.get("Paper"), dict):
             self._paper_data = paper
 
         webio_name, schema_marker, schema_io, schema_knx, server_alias = self._load_config_names()
@@ -2448,7 +2466,9 @@ class ComexioAPI:
         Placement checks that decide whether a bridge marker may be renamed or blanked need
         the complete picture: function_plan_load_all_plans silently skips malformed entries
         and filters against the cached plan list. This refreshes that cache (self._fub_data)
-        from fubs, then loads each plan the bulk response lacked individually (e.g. a plan
+        from fubs — unless a newer fetch's plan list is cached already; a plan only fubs still
+        lists then fails to load below (None) — then loads each plan the bulk response lacked
+        individually (e.g. a plan
         without elements, should the bulk endpoint omit those). Returns {} if there are no
         plans at all. strict is passed on to both loaders (see function_plan_load_elements).
         A non-numeric plan id also returns None — checked before the cache is replaced, so a

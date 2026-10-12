@@ -331,11 +331,12 @@ def test_a_failed_config_fetch_drops_the_block_settings(
     assert comexio_api.block_settings is None
 
 
-def _block_page(value: str, version: str) -> RawConfig:
-    """A config page whose element 104 has in_0 = value, read on Comexio firmware version."""
+def _block_page(value: str, version: str, active: int = 1) -> RawConfig:
+    """A config page whose element 104 has in_0 = value, read on Comexio firmware version; plan 7 Active = active."""
     variables = {
         "FubBaseConfig": {"1": {"FubElementId": 104, "Name": "in_0", "Value": value}},
-        "Fubs": {"7": {"Id": 7, "Name": f"Plan {value}", "Active": 1}},
+        "Fubs": {"7": {"Id": 7, "Name": f"Plan {value}", "Active": active}},
+        "Paper": {"1": {"Id": 1, "Name": f"Paper {value}"}},
     }
     return RawConfig(variables, {"1": {"unit": version}}, {"2": {"input": version}}, version)
 
@@ -449,7 +450,7 @@ def test_a_discarded_config_fetch_returns_the_newer_page(comexio_api: ComexioAPI
     overlap = _run_overlapping_fetches(comexio_api, client, OLDER_PAGE)
 
     assert overlap.older is NEWER_PAGE.variables
-    marked = [fubs for fubs, _mark in comexio_api._fetch_marks]
+    marked = [fubs for fubs, _mark, _generation in comexio_api._fetch_marks]
     assert any(fubs is NEWER_PAGE.variables["Fubs"] for fubs in marked)
     assert not any(fubs is OLDER_PAGE.variables["Fubs"] for fubs in marked)
 
@@ -553,6 +554,61 @@ def test_an_older_config_fetch_finishing_first_applies_until_the_newer_one_does(
 
     assert overlap.between == _page_state(OLDER_PAGE)
     assert _api_state(comexio_api) == _page_state(NEWER_PAGE)
+
+
+def test_an_older_page_parsed_after_a_newer_one_keeps_the_newer_plan_cache(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """A caller parses only after further awaits: the older fetch's page, parsed last, leaves the newer caches."""
+    overlap = _run_overlapping_fetches(comexio_api, client, OLDER_PAGE, older_finishes_first=True)
+    assert overlap.older is OLDER_PAGE.variables
+
+    comexio_api.parse_config(overlap.newer)
+    comexio_api.parse_config(overlap.older)
+
+    assert comexio_api.fub_data is NEWER_PAGE.variables["Fubs"]
+    assert comexio_api._paper_data is NEWER_PAGE.variables["Paper"]
+
+
+def test_a_page_parsed_with_an_older_poll_mark_keeps_the_run_states_it_already_shows(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """An overtaken poll parses the newer page with its older mark: HA's run states before that page stay as read."""
+    older_poll_mark = comexio_api.run_state_mark()
+    comexio_api.set_fub_active(7, True)  # before the newer fetch began, which reads plan 7 stopped again
+    client.get_raw_config = AsyncMock(return_value=_block_page("26", "11.0.3", active=0))
+    page = asyncio.run(comexio_api.get_raw_config())
+
+    comexio_api.parse_config(page, run_state_mark=older_poll_mark)
+
+    assert comexio_api.fub_data["7"]["Active"] == 0
+
+
+def test_a_later_caller_mark_keeps_the_run_states_ha_caused_after_the_fetch(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """A mark the caller took after the fetch began wins over the earlier one get_raw_config remembered."""
+    client.get_raw_config = AsyncMock(return_value=_block_page("26", "11.0.3", active=0))
+    page = asyncio.run(comexio_api.get_raw_config())
+    comexio_api.set_fub_active(7, True)  # after the fetch began: newer than the page's Active flag
+
+    comexio_api.parse_config(page, run_state_mark=comexio_api.run_state_mark())
+    assert comexio_api.fub_data["7"]["Active"] == 0
+    comexio_api.parse_config(page)
+    assert comexio_api.fub_data["7"]["Active"] == 1
+
+
+def test_a_plan_list_no_fetch_remembers_still_replaces_the_cache(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Without a remembered fetch generation (e.g. evicted marks) the plan list replaces the cache as before."""
+    _run_overlapping_fetches(comexio_api, client, OLDER_PAGE, older_finishes_first=True)
+    comexio_api.parse_config(NEWER_PAGE.variables)
+    unknown = {"9": {"Id": 9, "Name": "Plan 9", "Active": 0}}
+
+    comexio_api.parse_config({"Fubs": unknown})
+
+    assert comexio_api.fub_data is unknown
+    comexio_api.parse_config(OLDER_PAGE.variables)
+    assert comexio_api.fub_data is unknown
 
 
 def test_the_next_config_fetch_after_an_overlap_takes_its_page_again(
