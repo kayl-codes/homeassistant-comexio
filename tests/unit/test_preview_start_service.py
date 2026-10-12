@@ -44,7 +44,8 @@ def test_an_armed_preview_is_left_alone() -> None:
 
 def test_nothing_to_preview_is_reported() -> None:
     result, render = _run_start(armed=False, selection=False)
-    assert result == {"success": False, "error": "No plan is selected for the preview."}
+    # Not armed, but answered by this instance: the card waits before retrying the start on it.
+    assert result == {"success": False, "error": "No plan is selected for the preview.", "instance": _INSTANCE}
     render.assert_not_called()
 
 
@@ -180,7 +181,10 @@ def test_an_opened_card_follows_within_the_auto_stop_window_only(monkeypatch: py
     assert coordinator.preview_following is True
     now[0] += coordinator_module._PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60
     assert coordinator.preview_following is False
-    coordinator.start_preview_following()
+    coordinator.start_preview_following()  # the open card's keepalive renews the run-out window
+    assert coordinator.preview_following is True
+    now[0] += coordinator_module._PREVIEW_AUTO_STOP_DEFAULT_MINUTES * 60 - 1
+    assert coordinator.preview_following is True
     coordinator.end_preview_following()
     assert coordinator.preview_following is False
     coordinator._preview_plan_cache = {"fub_id": 19}  # an armed preview follows as before
@@ -191,7 +195,70 @@ def test_a_failed_render_is_not_reported_as_armed() -> None:
     """E.g. an expired session: the plan does not load, so the card must not be told the poll runs."""
     render = AsyncMock(side_effect=HomeAssistantError("The plan 'X' (ID 3) could not be loaded from Comexio."))
     result, _ = _run_start(armed=False, selection=True, render=render)
-    assert result == {"success": False, "error": "The plan 'X' (ID 3) could not be loaded from Comexio."}
+    assert result == {
+        "success": False,
+        "error": "The plan 'X' (ID 3) could not be loaded from Comexio.",
+        "instance": _INSTANCE,
+    }
+
+
+def test_two_cards_recovering_from_one_reload_render_once() -> None:
+    """Review (Sourcery, #171): both starts pass the armed check before the lock; the second must not render."""
+    coordinator = _follow_coordinator(following=False)
+
+    async def render(c: SimpleNamespace) -> None:
+        await asyncio.sleep(0)
+        c.preview_armed = True
+
+    render_mock = AsyncMock(side_effect=render)
+    call = SimpleNamespace(data={})
+
+    async def scenario() -> list[dict]:
+        with (
+            patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+            patch.object(misc, "preview_selection_available", return_value=True),
+            patch.object(plan_preview, "async_render_selected_preview", render_mock),
+        ):
+            return await asyncio.gather(
+                misc._handle_function_plan_preview_start(SimpleNamespace(), call),  # type: ignore[arg-type]
+                misc._handle_function_plan_preview_start(SimpleNamespace(), call),  # type: ignore[arg-type]
+            )
+
+    results = asyncio.run(scenario())
+    render_mock.assert_awaited_once()
+    assert [r["already_armed"] for r in results] == [False, True]
+    assert all(r["success"] is True and r["instance"] == _INSTANCE for r in results)
+
+
+def test_a_start_waiting_behind_a_failed_render_renders_itself() -> None:
+    """The re-check under the lock skips only an armed preview: a failed first render leaves the second to try."""
+    coordinator = _follow_coordinator(following=False)
+    attempts: list[int] = []
+
+    async def render(c: SimpleNamespace) -> None:
+        attempts.append(len(attempts))
+        await asyncio.sleep(0)
+        if len(attempts) == 1:
+            raise HomeAssistantError("plan not loadable")
+        c.preview_armed = True
+
+    call = SimpleNamespace(data={})
+
+    async def scenario() -> list[dict]:
+        with (
+            patch.object(misc, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+            patch.object(misc, "preview_selection_available", return_value=True),
+            patch.object(plan_preview, "async_render_selected_preview", AsyncMock(side_effect=render)),
+        ):
+            return await asyncio.gather(
+                misc._handle_function_plan_preview_start(SimpleNamespace(), call),  # type: ignore[arg-type]
+                misc._handle_function_plan_preview_start(SimpleNamespace(), call),  # type: ignore[arg-type]
+            )
+
+    first, second = asyncio.run(scenario())
+    assert len(attempts) == 2
+    assert first["success"] is False
+    assert second == {"success": True, "already_armed": False, "instance": _INSTANCE}
 
 
 class _PreviewCoordinator(SimpleNamespace):
@@ -287,6 +354,40 @@ def test_a_selection_changed_during_the_opening_render_is_shown_after_it() -> No
             await asyncio.gather(opening, follow)
 
     asyncio.run(scenario())
+    assert rendered == ["A", "B"]
+
+
+def test_a_selection_followed_before_the_opening_start_is_kept() -> None:
+    """Review (Sourcery, #171): an opening start that finds the preview armed must not supersede a queued follow."""
+    coordinator = _follow_coordinator(following=True)
+    coordinator.selection = "A"
+    rendered: list[str] = []
+
+    async def scenario() -> bool:
+        release = asyncio.Event()
+
+        async def render(c: SimpleNamespace) -> None:
+            selection = c.selection
+            if selection == "A":
+                await release.wait()
+            rendered.append(selection)
+            c.preview_armed = True
+
+        with (
+            patch.object(plan_preview, "preview_selection_available", return_value=True),
+            patch.object(plan_preview, "async_render_selected_preview", render),
+        ):
+            first = asyncio.ensure_future(plan_preview.async_render_opened_preview(coordinator))  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            coordinator.selection = "B"
+            follow = asyncio.ensure_future(plan_preview.async_follow_selection(coordinator))  # type: ignore[arg-type]
+            second = asyncio.ensure_future(plan_preview.async_render_opened_preview(coordinator))  # type: ignore[arg-type]
+            await asyncio.sleep(0)
+            release.set()
+            _, _, second_rendered = await asyncio.gather(first, follow, second)
+            return second_rendered
+
+    assert asyncio.run(scenario()) is False
     assert rendered == ["A", "B"]
 
 

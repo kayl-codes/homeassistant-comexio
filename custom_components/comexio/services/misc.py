@@ -341,7 +341,8 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
     No render while a preview is already armed (a second card, a reattach).
     With keepalive, the open card only renews that window (no render, no Comexio request), so its
     selection changes keep following however long it stays open.
-    Every successful answer carries the coordinator's preview_instance_id (see _PREVIEW_INSTANCE_KEY).
+    Every answer from a resolved instance carries the coordinator's preview_instance_id, also "not
+    armed" (see _PREVIEW_INSTANCE_KEY): the card then retries on that instance only after a pause.
     """
     if call.data.get("keepalive"):
         return _preview_keepalive(hass, call)
@@ -352,25 +353,32 @@ async def _handle_function_plan_preview_start(hass: HomeAssistant, call: Service
         return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
     coordinator, _api, _fub_id = ctx
 
+    instance = coordinator.preview_instance_id
     coordinator.start_preview_following()
     if coordinator.preview_armed:
         _LOGGER.debug(
             "Function Plan Preview Start: a plan preview is already armed (Duration: %.3fs)",
             time.monotonic() - started,
         )
-        return {"success": True, "already_armed": True, _PREVIEW_INSTANCE_KEY: coordinator.preview_instance_id}
+        return {"success": True, "already_armed": True, _PREVIEW_INSTANCE_KEY: instance}
     if not preview_selection_available(coordinator):
         _LOGGER.debug("Function Plan Preview Start: no plan is selected (Duration: %.3fs)", time.monotonic() - started)
-        return {"success": False, "error": "No plan is selected for the preview."}
+        return {"success": False, "error": "No plan is selected for the preview.", _PREVIEW_INSTANCE_KEY: instance}
     try:
-        await async_render_opened_preview(coordinator)
+        rendered = await async_render_opened_preview(coordinator)
     except HomeAssistantError as err:
         _LOGGER.warning(
             "Function Plan Preview Start: preview not armed (Duration: %.1fs): %s", time.monotonic() - started, err
         )
-        return {"success": False, "error": str(err)}
+        return {"success": False, "error": str(err), _PREVIEW_INSTANCE_KEY: instance}
+    if not rendered:
+        _LOGGER.debug(
+            "Function Plan Preview Start: armed meanwhile by another start or a follow (Duration: %.3fs)",
+            time.monotonic() - started,
+        )
+        return {"success": True, "already_armed": True, _PREVIEW_INSTANCE_KEY: instance}
     _LOGGER.info("Function Plan Preview Start: preview armed (Duration: %.1fs)", time.monotonic() - started)
-    return {"success": True, "already_armed": False, _PREVIEW_INSTANCE_KEY: coordinator.preview_instance_id}
+    return {"success": True, "already_armed": False, _PREVIEW_INSTANCE_KEY: instance}
 
 
 def _preview_keepalive(hass: HomeAssistant, call: ServiceCall) -> dict:

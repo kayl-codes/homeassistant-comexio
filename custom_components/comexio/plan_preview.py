@@ -104,15 +104,21 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
     )
 
 
-async def async_render_opened_preview(coordinator: ComexioCoordinator) -> None:
+async def async_render_opened_preview(coordinator: ComexioCoordinator) -> bool:
     """The plan card opened: render the current selection, in turn with the selection follows.
 
     Under the follows' lock, so a selection changed while this render awaits Comexio is rendered
-    after it rather than overwritten by it. Raises HomeAssistantError like async_render_selected_preview.
+    after it rather than overwritten by it. Returns False without a render when a start or follow
+    ahead of it in the lock armed the preview meanwhile (two cards recovering from the same reload).
+    The generation counts only once the lock is held, so a follow queued before it still renders.
+    Raises HomeAssistantError like async_render_selected_preview.
     """
-    coordinator.preview_follow_generation += 1
     async with coordinator.preview_follow_lock:
+        if coordinator.preview_armed:
+            return False
+        coordinator.preview_follow_generation += 1
         await async_render_selected_preview(coordinator)
+    return True
 
 
 def async_follow_selection(coordinator: ComexioCoordinator) -> Coroutine[Any, Any, None]:

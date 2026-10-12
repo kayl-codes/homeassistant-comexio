@@ -366,7 +366,8 @@ class ComexioPlanCard extends HTMLElement {
     this._previewStarted = false; // the backend answered the open's preview_start with success
     this._previewInstance = null; // coordinator id from that start's answer (backend preview_instance_id)
     this._keepaliveTimer = null; // periodic function_plan_preview_start keepalive while connected
-    this._keepaliveInstance = null; // instance named by the last answered keepalive
+    this._keepaliveInstance = null; // instance named by the last answered keepalive or start
+    this._startsInFlight = 0; // full starts still awaiting their answer (a render can outlast a keepalive)
     this._startRetryAfter = 0; // Date.now() before which an unarmed start is not retried on that instance
     this._keepaliveWarned = false; // a failing keepalive warns once until one is answered again
   }
@@ -1873,21 +1874,36 @@ class ComexioPlanCard extends HTMLElement {
       return;
     }
     this._startPreviewPending = false;
+    this._startsInFlight += 1;
     this._hass
       .callService("comexio", "function_plan_preview_start", this._previewServiceData(), undefined, false, true)
-      .then((result) => {
-        const response = result?.response;
-        this._previewStarted = response?.success === true;
-        this._previewInstance = this._previewStarted ? (response.instance ?? null) : null;
-        if (!this._previewStarted) {
-          // Not armed (no plan selected, plan not loadable): a keepalive retries the start — at once
-          // on a new instance, on the same one only after _PREVIEW_START_RETRY_MS.
+      .then(
+        (result) => {
+          const response = result?.response;
+          if (response?.instance) {
+            // Also on "not armed": the keepalive treats only another instance as new.
+            this._keepaliveInstance = response.instance;
+          }
+          this._previewStarted = response?.success === true;
+          this._previewInstance = this._previewStarted ? (response.instance ?? null) : null;
+          if (!this._previewStarted) {
+            // Not armed (no plan selected, plan not loadable): a keepalive retries the start — at once
+            // on a new instance, on the same one only after _PREVIEW_START_RETRY_MS.
+            this._startRetryAfter = Date.now() + _PREVIEW_START_RETRY_MS;
+            console.warn("comexio-plan-card: function_plan_preview_start not armed", response?.error);
+          }
+        },
+        (err) => {
+          // Rejected (connection lost, HA restarting): retried like an unarmed start, not on every keepalive.
+          // Only the service call's rejection: an error in the handler above must not pose as one.
+          this._previewStarted = false;
+          this._previewInstance = null;
           this._startRetryAfter = Date.now() + _PREVIEW_START_RETRY_MS;
-          console.warn("comexio-plan-card: function_plan_preview_start not armed", response?.error);
-        }
-      })
-      .catch((err) => {
-        console.warn("comexio-plan-card: function_plan_preview_start failed", err);
+          console.warn("comexio-plan-card: function_plan_preview_start failed", err);
+        },
+      )
+      .finally(() => {
+        this._startsInFlight -= 1;
       });
   }
 
@@ -1903,7 +1919,6 @@ class ComexioPlanCard extends HTMLElement {
     // keepalive alone never arms: its answer then names a different instance than the open's start,
     // so the full start is re-sent and the live values resume. A preview auto-stopped by the same
     // coordinator keeps its instance — the keepalive leaves that auto-stop in force.
-    const retryStart = !this._previewStarted;
     this._hass
       .callService("comexio", "function_plan_preview_start", data, undefined, false, true)
       .then((result) => {
@@ -1914,9 +1929,11 @@ class ComexioPlanCard extends HTMLElement {
           return;
         }
         this._keepaliveWarned = false;
-        if (!this.isConnected) {
+        if (!this.isConnected || this._startsInFlight > 0) {
+          // A start still awaiting its answer (a slow render) settles the state; none alongside it.
           return;
         }
+        const retryStart = !this._previewStarted;
         const newInstance = response.instance !== this._keepaliveInstance;
         this._keepaliveInstance = response.instance;
         const retryDue = retryStart && (newInstance || Date.now() >= this._startRetryAfter);
