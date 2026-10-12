@@ -85,7 +85,7 @@ def _resolve_coordinator(
     Without `config_entry` the only loaded instance is used. No loaded instance at all (a call
     during the reload that ends every sync) is reported as such, not as "multiple instances".
     quiet: a periodic background call (the plan card's keepalive) only logs at debug level —
-    repeated every few minutes, a notification each time would pile up while Comexio is offline.
+    repeated every 30 s per open card, a notification each time would pile up while Comexio is offline.
     """
     domain_data = hass.data.get(DOMAIN, {})
     entry_id = call.data.get("config_entry")

@@ -89,6 +89,16 @@ def test_a_reloaded_entry_answers_the_keepalive_as_a_new_instance(monkeypatch: p
     assert before_reload.preview_armed is False
 
     assert _keepalive_instance(after_reload) != opened
+    # A keepalive alone never arms — the card's re-sent start does.
+    assert after_reload.preview_armed is False
+
+
+def test_the_keepalive_sends_no_comexio_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It repeats every 30 s per open card: a Comexio request there would load the server for nothing."""
+    coordinator = _real_coordinator(monkeypatch)
+    calls_before = list(coordinator.api.mock_calls)
+    _keepalive_instance(coordinator)
+    assert coordinator.api.mock_calls == calls_before
 
 
 def _real_coordinator(monkeypatch: pytest.MonkeyPatch) -> ComexioCoordinator:

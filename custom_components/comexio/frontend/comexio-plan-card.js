@@ -54,6 +54,9 @@ const _PREVIEW_STOP_GRACE_MS = 2000;
 // its interval is the longest an open card goes without live values after a reload or sync. It
 // costs no Comexio request, only a service call that renews the window.
 const _PREVIEW_KEEPALIVE_MS = 30 * 1000;
+// A start the same instance answered "not armed" (no plan selected, render failed) is retried at
+// this pace, not on every keepalive: each full start logs on the backend.
+const _PREVIEW_START_RETRY_MS = 5 * 60 * 1000;
 
 // Backoff for re-fetching a preview image whose fetch failed: first retry after the minimum,
 // doubled per consecutive failure up to the maximum, until a fetch succeeds. Without it a
@@ -363,6 +366,9 @@ class ComexioPlanCard extends HTMLElement {
     this._previewStarted = false; // the backend answered the open's preview_start with success
     this._previewInstance = null; // coordinator id from that start's answer (backend preview_instance_id)
     this._keepaliveTimer = null; // periodic function_plan_preview_start keepalive while connected
+    this._keepaliveInstance = null; // instance named by the last answered keepalive
+    this._startRetryAfter = 0; // Date.now() before which an unarmed start is not retried on that instance
+    this._keepaliveWarned = false; // a failing keepalive warns once until one is answered again
   }
 
   setConfig(config) {
@@ -1833,6 +1839,8 @@ class ComexioPlanCard extends HTMLElement {
       // stop below — instead of only after a plan switch.
       this._previewStarted = false;
       this._previewInstance = null;
+      this._keepaliveInstance = null;
+      this._startRetryAfter = 0;
       this._startPreviewPending = true;
       this._startPreviewIfPending();
     }
@@ -1872,7 +1880,9 @@ class ComexioPlanCard extends HTMLElement {
         this._previewStarted = response?.success === true;
         this._previewInstance = this._previewStarted ? (response.instance ?? null) : null;
         if (!this._previewStarted) {
-          // Not armed (no plan selected, plan not loadable): the next keepalive retries the start.
+          // Not armed (no plan selected, plan not loadable): a keepalive retries the start — at once
+          // on a new instance, on the same one only after _PREVIEW_START_RETRY_MS.
+          this._startRetryAfter = Date.now() + _PREVIEW_START_RETRY_MS;
           console.warn("comexio-plan-card: function_plan_preview_start not armed", response?.error);
         }
       })
@@ -1900,21 +1910,33 @@ class ComexioPlanCard extends HTMLElement {
         const response = result?.response;
         if (response?.success !== true) {
           // E.g. the instance is not loaded (reloading, Comexio offline): the next keepalive retries.
-          console.warn("comexio-plan-card: function_plan_preview_start keepalive not answered", response?.error);
+          this._warnKeepaliveOnce("not answered", response?.error);
           return;
         }
+        this._keepaliveWarned = false;
         if (!this.isConnected) {
           return;
         }
+        const newInstance = response.instance !== this._keepaliveInstance;
+        this._keepaliveInstance = response.instance;
+        const retryDue = retryStart && (newInstance || Date.now() >= this._startRetryAfter);
         const reloaded = !retryStart && !!response.instance && response.instance !== this._previewInstance;
-        if (retryStart || reloaded) {
+        if (retryDue || reloaded) {
           this._startPreviewPending = true;
           this._startPreviewIfPending();
         }
       })
       .catch((err) => {
-        console.warn("comexio-plan-card: function_plan_preview_start keepalive failed", err);
+        this._warnKeepaliveOnce("failed", err);
       });
+  }
+
+  // Every 30 s while the entry is unloaded or Comexio is offline: one console warning per outage.
+  _warnKeepaliveOnce(what, detail) {
+    if (!this._keepaliveWarned) {
+      this._keepaliveWarned = true;
+      console.warn(`comexio-plan-card: function_plan_preview_start keepalive ${what}`, detail);
+    }
   }
 
   disconnectedCallback() {
