@@ -611,6 +611,53 @@ def test_a_plan_list_no_fetch_remembers_still_replaces_the_cache(comexio_api: Co
     assert comexio_api.fub_data is unknown
 
 
+PLACEMENT_PLAN = {"elements": [], "connections": []}
+
+
+def _older_plan_list_than_the_cached_one(comexio_api: ComexioAPI, client: MagicMock) -> dict[str, Any]:
+    """$Fubs of a fetch older than the cached plan list, which adds plan 9; the bulk load returns only plan 7."""
+    client.get_raw_config = AsyncMock(return_value=_block_page("26", "11.0.3"))
+    older = asyncio.run(comexio_api.get_raw_config())
+    newer_page = _block_page("27", "11.0.3")
+    newer_page.variables["Fubs"]["9"] = {"Id": 9, "Name": "Plan 9", "Active": 0}
+    client.get_raw_config = AsyncMock(return_value=newer_page)
+    comexio_api.parse_config(asyncio.run(comexio_api.get_raw_config()))
+    comexio_api.function_plan_load_all_plans = AsyncMock(return_value={7: PLACEMENT_PLAN})  # type: ignore[method-assign]
+    return older["Fubs"]
+
+
+def test_a_placement_check_on_an_older_plan_list_also_loads_the_newer_cached_plans(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # Regression: the older list was rejected for the cache, yet only its plans were checked —
+    # a plan the newer cached list adds, omitted by the bulk load, counted as having no placements.
+    fubs = _older_plan_list_than_the_cached_one(comexio_api, client)
+    comexio_api.function_plan_load_elements = AsyncMock(return_value=PLACEMENT_PLAN)  # type: ignore[method-assign]
+
+    plans = asyncio.run(comexio_api._load_all_plans_verified(fubs, strict=True))
+
+    assert plans == {7: PLACEMENT_PLAN, 9: PLACEMENT_PLAN}
+    comexio_api.function_plan_load_elements.assert_awaited_once_with(9, strict=True)
+
+
+def test_a_placement_check_fails_closed_on_an_unloadable_cached_plan(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    fubs = _older_plan_list_than_the_cached_one(comexio_api, client)
+    comexio_api.function_plan_load_elements = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    assert asyncio.run(comexio_api._load_all_plans_verified(fubs, strict=True)) is None
+
+
+def test_a_placement_check_fails_closed_on_a_malformed_cached_plan_id(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    fubs = _older_plan_list_than_the_cached_one(comexio_api, client)
+    comexio_api._fub_data["x"] = {"Id": "x"}
+
+    assert asyncio.run(comexio_api._load_all_plans_verified(fubs, strict=True)) is None
+
+
 def test_the_next_config_fetch_after_an_overlap_takes_its_page_again(
     comexio_api: ComexioAPI, client: MagicMock
 ) -> None:

@@ -489,6 +489,16 @@ def _saved_schema(conf_data: Mapping[str, Any], key: str, default: str) -> str:
     return default
 
 
+def _verified_plan_ids(fubs: dict[str, Any], source: str) -> set[int] | None:
+    """The plan ids of a plan list as ints, None after an error log if any is not numeric."""
+    try:
+        return {int(fid) for fid in fubs}
+    except (TypeError, ValueError):
+        bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
+        _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in %s — placement unknown", bad, source)
+        return None
+
+
 class ComexioAPI:
     """
     Detailed interface to communicate with the Comexio API.
@@ -2496,20 +2506,19 @@ class ComexioAPI:
         the complete picture: function_plan_load_all_plans silently skips malformed entries
         and filters against the cached plan list. This refreshes that cache (self._fub_data)
         from fubs — unless a newer fetch's plan list is cached already; a plan only fubs still
-        lists then fails to load below (None) — then loads each plan the bulk response lacked
-        individually (e.g. a plan
-        without elements, should the bulk endpoint omit those). Returns {} if there are no
-        plans at all. strict is passed on to both loaders (see function_plan_load_elements).
-        A non-numeric plan id also returns None — checked before the cache is replaced, so a
-        malformed $Fubs neither crashes the caller nor ends up in self._fub_data.
+        lists then fails to load below (None). Then each plan of fubs or of the cache (a newer
+        list kept, or a plan create_fup added) the bulk response lacked is loaded individually
+        (e.g. a plan without elements, should the bulk endpoint omit those). Returns {} if there
+        are no plans at all. strict is passed on to both loaders (see function_plan_load_elements).
+        A non-numeric plan id also returns None — checked in fubs before the cache is replaced,
+        so a malformed $Fubs neither crashes the caller nor ends up in self._fub_data.
         """
-        try:
-            fub_ids = {int(fid) for fid in fubs}
-        except (TypeError, ValueError):
-            bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
-            _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in $Fubs — placement unknown", bad)
+        if (fub_ids := _verified_plan_ids(fubs, "$Fubs")) is None:
             return None
         self._replace_fub_data(fubs)
+        if (cached_ids := _verified_plan_ids(self._fub_data, "the cached plan list")) is None:
+            return None
+        fub_ids |= cached_ids
         if not fub_ids:
             return {}
         plans = await self.function_plan_load_all_plans(strict=strict)
