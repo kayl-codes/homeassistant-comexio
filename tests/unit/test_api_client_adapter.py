@@ -273,6 +273,22 @@ def test_get_raw_config_unanswered_re_login_is_flagged_for_this_fetch_only(
     assert comexio_api.last_login_error == "connection"  # left stale, hence the per-fetch flag
 
 
+@pytest.mark.parametrize(
+    "failure", [_connection_error(), ComexioDataError("an error page")], ids=["transport", "scrape"]
+)
+def test_a_failed_fetch_after_an_unanswered_re_login_clears_the_flag(
+    comexio_api: ComexioAPI, client: MagicMock, failure: Exception
+) -> None:
+    """The flag describes only the last fetch: one failing on its own (not on the re-login) leaves it False."""
+    comexio_api.config_relogin_unreachable = True
+    _fail(client, "get_raw_config", failure)
+
+    with contextlib.suppress(aiohttp.ClientError):
+        asyncio.run(comexio_api.get_raw_config())
+
+    assert comexio_api.config_relogin_unreachable is False
+
+
 def test_get_raw_config_keeps_io_types_and_version(comexio_api: ComexioAPI, client: MagicMock) -> None:
     variables = {"FubModules": {"2": {}}}
     client.get_raw_config = AsyncMock(return_value=RawConfig(variables, {"1": {}}, {"2": {}}, "11.0.2"))
@@ -339,11 +355,15 @@ NEWER_PAGE = _block_page("26", "11.0.3")
 
 
 class _Overlap(NamedTuple):
-    """Outcome of two overlapping config fetches: each one's result and the state after the first finished."""
+    """Outcome of two overlapping config fetches: each one's result and the state after the first finished.
+
+    unreachable holds config_relogin_unreachable as each fetch's caller reads it on resuming.
+    """
 
     older: Any
     newer: Any
     between: tuple[Any, ...]
+    unreachable: dict[str, bool]
 
 
 def _run_overlapping_fetches(
@@ -355,10 +375,15 @@ def _run_overlapping_fetches(
 ) -> _Overlap:
     """Two config fetches overlap: both have started before either finishes, then they finish in the given order.
 
-    A failed re-login (ComexioAuthenticationError outcome) fails for both fetches. A transport
+    A failed re-login (ComexioAuthenticationError outcome) gets no reply from Comexio. A transport
     error comes back as the fetch's result, so the test can assert it.
     """
-    comexio_api._full_login = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    async def failed_login() -> bool:
+        comexio_api.last_login_error = api_module.LOGIN_ERROR_CONNECTION
+        return False
+
+    comexio_api._full_login = AsyncMock(side_effect=failed_login)  # type: ignore[method-assign]
 
     async def run() -> _Overlap:
         entered = {"older": asyncio.Event(), "newer": asyncio.Event()}
@@ -376,11 +401,15 @@ def _run_overlapping_fetches(
                 raise outcome
             return outcome
 
-        async def settle(task: asyncio.Task[dict[str, Any]]) -> Any:
+        unreachable: dict[str, bool] = {}
+
+        async def settle(name: str) -> Any:
             try:
-                return await task
+                return await tasks[name]
             except aiohttp.ClientError as err:
                 return err
+            finally:
+                unreachable[name] = comexio_api.config_relogin_unreachable
 
         client.get_raw_config = AsyncMock(side_effect=fetch)
         tasks = {"older": asyncio.create_task(comexio_api.get_raw_config())}
@@ -389,11 +418,11 @@ def _run_overlapping_fetches(
         await entered["newer"].wait()
         first, second = ("older", "newer") if older_finishes_first else ("newer", "older")
         may_finish[first].set()
-        results = {first: await settle(tasks[first])}
+        results = {first: await settle(first)}
         between = _api_state(comexio_api)
         may_finish[second].set()
-        results[second] = await settle(tasks[second])
-        return _Overlap(results["older"], results["newer"], between)
+        results[second] = await settle(second)
+        return _Overlap(results["older"], results["newer"], between, unreachable)
 
     return asyncio.run(run())
 
@@ -415,13 +444,67 @@ def test_an_older_config_fetch_finishing_last_keeps_the_newer_tables(
         assert isinstance(overlap.older, aiohttp.ClientError)
 
 
-def test_a_discarded_config_fetch_still_returns_its_own_page(comexio_api: ComexioAPI, client: MagicMock) -> None:
-    """The caller of the older fetch gets the page it read, and its $Fubs still carries its run-state mark."""
+def test_a_discarded_config_fetch_returns_the_newer_page(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """The caller of the older fetch parses the newer page, never its older plan list over the cache."""
     overlap = _run_overlapping_fetches(comexio_api, client, OLDER_PAGE)
 
-    assert overlap.older is OLDER_PAGE.variables
+    assert overlap.older is NEWER_PAGE.variables
     marked = [fubs for fubs, _mark in comexio_api._fetch_marks]
-    assert any(fubs is OLDER_PAGE.variables["Fubs"] for fubs in marked)
+    assert any(fubs is NEWER_PAGE.variables["Fubs"] for fubs in marked)
+    assert not any(fubs is OLDER_PAGE.variables["Fubs"] for fubs in marked)
+
+
+def test_a_stale_failure_does_not_hide_the_newest_page_from_an_overtaken_fetch(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Three fetches finish newest first: the middle one's failure must not make the oldest return its own page."""
+    newest = _block_page("30", "11.0.4")
+
+    async def run() -> list[Any]:
+        may_finish = [asyncio.Event() for _ in range(3)]
+        entered = [asyncio.Event() for _ in range(3)]
+        outcomes: list[RawConfig | Exception] = [OLDER_PAGE, ComexioDataError("an error page"), newest]
+        order = iter(range(3))
+
+        async def fetch() -> RawConfig:
+            index = next(order)
+            entered[index].set()
+            await may_finish[index].wait()
+            if isinstance(outcome := outcomes[index], Exception):
+                raise outcome
+            return outcome
+
+        client.get_raw_config = AsyncMock(side_effect=fetch)
+        tasks = []
+        for index in range(3):
+            tasks.append(asyncio.create_task(comexio_api.get_raw_config()))
+            await entered[index].wait()
+        results: list[Any] = [None] * 3
+        for index in (2, 1, 0):
+            may_finish[index].set()
+            results[index] = await tasks[index]
+        return results
+
+    oldest, middle, newer = asyncio.run(run())
+
+    assert (oldest, middle, newer) == (newest.variables, {}, newest.variables)
+    assert oldest is newest.variables
+    assert _api_state(comexio_api) == _page_state(newest)
+
+
+@pytest.mark.parametrize("older_finishes_first", [False, True], ids=["older-last", "older-first"])
+@pytest.mark.parametrize("failing", ["older", "newer"])
+def test_each_overlapping_config_fetch_reports_only_its_own_unreachable_re_login(
+    comexio_api: ComexioAPI, client: MagicMock, failing: str, older_finishes_first: bool
+) -> None:
+    """A re-login without reply flags only its own caller's poll, never the other fetch's successful one."""
+    outcomes = {"older": OLDER_PAGE, "newer": NEWER_PAGE, failing: ComexioAuthenticationError("lapsed")}
+
+    overlap = _run_overlapping_fetches(
+        comexio_api, client, outcomes["older"], outcomes["newer"], older_finishes_first=older_finishes_first
+    )
+
+    assert overlap.unreachable == {"older": failing == "older", "newer": failing == "newer"}
 
 
 def test_an_older_config_fetch_after_a_failed_newer_one_changes_nothing(
@@ -435,6 +518,7 @@ def test_an_older_config_fetch_after_a_failed_newer_one_changes_nothing(
     overlap = _run_overlapping_fetches(comexio_api, client, OLDER_PAGE, newer_outcome=ComexioDataError("an error page"))
 
     assert overlap.newer == {}
+    assert overlap.older is OLDER_PAGE.variables
     assert _api_state(comexio_api) == (None, {"1": {"unit": "before"}}, {"2": {"input": "before"}}, "11.0.1")
 
 

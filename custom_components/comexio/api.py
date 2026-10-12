@@ -577,6 +577,9 @@ class ComexioAPI:
         # version back over the newer one's, nor drop the newer table on its own failure.
         self._config_fetches_started: int = 0
         self._config_fetch_applied: int = 0
+        # The page of that applied fetch, None if it failed: what an overtaken fetch returns instead
+        # of its own older page.
+        self._config_page: dict[str, Any] | None = None
         # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
         # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
         self.reference_check: ReferenceCheck | None = None
@@ -615,7 +618,8 @@ class ComexioAPI:
         # problem (retry) apart from a genuine credential rejection (needs reauth).
         self.last_login_error: str | None = None
         # Set by get_raw_config when its re-login of a lapsed session got no reply (e.g. Comexio
-        # still rebooting); reset by every call, so it never outlives the fetch it describes.
+        # still rebooting). Written as each call ends, with no await before its caller resumes, so
+        # the caller reads its own fetch's outcome even while another fetch overlaps.
         self.config_relogin_unreachable = False
 
     def _build_session_kwargs(self) -> dict[str, Any]:
@@ -874,16 +878,15 @@ class ComexioAPI:
         aiohttp.ClientError / TimeoutError.
 
         Overlapping fetches: only a fetch started after the last applied one updates io_types,
-        comexio_version and block_settings; an older one finishing last still returns its own
-        page. Its caller then pairs that page with the newer fetch's io_types / comexio_version —
-        accepted, as those only change with a Comexio firmware update, whose reboot fails the
-        older fetch instead of answering it.
+        comexio_version and block_settings. An older one finishing last returns the newer applied
+        page instead of its own, so its caller never parses older plan metadata over the cache —
+        or its own page if the newer fetch failed, as nothing fresher was read.
         """
         run_state_mark = self._run_state_mark
         saves_before = self._block_settings_saves_confirmed
         self._config_fetches_started += 1
         generation = self._config_fetches_started
-        self.config_relogin_unreachable = False
+        unreachable = False
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -891,7 +894,7 @@ class ComexioAPI:
                 _LOGGER.warning("Comexio admin session is no longer logged in — logging in again")
                 if not await self._full_login():
                     _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
-                    self.config_relogin_unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
+                    unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
                     self._drop_block_settings(generation)
                     return {}
                 raw = await self.client.get_raw_config()
@@ -902,20 +905,37 @@ class ComexioAPI:
             _LOGGER.error("Failed to fetch the Comexio configuration: %s", err)
             self._drop_block_settings(generation)
             return {}
-        if self._claim_config_fetch(generation):
+        finally:
+            self.config_relogin_unreachable = unreachable
+        return self._finish_config_fetch(raw, generation, saves_before, run_state_mark)
+
+    def _finish_config_fetch(
+        self, raw: RawConfig, generation: int, saves_before: int, run_state_mark: int
+    ) -> dict[str, Any]:
+        """Apply a fetched page unless a newer fetch overtook it; the page its caller gets (see get_raw_config)."""
+        if self._claim_config_fetch(generation, raw.variables):
             self._apply_config_page(raw, saves_before)
+        elif self._config_page is not None:
+            _LOGGER.debug(
+                "Config fetch %d overtaken by %d — returning the newer page", generation, self._config_fetch_applied
+            )
+            return self._config_page
         else:
-            # Still returns this page (see the docstring) and marks its $Fubs below.
-            _LOGGER.debug("Config fetch finished after a newer one — keeping the newer page's tables")
+            _LOGGER.debug(
+                "Config fetch %d overtaken by failed %d — returning its page, applying nothing",
+                generation,
+                self._config_fetch_applied,
+            )
         if isinstance(fubs := raw.variables.get("Fubs"), dict):
             self._fetch_marks.append((fubs, run_state_mark))
         return raw.variables
 
-    def _claim_config_fetch(self, generation: int) -> bool:
-        """Whether this fetch's outcome may be applied: no fetch started after it was applied yet."""
+    def _claim_config_fetch(self, generation: int, page: dict[str, Any] | None) -> bool:
+        """Whether this fetch's outcome (page, None on failure) may be applied: no newer fetch was applied yet."""
         if generation <= self._config_fetch_applied:
             return False
         self._config_fetch_applied = generation
+        self._config_page = page
         return True
 
     def _drop_block_settings(self, generation: int) -> None:
@@ -924,7 +944,7 @@ class ComexioAPI:
         The newest outcome wins also as a failure: an older fetch finishing afterwards with a valid
         page is discarded entirely (io_types and comexio_version too); the next poll catches up.
         """
-        if self._claim_config_fetch(generation):
+        if self._claim_config_fetch(generation, None):
             self.block_settings = None
 
     def _apply_config_page(self, raw: RawConfig, saves_before: int) -> None:
