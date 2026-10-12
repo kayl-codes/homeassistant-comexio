@@ -771,7 +771,7 @@ def test_a_dropped_card_is_not_told_to_rearm_while_the_preview_still_runs(monkey
     coordinator.start_preview_following("card-c")
     coordinator._preview_plan_cache = _armed_cache(1)
     assert _run_stop(coordinator, {"card_id": "card-b"}) == {"success": True, "stopped": False}
-    assert coordinator.start_preview_following("frozen-tab") is False
+    assert "rearm" not in _keepalive(coordinator, "frozen-tab")
 
 
 def test_the_auto_stop_is_not_undone_by_a_dropped_cards_rearm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1052,7 +1052,7 @@ def test_a_lone_unarmed_card_gone_without_a_stop_ends_the_following(monkeypatch:
     assert coordinator.preview_following is False
     assert coordinator.preview_stop_generation == 1
     assert coordinator._preview_cards_disarm_generation is None
-    assert coordinator.start_preview_following("closed-tab") is False
+    assert "rearm" not in _keepalive(coordinator, "closed-tab")
 
 
 def test_a_sweep_that_disarms_logs_at_info(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
