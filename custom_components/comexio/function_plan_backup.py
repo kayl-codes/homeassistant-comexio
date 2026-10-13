@@ -608,10 +608,11 @@ class FunctionPlanBackupManager:
     ) -> int:
         """Add paper/dpi/orientation to snapshots stored before this was tracked (idempotent).
 
-        Matches a snapshot to its live plan by fub_id + plan_name (Comexio has never been
-        observed to let a plan's paper/DPI/orientation change after creation, so the current
-        live value is authoritative for still-existing plans). No match (plan deleted or its
-        ID reused by a different plan) falls back to A3 @ 90 DPI landscape. Snapshots that
+        Matches a snapshot to its live plan by fub_id + plan_name and stamps the live format — a
+        best guess only: a plan's paper/DPI/orientation can change (seen live 2026-10-13), and
+        before that was backed up on its own a legacy snapshot may predate such a change. No
+        match (plan deleted or its ID reused by a different plan) falls back to A3 @ 90 DPI
+        landscape; a live plan whose format is unreadable this cycle is left for a later one. Snapshots that
         already carry a "paper" key are left untouched, so this is safe to call on every
         backup cycle. Returns the number of snapshots filled in.
         """
@@ -623,7 +624,13 @@ class FunctionPlanBackupManager:
                 live_name = fub_data.get(key, {}).get("Name")
                 live_format = plan_format.get(key)
                 if live_name is not None and live_format is None:
-                    continue  # a live plan whose format was not readable this cycle — filled in a later one
+                    _LOGGER.debug(
+                        "[%s] Function Plan backup: paper metadata backfill for plan %s deferred — "
+                        "its paper format is not readable",
+                        self._server_id,
+                        key,
+                    )
+                    continue
                 group_filled += _backfill_identity_group(identities, live_name, live_format)
             if group_filled:
                 await store.async_save(data)

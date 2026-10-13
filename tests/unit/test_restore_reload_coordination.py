@@ -64,6 +64,7 @@ def test_the_sync_reload_waits_for_a_running_restore_and_keeps_in_sync_meanwhile
             await _settle()
             reset_and_reload.assert_not_awaited()
             assert coordinator.sync_progress_text.startswith("Waiting for the running function plan restore")
+            coordinator.async_update_listeners.assert_called_once()
             # Still a sync: the restore's own reload request is skipped, the sync's covers it.
             await coordinator.async_reload_entry("function plan restore")
             coordinator.hass.config_entries.async_reload.assert_not_awaited()
@@ -179,3 +180,26 @@ def test_a_failed_reload_after_a_restore_is_reported() -> None:
         asyncio.run(backup._async_reload_after_restore(MagicMock(), coordinator))  # type: ignore[arg-type]
     create.assert_called_once()
     assert "Reload the Comexio integration manually" in create.call_args.args[1]
+
+
+@pytest.mark.parametrize(
+    ("in_sync", "sync_error", "failed_writes"), [(False, False, []), (True, True, []), (True, False, ["m1"])]
+)
+def test_the_waiting_text_never_replaces_a_failed_syncs_report(
+    in_sync: bool, sync_error: bool, failed_writes: list[str]
+) -> None:
+    coordinator = _coordinator()
+    coordinator.in_sync = in_sync
+    coordinator.sync_error = sync_error
+    coordinator.sync_failed_writes = failed_writes
+    coordinator.sync_progress_text = "Sync failed: 1 write"
+
+    async def run() -> None:
+        async with coordinator._restore_lock:
+            task = asyncio.create_task(coordinator.async_reload_entry("options changed"))
+            await _settle()
+        await task
+
+    asyncio.run(run())
+    assert coordinator.sync_progress_text == "Sync failed: 1 write"
+    coordinator.async_update_listeners.assert_not_called()

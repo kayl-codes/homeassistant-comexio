@@ -1330,11 +1330,12 @@ class ComexioAPI:
         else:
             orient_id = 1 if orientation.lower() == "portrait" else 0
 
+        named = next((p for p in self._paper_data.values() if p.get("Name") == paper_name), None)
         if paper_name and paper_name in self._PAPER_MM_BY_NAME:
             mm_long, mm_short = self._PAPER_MM_BY_NAME[paper_name]
         else:
-            paper_id = str(fub.get("Paper", ""))
-            paper = self._paper_data.get(paper_id, {})
+            # A backup's paper outside the table is sized from $Paper by name, never by the live plan's.
+            paper = named if paper_name and named else self._paper_data.get(str(fub.get("Paper", "")), {})
             mm_long = paper.get("MMX", self._CANVAS_REF_MM_LONG)
             mm_short = paper.get("MMY", self._CANVAS_REF_MM_SHORT)
 

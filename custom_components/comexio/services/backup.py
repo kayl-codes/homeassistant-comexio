@@ -88,6 +88,25 @@ _MISSING_VALUE = "—"
 _NO_BLOCK_SETTINGS = "#nv — no block values stored in {side}, not compared"
 
 
+_REBUILD_PAPER = "A3"
+_REBUILD_DPI = 90
+_REBUILD_ORIENTATION = "landscape"
+
+
+def _rebuild_paper_format(snapshot: dict[str, Any]) -> tuple[str, int, str]:
+    """The format a plan rebuilt from a snapshot is created with.
+
+    A snapshot without a stored format (taken before paper/DPI tracking, or while the plan's
+    $Paper could not be read) falls back to A3 @ 90 DPI landscape — a spacious default so the
+    rebuild cannot come out clipped; _paper_default_note says so in the result.
+    """
+    return snapshot_paper_format(snapshot) or (_REBUILD_PAPER, _REBUILD_DPI, _REBUILD_ORIENTATION)
+
+
+def _paper_default_note(snapshot: dict[str, Any]) -> str:
+    return "" if snapshot_paper_format(snapshot) else " (the backup stores no paper format — default used)"
+
+
 def _restore_notification_id(coordinator: ComexioCoordinator) -> str:
     """The one notification a restore shows its progress in, replaced by its result or error."""
     return f"comexio_function_plan_restore_{coordinator.server_id}"
@@ -512,9 +531,13 @@ async def _restore_apply_snapshot(
     (the normal same-identity restore), but required when force_override targets a plan
     whose current name/paper/DPI differs from the snapshot's.
     """
-    paper = snapshot.get("paper", "A3")
-    dpi = snapshot.get("dpi", 90)
-    orientation = snapshot.get("orientation", "landscape")
+    # A snapshot whose format was unreadable when it was taken stores none: keep the live plan's
+    # rather than "aligning" it to the A3 fallback of a rebuild.
+    paper, dpi, orientation = snapshot_paper_format(snapshot) or (
+        api.get_fub_paper_format(fub_id),
+        api.get_fub_dpi(fub_id),
+        api.get_fub_orientation(fub_id),
+    )
     properties_changed = (
         api.get_fub_paper_format(fub_id) != paper
         or api.get_fub_dpi(fub_id) != dpi
@@ -930,11 +953,7 @@ async def _restore_plan_as_new(
         notification_id=notif_id,
     )
 
-    # Snapshots captured before paper/DPI tracking existed (or never backfilled) fall back to
-    # A3 @ 90 DPI landscape — a spacious default so the rebuild cannot come out clipped.
-    paper = snapshot.get("paper", "A3")
-    dpi = snapshot.get("dpi", 90)
-    orientation = snapshot.get("orientation", "landscape")
+    paper, dpi, orientation = _rebuild_paper_format(snapshot)
     new_fub_id = await api.create_fup(plan_name, paper_format=paper, dpi=dpi, orientation=orientation)
     if new_fub_id is None:
         persistent_notification.async_create(
@@ -1010,7 +1029,7 @@ async def _restore_plan_as_new(
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
         f"{_block_settings_line(block_settings)}"
-        f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
+        f"Paper: {paper} @ {dpi} DPI, {orientation}{_paper_default_note(snapshot)}\n"
         f"{activation_line}\n\n"
         f"{consumer_line}\n"
         f"{lineage_line}\n\n"
@@ -1069,9 +1088,7 @@ async def _restore_plan_as_copy(
         notification_id=notif_id,
     )
 
-    paper = snapshot.get("paper", "A3")
-    dpi = snapshot.get("dpi", 90)
-    orientation = snapshot.get("orientation", "landscape")
+    paper, dpi, orientation = _rebuild_paper_format(snapshot)
     try:
         new_fub_id = await api.create_fup(new_plan_name, paper_format=paper, dpi=dpi, orientation=orientation)
         if new_fub_id is None:
@@ -1124,7 +1141,7 @@ async def _restore_plan_as_copy(
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
         f"{_block_settings_line(block_settings)}"
-        f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
+        f"Paper: {paper} @ {dpi} DPI, {orientation}{_paper_default_note(snapshot)}\n"
         f"{activation_line}\n\n"
         "Backup lineage: unchanged — snapshots stay with the source plan; the copy starts fresh.\n\n"
         f"Duration: {duration:.1f}s"

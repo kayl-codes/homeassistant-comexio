@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.comexio import function_plan_backup as backup_module, plan_preview
+from custom_components.comexio import (
+    coordinator as coordinator_module,
+    function_plan_backup as backup_module,
+    plan_preview,
+)
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import DOMAIN
 from custom_components.comexio.coordinator import ComexioCoordinator
@@ -255,3 +259,88 @@ def test_the_backfill_waits_for_a_live_plans_format(stores: dict[str, Any], plan
 
     assert asyncio.run(run()) == 0
     assert "paper" not in stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"][0]
+
+
+def test_a_backup_render_passes_its_paper_format_to_the_title_and_the_armed_cache() -> None:
+    """A dropped argument would render the first frame right and every live-value re-render with the live paper."""
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = SERVER_ID
+    coordinator._preview_plan_cache = None
+    coordinator._preview_cache_generation = 0
+    coordinator._connection_values = {}
+    coordinator._restart_connection_poll = MagicMock()  # type: ignore[method-assign]
+    coordinator._restart_preview_auto_stop = MagicMock()  # type: ignore[method-assign]
+    coordinator._connection_poll_fast_requested = False
+    coordinator.hass = MagicMock()
+    coordinator.function_plan_catalog = SimpleNamespace(async_get_catalog=AsyncMock(return_value={}))
+    coordinator._resolve_preview_label_maps = MagicMock(return_value=({}, {}, {}))  # type: ignore[method-assign]
+    coordinator._build_preview_title_and_canvas = MagicMock(return_value=("", None))  # type: ignore[method-assign]
+    coordinator._resolve_preview_connection_values = AsyncMock(return_value=({}, {}))  # type: ignore[method-assign]
+    coordinator.function_plan_knx_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
+    coordinator._async_publish_plan_preview = AsyncMock(return_value="/local/x.svg")  # type: ignore[method-assign]
+    coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
+
+    with (
+        patch.object(coordinator_module, "_build_sun_times", return_value={}),
+        patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
+        patch.object(coordinator_module, "render_plan_svg", return_value="<svg/>"),
+    ):
+        asyncio.run(coordinator.async_generate_plan_preview(7, "Lights", {}, {}, "snapshot:auto:1", paper_format=A5))
+
+    coordinator._build_preview_title_and_canvas.assert_called_once_with(7, A5)
+    assert coordinator._preview_plan_cache["paper_format"] == A5
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [("live", None), ("snapshot:auto:0", A5), ("snapshot:auto:1", A4), ("snapshot:auto:2", None)],
+)
+def test_a_preview_source_reads_its_own_slots_paper_format(source: str, expected: tuple | None) -> None:
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    manager._auto_data = {"7": {"Lights": [{"paper": p, "dpi": d, "orientation": o} for p, d, o in (A5, A4)]}}
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.function_plan_backup = manager
+
+    assert coordinator.snapshot_paper_format_for_source(7, "Lights", source) == expected
+    assert coordinator.snapshot_paper_format_for_source(7, "Other", source) is None
+
+
+@pytest.mark.parametrize(
+    ("stored", "aligned_to"), [({}, None), ({"paper": "A4", "dpi": 100}, ("A4", 100, "landscape"))]
+)
+def test_a_restore_onto_the_plan_keeps_its_paper_when_the_backup_stores_none(
+    stored: dict[str, Any], aligned_to: tuple | None
+) -> None:
+    """(Review) without a stored format, "aligning" would switch the live A5 plan to the A3 rebuild default."""
+    api = AsyncMock()
+    api.get_fub_paper_format = MagicMock(return_value="A5")
+    api.get_fub_dpi = MagicMock(return_value=120)
+    api.get_fub_orientation = MagicMock(return_value="landscape")
+    snapshot = {"elements": {}, "connections": {}, **stored}
+
+    sanitized = AsyncMock(return_value=(snapshot, {}, None))
+    with patch.object(backup_service, "_sanitize_missing_comments", sanitized):
+        asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, "Lights", "Lights", False))
+
+    if aligned_to is None:
+        api.function_plan_update_paper.assert_not_awaited()
+    else:
+        api.function_plan_update_paper.assert_awaited_once_with(7, *aligned_to, name="Lights")
+
+
+def test_a_rebuild_without_a_stored_format_says_it_used_the_default() -> None:
+    assert backup_service._rebuild_paper_format({}) == ("A3", 90, "landscape")
+    assert "default used" in backup_service._paper_default_note({})
+    assert backup_service._rebuild_paper_format({"paper": "A5", "dpi": 120}) == ("A5", 120, "landscape")
+    assert backup_service._paper_default_note({"paper": "A5"}) == ""
+
+
+def test_a_backups_paper_outside_the_size_table_is_sized_from_its_paper_entry(parsing_api: ComexioAPI) -> None:
+    parsing_api.parse_config(load_json_fixture("config_basic.json"))
+    parsing_api._paper_data["9"] = {"Name": "Letter", "MMX": 279, "MMY": 216}
+    live = parsing_api.get_fub_canvas_bounds(1)
+
+    letter = parsing_api.get_fub_canvas_bounds(1, paper_name="Letter")
+
+    parsing_api._fub_data["1"]["Paper"] = "9"
+    assert letter == parsing_api.get_fub_canvas_bounds(1) != live
