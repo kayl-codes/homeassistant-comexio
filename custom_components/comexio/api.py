@@ -133,6 +133,11 @@ async def _attempt[T, F](
         return failed
 
 
+def plan_paper_supported(paper_format: str) -> bool:
+    """Whether a plan can be set to this paper format (_plan_paper_and_orientation replaces any other)."""
+    return paper_format.upper() in _PLAN_PAPER_IDS
+
+
 def _plan_paper_and_orientation(paper_format: str, orientation: str) -> tuple[str, str]:
     """Paper format and orientation as aiocomexio accepts them.
 

@@ -159,6 +159,7 @@ def test_the_restore_service_pauses_the_auto_backup_for_every_restore_path(fails
     with (
         patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
         patch.object(backup, "_run_function_plan_restore", AsyncMock(side_effect=restore)),
+        patch.object(backup, "_refresh_service_descriptions", AsyncMock()),
         pytest.raises(RuntimeError) if fails else contextlib.nullcontext(),
     ):
         asyncio.run(backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={})))

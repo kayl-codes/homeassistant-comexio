@@ -7,6 +7,7 @@ everything that reads/writes the stored backup catalog (function_plan_backup.py)
 than acting on the live plan directly.
 """
 
+import asyncio
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 import json
@@ -21,6 +22,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.util import dt as dt_util
 
+from ..api import plan_paper_supported
 from ..const import (
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
@@ -93,23 +95,46 @@ _REBUILD_DPI = 90
 _REBUILD_ORIENTATION = "landscape"
 
 
+def _settable_format(paper_format: tuple[str, int, str] | None) -> tuple[str, int, str] | None:
+    """paper_format when a plan can be set to it, else None (Comexio would get A4 instead)."""
+    return paper_format if paper_format is not None and plan_paper_supported(paper_format[0]) else None
+
+
 def _rebuild_paper_format(snapshot: dict[str, Any]) -> tuple[str, int, str]:
     """The format a plan rebuilt from a snapshot is created with.
 
     A snapshot without a stored format (taken before paper/DPI tracking, or while the plan's
-    $Paper could not be read) falls back to A3 @ 90 DPI landscape — a spacious default so the
-    rebuild cannot come out clipped; _paper_default_note says so in the result.
+    $Paper could not be read), or with a paper a plan cannot be set to, falls back to A3 @ 90 DPI
+    landscape — a spacious default so the rebuild cannot come out clipped; _paper_default_note
+    says so in the result.
     """
-    return snapshot_paper_format(snapshot) or (_REBUILD_PAPER, _REBUILD_DPI, _REBUILD_ORIENTATION)
+    return _settable_format(snapshot_paper_format(snapshot)) or (_REBUILD_PAPER, _REBUILD_DPI, _REBUILD_ORIENTATION)
 
 
 def _paper_default_note(snapshot: dict[str, Any]) -> str:
-    return "" if snapshot_paper_format(snapshot) else " (the backup stores no paper format — default used)"
+    if (stored := snapshot_paper_format(snapshot)) is None:
+        if "paper" in snapshot:
+            return " (the backup's paper format is unreadable — default used)"
+        return " (the backup stores no paper format — default used)"
+    if _settable_format(stored) is None:
+        return f" (the backup's paper {stored[0]} cannot be set on a plan — default used)"
+    return ""
 
 
 def _restore_notification_id(coordinator: ComexioCoordinator) -> str:
     """The one notification a restore shows its progress in, replaced by its result or error."""
     return f"comexio_function_plan_restore_{coordinator.server_id}"
+
+
+def _post_restore_aborted(hass: HomeAssistant, coordinator: ComexioCoordinator, what: str) -> None:
+    """Replace a restore's "in progress" notice when it ends without a result of its own."""
+    persistent_notification.async_create(
+        hass,
+        f"{what}. A plan may be left partially restored or created — check it in Comexio Studio before "
+        "restoring again.",
+        title=_TITLE_RESTORE_ERR,
+        notification_id=_restore_notification_id(coordinator),
+    )
 
 
 def _coerce_int(value) -> int | None:
@@ -531,18 +556,21 @@ async def _restore_apply_snapshot(
     (the normal same-identity restore), but required when force_override targets a plan
     whose current name/paper/DPI differs from the snapshot's.
     """
-    # A snapshot whose format was unreadable when it was taken stores none: keep the live plan's
-    # rather than "aligning" it to the A3 fallback of a rebuild.
+    # A snapshot whose format was unreadable when it was taken stores none, and one a plan cannot
+    # be set to would turn into A4: keep the live plan's rather than "aligning" it to a guess.
     live_format = api.get_fub_known_format(fub_id)
-    target_format = snapshot_paper_format(snapshot) or live_format
+    snapshot_format = snapshot_paper_format(snapshot)
+    target_format = _settable_format(snapshot_format) or _settable_format(live_format)
     paper, dpi, orientation = target_format or (None, None, None)
-    properties_changed = target_format != live_format or live_name != plan_name
+    properties_changed = (target_format is not None and target_format != live_format) or live_name != plan_name
     paper_ok = True
     if properties_changed and target_format is None:
         # Comexio saves the name only together with the format, and neither the backup nor the
         # plan states one: renaming would overwrite the plan's format with a guess.
         _LOGGER.warning(
-            "Function Plan Restore: plan %s not renamed to '%s' — its paper format is unreadable", fub_id, plan_name
+            "Function Plan Restore: plan %s not renamed to '%s' — its paper format is unreadable or cannot be set",
+            fub_id,
+            plan_name,
         )
         paper_ok = False
     elif properties_changed:
@@ -595,6 +623,11 @@ async def _restore_apply_snapshot(
         "paper": paper,
         "dpi": dpi,
         "orientation": orientation,
+        "unsettable_format": (
+            snapshot_format
+            if snapshot_format and snapshot_format != live_format and not _settable_format(snapshot_format)
+            else None
+        ),
         "properties_changed": properties_changed,
         "paper_ok": paper_ok,
         "pos_ok": pos_ok,
@@ -683,7 +716,8 @@ def _restore_status(content_ok: bool, apply: dict, verify: dict) -> str:
     """Overall OK/PARTIAL/FAILED verdict for a restore (see _restore_plan_in_place)."""
     if not verify["reload_ok"]:
         return "FAILED"
-    if content_ok and apply["paper_ok"] and _block_settings_ok(apply["block_settings"]):
+    paper_restored = apply["paper_ok"] and apply.get("unsettable_format") is None
+    if content_ok and paper_restored and _block_settings_ok(apply["block_settings"]):
         return "OK"
     if apply["run_ok"] or apply["pos_ok"] or apply["paper_ok"] or verify["counts_match"]:
         return "PARTIAL"
@@ -900,14 +934,20 @@ def _new_plan_activation_line(run_ok: bool | None, auto_start: bool) -> str:
 
 def _aligned_properties_line(apply: dict, plan_name: str) -> str:
     """The restore result's line on aligning the live plan's name/paper with the snapshot ("" when nothing changed)."""
-    if not apply["properties_changed"]:
-        return ""
-    if apply["paper"] is None:
-        return (
-            f"Name not aligned with snapshot ('{plan_name}'): {ICON_ERROR} neither the backup nor the plan states "
-            "a paper format, and renaming would overwrite it — rename the plan in Comexio Studio\n"
+    line = ""
+    if (unsettable := apply.get("unsettable_format")) is not None:
+        line = (
+            f"Paper format: {ICON_WARNING} the backup's {format_paper_format(unsettable)} cannot be set on a plan "
+            "— the plan keeps its own\n"
         )
-    return (
+    if not apply["properties_changed"]:
+        return line
+    if apply["paper"] is None:
+        return line + (
+            f"Name not aligned with snapshot ('{plan_name}'): {ICON_ERROR} neither the backup nor the plan states "
+            "a paper format a plan can be set to, and renaming would overwrite it — rename the plan in Comexio Studio\n"
+        )
+    return line + (
         f"Aligned with snapshot: name '{plan_name}', paper {apply['paper']} @ {apply['dpi']} DPI, "
         f"{apply['orientation']} — "
         f"{ICON_SUCCESS if apply['paper_ok'] else f'{ICON_ERROR} failed, restore may look wrong'}\n"
@@ -1486,21 +1526,23 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
             # copy a half-built plan — each pushing an older entry out of the auto slots.
             with coordinator.pause_auto_backup():
                 await _run_function_plan_restore(hass, call, coordinator, api, plan_hash)
+        except asyncio.CancelledError:
+            # Home Assistant stopping or the service call cancelled: the restore ends here too.
+            _post_restore_aborted(hass, coordinator, "The restore was cancelled")
+            raise
         except Exception as exc:
             # The restore paths catch connection errors themselves; anything else (a closed API
             # session, an unexpected response) would leave their "in progress" notification
             # stuck forever and the half-built plan unreported. Re-raised so the service call
-            # fails too (HA logs it with the traceback).
-            persistent_notification.async_create(
-                hass,
-                f"The restore failed unexpectedly: {exc!r}. A plan may be left partially restored or "
-                "created — check it in Comexio Studio before restoring again.",
-                title=_TITLE_RESTORE_ERR,
-                notification_id=_restore_notification_id(coordinator),
-            )
+            # fails too (HA logs it with the traceback). No repr: a response error's carries
+            # the request headers, session cookie and Basic Auth included.
+            _post_restore_aborted(hass, coordinator, f"The restore failed unexpectedly: {type(exc).__name__}: {exc}")
             raise
         finally:
             coordinator.async_update_listeners()
+    # Outside the guard above: a failing services.yaml rewrite must not replace the restore's
+    # posted result with "failed unexpectedly" (the service call still fails and logs it).
+    await _refresh_service_descriptions(hass)
 
 
 async def _run_function_plan_restore(
@@ -1568,7 +1610,6 @@ async def _run_function_plan_restore(
         # The source plan is never touched here — no conflict/identity check applies.
         warn_firmware()
         await _restore_plan_as_copy(hass, coordinator, api, fub_id, snapshot, kind, slot, new_plan_name, auto_start)
-        await _refresh_service_descriptions(hass)
         return
 
     if live_fub is not None:
@@ -1609,7 +1650,6 @@ async def _run_function_plan_restore(
         identity_was_mismatched=conflict,
         auto_start=auto_start,
     )
-    await _refresh_service_descriptions(hass)
 
 
 async def _delete_one_snapshot(hass: HomeAssistant, coordinator: ComexioCoordinator, snapshot_raw: str) -> str | None:

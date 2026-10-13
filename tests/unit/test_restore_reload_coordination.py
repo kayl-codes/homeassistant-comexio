@@ -97,6 +97,52 @@ def test_an_unexpected_restore_error_replaces_the_progress_notice() -> None:
     assert not coordinator._restore_lock.locked()
 
 
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (asyncio.CancelledError(), "The restore was cancelled"),
+        (RuntimeError("Session is closed"), "RuntimeError: Session is closed"),
+    ],
+)
+def test_a_cancelled_or_failed_restore_replaces_its_progress_notice(error: BaseException, expected: str) -> None:
+    """(Review) a cancel skips 'except Exception'; an error's repr can carry request headers and cookies."""
+    coordinator = _coordinator()
+    coordinator._auto_backup_pauses = 0
+    coordinator._auto_backup_pause_generation = 0
+    with (
+        patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+        patch.object(backup, "_run_function_plan_restore", AsyncMock(side_effect=error)),
+        patch.object(backup.persistent_notification, "async_create") as create,
+    ):
+        restore = backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={}))
+        with pytest.raises(type(error)):
+            asyncio.run(restore)
+
+    assert expected in create.call_args.args[1]
+    assert "RuntimeError(" not in create.call_args.args[1]
+    assert create.call_args.kwargs["notification_id"] == "comexio_function_plan_restore_cx1"
+    assert not coordinator._restore_lock.locked()
+    assert coordinator._auto_backup_pauses == 0
+
+
+def test_a_failing_service_description_refresh_keeps_the_restores_result() -> None:
+    """(Review) the refresh used to run inside the guard: its error replaced an OK result with 'failed'."""
+    coordinator = _coordinator()
+    coordinator._auto_backup_pauses = 0
+    coordinator._auto_backup_pause_generation = 0
+    with (
+        patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+        patch.object(backup, "_run_function_plan_restore", AsyncMock()),
+        patch.object(backup, "_refresh_service_descriptions", AsyncMock(side_effect=OSError("disk full"))),
+        patch.object(backup.persistent_notification, "async_create") as create,
+    ):
+        restore = backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={}))
+        with pytest.raises(OSError):
+            asyncio.run(restore)
+
+    create.assert_not_called()
+
+
 def test_the_restores_own_reload_runs_after_it_instead_of_deadlocking() -> None:
     """Awaiting the reload under _restore_lock would wait for the restore itself."""
     coordinator = _coordinator()

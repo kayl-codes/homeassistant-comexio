@@ -12,7 +12,7 @@ from custom_components.comexio import (
     function_plan_backup as backup_module,
     plan_preview,
 )
-from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.api import ComexioAPI, plan_paper_supported
 from custom_components.comexio.const import DOMAIN
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
@@ -72,15 +72,35 @@ def test_auto_backup_rotates_on_a_paper_format_change_alone(stores: dict[str, An
 
 
 def test_a_snapshot_without_a_stored_format_is_no_format_change(stores: dict[str, Any], plan: dict[str, Any]) -> None:
+    """A snapshot from before the format was tracked: the backfill, not a new backup, gives it one."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+
+    async def run() -> list[int]:
+        rotated = [len(await manager.async_auto_backup({1: plan}, fub_data))]
+        del manager._auto_data["1"]["Lights"][0][backup_module.SNAPSHOT_PAPER_UNKNOWN]
+        rotated.append(len(await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A5})))
+        return rotated
+
+    assert asyncio.run(run()) == [1, 0]
+
+
+def test_a_format_readable_again_after_an_unreadable_snapshot_is_backed_up(
+    stores: dict[str, Any], plan: dict[str, Any]
+) -> None:
+    """(Review) otherwise no snapshot ever stores it, and a rebuild from the newest one comes out A3."""
     manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
     fub_data = {"1": {"Name": "Lights"}}
 
     async def run() -> list[int]:
         rotated = [len(await manager.async_auto_backup({1: plan}, fub_data))]
         rotated.append(len(await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A5})))
+        rotated.append(len(await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A5})))
         return rotated
 
-    assert asyncio.run(run()) == [1, 0]
+    assert asyncio.run(run()) == [1, 1, 0]
+    history = stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"]
+    assert backup_module.snapshot_paper_format(history[0]) == A5
 
 
 def test_the_backup_diff_names_a_changed_paper_format(plan: dict[str, Any]) -> None:
@@ -174,6 +194,11 @@ def test_a_re_render_of_an_armed_backup_keeps_its_paper_format() -> None:
         ({}, None),
         ({"paper": "A5"}, ("A5", 90, "landscape")),
         ({"paper": "A3", "dpi": 120, "orientation": "portrait"}, ("A3", 120, "portrait")),
+        # (Review) damaged values count as not stored instead of raising in diff, preview or restore.
+        ({"paper": "A5", "dpi": None}, None),
+        ({"paper": "A5", "dpi": "high"}, None),
+        ({"paper": "A5", "orientation": "upside"}, None),
+        ({"paper": None}, None),
     ],
 )
 def test_snapshot_paper_format(snapshot: dict[str, Any], expected: tuple | None) -> None:
@@ -262,6 +287,25 @@ def test_the_backfill_waits_for_a_live_plans_format(stores: dict[str, Any], plan
 
     assert asyncio.run(run()) == 0
     assert "paper" not in stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"][0]
+
+
+def test_older_names_under_a_live_id_get_the_fallback_while_its_format_is_unreadable(
+    stores: dict[str, Any], plan: dict[str, Any]
+) -> None:
+    """(Review) only the live identity waits for its format; a former plan under the ID never will."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+
+    async def run() -> int:
+        await manager.async_auto_backup({1: plan}, fub_data)
+        manager._auto_data["1"]["Lights"].append({**plan, "hash": "old", "plan_name": "Lights"})
+        manager._auto_data["1"]["Former"] = [{**plan, "hash": "former", "plan_name": "Former"}]
+        return await manager.async_backfill_paper_metadata(fub_data, {})
+
+    assert asyncio.run(run()) == 1
+    identities = stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]
+    assert backup_module.snapshot_paper_format(identities["Former"][0]) == ("A3", 90, "landscape")
+    assert all("paper" not in snap for snap in identities["Lights"])
 
 
 def test_a_snapshot_taken_while_the_format_was_unreadable_is_never_backfilled(
@@ -354,6 +398,78 @@ def test_a_rebuild_without_a_stored_format_says_it_used_the_default() -> None:
     assert "default used" in backup_service._paper_default_note({})
     assert backup_service._rebuild_paper_format({"paper": "A5", "dpi": 120}) == ("A5", 120, "landscape")
     assert backup_service._paper_default_note({"paper": "A5"}) == ""
+
+
+def test_a_rebuild_never_uses_a_paper_a_plan_cannot_be_set_to() -> None:
+    """(Review) Comexio would get A4 instead of the backup's A2 — the spacious default is the safer guess."""
+    snapshot = {"paper": "A2", "dpi": 120, "orientation": "portrait"}
+    assert backup_service._rebuild_paper_format(snapshot) == ("A3", 90, "landscape")
+    assert "A2 cannot be set on a plan" in backup_service._paper_default_note(snapshot)
+
+
+@pytest.mark.parametrize(("live_name", "renamed"), [("Lights", False), ("Renamed", True)])
+def test_a_restore_keeps_the_live_format_when_the_backups_cannot_be_set(live_name: str, renamed: bool) -> None:
+    """(Review) restoring an A2 backup must not turn the plan into A4 and report A2 as restored."""
+    api = AsyncMock()
+    api.get_fub_known_format = MagicMock(return_value=A5)
+    snapshot = {"elements": {}, "connections": {}, "paper": "A2", "dpi": 90, "orientation": "landscape"}
+
+    sanitized = AsyncMock(return_value=(snapshot, {}, None))
+    with patch.object(backup_service, "_sanitize_missing_comments", sanitized):
+        apply = asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, live_name, "Lights", False))
+
+    if renamed:
+        api.function_plan_update_paper.assert_awaited_once_with(7, *A5, name="Lights")
+    else:
+        api.function_plan_update_paper.assert_not_awaited()
+    assert "A2 @ 90 DPI, landscape cannot be set on a plan" in backup_service._aligned_properties_line(apply, "Lights")
+
+
+def test_a_restore_onto_a_plan_already_on_the_backups_unsettable_paper_warns_nothing() -> None:
+    """(Review) live A2 = backup A2: nothing differs, so no 'cannot be set' warning and no PARTIAL."""
+    a2 = ("A2", 90, "landscape")
+    api = AsyncMock()
+    api.get_fub_known_format = MagicMock(return_value=a2)
+    snapshot = {"elements": {}, "connections": {}, "paper": "A2", "dpi": 90, "orientation": "landscape"}
+
+    sanitized = AsyncMock(return_value=(snapshot, {}, None))
+    with patch.object(backup_service, "_sanitize_missing_comments", sanitized):
+        apply = asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, "Lights", "Lights", False))
+
+    assert apply["unsettable_format"] is None
+    assert backup_service._aligned_properties_line(apply, "Lights") == ""
+
+
+def test_a_restore_that_could_not_set_the_backups_paper_is_partial() -> None:
+    apply = {"paper_ok": True, "unsettable_format": ("A2", 90, "landscape"), "block_settings": None, "run_ok": True}
+    verify = {"reload_ok": True, "counts_match": True}
+    with patch.object(backup_service, "_block_settings_ok", return_value=True):
+        assert backup_service._restore_status(True, apply, verify) == "PARTIAL"
+        assert backup_service._restore_status(True, {**apply, "unsettable_format": None}, verify) == "OK"
+
+
+def test_a_damaged_stored_format_is_named_unreadable() -> None:
+    assert "unreadable" in backup_service._paper_default_note({"paper": "A5", "dpi": None})
+
+
+@pytest.mark.parametrize(("paper", "supported"), [("A3", True), ("a4", True), ("A5", True), ("A2", False), ("", False)])
+def test_which_papers_a_plan_can_be_set_to(paper: str, supported: bool) -> None:
+    assert plan_paper_supported(paper) is supported
+
+
+def test_a_restore_never_renames_a_plan_whose_live_paper_cannot_be_set() -> None:
+    api = AsyncMock()
+    api.get_fub_known_format = MagicMock(return_value=("A2", 90, "landscape"))
+    snapshot = {"elements": {}, "connections": {}}
+
+    sanitized = AsyncMock(return_value=(snapshot, {}, None))
+    with patch.object(backup_service, "_sanitize_missing_comments", sanitized):
+        same = asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, "Lights", "Lights", False))
+        renamed = asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, "Renamed", "Lights", False))
+
+    api.function_plan_update_paper.assert_not_awaited()
+    assert same["properties_changed"] is False
+    assert renamed["paper_ok"] is False
 
 
 def test_a_backups_paper_outside_the_size_table_is_sized_from_its_paper_entry(parsing_api: ComexioAPI) -> None:

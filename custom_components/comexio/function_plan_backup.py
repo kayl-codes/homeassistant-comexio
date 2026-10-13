@@ -78,9 +78,11 @@ def _backfill_identity_group(
     """
     filled = 0
     for plan_name, history in identities.items():
-        is_live_identity = live_format is not None and live_name is not None and plan_name == live_name
+        is_live_identity = live_name is not None and plan_name == live_name
+        if is_live_identity and live_format is None:
+            continue  # its format is unreadable this cycle: left for a later one
         fallback = (_FALLBACK_PAPER, _FALLBACK_DPI, _FALLBACK_ORIENTATION)
-        paper, dpi, orientation = live_format if is_live_identity else fallback
+        paper, dpi, orientation = live_format if is_live_identity and live_format else fallback
         for snap in history:
             if "paper" in snap or snap.get(SNAPSHOT_PAPER_UNKNOWN):
                 continue
@@ -203,14 +205,20 @@ def _plan_settings(
 
 
 def snapshot_paper_format(snapshot: Mapping[str, Any]) -> tuple[str, int, str] | None:
-    """A snapshot's stored (paper, dpi, orientation), or None when it was captured without them."""
-    if "paper" not in snapshot:
+    """A snapshot's stored (paper, dpi, orientation), or None when it was captured without them.
+
+    A malformed stored value (a damaged or hand-edited backup) counts as not stored either.
+    """
+    if not snapshot.get("paper"):
         return None
-    return (
-        str(snapshot["paper"]),
-        int(snapshot.get("dpi", _FALLBACK_DPI)),
-        str(snapshot.get("orientation", _FALLBACK_ORIENTATION)),
-    )
+    try:
+        dpi = int(snapshot.get("dpi", _FALLBACK_DPI))
+    except (TypeError, ValueError):
+        return None
+    orientation = snapshot.get("orientation", _FALLBACK_ORIENTATION)
+    if orientation not in ("portrait", "landscape"):
+        return None
+    return str(snapshot["paper"]), dpi, orientation
 
 
 def format_paper_format(paper_format: tuple[str, int, str]) -> str:
@@ -222,10 +230,13 @@ def format_paper_format(paper_format: tuple[str, int, str]) -> str:
 def _paper_format_changed(previous: Mapping[str, Any], current: tuple[Any, Any, Any]) -> bool:
     """Whether today's paper/DPI/orientation differ from the ones the previous snapshot stored.
 
-    Not read this poll (None) or not stored in the previous snapshot never counts as a change.
+    Not read this poll (None) never counts as a change, nor does a previous snapshot from before
+    the format was tracked — but one taken while it was unreadable does, so it gets stored.
     """
-    if None in current or (stored := snapshot_paper_format(previous)) is None:
+    if None in current:
         return False
+    if (stored := snapshot_paper_format(previous)) is None:
+        return bool(previous.get(SNAPSHOT_PAPER_UNKNOWN))
     return stored != (str(current[0]), int(current[1]), str(current[2]))
 
 
@@ -617,7 +628,8 @@ class FunctionPlanBackupManager:
         best guess only: a plan's paper/DPI/orientation can change (seen live 2026-10-13), and
         before that was backed up on its own a legacy snapshot may predate such a change. No
         match (plan deleted or its ID reused by a different plan) falls back to A3 @ 90 DPI
-        landscape; a live plan whose format is unreadable this cycle is left for a later one. Snapshots that
+        landscape; the snapshots of a live plan whose format is unreadable this cycle are left for a
+        later one (older names under its ID still get the fallback). Snapshots that
         already carry a "paper" key, or were taken while the format was unreadable
         (SNAPSHOT_PAPER_UNKNOWN), are left untouched, so this is safe to call on every backup
         cycle. Returns the number of snapshots filled in.
@@ -636,7 +648,6 @@ class FunctionPlanBackupManager:
                         self._server_id,
                         key,
                     )
-                    continue
                 group_filled += _backfill_identity_group(identities, live_name, live_format)
             if group_filled:
                 await store.async_save(data)
