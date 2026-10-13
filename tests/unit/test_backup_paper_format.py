@@ -509,6 +509,97 @@ def test_an_auto_backup_that_could_not_be_saved_is_taken_again(stores: dict[str,
     assert asyncio.run(run()) == 1
 
 
+def test_a_failed_auto_backup_save_keeps_a_snapshot_a_restore_promoted_meanwhile(
+    stores: dict[str, Any], plan: dict[str, Any]
+) -> None:
+    """(Review) the rollback took back the snapshot the restore had just marked restored."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+
+    async def promote_then_fail(_data: Any) -> None:
+        manager._auto_data["1"]["Lights"][0]["restored_at"] = "2026-10-14T00:00:00+00:00"
+        raise OSError("disk full")
+
+    async def run() -> None:
+        await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A4})
+        with (
+            patch.object(manager._auto_store, "async_save", AsyncMock(side_effect=promote_then_fail)),
+            pytest.raises(OSError),
+        ):
+            await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A5})
+
+    asyncio.run(run())
+    newest = manager._auto_data["1"]["Lights"][0]
+    assert backup_module.snapshot_paper_format(newest) == A5
+    assert "restored_at" in newest
+
+
+def test_an_unsaved_backfill_is_filled_in_again(stores: dict[str, Any], plan: dict[str, Any]) -> None:
+    """(Review) left in memory, the filled snapshots counted as done and never reached the store."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+
+    async def run() -> int:
+        await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A5})
+        snap = manager._auto_data["1"]["Lights"][0]
+        for key in ("paper", "dpi", "orientation"):
+            del snap[key]
+        with (
+            patch.object(manager._auto_store, "async_save", AsyncMock(side_effect=OSError("disk full"))),
+            pytest.raises(OSError),
+        ):
+            await manager.async_backfill_paper_metadata(fub_data, {"1": A5})
+        assert "paper" not in snap
+        return await manager.async_backfill_paper_metadata(fub_data, {"1": A5})
+
+    assert asyncio.run(run()) == 1
+
+
+def test_a_promotion_that_could_not_be_saved_is_taken_back(stores: dict[str, Any], plan: dict[str, Any]) -> None:
+    """(Review) memory showed the snapshot restored while disk and the result said otherwise."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+
+    async def run() -> list[dict[str, Any]]:
+        await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A4})
+        await manager.async_auto_backup({1: {**plan, "elements": {}}}, fub_data, plan_format={"1": A4})
+        before = list(manager._auto_data["1"]["Lights"])
+        with (
+            patch.object(manager._auto_store, "async_save", AsyncMock(side_effect=OSError("disk full"))),
+            pytest.raises(OSError),
+        ):
+            await manager.async_mark_restored("auto", 1, "Lights", before[1])
+        return before
+
+    before = asyncio.run(run())
+    history = manager._auto_data["1"]["Lights"]
+    assert history == before
+    assert all("restored_at" not in snap for snap in history)
+
+
+@pytest.mark.parametrize("old_id_still_live", [False, True])
+def test_a_lineage_move_that_could_not_be_saved_is_put_back(
+    stores: dict[str, Any], plan: dict[str, Any], old_id_still_live: bool
+) -> None:
+    """(Review) memory showed the backups moved while the store still had them under the old ID."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+
+    async def run() -> None:
+        await manager.async_auto_backup({1: plan}, {"1": {"Name": "Lights"}}, plan_format={"1": A4})
+        with (
+            patch.object(manager._auto_store, "async_save", AsyncMock(side_effect=OSError("disk full"))),
+            pytest.raises(OSError),
+        ):
+            if old_id_still_live:
+                await manager.async_purge_identity(1, "Lights")
+            else:
+                await manager.async_rekey_fub_id(1, 5, "Lights")
+
+    asyncio.run(run())
+    assert len(manager._auto_data["1"]["Lights"]) == 1
+    assert "5" not in manager._auto_data
+
+
 def test_a_restore_never_renames_a_plan_whose_live_paper_cannot_be_set() -> None:
     api = AsyncMock()
     api.get_fub_known_format = MagicMock(return_value=("A2", 90, "landscape"))

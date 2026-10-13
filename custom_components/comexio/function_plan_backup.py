@@ -69,14 +69,14 @@ def _backfill_identity_group(
     identities: dict[str, list[dict[str, Any]]],
     live_name: str | None,
     live_format: tuple[str, int, str] | None,
-) -> int:
+) -> list[dict[str, Any]]:
     """Fill in missing paper/dpi/orientation on every snapshot under one fub_id key.
 
     Paper format is the same for every snapshot of a given plan_name (see
     async_backfill_paper_metadata), so it's resolved once per plan_name bucket rather than
-    once per snapshot. Returns the number of snapshots filled in.
+    once per snapshot. Returns the snapshots filled in.
     """
-    filled = 0
+    filled: list[dict[str, Any]] = []
     for plan_name, history in identities.items():
         is_live_identity = live_name is not None and plan_name == live_name
         if is_live_identity and live_format is None:
@@ -89,8 +89,44 @@ def _backfill_identity_group(
             snap["paper"] = paper
             snap["dpi"] = dpi
             snap["orientation"] = orientation
-            filled += 1
+            filled.append(snap)
     return filled
+
+
+def _copy_keys(data: dict[str, Any], keys: tuple[str, ...]) -> dict[str, dict[str, Any] | None]:
+    """The identity maps under these fub_id keys (None: absent), copied deep enough to put them back."""
+    return {key: ({name: list(h) for name, h in data[key].items()} if key in data else None) for key in keys}
+
+
+async def _async_save_or_put_back(store: Any, data: dict[str, Any], before: dict[str, dict[str, Any] | None]) -> None:
+    """Save; on failure put the keys copied by _copy_keys back as they were, then raise.
+
+    Each store is saved on its own: when the second fails, memory keeps what the first saved,
+    so memory and disk still agree and the next attempt starts from the saved state.
+    """
+    try:
+        await store.async_save(data)
+    except Exception:
+        for key, identities in before.items():
+            if identities is None:
+                data.pop(key, None)
+            else:
+                data[key] = identities
+        raise
+
+
+async def _async_save_backfill_or_take_back(store: Any, data: dict[str, Any], filled: list[dict[str, Any]]) -> None:
+    """Save a backfill; on failure remove what it filled in, then raise.
+
+    Kept in memory, the filled snapshots would count as done: no later cycle would save them again.
+    """
+    try:
+        await store.async_save(data)
+    except Exception:
+        for snap in filled:
+            for key in ("paper", "dpi", "orientation"):
+                snap.pop(key, None)
+        raise
 
 
 def _backup_entry(key: str, plan_name: str, slot: int, snap: dict[str, Any]) -> dict[str, Any]:
@@ -580,13 +616,14 @@ class FunctionPlanBackupManager:
         Kept in memory, an unsaved snapshot would be what the next cycle compares against: the
         change it records would never be backed up again (until a restart or another change).
         A history changed meanwhile (e.g. a restore promoting a slot during the save) is left
-        alone rather than overwritten with the copy taken before.
+        alone rather than overwritten with the copy taken before — also when the restore promoted
+        the inserted snapshot itself (it then carries restored_at and is the restore's, not ours).
         """
         try:
             await self._auto_store.async_save(self._auto_data)
         except Exception:
             for history, before, inserted in rollback:
-                if history and history[0] is inserted:
+                if history and history[0] is inserted and "restored_at" not in inserted:
                     history[:] = before
             raise
 
@@ -658,7 +695,7 @@ class FunctionPlanBackupManager:
         await self._async_ensure_loaded()
         filled = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
-            group_filled = 0
+            group_filled: list[dict[str, Any]] = []
             for key, identities in data.items():
                 live_name = fub_data.get(key, {}).get("Name")
                 live_format = plan_format.get(key)
@@ -671,8 +708,8 @@ class FunctionPlanBackupManager:
                     )
                 group_filled += _backfill_identity_group(identities, live_name, live_format)
             if group_filled:
-                await store.async_save(data)
-            filled += group_filled
+                await _async_save_backfill_or_take_back(store, data, group_filled)
+            filled += len(group_filled)
         if filled:
             _LOGGER.info(
                 "[%s] Function Plan backup: backfilled paper/DPI metadata on %d snapshot(s)", self._server_id, filled
@@ -741,12 +778,14 @@ class FunctionPlanBackupManager:
                 data.pop(old_key, None)
             if not old_history:
                 continue
+            before = _copy_keys(data, (old_key, new_key))
+            before[old_key] = {**(before[old_key] or {}), plan_name: old_history}
             new_identities = data.setdefault(new_key, {})
             combined = new_identities.get(plan_name, []) + old_history
             combined.sort(key=lambda s: s.get("captured_at") or "", reverse=True)
             new_identities[plan_name] = combined[:limit]
+            await _async_save_or_put_back(store, data, before)
             moved += len(old_history)
-            await store.async_save(data)
         # The restored plan is live again under new_fub_id, so the keep decision is not carried over.
         await self._async_forget_kept_if_gone(old_fub_id, plan_name)
         if moved:
@@ -777,10 +816,12 @@ class FunctionPlanBackupManager:
             identities = data.get(key)
             if not identities or plan_name not in identities:
                 continue
-            removed += len(identities.pop(plan_name))
+            before = _copy_keys(data, (key,))
+            purged = identities.pop(plan_name)
             if not identities:
                 data.pop(key, None)
-            await store.async_save(data)
+            await _async_save_or_put_back(store, data, before)
+            removed += len(purged)
         await self._async_forget_kept_if_gone(fub_id, plan_name)
         if removed:
             _LOGGER.info(
@@ -829,10 +870,20 @@ class FunctionPlanBackupManager:
                 captured_at,
             )
             return False
+        before, previous_mark = list(history), history[slot].get("restored_at")
         snap = history.pop(slot)
         snap["restored_at"] = dt_util.utcnow().isoformat()
         history.insert(0, snap)
-        await store.async_save(data)
+        try:
+            await store.async_save(data)
+        except Exception:
+            # Unsaved, the promotion must not stay in memory: the caller reports it as not done.
+            history[:] = before
+            if previous_mark is None:
+                snap.pop("restored_at", None)
+            else:
+                snap["restored_at"] = previous_mark
+            raise
         _LOGGER.info(
             "[%s] Function Plan backup: promoted %s[%d] of '%s' (fub=%s) to slot 0 after restore",
             self._server_id,

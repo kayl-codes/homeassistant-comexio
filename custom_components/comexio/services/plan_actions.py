@@ -169,7 +169,7 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
     (coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata),
     or None on any failure (a notification has already been posted).
     """
-    ctx = await _resolve_function_plan_context(hass, call, error_title)
+    ctx = await _resolve_function_plan_context(hass, call, error_title, edits_plan=False)
     if ctx is None:
         return None
     coordinator, api, fub_id = ctx

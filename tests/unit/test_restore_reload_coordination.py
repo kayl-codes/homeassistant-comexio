@@ -2,15 +2,16 @@
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from custom_components.comexio.button import ComexioSyncButton
-from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.const import CONF_FUNCTION_PLAN_PLAN_MAP, DOMAIN
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.repairs import ComexioRepairFlow
-from custom_components.comexio.services import backup
+from custom_components.comexio.services import _context, backup, connect, marker_actions, plan_actions
 
 
 def _coordinator() -> ComexioCoordinator:
@@ -93,7 +94,7 @@ def test_an_unexpected_restore_error_replaces_the_progress_notice() -> None:
 
     create.assert_called_once()
     assert create.call_args.kwargs["notification_id"] == "comexio_function_plan_restore_cx1"
-    assert "Session is closed" in create.call_args.args[1]
+    assert "RuntimeError" in create.call_args.args[1]
     assert not coordinator._restore_lock.locked()
 
 
@@ -101,7 +102,7 @@ def test_an_unexpected_restore_error_replaces_the_progress_notice() -> None:
     ("error", "expected"),
     [
         (asyncio.CancelledError(), "The restore was cancelled"),
-        (RuntimeError("Session is closed"), "RuntimeError: Session is closed"),
+        (RuntimeError("401, url='http://cx/admin/?token=s3cret'"), "RuntimeError — details in the"),
     ],
 )
 def test_a_cancelled_or_failed_restore_replaces_its_progress_notice(error: BaseException, expected: str) -> None:
@@ -119,7 +120,8 @@ def test_a_cancelled_or_failed_restore_replaces_its_progress_notice(error: BaseE
             asyncio.run(restore)
 
     assert expected in create.call_args.args[1]
-    assert "RuntimeError(" not in create.call_args.args[1]
+    # (Review) the message itself can carry the request URL — the log has it, not the notification.
+    assert "s3cret" not in create.call_args.args[1]
     assert create.call_args.kwargs["notification_id"] == "comexio_function_plan_restore_cx1"
     assert not coordinator._restore_lock.locked()
     assert coordinator._auto_backup_pauses == 0
@@ -186,6 +188,118 @@ def test_the_restores_own_reload_runs_after_it_instead_of_deadlocking() -> None:
 
     with patch.object(backup.persistent_notification, "async_create"):
         asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        plan_actions.handle_function_plan_sort,
+        plan_actions.handle_function_plan_stop,
+        plan_actions.handle_function_plan_activate,
+        connect.handle_function_plan_connect,
+        marker_actions.handle_marker_delete,
+    ],
+)
+def test_plan_editing_services_refuse_while_a_restore_runs(handler: Any) -> None:
+    """(Review) an edit during a restore mixed into the restored plan, or the restore overwrote it."""
+    coordinator = _coordinator()
+    coordinator.api = MagicMock()
+    call = SimpleNamespace(data={"fub_id": "1", "marker_id": "5", "confirm": True})
+
+    async def run() -> None:
+        async with coordinator._restore_lock:
+            await handler(coordinator.hass, call)
+
+    with (
+        patch.object(_context, "_resolve_coordinator", return_value=coordinator),
+        patch.object(_context.persistent_notification, "async_create") as create,
+        patch.object(marker_actions, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+    ):
+        asyncio.run(run())
+
+    assert create.call_args.args[1] == _context.RESTORE_RUNNING_MSG
+    assert coordinator.api.mock_calls == []
+
+
+def test_a_failing_promotion_keeps_the_restore_result() -> None:
+    """(Review) the plan is restored by then: a store error must not report the restore as failed."""
+    coordinator = SimpleNamespace(
+        function_plan_backup=SimpleNamespace(async_mark_restored=AsyncMock(side_effect=OSError("disk full")))
+    )
+    promoted = asyncio.run(backup._async_promote_restored(coordinator, "auto", 1, "Lights", {}))
+    assert promoted == "OSError"
+
+
+def test_a_restore_as_new_whose_lineage_could_not_move_reports_the_built_plan() -> None:
+    """(Review) the plan is built by then: reported PARTIAL with the failed bookkeeping, not as failed."""
+    coordinator = _coordinator()
+    coordinator.function_plan_backup = SimpleNamespace(async_rekey_fub_id=AsyncMock(side_effect=OSError("disk full")))
+    coordinator.async_repoint_function_plan_fub_id = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    api = SimpleNamespace(
+        create_fup=AsyncMock(return_value=50),
+        function_plan_rebuild_plan_from_snapshot=AsyncMock(return_value=({}, 0, [])),
+        function_plan_run_fup=AsyncMock(return_value=True),
+    )
+    snapshot = {"plan_name": "Kitch", "elements": {}, "connections": {}}
+
+    with patch.object(backup.persistent_notification, "async_create") as create:
+        asyncio.run(backup._restore_plan_as_new(coordinator.hass, coordinator, api, 42, snapshot, "auto", 0))
+
+    assert create.call_args.kwargs["title"] == "Function Plan Restore — PARTIAL"
+    assert "not moved from old ID 42 to new ID 50 (OSError" in create.call_args.args[1]
+
+
+def test_a_restore_as_new_whose_references_could_not_move_still_moves_its_backups() -> None:
+    """(Review) one try block skipped the other step and named the wrong one as failed."""
+    coordinator = _coordinator()
+    coordinator.function_plan_backup = SimpleNamespace(async_rekey_fub_id=AsyncMock())
+    coordinator.async_repoint_function_plan_fub_id = AsyncMock(side_effect=OSError("x"))  # type: ignore[method-assign]
+    coordinator.hass.async_create_task = MagicMock()
+    api = SimpleNamespace(
+        create_fup=AsyncMock(return_value=50),
+        function_plan_rebuild_plan_from_snapshot=AsyncMock(return_value=({}, 0, [])),
+        function_plan_run_fup=AsyncMock(return_value=True),
+    )
+    snapshot = {"plan_name": "Kitch", "elements": {}, "connections": {}}
+
+    with patch.object(backup.persistent_notification, "async_create") as create:
+        asyncio.run(backup._restore_plan_as_new(coordinator.hass, coordinator, api, 42, snapshot, "auto", 0))
+
+    coordinator.function_plan_backup.async_rekey_fub_id.assert_awaited_once_with(42, 50, "Kitch")
+    message = create.call_args.args[1]
+    assert "Backup lineage: moved from old ID 42 to new ID 50." in message
+    assert f"References: {backup.ICON_WARNING} not updated — they still point at old ID 42 (OSError" in message
+    assert create.call_args.kwargs["title"] == "Function Plan Restore — PARTIAL"
+    coordinator.hass.async_create_task.assert_not_called()
+
+
+def test_a_free_restore_lock_lets_a_plan_edit_through_and_visualize_never_waits() -> None:
+    coordinator = _coordinator()
+    with patch.object(_context.persistent_notification, "async_create") as create:
+        assert _context.refuse_while_restoring(coordinator.hass, coordinator, "T") is False
+    create.assert_not_called()
+
+    resolver = AsyncMock(return_value=None)
+    with patch.object(plan_actions, "_resolve_function_plan_context", resolver):
+        asyncio.run(plan_actions._resolve_visualize_live_source(MagicMock(), SimpleNamespace(data={}), "T"))
+    assert resolver.call_args.kwargs["edits_plan"] is False
+
+
+def test_the_bus_load_cascade_stops_while_a_restore_runs() -> None:
+    """(Review) a stop during a restore could leave a plan the restore just wrote stopped."""
+    coordinator = _coordinator()
+    coordinator.config_entry = SimpleNamespace(entry_id="e1", options={CONF_FUNCTION_PLAN_PLAN_MAP: {"A": 1, "B": 2}})
+    coordinator._watchdog_lock = asyncio.Lock()
+    coordinator.api = SimpleNamespace(function_plan_stop_fup=AsyncMock(), function_plan_run_fup=AsyncMock())
+    coordinator._async_finish_watchdog_cascade = AsyncMock()  # type: ignore[method-assign]
+
+    async def run() -> None:
+        async with coordinator._restore_lock:
+            await coordinator._async_bus_load_cascade_restart(50.0)
+
+    asyncio.run(run())
+    coordinator.api.function_plan_stop_fup.assert_not_awaited()
+    coordinator.api.function_plan_run_fup.assert_not_awaited()
 
 
 def test_the_reload_after_an_uninstall_cleanup_waits_for_a_running_restore() -> None:

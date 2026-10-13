@@ -4608,6 +4608,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             culprit: str | None = None
             for plan_name, fub_id in reversed(list(plan_map.items())):
+                if self._restore_lock.locked():
+                    # The restore rewrites and restarts plans itself; a stop now could leave one stopped.
+                    _LOGGER.warning(
+                        "[%s] Bus-load watchdog: cascade stopped before plan '%s' — a function plan restore is running",
+                        self.server_id,
+                        plan_name,
+                    )
+                    break
                 if not await self.api.function_plan_stop_fup(fub_id):
                     _LOGGER.warning(
                         "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "

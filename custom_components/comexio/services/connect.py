@@ -21,7 +21,13 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
     expand_ignored_marker_ids,
 )
-from ._context import _ensure_comexio_login, _get_canvas_grid_dims, _plan_activation_note, _resolve_function_plan
+from ._context import (
+    _ensure_comexio_login,
+    _get_canvas_grid_dims,
+    _plan_activation_note,
+    _resolve_function_plan,
+    refuse_while_restoring,
+)
 from ._grid import _find_first_free_grid_position, _get_occupied_grid_slots
 
 _LOGGER = logging.getLogger(__name__)
@@ -366,6 +372,9 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
         return
 
     if not await _ensure_comexio_login(hass, api, error_title):
+        return
+    # Again after the login round-trip: a restore may have started meanwhile.
+    if refuse_while_restoring(hass, coordinator, error_title):
         return
 
     plan_info = api.fub_data.get(str(fub_id), {})

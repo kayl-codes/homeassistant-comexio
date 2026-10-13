@@ -434,6 +434,21 @@ def _restore_conflict_message(fub_id: int, snapshot_name: str, live_name: str | 
     )
 
 
+async def _async_promote_restored(
+    coordinator: ComexioCoordinator, kind: str, fub_id: int, plan_name: str, snapshot: dict
+) -> bool | str:
+    """async_mark_restored, or the error's type name when saving the history failed.
+
+    The plan is restored by then: a failing store write must not turn the result into
+    "failed unexpectedly" (the handler's catch-all).
+    """
+    try:
+        return await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, snapshot)
+    except Exception as exc:
+        _LOGGER.exception("Function Plan Restore: marking %s[%s] of '%s' restored failed", kind, fub_id, plan_name)
+        return type(exc).__name__
+
+
 async def _restore_plan_in_place(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -498,9 +513,9 @@ async def _restore_plan_in_place(
         # Skipped for identity_was_mismatched (force_override onto a DIFFERENT plan): this
         # snapshot's own (fub_id, plan_name) key no longer describes what's now live, so its
         # backup history is left exactly where it was.
-        promoted: bool | None = None  # None: not attempted (see the gate below)
+        promoted: bool | str | None = None  # None: not attempted (see the gate below)
         if content_ok and not identity_was_mismatched:
-            promoted = await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, snapshot)
+            promoted = await _async_promote_restored(coordinator, kind, fub_id, plan_name, snapshot)
 
         msg = _restore_build_message(
             plan_name,
@@ -859,7 +874,7 @@ def _restore_build_message(
     identity_was_mismatched: bool,
     was_active: bool,
     duration: float,
-    promoted: bool | None = None,
+    promoted: bool | str | None = None,
     auto_start: bool = True,
 ) -> str:
     """Human-readable persistent_notification body for a restore result."""
@@ -883,10 +898,14 @@ def _restore_build_message(
         shown = apply["comment_warnings"][:5]
         comment_line += "\n".join(f"{ICON_WARNING} {w}" for w in shown) + "\n"
     promoted_line = ""
-    if promoted:
+    if promoted is True:
         promoted_line = f"Backup slot: promoted {kind}[{slot}] → {kind}[0] (now marked restored *)\n"
     elif promoted is False:
         promoted_line = f"Backup slot: {kind}[{slot}] not found in the backup history — not marked restored\n"
+    elif promoted is not None:
+        promoted_line = (
+            f"Backup slot: {ICON_WARNING} {kind}[{slot}] could not be marked restored ({promoted} — see log)\n"
+        )
     return (
         f"Restore of plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] "
         f"({snapshot.get('captured_at')}): **{status}**\n"
@@ -974,6 +993,35 @@ async def _async_reload_after_restore(hass: HomeAssistant, coordinator: ComexioC
     )
 
 
+async def _move_restored_plan_lineage(
+    coordinator: ComexioCoordinator, plan_name: str, old_fub_id: int, new_fub_id: int, old_id_still_live: bool
+) -> tuple[int, list[str], str | None, str | None]:
+    """Move a plan's backups and references to its new ID, each step on its own.
+
+    The plan is built by then: a failing step is logged and reported (its error type name), never
+    raised into the restore's "failed unexpectedly" handler, and never skips the other step — the
+    references must follow the plan even when its backups could not move.
+    Returns (purged snapshots, updated references, backups error, references error).
+    """
+    purged, backups_error = 0, None
+    try:
+        if old_id_still_live:
+            purged = await coordinator.function_plan_backup.async_purge_identity(old_fub_id, plan_name)
+        else:
+            await coordinator.function_plan_backup.async_rekey_fub_id(old_fub_id, new_fub_id, plan_name)
+    except Exception as exc:
+        _LOGGER.exception("Function Plan restore as new plan: backups of '%s' not moved", plan_name)
+        backups_error = type(exc).__name__
+    updated: list[str] = []
+    refs_error = None
+    try:
+        updated = await coordinator.async_repoint_function_plan_fub_id(plan_name, old_fub_id, new_fub_id)
+    except Exception as exc:
+        _LOGGER.exception("Function Plan restore as new plan: references to '%s' not updated", plan_name)
+        refs_error = type(exc).__name__
+    return purged, updated, backups_error, refs_error
+
+
 async def _restore_plan_as_new(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -1043,12 +1091,9 @@ async def _restore_plan_as_new(
         return
     duration = time.monotonic() - t_start
 
-    if old_id_still_live:
-        purged = await coordinator.function_plan_backup.async_purge_identity(old_fub_id, plan_name)
-    else:
-        await coordinator.function_plan_backup.async_rekey_fub_id(old_fub_id, new_fub_id, plan_name)
-        purged = 0
-    updated_consumers = await coordinator.async_repoint_function_plan_fub_id(plan_name, old_fub_id, new_fub_id)
+    purged, updated_consumers, lineage_error, refs_error = await _move_restored_plan_lineage(
+        coordinator, plan_name, old_fub_id, new_fub_id, old_id_still_live
+    )
     if updated_consumers:
         # Scheduled, not awaited: the reload waits for this restore to release _restore_lock
         # (restores_held_off), so awaiting it here would deadlock.
@@ -1057,6 +1102,8 @@ async def _restore_plan_as_new(
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))
     status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
+    if (lineage_error or refs_error) and status == "OK":
+        status = "PARTIAL"
 
     captured_raw = snapshot.get("captured_at")
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
@@ -1074,6 +1121,16 @@ async def _restore_plan_as_new(
         if old_id_still_live
         else f"Backup lineage: moved from old ID {old_fub_id} to new ID {new_fub_id}."
     )
+    if refs_error:
+        consumer_line = (
+            f"References: {ICON_WARNING} not updated — they still point at old ID {old_fub_id} "
+            f"({refs_error} — see log)."
+        )
+    if lineage_error:
+        lineage_line = (
+            f"Backup lineage: {ICON_WARNING} not moved from old ID {old_fub_id} to new ID {new_fub_id} "
+            f"({lineage_error} — see log)."
+        )
 
     msg = (
         f"Plan '{plan_name}' restored as a NEW plan (old ID {old_fub_id} → new ID {new_fub_id})\n\n"
@@ -1475,7 +1532,6 @@ async def _resolve_restore_conflict(
             old_id_still_live=live_fub is not None,
             auto_start=auto_start,
         )
-        await _refresh_service_descriptions(hass)
         return True
     # force_override on an identity mismatch: fall through and deliberately
     # overwrite the plan that now occupies this fub_id.
@@ -1534,9 +1590,13 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
             # The restore paths catch connection errors themselves; anything else (a closed API
             # session, an unexpected response) would leave their "in progress" notification
             # stuck forever and the half-built plan unreported. Re-raised so the service call
-            # fails too (HA logs it with the traceback). No repr: a response error's carries
-            # the request headers, session cookie and Basic Auth included.
-            _post_restore_aborted(hass, coordinator, f"The restore failed unexpectedly: {type(exc).__name__}: {exc}")
+            # fails too (HA logs it with the traceback). Only the type: the message of e.g. a
+            # response error carries the request URL, which every notification viewer would see.
+            _post_restore_aborted(
+                hass,
+                coordinator,
+                f"The restore failed unexpectedly ({type(exc).__name__} — details in the Home Assistant log)",
+            )
             raise
         finally:
             coordinator.async_update_listeners()

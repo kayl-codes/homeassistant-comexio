@@ -19,11 +19,12 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 
 from ..const import MARKER_DELETE_MAX_COUNT, parse_ignored_marker_tokens
-from ._context import _async_get_service_context
+from ._context import _async_get_service_context, _ensure_comexio_login, refuse_while_restoring
 
 _LOGGER = logging.getLogger(__name__)
 
 _TITLE_MARKER_DELETE_ERR = "Marker Delete — Error"
+_RESTORE_RUNNING_RESULT = "A function plan restore is running — nothing deleted."
 
 
 def _parse_marker_id_list(raw_input: str) -> tuple[list[int], list[str]]:
@@ -190,14 +191,19 @@ async def handle_marker_delete(hass: HomeAssistant, call: ServiceCall) -> dict:
     if error is not None:
         return _fail(hass, error, requested=marker_ids)
 
-    ctx = await _async_get_service_context(hass, call, _TITLE_MARKER_DELETE_ERR, resolve_plan=False, do_login=True)
-    if ctx is None:
-        # _async_get_service_context posts its own notification with the specific reason.
+    ctx = await _async_get_service_context(hass, call, _TITLE_MARKER_DELETE_ERR, resolve_plan=False, do_login=False)
+    # Checked before the login (no needless round-trip) and again after it (a restore may start meanwhile).
+    if ctx is not None and refuse_while_restoring(hass, ctx[0], _TITLE_MARKER_DELETE_ERR):
+        return _error_result(_RESTORE_RUNNING_RESULT, requested=marker_ids)
+    if ctx is None or not await _ensure_comexio_login(hass, ctx[1], _TITLE_MARKER_DELETE_ERR):
+        # Both post their own notification with the specific reason.
         return _error_result(
             "Comexio instance not found or admin login failed — see notification. Nothing deleted.",
             requested=marker_ids,
         )
     coordinator, api, _fub_id = ctx
+    if refuse_while_restoring(hass, coordinator, _TITLE_MARKER_DELETE_ERR):
+        return _error_result(_RESTORE_RUNNING_RESULT, requested=marker_ids)
 
     force = call.data.get("force") is True
     requested = marker_ids

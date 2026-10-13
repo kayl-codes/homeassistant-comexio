@@ -37,6 +37,10 @@ NO_PLAN_SELECTED_MSG = (
 )
 _INSTANCE_NOT_FOUND_LOG = "Comexio instance %s not found in hass.data"
 _INSTANCE_NOT_FOUND_MSG = "Comexio instance `{}` not found (not loaded, or wrong `config_entry`)."
+RESTORE_RUNNING_MSG = (
+    "A function plan restore is running — please wait for it to finish. It rewrites the plan, so a change "
+    "made now could be lost or mixed into the restored plan."
+)
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
@@ -222,14 +226,29 @@ def _parse_snapshot_field(raw: str) -> tuple[int, str, int, str | None] | None:
         return None
 
 
-def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: str) -> tuple[Any, Any, int] | None:
+def refuse_while_restoring(hass: HomeAssistant, coordinator: ComexioCoordinator, error_title: str) -> bool:
+    """Whether a function plan restore runs — then notify and return True, the caller must not edit a plan."""
+    if not coordinator._restore_lock.locked():
+        return False
+    _LOGGER.warning("[%s] %s not started — a function plan restore is running", coordinator.server_id, error_title)
+    persistent_notification.async_create(hass, RESTORE_RUNNING_MSG, title=error_title)
+    return True
+
+
+def _resolve_function_plan(
+    hass: HomeAssistant, call: ServiceCall, error_title: str, *, edits_plan: bool = True
+) -> tuple[Any, Any, int] | None:
     """Resolve (coordinator, api, fub_id) for a function plan service call — without logging in.
 
     Handles config_entry auto-resolution (when only one Comexio instance exists) and fub_id
     resolution via `_resolve_fub_id`, notifying the user and returning None on any failure.
+    edits_plan (the default): refuse while a restore runs — it rewrites the plan this call would
+    change, and the two would mix or one would silently lose its change.
     """
     coordinator = _resolve_coordinator(hass, call, error_title)
     if coordinator is None:
+        return None
+    if edits_plan and refuse_while_restoring(hass, coordinator, error_title):
         return None
 
     api = coordinator.api
@@ -259,14 +278,17 @@ async def _ensure_comexio_login(hass: HomeAssistant, api, error_title: str) -> b
 
 
 async def _resolve_function_plan_context(
-    hass: HomeAssistant, call: ServiceCall, error_title: str
+    hass: HomeAssistant, call: ServiceCall, error_title: str, *, edits_plan: bool = True
 ) -> tuple[Any, Any, int] | None:
     """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in."""
-    ctx = _resolve_function_plan(hass, call, error_title)
+    ctx = _resolve_function_plan(hass, call, error_title, edits_plan=edits_plan)
     if ctx is None:
         return None
-    _coordinator, api, _fub_id = ctx
+    coordinator, api, _fub_id = ctx
     if not await _ensure_comexio_login(hass, api, error_title):
+        return None
+    # Again after the login round-trip: a restore may have started meanwhile.
+    if edits_plan and refuse_while_restoring(hass, coordinator, error_title):
         return None
     return ctx
 
