@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import (
@@ -273,6 +273,22 @@ def test_get_raw_config_unanswered_re_login_is_flagged_for_this_fetch_only(
     assert comexio_api.last_login_error == "connection"  # left stale, hence the per-fetch flag
 
 
+@pytest.mark.parametrize(
+    "failure", [_connection_error(), ComexioDataError("an error page")], ids=["transport", "scrape"]
+)
+def test_a_failed_fetch_after_an_unanswered_re_login_clears_the_flag(
+    comexio_api: ComexioAPI, client: MagicMock, failure: Exception
+) -> None:
+    """The flag describes only the last fetch: one failing on its own (not on the re-login) leaves it False."""
+    comexio_api.config_relogin_unreachable = True
+    _fail(client, "get_raw_config", failure)
+
+    with contextlib.suppress(aiohttp.ClientError):
+        asyncio.run(comexio_api.get_raw_config())
+
+    assert comexio_api.config_relogin_unreachable is False
+
+
 def test_get_raw_config_keeps_io_types_and_version(comexio_api: ComexioAPI, client: MagicMock) -> None:
     variables = {"FubModules": {"2": {}}}
     client.get_raw_config = AsyncMock(return_value=RawConfig(variables, {"1": {}}, {"2": {}}, "11.0.2"))
@@ -313,6 +329,343 @@ def test_a_failed_config_fetch_drops_the_block_settings(
         asyncio.run(comexio_api.get_raw_config())
 
     assert comexio_api.block_settings is None
+
+
+def _block_page(value: str, version: str, active: int = 1) -> RawConfig:
+    """A config page whose element 104 has in_0 = value, read on Comexio firmware version; plan 7 Active = active."""
+    variables = {
+        "FubBaseConfig": {"1": {"FubElementId": 104, "Name": "in_0", "Value": value}},
+        "Fubs": {"7": {"Id": 7, "Name": f"Plan {value}", "Active": active}},
+        "Paper": {"1": {"Id": 1, "Name": f"Paper {value}"}},
+    }
+    return RawConfig(variables, {"1": {"unit": version}}, {"2": {"input": version}}, version)
+
+
+def _page_state(page: RawConfig) -> tuple[Any, ...]:
+    """What a fetch that applied page leaves in block_settings, io_types, io_input_types, comexio_version."""
+    value = page.variables["FubBaseConfig"]["1"]["Value"]
+    return {"104": {"in_0": value}}, page.io_types, page.io_input_types, page.comexio_version
+
+
+def _api_state(comexio_api: ComexioAPI) -> tuple[Any, ...]:
+    return comexio_api.block_settings, comexio_api.io_types, comexio_api.io_input_types, comexio_api.comexio_version
+
+
+OLDER_PAGE = _block_page("10", "11.0.2")
+NEWER_PAGE = _block_page("26", "11.0.3")
+
+
+class _Overlap(NamedTuple):
+    """Outcome of two overlapping config fetches: each one's result and the state after the first finished.
+
+    unreachable holds config_relogin_unreachable as each fetch's caller reads it on resuming.
+    """
+
+    older: Any
+    newer: Any
+    between: tuple[Any, ...]
+    unreachable: dict[str, bool]
+
+
+def _run_overlapping_fetches(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    older_outcome: RawConfig | Exception,
+    newer_outcome: RawConfig | Exception = NEWER_PAGE,
+    older_finishes_first: bool = False,
+) -> _Overlap:
+    """Two config fetches overlap: both have started before either finishes, then they finish in the given order.
+
+    A failed re-login (ComexioAuthenticationError outcome) gets no reply from Comexio. A transport
+    error comes back as the fetch's result, so the test can assert it.
+    """
+
+    async def failed_login() -> bool:
+        comexio_api.last_login_error = api_module.LOGIN_ERROR_CONNECTION
+        return False
+
+    comexio_api._full_login = AsyncMock(side_effect=failed_login)  # type: ignore[method-assign]
+
+    async def run() -> _Overlap:
+        entered = {"older": asyncio.Event(), "newer": asyncio.Event()}
+        may_finish = {"older": asyncio.Event(), "newer": asyncio.Event()}
+        outcomes = {"older": older_outcome, "newer": newer_outcome}
+        order = iter(["older", "newer"])
+
+        async def fetch() -> RawConfig:
+            name = next(order, "re-login")
+            if name == "re-login":
+                raise AssertionError("a failed re-login must not fetch again")
+            entered[name].set()
+            await may_finish[name].wait()
+            if isinstance(outcome := outcomes[name], Exception):
+                raise outcome
+            return outcome
+
+        unreachable: dict[str, bool] = {}
+
+        async def settle(name: str) -> Any:
+            try:
+                return await tasks[name]
+            except aiohttp.ClientError as err:
+                return err
+            finally:
+                unreachable[name] = comexio_api.config_relogin_unreachable
+
+        client.get_raw_config = AsyncMock(side_effect=fetch)
+        tasks = {"older": asyncio.create_task(comexio_api.get_raw_config())}
+        await entered["older"].wait()
+        tasks["newer"] = asyncio.create_task(comexio_api.get_raw_config())
+        await entered["newer"].wait()
+        first, second = ("older", "newer") if older_finishes_first else ("newer", "older")
+        may_finish[first].set()
+        results = {first: await settle(first)}
+        between = _api_state(comexio_api)
+        may_finish[second].set()
+        results[second] = await settle(second)
+        return _Overlap(results["older"], results["newer"], between, unreachable)
+
+    return asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "older_outcome",
+    [OLDER_PAGE, ComexioDataError("an error page"), _connection_error(), ComexioAuthenticationError("lapsed")],
+    ids=["older-page", "older-scrape-error", "older-transport-error", "older-failed-re-login"],
+)
+def test_an_older_config_fetch_finishing_last_keeps_the_newer_tables(
+    comexio_api: ComexioAPI, client: MagicMock, older_outcome: RawConfig | Exception
+) -> None:
+    """(bw): an older fetch finishing after a newer one must not put its page back or drop the newer table."""
+    overlap = _run_overlapping_fetches(comexio_api, client, older_outcome)
+
+    assert overlap.newer is NEWER_PAGE.variables
+    assert _api_state(comexio_api) == _page_state(NEWER_PAGE)
+    if isinstance(older_outcome, ComexioConnectionError):
+        assert isinstance(overlap.older, aiohttp.ClientError)
+
+
+def test_a_discarded_config_fetch_returns_the_newer_page(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """The caller of the older fetch parses the newer page, never its older plan list over the cache."""
+    overlap = _run_overlapping_fetches(comexio_api, client, OLDER_PAGE)
+
+    assert overlap.older is NEWER_PAGE.variables
+    marked = [fubs for fubs, _mark, _generation in comexio_api._fetch_marks]
+    assert any(fubs is NEWER_PAGE.variables["Fubs"] for fubs in marked)
+    assert not any(fubs is OLDER_PAGE.variables["Fubs"] for fubs in marked)
+
+
+def _run_three_fetches(
+    comexio_api: ComexioAPI, client: MagicMock, outcomes: list[RawConfig | Exception], finish_order: tuple[int, ...]
+) -> list[Any]:
+    """Three config fetches start in turn (outcomes in start order), then finish in finish_order; their results."""
+
+    async def run() -> list[Any]:
+        may_finish = [asyncio.Event() for _ in outcomes]
+        entered = [asyncio.Event() for _ in outcomes]
+        order = iter(range(len(outcomes)))
+
+        async def fetch() -> RawConfig:
+            index = next(order)
+            entered[index].set()
+            await may_finish[index].wait()
+            if isinstance(outcome := outcomes[index], Exception):
+                raise outcome
+            return outcome
+
+        client.get_raw_config = AsyncMock(side_effect=fetch)
+        tasks = []
+        for index in range(len(outcomes)):
+            tasks.append(asyncio.create_task(comexio_api.get_raw_config()))
+            await entered[index].wait()
+        results: list[Any] = [None] * len(outcomes)
+        for index in finish_order:
+            may_finish[index].set()
+            results[index] = await tasks[index]
+        return results
+
+    return asyncio.run(run())
+
+
+NEWEST_PAGE = _block_page("30", "11.0.4")
+
+
+def test_a_stale_failure_does_not_hide_the_newest_page_from_an_overtaken_fetch(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Three fetches finish newest first: the middle one's failure must not make the oldest return its own page."""
+    outcomes: list[RawConfig | Exception] = [OLDER_PAGE, ComexioDataError("an error page"), NEWEST_PAGE]
+
+    oldest, middle, newest = _run_three_fetches(comexio_api, client, outcomes, (2, 1, 0))
+
+    assert (middle, newest) == ({}, NEWEST_PAGE.variables)
+    assert oldest is NEWEST_PAGE.variables
+    assert _api_state(comexio_api) == _page_state(NEWEST_PAGE)
+
+
+def test_a_newest_failure_keeps_the_newer_parsed_page_for_an_overtaken_fetch(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """The middle page is applied and parsed, then the newest fetch fails: the oldest still gets the middle page."""
+    outcomes: list[RawConfig | Exception] = [OLDER_PAGE, NEWER_PAGE, ComexioDataError("an error page")]
+
+    oldest, middle, newest = _run_three_fetches(comexio_api, client, outcomes, (1, 2, 0))
+
+    assert (middle, newest) == (NEWER_PAGE.variables, {})
+    assert oldest is NEWER_PAGE.variables
+    assert _api_state(comexio_api) == (None, *_page_state(NEWER_PAGE)[1:])
+
+
+@pytest.mark.parametrize("older_finishes_first", [False, True], ids=["older-last", "older-first"])
+@pytest.mark.parametrize("failing", ["older", "newer"])
+def test_each_overlapping_config_fetch_reports_only_its_own_unreachable_re_login(
+    comexio_api: ComexioAPI, client: MagicMock, failing: str, older_finishes_first: bool
+) -> None:
+    """A re-login without reply flags only its own caller's poll, never the other fetch's successful one."""
+    outcomes = {"older": OLDER_PAGE, "newer": NEWER_PAGE, failing: ComexioAuthenticationError("lapsed")}
+
+    overlap = _run_overlapping_fetches(
+        comexio_api, client, outcomes["older"], outcomes["newer"], older_finishes_first=older_finishes_first
+    )
+
+    assert overlap.unreachable == {"older": failing == "older", "newer": failing == "newer"}
+
+
+def test_an_older_config_fetch_after_a_failed_newer_one_changes_nothing(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """The newest outcome wins also when it is a failure: no table, io_types and version as before both."""
+    comexio_api.block_settings = {"104": {"in_0": "1"}}
+    comexio_api.io_types, comexio_api.io_input_types = {"1": {"unit": "before"}}, {"2": {"input": "before"}}
+    comexio_api.comexio_version = "11.0.1"
+
+    overlap = _run_overlapping_fetches(comexio_api, client, OLDER_PAGE, newer_outcome=ComexioDataError("an error page"))
+
+    assert overlap.newer == {}
+    assert overlap.older is OLDER_PAGE.variables
+    assert _api_state(comexio_api) == (None, {"1": {"unit": "before"}}, {"2": {"input": "before"}}, "11.0.1")
+
+
+def test_an_older_config_fetch_finishing_first_applies_until_the_newer_one_does(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """The older page is fresher than the cache, so it applies while the newer fetch still runs."""
+    overlap = _run_overlapping_fetches(comexio_api, client, OLDER_PAGE, older_finishes_first=True)
+
+    assert overlap.between == _page_state(OLDER_PAGE)
+    assert _api_state(comexio_api) == _page_state(NEWER_PAGE)
+
+
+def test_an_older_page_parsed_after_a_newer_one_keeps_the_newer_plan_cache(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """A caller parses only after further awaits: the older fetch's page, parsed last, leaves the newer caches."""
+    overlap = _run_overlapping_fetches(comexio_api, client, OLDER_PAGE, older_finishes_first=True)
+    assert overlap.older is OLDER_PAGE.variables
+
+    comexio_api.parse_config(overlap.newer)
+    comexio_api.parse_config(overlap.older)
+
+    assert comexio_api.fub_data is NEWER_PAGE.variables["Fubs"]
+    assert comexio_api._paper_data is NEWER_PAGE.variables["Paper"]
+
+
+def test_a_page_parsed_with_an_older_poll_mark_keeps_the_run_states_it_already_shows(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """An overtaken poll parses the newer page with its older mark: HA's run states before that page stay as read."""
+    older_poll_mark = comexio_api.run_state_mark()
+    comexio_api.set_fub_active(7, True)  # before the newer fetch began, which reads plan 7 stopped again
+    client.get_raw_config = AsyncMock(return_value=_block_page("26", "11.0.3", active=0))
+    page = asyncio.run(comexio_api.get_raw_config())
+
+    comexio_api.parse_config(page, run_state_mark=older_poll_mark)
+
+    assert comexio_api.fub_data["7"]["Active"] == 0
+
+
+def test_a_later_caller_mark_keeps_the_run_states_ha_caused_after_the_fetch(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """A mark the caller took after the fetch began wins over the earlier one get_raw_config remembered."""
+    client.get_raw_config = AsyncMock(return_value=_block_page("26", "11.0.3", active=0))
+    page = asyncio.run(comexio_api.get_raw_config())
+    comexio_api.set_fub_active(7, True)  # after the fetch began: newer than the page's Active flag
+
+    comexio_api.parse_config(page, run_state_mark=comexio_api.run_state_mark())
+    assert comexio_api.fub_data["7"]["Active"] == 0
+    comexio_api.parse_config(page)
+    assert comexio_api.fub_data["7"]["Active"] == 1
+
+
+def test_a_plan_list_no_fetch_remembers_still_replaces_the_cache(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Without a remembered fetch generation (e.g. evicted marks) the plan list replaces the cache as before."""
+    _run_overlapping_fetches(comexio_api, client, OLDER_PAGE, older_finishes_first=True)
+    comexio_api.parse_config(NEWER_PAGE.variables)
+    unknown = {"9": {"Id": 9, "Name": "Plan 9", "Active": 0}}
+
+    comexio_api.parse_config({"Fubs": unknown})
+
+    assert comexio_api.fub_data is unknown
+    comexio_api.parse_config(OLDER_PAGE.variables)
+    assert comexio_api.fub_data is unknown
+
+
+PLACEMENT_PLAN = {"elements": [], "connections": []}
+
+
+def _older_plan_list_than_the_cached_one(comexio_api: ComexioAPI, client: MagicMock) -> dict[str, Any]:
+    """$Fubs of a fetch older than the cached plan list, which adds plan 9; the bulk load returns only plan 7."""
+    client.get_raw_config = AsyncMock(return_value=_block_page("26", "11.0.3"))
+    older = asyncio.run(comexio_api.get_raw_config())
+    newer_page = _block_page("27", "11.0.3")
+    newer_page.variables["Fubs"]["9"] = {"Id": 9, "Name": "Plan 9", "Active": 0}
+    client.get_raw_config = AsyncMock(return_value=newer_page)
+    comexio_api.parse_config(asyncio.run(comexio_api.get_raw_config()))
+    comexio_api.function_plan_load_all_plans = AsyncMock(return_value={7: PLACEMENT_PLAN})  # type: ignore[method-assign]
+    return older["Fubs"]
+
+
+def test_a_placement_check_on_an_older_plan_list_also_loads_the_newer_cached_plans(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # Regression: the older list was rejected for the cache, yet only its plans were checked —
+    # a plan the newer cached list adds, omitted by the bulk load, counted as having no placements.
+    fubs = _older_plan_list_than_the_cached_one(comexio_api, client)
+    comexio_api.function_plan_load_elements = AsyncMock(return_value=PLACEMENT_PLAN)  # type: ignore[method-assign]
+
+    plans = asyncio.run(comexio_api._load_all_plans_verified(fubs, strict=True))
+
+    assert plans == {7: PLACEMENT_PLAN, 9: PLACEMENT_PLAN}
+    comexio_api.function_plan_load_elements.assert_awaited_once_with(9, strict=True)
+
+
+def test_a_placement_check_fails_closed_on_an_unloadable_cached_plan(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    fubs = _older_plan_list_than_the_cached_one(comexio_api, client)
+    comexio_api.function_plan_load_elements = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    assert asyncio.run(comexio_api._load_all_plans_verified(fubs, strict=True)) is None
+
+
+def test_a_placement_check_fails_closed_on_a_malformed_cached_plan_id(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    fubs = _older_plan_list_than_the_cached_one(comexio_api, client)
+    comexio_api._fub_data["x"] = {"Id": "x"}
+
+    assert asyncio.run(comexio_api._load_all_plans_verified(fubs, strict=True)) is None
+
+
+def test_the_next_config_fetch_after_an_overlap_takes_its_page_again(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    _run_overlapping_fetches(comexio_api, client, _block_page("10", "11.0.2"))
+
+    client.get_raw_config = AsyncMock(return_value=_block_page("30", "11.0.4"))
+    asyncio.run(comexio_api.get_raw_config())
+    assert (comexio_api.block_settings, comexio_api.comexio_version) == ({"104": {"in_0": "30"}}, "11.0.4")
 
 
 @pytest.mark.parametrize(
@@ -1026,6 +1379,86 @@ def test_create_fup_tells_the_listener(comexio_api: ComexioAPI, client: MagicMoc
     _fail(client, "create_function_plan", ComexioRequestRejectedError("name already in use"))
     asyncio.run(comexio_api.create_fup("HA - IO"))
     listener.assert_called_once_with()  # a failed create changes no plan
+
+
+def _plan_list_from_before_the_create(comexio_api: ComexioAPI, client: MagicMock) -> dict[str, Any]:
+    """A config page whose fetch began before create_fup created plan 8, so it does not list it."""
+    client.get_raw_config = AsyncMock(return_value=_block_page("26", "11.0.3"))
+    page = asyncio.run(comexio_api.get_raw_config())
+    client.create_function_plan = AsyncMock(return_value=CreatedFunctionPlan(8, NEW_PLAN))
+    asyncio.run(comexio_api.create_fup("HA - IO"))
+    assert "8" not in page["Fubs"]
+    return page
+
+
+def test_a_plan_list_older_than_create_fup_keeps_the_new_plan(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Regression: the older page replaced the cache, and the new plan was gone until the next poll.
+    page = _plan_list_from_before_the_create(comexio_api, client)
+
+    comexio_api.parse_config(page)
+
+    assert comexio_api.fub_data["8"] == NEW_PLAN
+    assert set(page["Fubs"]) <= set(comexio_api.fub_data)
+
+
+def test_a_plan_list_fetched_after_create_fup_is_the_word_on_the_new_plan(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """A fetch begun after the create that does not list the plan (deleted in Studio) drops it for good."""
+    older = _plan_list_from_before_the_create(comexio_api, client)
+    client.get_raw_config = AsyncMock(return_value=_block_page("27", "11.0.3"))
+    newer = asyncio.run(comexio_api.get_raw_config())
+
+    comexio_api.parse_config(newer)
+    assert "8" not in comexio_api.fub_data
+    comexio_api.parse_config(older)
+    assert "8" not in comexio_api.fub_data
+
+
+def test_a_plan_deleted_after_create_fup_is_not_kept_listed(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    page = _plan_list_from_before_the_create(comexio_api, client)
+    client.delete_function_plan = AsyncMock()
+    assert asyncio.run(comexio_api.delete_fup(8))
+
+    comexio_api.parse_config(page)
+
+    assert "8" not in comexio_api.fub_data
+
+
+def test_a_plan_list_older_than_create_fup_keeps_the_refreshed_entry(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    page = _plan_list_from_before_the_create(comexio_api, client)
+    renamed = {**NEW_PLAN, "Name": "HA - IO renamed"}
+    comexio_api.update_fub_cache_entry(8, renamed)
+
+    comexio_api.parse_config(page)
+
+    assert comexio_api.fub_data["8"] == renamed
+
+
+def test_a_plan_list_older_than_create_fup_that_lists_the_plan_keeps_its_entry(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Comexio answered the older fetch after the create: the page's own entry wins."""
+    page = _plan_list_from_before_the_create(comexio_api, client)
+    listed = {**NEW_PLAN, "Name": "HA - IO as listed"}
+    page["Fubs"]["8"] = listed
+
+    comexio_api.parse_config(page)
+
+    assert comexio_api.fub_data["8"] is listed
+    assert comexio_api.fub_data is page["Fubs"]
+
+
+def test_a_failed_delete_keeps_the_created_plan_listed(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    page = _plan_list_from_before_the_create(comexio_api, client)
+    _fail(client, "delete_function_plan", ComexioRequestRejectedError("plan is in use"))
+    assert not asyncio.run(comexio_api.delete_fup(8))
+
+    comexio_api.parse_config(page)
+
+    assert comexio_api.fub_data["8"] == NEW_PLAN
 
 
 def test_create_fup_finds_a_plan_created_without_id(comexio_api: ComexioAPI, client: MagicMock) -> None:
