@@ -1309,43 +1309,51 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # failing reset step can never skip the reload that covers every reload
         # coordinator.async_reload_entry skipped during this sync.
         try:
-            try:
-                # 1. Flag reset
-                self.coordinator.in_sync = False
-                self.coordinator.cancel_sync = False
-                # An aborted or partial run keeps its report as the sensor's progress_details.
-                if not (self.coordinator.sync_error or self.coordinator.sync_failed_writes):
-                    self.coordinator.sync_progress_text = "Idle"
-                self.coordinator.sync_progress_pct = None
-                self.coordinator.sync_current_step = None
-                self.coordinator.async_set_updated_data(self.coordinator.data)
-
-                # 2. Reset audit_ignored. Set the skip flag first so the update_listener
-                #    suppresses its reload — the explicit reload below is the single reload (R2).
-                new_options = dict(self.coordinator.config_entry.options)
-                new_options["audit_ignored"] = False
-                self.coordinator.request_options_update_without_reload(new_options)
-            except Exception:
-                _LOGGER.exception("[%s] Resetting the sync state failed — reloading anyway", self.server_id)
-
-            # 3. Give the Comexio server a moment to finish the write operation;
-            #    the update_listener task runs here, sees the skip flag, and returns. (R2)
-            await asyncio.sleep(0.5)
-
-            # 4. Reset UI button
-            try:
-                self.async_write_ha_state()
-            except Exception:
-                _LOGGER.exception("[%s] Could not reset the sync button state — reloading anyway", self.server_id)
-
-            # 5. Restart integration (necessary!)
-            _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
-            await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
+            # The reload below closes the API session: wait for a restore that runs now and keep
+            # new ones out until it is done. in_sync stays True while waiting, so the restore's
+            # own reload request is skipped (async_reload_entry) — this reload covers it.
+            async with self.coordinator.restores_held_off():
+                await self._reset_sync_state_and_reload()
         finally:
             # 6. Release the (old) coordinator's lock — the reload built a new coordinator
             #    with its own lock; a press that waited on this one is dropped by
             #    async_handle_press' coordinator-identity check.
             self.coordinator._sync_lock.release()
+
+    async def _reset_sync_state_and_reload(self) -> None:
+        """Steps 1-5 of _finalize_sync: reset the sync state and the button, then reload the integration."""
+        try:
+            # 1. Flag reset
+            self.coordinator.in_sync = False
+            self.coordinator.cancel_sync = False
+            # An aborted or partial run keeps its report as the sensor's progress_details.
+            if not (self.coordinator.sync_error or self.coordinator.sync_failed_writes):
+                self.coordinator.sync_progress_text = "Idle"
+            self.coordinator.sync_progress_pct = None
+            self.coordinator.sync_current_step = None
+            self.coordinator.async_set_updated_data(self.coordinator.data)
+
+            # 2. Reset audit_ignored. Set the skip flag first so the update_listener
+            #    suppresses its reload — the explicit reload below is the single reload (R2).
+            new_options = dict(self.coordinator.config_entry.options)
+            new_options["audit_ignored"] = False
+            self.coordinator.request_options_update_without_reload(new_options)
+        except Exception:
+            _LOGGER.exception("[%s] Resetting the sync state failed — reloading anyway", self.server_id)
+
+        # 3. Give the Comexio server a moment to finish the write operation;
+        #    the update_listener task runs here, sees the skip flag, and returns. (R2)
+        await asyncio.sleep(0.5)
+
+        # 4. Reset UI button
+        try:
+            self.async_write_ha_state()
+        except Exception:
+            _LOGGER.exception("[%s] Could not reset the sync button state — reloading anyway", self.server_id)
+
+        # 5. Restart integration (necessary!)
+        _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
+        await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
 
     async def _decide_effective_action(
         self,

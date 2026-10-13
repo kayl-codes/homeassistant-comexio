@@ -1906,6 +1906,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
         finally:
             self._auto_backup_pauses -= 1
 
+    @contextlib.asynccontextmanager
+    async def restores_held_off(self) -> AsyncIterator[None]:
+        """Wait for a running function plan restore, then keep new ones out — around a reload.
+
+        A reload tears the coordinator down and closes the API session, so one landing mid-restore
+        kills the restore's remaining Comexio requests ("Session is closed", seen live 2026-10-13
+        when a sync finished during a copy-restore: the copy was left half built). A restore
+        started meanwhile is rejected as already running instead of starting against the
+        coordinator being torn down. Lock order: callers that hold _sync_lock take this after it;
+        a restore never waits for _sync_lock while it holds _restore_lock (see its reload).
+        """
+        if self._restore_lock.locked():
+            _LOGGER.info("[%s] Reload waits for the running function plan restore to finish", self.server_id)
+            if self.in_sync and not (self.sync_error or self.sync_failed_writes):
+                self.sync_progress_text = "Waiting for the running function plan restore before reloading…"
+                self.async_update_listeners()
+        async with self._restore_lock:
+            yield
+
     def _auto_backup_held_back(self, generation: int) -> bool:
         """Whether a restore runs now or ran since the backup cycle read `generation`."""
         return bool(self._auto_backup_pauses) or generation != self._auto_backup_pause_generation
@@ -2019,15 +2038,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await refresh()
 
     def _current_plan_format(self, fub_data: dict) -> dict[str, tuple[str, int, str]]:
-        """Return {fub_id_str: (paper, dpi, orientation)} for every plan currently in fub_data."""
-        return {
-            key: (
-                self.api.get_fub_paper_format(int(key)),
-                self.api.get_fub_dpi(int(key)),
-                self.api.get_fub_orientation(int(key)),
-            )
-            for key in fub_data
-        }
+        """Return {fub_id_str: (paper, dpi, orientation)} for every plan in fub_data whose format is known.
+
+        A plan whose format was not readable (e.g. $Paper did not decode) is left out: the
+        backups then neither store a guessed format nor take the guess for a format change.
+        """
+        return {key: fmt for key in fub_data if (fmt := self.api.get_fub_known_format(int(key))) is not None}
 
     async def async_function_plan_change_backup(
         self, fub_id: int, operation: str, plan_data: dict | None = None
@@ -2041,9 +2057,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("[%s] Pre-change backup skipped: plan %s could not be loaded", self.server_id, fub_id)
                 return
             plan_name = self.api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-            paper = self.api.get_fub_paper_format(fub_id)
-            dpi = self.api.get_fub_dpi(fub_id)
-            orientation = self.api.get_fub_orientation(fub_id)
+            # Unknown stays unstored (None) rather than a guessed A4 a restore would then rebuild.
+            paper, dpi, orientation = self.api.get_fub_known_format(fub_id) or (None, None, None)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
             await self.function_plan_backup.async_change_backup(
                 fub_id,
@@ -2776,6 +2791,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         source: str,
         label_metadata: dict[str, dict[str, str]] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
+        paper_format: tuple[str, int, str] | None = None,
     ) -> str:
         """Render elements/connections (live plan or backup snapshot) to a preview SVG file.
 
@@ -2799,11 +2815,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         extended views the render shows; a live render always uses the last polled ones.
         Kept in the preview cache with the frozen elements, so a re-render never picks up
         another backup's settings after the slots rotated.
+
+        paper_format: a snapshot's stored (paper, dpi, orientation) (snapshot_paper_format), which
+        its title and canvas show; None for a live render or a snapshot captured without them,
+        which show the live plan's. Cached like block_settings.
         """
         cache_generation_before = self._preview_cache_generation
         markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(label_metadata)
         catalog = await self.function_plan_catalog.async_get_catalog()
-        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id)
+        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id, paper_format)
         sun_times = _build_sun_times(self.hass)
         # A plan switch invalidates the previous plan's connection-id values BEFORE this
         # render — otherwise one frame could color wires from an unrelated plan whose
@@ -2852,7 +2872,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 kind, slot = _parse_snapshot_source(source)
                 self._update_snapshot_preview_cache(
-                    fub_id, plan_name, elements, connections, kind, slot, label_metadata, block_settings, live_id_map
+                    fub_id,
+                    plan_name,
+                    elements,
+                    connections,
+                    kind,
+                    slot,
+                    label_metadata,
+                    block_settings,
+                    live_id_map,
+                    paper_format,
                 )
         else:
             _LOGGER.debug(
@@ -2863,6 +2892,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # postponing the periodic poll, like the webhook pushes (see _async_publish_pushed_value).
         self.async_update_listeners()
         return url
+
+    def snapshot_paper_format_for_source(self, fub_id: int, plan_name: str, source: str) -> tuple[str, int, str] | None:
+        """The stored paper format of a 'snapshot:<kind>:<slot>' preview source; None for "live".
+
+        Same caveat as snapshot_block_settings_for_source: only right after reading that snapshot.
+        """
+        if source == "live":
+            return None
+        kind, slot = _parse_snapshot_source(source)
+        return self.function_plan_backup.paper_format_sync(kind, fub_id, plan_name, slot)
 
     def snapshot_block_settings_for_source(
         self, fub_id: int, plan_name: str, source: str
@@ -3058,21 +3097,28 @@ class ComexioCoordinator(DataUpdateCoordinator):
             label_maps = snapshot_label_maps(label_metadata, *label_maps)
         return label_maps
 
-    def _build_preview_title_and_canvas(self, fub_id: int) -> tuple[str, Any]:
+    def _build_preview_title_and_canvas(
+        self, fub_id: int, paper_format: tuple[str, int, str] | None = None
+    ) -> tuple[str, Any]:
         """Build the Studio-style title suffix (state + paper/DPI) and canvas bounds for a live plan.
 
         Title suffix carries the plan's live state + paper/DPI (Studio-style header info),
-        rendered at half the plan-name size. Read from the live fub data — for snapshots
-        of deleted plans it stays empty.
+        rendered at half the plan-name size. The state is read from the live fub data — for
+        snapshots of deleted plans the suffix stays empty. paper_format: a backup's own format,
+        shown instead of the live one (the plan may have been switched to another paper since).
         """
         if (active := self.api.get_fub_active(fub_id)) is None:
             return "", None
-        paper = self.api.get_fub_paper_format(fub_id)
-        dpi = self.api.get_fub_dpi(fub_id)
+        if paper_format is None:
+            paper = self.api.get_fub_paper_format(fub_id)
+            dpi = self.api.get_fub_dpi(fub_id)
+            # Paper-sized viewBox: same relative element scale for every plan of this paper
+            # format instead of blowing a nearly empty plan up to full card width.
+            canvas = self.api.get_fub_canvas_bounds(fub_id)
+        else:
+            paper, dpi, orientation = paper_format
+            canvas = self.api.get_fub_canvas_bounds(fub_id, paper_name=paper, orientation=orientation, resolution=dpi)
         title_suffix = f"[{'aktiv' if active else 'inaktiv'}] [{paper} | {dpi}dpi]"
-        # Paper-sized viewBox: same relative element scale for every plan of this paper
-        # format instead of blowing a nearly empty plan up to full card width.
-        canvas = self.api.get_fub_canvas_bounds(fub_id)
         return title_suffix, canvas
 
     def _update_live_preview_cache(
@@ -3096,6 +3142,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "snapshot_source": None,
             "label_metadata": None,
             "block_settings": None,
+            "paper_format": None,
             "live_id_map": None,
         }
         self._preview_cache_generation += 1
@@ -3115,10 +3162,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         label_metadata: dict[str, dict[str, str]] | None,
         block_settings: Mapping[str, Mapping[str, str]] | None,
         live_id_map: dict[str, str] | None,
+        paper_format: tuple[str, int, str] | None = None,
     ) -> None:
         """Arm the preview cache for a frozen backup snapshot (wiring stays put, values stay live).
 
-        label_metadata / block_settings: the snapshot's own, frozen with its wiring.
+        label_metadata / block_settings / paper_format: the snapshot's own, frozen with its wiring.
 
         live_id_map: this snapshot's element-id -> live-plan element-id translation (see
         build_source_id_translation), reused as-is by subsequent refreshes of the SAME
@@ -3139,6 +3187,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "snapshot_source": source,
             "label_metadata": label_metadata,
             "block_settings": block_settings,
+            "paper_format": paper_format,
             "live_id_map": live_id_map,
         }
         self._preview_cache_generation += 1
@@ -3188,6 +3237,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 cache["snapshot_source"] or "live",
                 cache["label_metadata"],
                 cache["block_settings"],
+                cache["paper_format"],
             )
 
     async def _async_refresh_plan_preview(self, _now: Any) -> None:
@@ -6340,7 +6390,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         whatever this reload was for — options written meanwhile included — so it is skipped
         here instead of queued. Outside a sync the reload runs under _sync_lock, so it cannot
         cut into a Web-IO range check, and a sync pressed meanwhile is rejected as concurrent
-        instead of running against the coordinator being torn down.
+        instead of running against the coordinator being torn down. It also waits for a running
+        function plan restore (restores_held_off) — so a caller holding _restore_lock must not
+        await this, but schedule it (see the restore's own reload in services/backup.py).
 
         Checks the entry's *current* coordinator, not necessarily self: a caller that outlived
         an earlier reload (the uninstall cleanup task, the KNX auto-tag timer) still holds the
@@ -6356,7 +6408,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 reason,
             )
             return
-        async with target._sync_lock:
+        async with target._sync_lock, target.restores_held_off():
+            # Re-checked under the locks: a sync or cleanup that held them may have reloaded meanwhile
+            # (a failed sync clears in_sync before its closing reload) — that reload covered this one,
+            # and a second one would cut into whatever runs on the new coordinator by now.
+            if self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) is not target:
+                _LOGGER.info(
+                    "[%s] Reload requested (%s) skipped — the integration was reloaded meanwhile",
+                    self.server_id,
+                    reason,
+                )
+                return
             await self.hass.config_entries.async_reload(self.config_entry.entry_id)
 
     def _schedule_knx_dpt_reload(self, renamed_count: int) -> None:

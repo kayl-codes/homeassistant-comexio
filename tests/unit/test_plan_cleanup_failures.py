@@ -434,6 +434,7 @@ def test_visualize_svg_returns_the_preview_url() -> None:
     coordinator = SimpleNamespace(
         async_generate_plan_preview=AsyncMock(return_value="/local/comexio/plan_5.svg"),
         snapshot_block_settings_for_source=MagicMock(return_value=None),
+        snapshot_paper_format_for_source=MagicMock(return_value=None),
         preview_follow_lock=asyncio.Lock(),
         preview_follow_generation=0,
     )

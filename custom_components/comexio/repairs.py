@@ -1072,7 +1072,9 @@ class ComexioRepairFlow(RepairsFlow):
         await asyncio.sleep(0.5)
         _LOGGER.info("[%s] Reloading integration after uninstall cleanup...", coordinator.server_id)
         try:
-            await self.hass.config_entries.async_reload(entry.entry_id)
+            # The caller holds _sync_lock, which comes first in the lock order (restores_held_off).
+            async with coordinator.restores_held_off():
+                await self.hass.config_entries.async_reload(entry.entry_id)
         except Exception:
             _LOGGER.exception(
                 "[%s] Reload after uninstall cleanup failed — reload the integration manually",

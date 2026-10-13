@@ -199,6 +199,49 @@ def _plan_settings(
     return plan_block_settings(block_settings, plan_data.get("elements") or {})
 
 
+def snapshot_paper_format(snapshot: Mapping[str, Any]) -> tuple[str, int, str] | None:
+    """A snapshot's stored (paper, dpi, orientation), or None when it was captured without them."""
+    if "paper" not in snapshot:
+        return None
+    return (
+        str(snapshot["paper"]),
+        int(snapshot.get("dpi", _FALLBACK_DPI)),
+        str(snapshot.get("orientation", _FALLBACK_ORIENTATION)),
+    )
+
+
+def format_paper_format(paper_format: tuple[str, int, str]) -> str:
+    """'A4 @ 90 DPI, landscape' — how the backup diff names a paper format."""
+    paper, dpi, orientation = paper_format
+    return f"{paper} @ {dpi} DPI, {orientation}"
+
+
+def _paper_format_changed(previous: Mapping[str, Any], current: tuple[Any, Any, Any]) -> bool:
+    """Whether today's paper/DPI/orientation differ from the ones the previous snapshot stored.
+
+    Not read this poll (None) or not stored in the previous snapshot never counts as a change.
+    """
+    if None in current or (stored := snapshot_paper_format(previous)) is None:
+        return False
+    return stored != (str(current[0]), int(current[1]), str(current[2]))
+
+
+def _auto_backup_reason(
+    history: list[dict[str, Any]],
+    new_hash: str,
+    plan_settings: Mapping[str, Any] | None,
+    paper_format: tuple[Any, Any, Any],
+) -> str | None:
+    """Why a plan needs a new auto backup ('wiring', 'block settings', 'paper format'), None when it does not."""
+    if not history or history[0].get("hash") != new_hash:
+        return "wiring"
+    if block_settings_changed(history[0], plan_settings):
+        return "block settings"
+    if _paper_format_changed(history[0], paper_format):
+        return "paper format"
+    return None
+
+
 def retention_cutoff(months: int) -> datetime:
     """UTC cutoff timestamp for a retention window expressed in whole months (~30 days each).
 
@@ -446,7 +489,7 @@ class FunctionPlanBackupManager:
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
         held_back: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
-        """Rotate in snapshots for all plans whose wiring or block settings changed since the last auto backup.
+        """Rotate in snapshots for all plans whose wiring, block settings or paper format changed since the last backup.
 
         plan_format: optional {fub_id_str: (paper, dpi, orientation)} so the snapshot can
         record the canvas settings needed to recreate the plan identically on restore.
@@ -474,10 +517,10 @@ class FunctionPlanBackupManager:
             plan_name = fub_data.get(key, {}).get("Name", key)
             history = self._auto_data.setdefault(key, {}).setdefault(plan_name, [])
             plan_settings = _plan_settings(block_settings, plan_data)
-            wiring_changed = not history or history[0].get("hash") != new_hash
-            if not wiring_changed and not block_settings_changed(history[0], plan_settings):
-                continue
             paper, dpi, orientation = (plan_format or {}).get(key, (None, None, None))
+            reason = _auto_backup_reason(history, new_hash, plan_settings, (paper, dpi, orientation))
+            if reason is None:
+                continue
             label_metadata = referenced_label_metadata(
                 plan_data, markers_by_id or {}, webio_by_id or {}, ios_by_id or {}
             )
@@ -502,7 +545,7 @@ class FunctionPlanBackupManager:
                 self._server_id,
                 plan_name,
                 fub_id,
-                "wiring" if wiring_changed else "block settings",
+                reason,
                 len(history),
                 FUNCTION_PLAN_AUTO_BACKUP_SLOTS,
             )
@@ -579,6 +622,8 @@ class FunctionPlanBackupManager:
             for key, identities in data.items():
                 live_name = fub_data.get(key, {}).get("Name")
                 live_format = plan_format.get(key)
+                if live_name is not None and live_format is None:
+                    continue  # a live plan whose format was not readable this cycle — filled in a later one
                 group_filled += _backfill_identity_group(identities, live_name, live_format)
             if group_filled:
                 await store.async_save(data)
@@ -1061,6 +1106,11 @@ class FunctionPlanBackupManager:
         """A stored snapshot's block settings (cache-only); None without the snapshot or its settings."""
         snapshot = self._stored_snapshot(kind, fub_id, plan_name, slot)
         return None if snapshot is None else snapshot_block_settings(snapshot)
+
+    def paper_format_sync(self, kind: str, fub_id: int, plan_name: str, slot: int) -> tuple[str, int, str] | None:
+        """A stored snapshot's (paper, dpi, orientation) (cache-only); None without the snapshot or its format."""
+        snapshot = self._stored_snapshot(kind, fub_id, plan_name, slot)
+        return None if snapshot is None else snapshot_paper_format(snapshot)
 
     def block_check_sync(self, kind: str, fub_id: int, plan_name: str, slot: int) -> dict[str, Any] | None:
         """function_plan_block_keys.block_check of a stored snapshot, from the caches (for the backup selector).

@@ -32,7 +32,13 @@ from ..const import (
     TIMESTAMP_DISPLAY_FORMAT,
 )
 from ..coordinator import ComexioCoordinator
-from ..function_plan_backup import SNAPSHOT_COMEXIO_VERSION, is_orphaned_identity, retention_cutoff
+from ..function_plan_backup import (
+    SNAPSHOT_COMEXIO_VERSION,
+    format_paper_format,
+    is_orphaned_identity,
+    retention_cutoff,
+    snapshot_paper_format,
+)
 from ..function_plan_block_keys import CHECK_PLAUSIBLE, CHECK_UNRESOLVED, CHECK_UNVERIFIED, block_check
 from ..function_plan_block_settings import (
     block_settings_diff,
@@ -80,6 +86,11 @@ _MISSING_VALUE = "—"
 # Diff line when a side of the diff was stored before block settings were captured (#nv = no
 # value): without it a values diff would silently look like "nothing changed".
 _NO_BLOCK_SETTINGS = "#nv — no block values stored in {side}, not compared"
+
+
+def _restore_notification_id(coordinator: ComexioCoordinator) -> str:
+    """The one notification a restore shows its progress in, replaced by its result or error."""
+    return f"comexio_function_plan_restore_{coordinator.server_id}"
 
 
 def _coerce_int(value) -> int | None:
@@ -253,6 +264,15 @@ async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[di
             entry["diff"]["block_settings"] = _label_block_settings_diff(settings_diff, newer, catalog, newer_maps)
         else:
             entry["diff"]["block_settings"] = [_no_block_settings_line(newer, older)]
+        entry["diff"]["paper_format"] = _paper_format_diff(newer, older)
+
+
+def _paper_format_diff(newer: dict, older: dict) -> list[str]:
+    """The diff line of a changed paper format/DPI/orientation ('older → newer'); empty when equal or not stored."""
+    new_format, old_format = snapshot_paper_format(newer), snapshot_paper_format(older)
+    if new_format is None or old_format is None or new_format == old_format:
+        return []
+    return [f"{format_paper_format(old_format)} → {format_paper_format(new_format)}"]
 
 
 def _no_block_settings_line(newer: dict, older: dict) -> str:
@@ -396,7 +416,7 @@ async def _restore_plan_in_place(
 
     # Same notification_id for the start and final message — the "in progress" notice is
     # replaced in place by the result, mirroring the sync-progress pattern in button.py.
-    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    notif_id = _restore_notification_id(coordinator)
     persistent_notification.async_create(
         hass,
         f"Restoring plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] — this can take up to a minute…",
@@ -861,6 +881,24 @@ def _new_plan_activation_line(run_ok: bool | None, auto_start: bool) -> str:
     )
 
 
+async def _async_reload_after_restore(hass: HomeAssistant, coordinator: ComexioCoordinator) -> None:
+    """Reload so the repointed consumers (plan selector, cluster plan_map) pick up the new plan ID.
+
+    Runs as its own task after the restore, so a failure is reported here: the restore's result
+    notification already went out.
+    """
+    try:
+        await coordinator.async_reload_entry("function plan restore")
+    except Exception:
+        _LOGGER.exception("[%s] Reload after a function plan restore failed", coordinator.server_id)
+        persistent_notification.async_create(
+            hass,
+            "The integration could not be reloaded after the restore — the plan selector and clusters may "
+            "still point at the old plan ID. Reload the Comexio integration manually.",
+            title=_TITLE_RESTORE_ERR,
+        )
+
+
 async def _restore_plan_as_new(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -883,7 +921,7 @@ async def _restore_plan_as_new(
     plan_name = snapshot.get("plan_name", str(old_fub_id))
     t_start = time.monotonic()
 
-    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    notif_id = _restore_notification_id(coordinator)
     persistent_notification.async_create(
         hass,
         f"Restoring plan '{plan_name}' (former ID {old_fub_id}) from {kind}[{slot}] as a new plan — "
@@ -941,7 +979,9 @@ async def _restore_plan_as_new(
         purged = 0
     updated_consumers = await coordinator.async_repoint_function_plan_fub_id(plan_name, old_fub_id, new_fub_id)
     if updated_consumers:
-        await coordinator.async_reload_entry("function plan restore")
+        # Scheduled, not awaited: the reload waits for this restore to release _restore_lock
+        # (restores_held_off), so awaiting it here would deadlock.
+        hass.async_create_task(_async_reload_after_restore(hass, coordinator), name="comexio_reload_after_restore")
 
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))
@@ -1020,7 +1060,7 @@ async def _restore_plan_as_copy(
     source_name = snapshot.get("plan_name", str(source_fub_id))
     t_start = time.monotonic()
 
-    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    notif_id = _restore_notification_id(coordinator)
     persistent_notification.async_create(
         hass,
         f"Restoring {kind}[{slot}] of plan '{source_name}' as a new copy '{new_plan_name}' — "
@@ -1394,7 +1434,7 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         _LOGGER.warning("Function Plan Restore already in progress, ignoring concurrent request")
         persistent_notification.async_create(
             hass,
-            "A restore is already running — please wait for it to finish before starting another one.",
+            "A restore or an integration reload is running — please wait for it to finish before starting a restore.",
             title=_TITLE_RESTORE_ERR,
         )
         return
@@ -1412,6 +1452,19 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
             # copy a half-built plan — each pushing an older entry out of the auto slots.
             with coordinator.pause_auto_backup():
                 await _run_function_plan_restore(hass, call, coordinator, api, plan_hash)
+        except Exception as exc:
+            # The restore paths catch connection errors themselves; anything else (a closed API
+            # session, an unexpected response) would leave their "in progress" notification
+            # stuck forever and the half-built plan unreported. Re-raised so the service call
+            # fails too (HA logs it with the traceback).
+            persistent_notification.async_create(
+                hass,
+                f"The restore failed unexpectedly: {exc!r}. A plan may be left partially restored or "
+                "created — check it in Comexio Studio before restoring again.",
+                title=_TITLE_RESTORE_ERR,
+                notification_id=_restore_notification_id(coordinator),
+            )
+            raise
         finally:
             coordinator.async_update_listeners()
 

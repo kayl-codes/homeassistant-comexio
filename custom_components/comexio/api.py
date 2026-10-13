@@ -1170,25 +1170,47 @@ class ComexioAPI:
         fub = self._fub_data.get(str(fub_id), {})
         return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
 
+    def get_fub_known_format(self, fub_id: int) -> tuple[str, int, str] | None:
+        """(paper, dpi, orientation) as Comexio states them, None when any part is not known.
+
+        Unlike the getters above, no default stands in for a missing value: a backup compares
+        and stores this, and a default (an undecoded $Paper read as A4) would count as a change.
+        """
+        fub = self._fub_data.get(str(fub_id))
+        if fub is None or fub.get("Resolution") is None or fub.get("Orientation") is None:
+            return None
+        paper = self._paper_data.get(str(fub.get("Paper", "")), {}).get("Name")
+        if not paper:
+            return None
+        try:
+            dpi, orient_id = int(fub["Resolution"]), int(fub["Orientation"])
+        except (TypeError, ValueError):
+            return None
+        return str(paper), dpi, "portrait" if orient_id == 1 else "landscape"
+
     def get_fub_active(self, fub_id: int) -> bool | None:
         """Return a function plan's active flag, or None if the plan is not known live."""
         fub = self._fub_data.get(str(fub_id))
         return None if fub is None else bool(int(fub.get("Active") or 0))
 
     def get_fub_canvas_bounds(
-        self, fub_id: int, paper_name: str | None = None, orientation: str | None = None
+        self,
+        fub_id: int,
+        paper_name: str | None = None,
+        orientation: str | None = None,
+        resolution: int | None = None,
     ) -> tuple[float, float]:
         """Return estimated (x_max, y_max) canvas bounds for a function plan.
 
         Scales proportionally from the A4-landscape-90-DPI reference (870×720).
-        DPI (Resolution) is always taken from $Fubs plan data.
+        resolution overrides the DPI (a backup's own); None = read from $Fubs.
         paper_name overrides the format (A2/A3/A4/A5); None = read from $Fubs/$Paper.
         orientation overrides as "landscape"/"portrait" — needed for a plan that was just
         created and is not in the cached $Fubs data yet; None = read from $Fubs, where
         0 = landscape (long side → X), 1 = portrait (long side → Y).
         """
         fub = self._fub_data.get(str(fub_id), {})
-        res = int(fub.get("Resolution", self._CANVAS_REF_RES))
+        res = int(fub.get("Resolution", self._CANVAS_REF_RES)) if resolution is None else resolution
         if orientation is None:
             orient_id = int(fub.get("Orientation", 0))
         else:
