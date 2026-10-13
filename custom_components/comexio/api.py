@@ -18,6 +18,7 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     CreatedFunctionPlan,
+    RawConfig,
     config as comexio_config,
     webio as comexio_webio,
 )
@@ -490,6 +491,16 @@ def _saved_schema(conf_data: Mapping[str, Any], key: str, default: str) -> str:
     return default
 
 
+def _verified_plan_ids(fubs: dict[str, Any], source: str) -> set[int] | None:
+    """The plan ids of a plan list as ints, None after an error log if any is not numeric."""
+    try:
+        return {int(fid) for fid in fubs}
+    except (TypeError, ValueError):
+        bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
+        _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in %s — placement unknown", bad, source)
+        return None
+
+
 class ComexioAPI:
     """
     Detailed interface to communicate with the Comexio API.
@@ -565,13 +576,23 @@ class ComexioAPI:
         # Comexio's own firmware/frontend version (e.g. "11.0.2"), from static asset paths
         self.comexio_version: str | None = None
         # Block settings of every plan element ($FubBaseConfig, see function_plan_block_settings)
-        # from the last config fetch; None when that fetch failed or did not carry a readable
+        # from the newest config fetch; None when that fetch failed or did not carry a readable
         # table, so a backup then stores none rather than an ever older copy.
         self.block_settings: BlockSettings | None = None
         # Block settings saves Comexio confirmed so far — a config fetch during which one completed
         # may carry the table from before it and must not overwrite the cache the save updated.
         # A refused or failed save changed nothing on Comexio, so it does not count.
         self._block_settings_saves_confirmed: int = 0
+        # Config fetches started so far, and the generation of the newest one whose outcome was
+        # applied. Two overlapping fetches (a poll and a service's own fetch) can finish out of
+        # order — the older one must not put its page's block settings, io_types or firmware
+        # version back over the newer one's, nor drop the newer table on its own failure.
+        self._config_fetches_started: int = 0
+        self._config_fetch_applied: int = 0
+        # The page of the newest fetch that applied a page, and its generation: what an overtaken
+        # fetch returns instead of its own older page. A failed fetch leaves both as they are.
+        self._config_page: dict[str, Any] = {}
+        self._config_page_generation: int = 0
         # Result of the last reference catalog reconciliation (reference_catalog.reconcile, set by
         # the coordinator each poll) — the only source of block-type ids such as the Flanke's.
         self.reference_check: ReferenceCheck | None = None
@@ -599,9 +620,15 @@ class ComexioAPI:
         self._ha_run_states: dict[str, tuple[bool, int]] = {}
         # fub_id_str → time.monotonic() of HA's own last stop of the plan (ha_stopped_within).
         self._ha_stopped_at: dict[str, float] = {}
-        # (fetched $Fubs dict, run_state_mark taken before its get_raw_config fetch): lets every
-        # path that writes a fetched plan list or plan into the cache apply that guard on its own.
-        self._fetch_marks: deque[tuple[dict[str, Any], int]] = deque(maxlen=FUNCTION_PLAN_FETCH_MARK_SLOTS)
+        # (fetched $Fubs dict, run_state_mark taken before its get_raw_config fetch, that fetch's
+        # generation): lets every path that writes a fetched plan list or plan into the cache apply
+        # that guard on its own, and parse_config skip a plan list older than the cached one.
+        self._fetch_marks: deque[tuple[dict[str, Any], int, int]] = deque(maxlen=FUNCTION_PLAN_FETCH_MARK_SLOTS)
+        # Generation of the config fetch whose plan list _fub_data holds (0: none known yet).
+        self._fub_data_generation = 0
+        # Plans create_fup cached itself: fub_id_str → (entry, fetches started before the create). A
+        # plan list from a fetch that began before the create may not list the plan yet (_with_created_fubs).
+        self._created_fubs: dict[str, tuple[dict[str, Any], int]] = {}
         # Bumped with every fetched plan list or plan written into the cache (fub_cache_epoch): a
         # run-state answer whose fetch began before such a write may be older than its Active flags.
         self._fub_cache_epoch = 0
@@ -610,7 +637,8 @@ class ComexioAPI:
         # problem (retry) apart from a genuine credential rejection (needs reauth).
         self.last_login_error: str | None = None
         # Set by get_raw_config when its re-login of a lapsed session got no reply (e.g. Comexio
-        # still rebooting); reset by every call, so it never outlives the fetch it describes.
+        # still rebooting). Written as each call ends, with no await before its caller resumes, so
+        # the caller reads its own fetch's outcome even while another fetch overlaps.
         self.config_relogin_unreachable = False
 
     def _build_session_kwargs(self) -> dict[str, Any]:
@@ -720,19 +748,55 @@ class ComexioAPI:
 
     def _fetch_mark(self, matches: Callable[[dict[str, Any]], bool]) -> int | None:
         """run_state_mark taken before the newest remembered fetch whose $Fubs matches, None if unknown."""
-        return next((mark for fubs, mark in reversed(self._fetch_marks) if matches(fubs)), None)
+        return next((mark for fubs, mark, _generation in reversed(self._fetch_marks) if matches(fubs)), None)
 
-    def _replace_fub_data(self, fubs: dict[str, Any], run_state_mark: int | None = None) -> None:
+    def _replace_fub_data(self, fubs: dict[str, Any], run_state_mark: int | None = None) -> bool:
         """Make a fetched plan list the cache, keeping the run states HA caused since its fetch began.
 
-        run_state_mark defaults to the mark get_raw_config() remembered for this $Fubs dict.
+        A caller parses its page only after further awaits, so a newer fetch's page may already be
+        cached: a plan list from an older fetch is skipped then (False). Of run_state_mark and the
+        mark get_raw_config() remembered for this $Fubs dict the later one counts — the page already
+        shows every run state HA caused before its own fetch began.
         """
-        if run_state_mark is None:
-            run_state_mark = self._fetch_mark(lambda known: known is fubs)
+        known = next(((mark, gen) for listed, mark, gen in reversed(self._fetch_marks) if listed is fubs), None)
+        if known is not None:
+            mark, generation = known
+            if generation < self._fub_data_generation:
+                _LOGGER.debug(
+                    "Plan list of config fetch %d is older than the cached one of %d — keeping the cache",
+                    generation,
+                    self._fub_data_generation,
+                )
+                return False
+            self._fub_data_generation = generation
+            run_state_mark = mark if run_state_mark is None else max(run_state_mark, mark)
+            fubs = self._with_created_fubs(fubs, generation)
         self._fub_data = fubs
         self._fub_cache_epoch += 1
         if run_state_mark is not None:
             self.apply_fub_run_states(self._ha_run_states_since(run_state_mark))
+        return True
+
+    def _with_created_fubs(self, fubs: dict[str, Any], generation: int) -> dict[str, Any]:
+        """fubs plus the plans create_fup cached after config fetch `generation` began and fubs lacks.
+
+        Such a plan keeps its current cache entry (update_fub_cache_entry may have refreshed it).
+        A plan created before that fetch began is forgotten here: its page is the newer word on it.
+        """
+        self._created_fubs = {key: created for key, created in self._created_fubs.items() if created[1] >= generation}
+        missing = {
+            key: self._fub_data.get(key, entry)
+            for key, (entry, _started) in self._created_fubs.items()
+            if key not in fubs
+        }
+        if not missing:
+            return fubs
+        _LOGGER.debug(
+            "Plan list of config fetch %d lacks the plan(s) %s created since it began — keeping them",
+            generation,
+            sorted(missing),
+        )
+        return {**fubs, **missing}
 
     def run_state_mark(self) -> int:
         """Mark to take before a config or run-state fetch; pass it on as `since` when applying the result."""
@@ -867,10 +931,19 @@ class ComexioAPI:
         server answered but the scrape failed (HTTP error status, failed re-login, no parseable
         $FubModules) — callers check for FubModules. A transport failure raises
         aiohttp.ClientError / TimeoutError.
+
+        Overlapping fetches: only a fetch started after the last applied one updates io_types,
+        comexio_version and block_settings. An older one finishing last returns the newest page any
+        fetch applied instead of its own — or its own page if every newer fetch failed, as nothing
+        fresher was read. A caller that parses an older page after a newer one keeps the newer plan
+        and paper metadata (parse_config). A fetch that fails itself still reports its failure, even
+        after a newer one succeeded: it ended later, so it is the newer word on whether Comexio answers.
         """
         run_state_mark = self._run_state_mark
         saves_before = self._block_settings_saves_confirmed
-        self.config_relogin_unreachable = False
+        self._config_fetches_started += 1
+        generation = self._config_fetches_started
+        unreachable = False
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -878,17 +951,62 @@ class ComexioAPI:
                 _LOGGER.warning("Comexio admin session is no longer logged in — logging in again")
                 if not await self._full_login():
                     _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
-                    self.config_relogin_unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
-                    self.block_settings = None
+                    unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
+                    self._drop_block_settings(generation)
                     return {}
                 raw = await self.client.get_raw_config()
         except ComexioConnectionError as err:
-            self.block_settings = None
+            self._drop_block_settings(generation)
             _raise_transport_error(err)
         except ComexioError as err:
             _LOGGER.error("Failed to fetch the Comexio configuration: %s", err)
-            self.block_settings = None
+            self._drop_block_settings(generation)
             return {}
+        finally:
+            self.config_relogin_unreachable = unreachable
+        return self._finish_config_fetch(raw, generation, saves_before, run_state_mark)
+
+    def _finish_config_fetch(
+        self, raw: RawConfig, generation: int, saves_before: int, run_state_mark: int
+    ) -> dict[str, Any]:
+        """Apply a fetched page unless a newer fetch overtook it; the page its caller gets (see get_raw_config)."""
+        if self._claim_config_fetch(generation, raw.variables):
+            self._apply_config_page(raw, saves_before)
+        elif self._config_page_generation > generation:
+            _LOGGER.debug(
+                "Config fetch %d overtaken by %d — returning the newer page", generation, self._config_page_generation
+            )
+            return self._config_page
+        else:
+            _LOGGER.debug(
+                "Config fetch %d overtaken by failed %d — returning its page, applying nothing",
+                generation,
+                self._config_fetch_applied,
+            )
+        if isinstance(fubs := raw.variables.get("Fubs"), dict):
+            self._fetch_marks.append((fubs, run_state_mark, generation))
+        return raw.variables
+
+    def _claim_config_fetch(self, generation: int, page: dict[str, Any] | None) -> bool:
+        """Whether this fetch's outcome (page, None on failure) may be applied: no newer fetch was applied yet."""
+        if generation <= self._config_fetch_applied:
+            return False
+        self._config_fetch_applied = generation
+        if page is not None:
+            self._config_page, self._config_page_generation = page, generation
+        return True
+
+    def _drop_block_settings(self, generation: int) -> None:
+        """A failed fetch drops the block settings — unless a newer fetch already applied its own.
+
+        The newest outcome wins also as a failure: an older fetch finishing afterwards with a valid
+        page is discarded entirely (io_types and comexio_version too); the next poll catches up.
+        """
+        if self._claim_config_fetch(generation, None):
+            self.block_settings = None
+
+    def _apply_config_page(self, raw: RawConfig, saves_before: int) -> None:
+        """Take io_types, comexio_version and the block settings from a fetched config page."""
         self.io_types = raw.io_types
         self.io_input_types = raw.io_input_types
         if raw.comexio_version:
@@ -900,15 +1018,10 @@ class ComexioAPI:
             # overlapping save brings the whole table up to date. A save still running now
             # applies its values to the table taken here once Comexio confirms it.
             _LOGGER.debug("Block settings: config fetch overlapped a save — keeping the cached table")
-        else:
-            if block_settings is None and self.block_settings is not None:
-                _LOGGER.warning(
-                    "Comexio's config page no longer carries $FubBaseConfig — block settings are not backed up"
-                )
-            self.block_settings = block_settings
-        if isinstance(fubs := raw.variables.get("Fubs"), dict):
-            self._fetch_marks.append((fubs, run_state_mark))
-        return raw.variables
+            return
+        if block_settings is None and self.block_settings is not None:
+            _LOGGER.warning("Comexio's config page no longer carries $FubBaseConfig — block settings are not backed up")
+        self.block_settings = block_settings
 
     async def get_knx_dpt_catalog(self) -> dict[str, Any]:
         """Fetch $KnxPoints/$KnxDevices/$KnxDpt from the KNX admin page.
@@ -1081,17 +1194,18 @@ class ComexioAPI:
         than one merged dict — see get_live_states' docstring for why merging them would be
         unsafe (markers and KNX objects share the same plain numeric id space).
         run_state_mark (run_state_mark() taken before conf was fetched) keeps the run states HA
-        caused since then over the older Active flags in conf; without it, the mark
-        get_raw_config() remembered for conf does.
+        caused since then over the older Active flags in conf; the mark get_raw_config()
+        remembered for conf counts instead if it is later or run_state_mark is missing. A conf
+        from an older fetch than the cached plan list leaves the plan and paper caches alone.
         """
         # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection).
         # aiocomexio decodes each page variable on its own: a config whose $Fubs/$Paper did not
         # decode keeps the last known cache — wiping it would turn every plan's run-state sensor
         # unavailable and empty the plan selector until the next poll. An empty plan list still
         # decodes to a dict and replaces the cache.
-        if isinstance(fubs := conf.get("Fubs"), dict):
-            self._replace_fub_data(fubs, run_state_mark)
-        if isinstance(paper := conf.get("Paper"), dict):
+        # A page older than the cached plan list leaves $Paper alone too: both come from one page.
+        newest = not isinstance(fubs := conf.get("Fubs"), dict) or self._replace_fub_data(fubs, run_state_mark)
+        if newest and isinstance(paper := conf.get("Paper"), dict):
             self._paper_data = paper
 
         webio_name, schema_marker, schema_io, schema_knx, server_alias = self._load_config_names()
@@ -1280,9 +1394,12 @@ class ComexioAPI:
     async def delete_fup(self, fub_id: int) -> bool:
         """Delete an entire function plan (not just elements within it); False if that failed."""
         _LOGGER.info("delete_fup: deleting Function Plan fub_id=%s", fub_id)
-        return await _succeeded(
+        deleted = await _succeeded(
             f"Deleting function plan {fub_id}", lambda: self.client.delete_function_plan(int(fub_id))
         )
+        if deleted:
+            self._created_fubs.pop(str(fub_id), None)  # no older plan list may keep it listed then
+        return deleted
 
     async def update_webio_device_ip(self, device_id: str | int, ha_address: str, webio_name: str) -> bool:
         """
@@ -2105,6 +2222,7 @@ class ComexioAPI:
             return None
         _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, created.fub_id)
         self._fub_data[str(created.fub_id)] = created.fubs_entry
+        self._created_fubs[str(created.fub_id)] = (created.fubs_entry, self._config_fetches_started)
         if self.run_state_listener is not None:
             self.run_state_listener()
         return created.fub_id
@@ -2391,19 +2509,20 @@ class ComexioAPI:
         Placement checks that decide whether a bridge marker may be renamed or blanked need
         the complete picture: function_plan_load_all_plans silently skips malformed entries
         and filters against the cached plan list. This refreshes that cache (self._fub_data)
-        from fubs, then loads each plan the bulk response lacked individually (e.g. a plan
-        without elements, should the bulk endpoint omit those). Returns {} if there are no
-        plans at all. strict is passed on to both loaders (see function_plan_load_elements).
-        A non-numeric plan id also returns None — checked before the cache is replaced, so a
-        malformed $Fubs neither crashes the caller nor ends up in self._fub_data.
+        from fubs — unless a newer fetch's plan list is cached already; a plan only fubs still
+        lists then fails to load below (None). Then each plan of fubs or of the cache (a newer
+        list kept, or a plan create_fup added) the bulk response lacked is loaded individually
+        (e.g. a plan without elements, should the bulk endpoint omit those). Returns {} if there
+        are no plans at all. strict is passed on to both loaders (see function_plan_load_elements).
+        A non-numeric plan id also returns None — checked in fubs before the cache is replaced,
+        so a malformed $Fubs neither crashes the caller nor ends up in self._fub_data.
         """
-        try:
-            fub_ids = {int(fid) for fid in fubs}
-        except (TypeError, ValueError):
-            bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
-            _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in $Fubs — placement unknown", bad)
+        if (fub_ids := _verified_plan_ids(fubs, "$Fubs")) is None:
             return None
         self._replace_fub_data(fubs)
+        if (cached_ids := _verified_plan_ids(self._fub_data, "the cached plan list")) is None:
+            return None
+        fub_ids |= cached_ids
         if not fub_ids:
             return {}
         plans = await self.function_plan_load_all_plans(strict=strict)
