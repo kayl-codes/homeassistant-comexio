@@ -14,6 +14,7 @@ from typing import Any
 import uuid
 
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
+from aiocomexio.config import clean_value
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -312,6 +313,30 @@ def _format_by_ref(by_ref: dict[int, list[int]]) -> str:
         for ref_type, ids in by_ref.items()
         for mid in ids
     )
+
+
+def _io_live_requests(ios: Iterable[Mapping[str, Any]]) -> list[tuple[int, str]]:
+    """(extension id, IO id) of every IO whose live value to ask for: those on online extensions.
+
+    An offline extension cannot answer; its IOs keep their last known value.
+    """
+    return [(int(io["ext_id"]), io["id"]) for io in ios if not io.get("offline") and str(io["ext_id"]).isdigit()]
+
+
+def _apply_io_live_values(
+    ios: Iterable[dict[str, Any]], live_values: Mapping[str, str] | None, known_values: Mapping[str, Any]
+) -> None:
+    """Set each IO's value from its live value, else its last known one (#175).
+
+    The config page carries no live IO value: parse_config's value is a default (0 on a live
+    install), so it only counts for an IO that never had a value. live_values None means the
+    whole fetch failed — every IO keeps its last known value.
+    """
+    for io in ios:
+        if live_values is not None and (live := live_values.get(io["id"])) is not None:
+            io["value"] = clean_value(live)
+        elif io["id"] in known_values:
+            io["value"] = known_values[io["id"]]
 
 
 def _source_max_ids(raw_config: dict[str, Any]) -> tuple[int, int]:
@@ -1051,12 +1076,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
             knx_dpt_catalog,
             run_state_mark=run_state_mark,
         )
+        await self._async_apply_io_live_states(parsed_data["io"])
         return raw_config, parsed_data, knx_live_states
+
+    async def _async_apply_io_live_states(self, ios: list[dict[str, Any]]) -> None:
+        """Live IO values from their own dashboard refresh, over parse_config's default (#175)."""
+        io_live_states = await self.api.get_io_live_states(_io_live_requests(ios))
+        if io_live_states is None:
+            _LOGGER.warning("[%s] IO live states fetch failed; keeping last known values", self.server_id)
+        _apply_io_live_values(ios, io_live_states, self.io_states)
 
     def _merge_polled_states(self, final_data: dict[str, Any]) -> None:
         """R1: Merge the API snapshot with any webhook values that arrived during the fetch.
 
-        Webhooks that fired while awaiting get_raw_config / get_live_states already updated
+        Webhooks that fired while awaiting get_raw_config / get_live_states / get_io_live_states already updated
         marker_states / io_states — prefer those over the (older) API value.
         """
         for m in final_data["markers"]:

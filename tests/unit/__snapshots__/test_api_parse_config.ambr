@@ -13,6 +13,7 @@
     }),
     'io': list([
       dict({
+        'ext_id': '1',
         'ext_name': 'BASE',
         'ha_name': 'I1 Taster Flur',
         'id': '11',
@@ -29,6 +30,7 @@
         'value': 1.0,
       }),
       dict({
+        'ext_id': '1',
         'ext_name': 'BASE',
         'ha_name': 'Q1 Licht Flur',
         'id': '12',
@@ -45,6 +47,7 @@
         'value': 0.0,
       }),
       dict({
+        'ext_id': '1',
         'ext_name': 'BASE',
         'ha_name': 'AI1 #nn',
         'id': '13',
@@ -61,6 +64,7 @@
         'value': 21.5,
       }),
       dict({
+        'ext_id': '2',
         'ext_name': 'UD 1',
         'ha_name': 'QI1 Dimmer Bad',
         'id': '21',
@@ -79,6 +83,7 @@
     ]),
     'io_all': list([
       dict({
+        'ext_id': '1',
         'ext_name': 'BASE',
         'ha_name': 'I1 Taster Flur',
         'id': '11',
@@ -95,6 +100,7 @@
         'value': 1.0,
       }),
       dict({
+        'ext_id': '1',
         'ext_name': 'BASE',
         'ha_name': 'Q1 Licht Flur',
         'id': '12',
@@ -111,6 +117,7 @@
         'value': 0.0,
       }),
       dict({
+        'ext_id': '1',
         'ext_name': 'BASE',
         'ha_name': 'AI1 #nn',
         'id': '13',
@@ -127,6 +134,7 @@
         'value': 21.5,
       }),
       dict({
+        'ext_id': '1',
         'ext_name': 'BASE',
         'ha_name': 'Q2 Reserve',
         'id': '14',
@@ -143,6 +151,7 @@
         'value': 0.0,
       }),
       dict({
+        'ext_id': '2',
         'ext_name': 'UD 1',
         'ha_name': 'QI1 Dimmer Bad',
         'id': '21',

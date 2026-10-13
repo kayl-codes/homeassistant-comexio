@@ -101,6 +101,8 @@ def api_returns() -> dict[str, Any]:
         "login": True,
         "get_raw_config": load_json_fixture("config_basic.json"),
         "get_live_states": ({}, {}),
+        # No IO answered: every IO keeps its config value (no last known value yet).
+        "get_io_live_states": {},
         # The real bulk load returns a dict, never None — even when it fails or there is no plan.
         "function_plan_load_all_plans": {},
     }

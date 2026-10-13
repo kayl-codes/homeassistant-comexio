@@ -877,6 +877,17 @@ def test_get_live_states_splits_markers_and_knx(comexio_api: ComexioAPI, client:
     assert asyncio.run(comexio_api.get_live_states(5, 5)) == ({"5": 1}, {"5": 0})
 
 
+def test_get_io_live_states_failure_is_none_not_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    _fail(client, "get_io_live_states", _connection_error())
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) is None
+
+
+def test_get_io_live_states_passes_the_pairs_through(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_io_live_states = AsyncMock(return_value={"11": "74"})
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) == {"11": "74"}
+    client.get_io_live_states.assert_awaited_once_with([(1, "11")])
+
+
 def test_knx_catalog_failure_keeps_last_known_good(comexio_api: ComexioAPI, client: MagicMock) -> None:
     catalog = {"KnxPoints": {"1": {}}}
     comexio_api.seed_knx_dpt_catalog(catalog, "11.0.1")

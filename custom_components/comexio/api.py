@@ -1099,6 +1099,19 @@ class ComexioAPI:
             return None, None
         return states.markers, states.knx
 
+    async def get_io_live_states(self, ios: Iterable[tuple[int, str]]) -> dict[str, str] | None:
+        """Live values of physical IOs ((extension id, IO id) pairs), in one request of their own.
+
+        Returns {IO id: numeric value text}; an IO Comexio does not answer with a number is
+        absent. None on any fetch/parse failure — never {} — for the same reason as
+        get_live_states: the caller keeps the last known values instead of reading 0.
+        """
+        try:
+            return await self.client.get_io_live_states(ios)
+        except ComexioError as err:
+            _LOGGER.error("IO live states fetch failed: %s", err)
+            return None
+
     async def get_function_plan_connection_values(
         self, fub_id: int, session: aiohttp.ClientSession | None = None
     ) -> dict[str, list[Any]]:
