@@ -533,19 +533,19 @@ async def _restore_apply_snapshot(
     """
     # A snapshot whose format was unreadable when it was taken stores none: keep the live plan's
     # rather than "aligning" it to the A3 fallback of a rebuild.
-    paper, dpi, orientation = snapshot_paper_format(snapshot) or (
-        api.get_fub_paper_format(fub_id),
-        api.get_fub_dpi(fub_id),
-        api.get_fub_orientation(fub_id),
-    )
-    properties_changed = (
-        api.get_fub_paper_format(fub_id) != paper
-        or api.get_fub_dpi(fub_id) != dpi
-        or api.get_fub_orientation(fub_id) != orientation
-        or live_name != plan_name
-    )
+    live_format = api.get_fub_known_format(fub_id)
+    target_format = snapshot_paper_format(snapshot) or live_format
+    paper, dpi, orientation = target_format or (None, None, None)
+    properties_changed = target_format != live_format or live_name != plan_name
     paper_ok = True
-    if properties_changed:
+    if properties_changed and target_format is None:
+        # Comexio saves the name only together with the format, and neither the backup nor the
+        # plan states one: renaming would overwrite the plan's format with a guess.
+        _LOGGER.warning(
+            "Function Plan Restore: plan %s not renamed to '%s' — its paper format is unreadable", fub_id, plan_name
+        )
+        paper_ok = False
+    elif properties_changed:
         paper_ok = await api.function_plan_update_paper(fub_id, paper, dpi, orientation, name=plan_name)
 
     await api.function_plan_stop_fup(fub_id)
@@ -830,13 +830,7 @@ def _restore_build_message(
 ) -> str:
     """Human-readable persistent_notification body for a restore result."""
     run_label, reactivation_note = _restore_run_label(apply, was_active, auto_start)
-    paper_line = ""
-    if apply["properties_changed"]:
-        paper_line = (
-            f"Aligned with snapshot: name '{plan_name}', paper {apply['paper']} @ {apply['dpi']} DPI, "
-            f"{apply['orientation']} — "
-            f"{ICON_SUCCESS if apply['paper_ok'] else f'{ICON_ERROR} failed, restore may look wrong'}\n"
-        )
+    paper_line = _aligned_properties_line(apply, plan_name)
     if identity_was_mismatched:
         content_line = (
             f"Content match: {ICON_SUCCESS if verify['counts_match'] else ICON_ERROR} "
@@ -904,22 +898,40 @@ def _new_plan_activation_line(run_ok: bool | None, auto_start: bool) -> str:
     )
 
 
+def _aligned_properties_line(apply: dict, plan_name: str) -> str:
+    """The restore result's line on aligning the live plan's name/paper with the snapshot ("" when nothing changed)."""
+    if not apply["properties_changed"]:
+        return ""
+    if apply["paper"] is None:
+        return (
+            f"Name not aligned with snapshot ('{plan_name}'): {ICON_ERROR} neither the backup nor the plan states "
+            "a paper format, and renaming would overwrite it — rename the plan in Comexio Studio\n"
+        )
+    return (
+        f"Aligned with snapshot: name '{plan_name}', paper {apply['paper']} @ {apply['dpi']} DPI, "
+        f"{apply['orientation']} — "
+        f"{ICON_SUCCESS if apply['paper_ok'] else f'{ICON_ERROR} failed, restore may look wrong'}\n"
+    )
+
+
 async def _async_reload_after_restore(hass: HomeAssistant, coordinator: ComexioCoordinator) -> None:
     """Reload so the repointed consumers (plan selector, cluster plan_map) pick up the new plan ID.
 
     Runs as its own task after the restore, so a failure is reported here: the restore's result
-    notification already went out.
+    notification already went out. Home Assistant reports a failed reload by returning False, too.
     """
     try:
-        await coordinator.async_reload_entry("function plan restore")
+        if await coordinator.async_reload_entry("function plan restore"):
+            return
+        _LOGGER.error("[%s] Reload after a function plan restore failed", coordinator.server_id)
     except Exception:
         _LOGGER.exception("[%s] Reload after a function plan restore failed", coordinator.server_id)
-        persistent_notification.async_create(
-            hass,
-            "The integration could not be reloaded after the restore — the plan selector and clusters may "
-            "still point at the old plan ID. Reload the Comexio integration manually.",
-            title=_TITLE_RESTORE_ERR,
-        )
+    persistent_notification.async_create(
+        hass,
+        "The integration could not be reloaded after the restore — the plan selector and clusters may "
+        "still point at the old plan ID. Reload the Comexio integration manually.",
+        title=_TITLE_RESTORE_ERR,
+    )
 
 
 async def _restore_plan_as_new(
@@ -1447,12 +1459,17 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         return
     coordinator, api, _unused_fub_id = ctx
 
-    if coordinator._restore_lock.locked():
-        _LOGGER.warning("Function Plan Restore already in progress, ignoring concurrent request")
+    # A sync and an uninstall cleanup write into function plans too, and a reload closes the API
+    # session: none may overlap a restore (they refuse to start while one runs, see restores_held_off).
+    if coordinator._restore_lock.locked() or coordinator._sync_lock.locked() or coordinator.in_sync:
+        _LOGGER.warning("Function Plan Restore not started — a restore, sync, cleanup or reload is running")
         persistent_notification.async_create(
             hass,
-            "A restore or an integration reload is running — please wait for it to finish before starting a restore.",
+            "A restore, sync, Web-IO range check, uninstall cleanup or integration reload is running — please "
+            "wait for it to finish before starting a restore.",
             title=_TITLE_RESTORE_ERR,
+            # Not the running restore's own id: that would overwrite its progress notice.
+            notification_id=f"comexio_function_plan_restore_blocked_{coordinator.server_id}",
         )
         return
 

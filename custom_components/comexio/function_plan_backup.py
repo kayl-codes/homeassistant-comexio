@@ -53,6 +53,9 @@ STORAGE_VERSION = 1
 
 # Snapshot key: Comexio's firmware version at capture time (ComexioAPI.comexio_version).
 SNAPSHOT_COMEXIO_VERSION = "comexio_version"
+# Set on a snapshot whose paper format was unreadable when it was taken — unlike a snapshot from
+# before the format was tracked, it never gets a later format backfilled as its own.
+SNAPSHOT_PAPER_UNKNOWN = "paper_unknown"
 
 # Fallback used when backfilling snapshots captured before paper/DPI tracking existed and
 # the plan can no longer be matched live (deleted or reassigned) — a spacious default so a
@@ -79,7 +82,7 @@ def _backfill_identity_group(
         fallback = (_FALLBACK_PAPER, _FALLBACK_DPI, _FALLBACK_ORIENTATION)
         paper, dpi, orientation = live_format if is_live_identity else fallback
         for snap in history:
-            if "paper" in snap:
+            if "paper" in snap or snap.get(SNAPSHOT_PAPER_UNKNOWN):
                 continue
             snap["paper"] = paper
             snap["dpi"] = dpi
@@ -461,6 +464,8 @@ class FunctionPlanBackupManager:
             snapshot["operation"] = operation
         if paper is not None:
             snapshot["paper"] = paper
+        else:
+            snapshot[SNAPSHOT_PAPER_UNKNOWN] = True
         if dpi is not None:
             snapshot["dpi"] = dpi
         if orientation is not None:
@@ -613,8 +618,9 @@ class FunctionPlanBackupManager:
         before that was backed up on its own a legacy snapshot may predate such a change. No
         match (plan deleted or its ID reused by a different plan) falls back to A3 @ 90 DPI
         landscape; a live plan whose format is unreadable this cycle is left for a later one. Snapshots that
-        already carry a "paper" key are left untouched, so this is safe to call on every
-        backup cycle. Returns the number of snapshots filled in.
+        already carry a "paper" key, or were taken while the format was unreadable
+        (SNAPSHOT_PAPER_UNKNOWN), are left untouched, so this is safe to call on every backup
+        cycle. Returns the number of snapshots filled in.
         """
         await self._async_ensure_loaded()
         filled = 0

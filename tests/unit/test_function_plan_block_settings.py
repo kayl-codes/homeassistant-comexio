@@ -420,7 +420,7 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
 
     api = _restore_api(plan)
     api.fub_data = {"1": {"Name": "Lights", "Active": True}}
-    api.get_fub_paper_format = api.get_fub_dpi = api.get_fub_orientation = MagicMock(return_value=None)
+    api.get_fub_known_format = MagicMock(return_value=None)
     api.function_plan_update_paper = AsyncMock(return_value=True)
     api.function_plan_stop_fup = AsyncMock(return_value=True)
     api.function_plan_save_elements_pos = AsyncMock(return_value=True)

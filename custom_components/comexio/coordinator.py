@@ -170,7 +170,12 @@ from .const import (
     webio_class_label,
     webio_class_name,
 )
-from .function_plan_backup import FunctionPlanBackupManager, build_orphaned_backup_options, retention_cutoff
+from .function_plan_backup import (
+    FunctionPlanBackupManager,
+    build_orphaned_backup_options,
+    retention_cutoff,
+    snapshot_paper_format,
+)
 from .function_plan_block_settings import expand_autohide_blocks, snapshot_block_settings
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .ha_address import HaAddressResolver, webio_device_hint
@@ -2817,13 +2822,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         another backup's settings after the slots rotated.
 
         paper_format: a snapshot's stored (paper, dpi, orientation) (snapshot_paper_format), which
-        its title and canvas show; None for a live render or a snapshot captured without them,
-        which show the live plan's. Cached like block_settings.
+        its title and canvas show; None for a live render, or for a snapshot captured without them,
+        which is sized like the live plan but names no format. Cached like block_settings.
         """
         cache_generation_before = self._preview_cache_generation
         markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(label_metadata)
         catalog = await self.function_plan_catalog.async_get_catalog()
-        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id, paper_format)
+        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id, paper_format, source == "live")
         sun_times = _build_sun_times(self.hass)
         # A plan switch invalidates the previous plan's connection-id values BEFORE this
         # render — otherwise one frame could color wires from an unrelated plan whose
@@ -3029,6 +3034,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         render_elements, render_catalog = expand_autohide_blocks(
             snapshot.get("elements") or {}, catalog, snapshot_block_settings(snapshot)
         )
+        format_suffix, canvas = self._snapshot_format_title_and_canvas(fub_id, snapshot_paper_format(snapshot))
         svg_content = render_plan_svg(
             render_elements,
             snapshot.get("connections") or {},
@@ -3037,9 +3043,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             webio_by_id,
             ios_by_id,
             plan_name,
-            _ORPHANED_PREVIEW_TITLE_SUFFIX,
+            f"{_ORPHANED_PREVIEW_TITLE_SUFFIX} {format_suffix}".rstrip(),
             _build_sun_times(self.hass),
-            canvas=None,
+            canvas=canvas,
             connection_values=None,
             knx_by_id=self.function_plan_knx_label_map(),
             plan_id=str(fub_id),
@@ -3098,28 +3104,39 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return label_maps
 
     def _build_preview_title_and_canvas(
-        self, fub_id: int, paper_format: tuple[str, int, str] | None = None
+        self, fub_id: int, paper_format: tuple[str, int, str] | None = None, live: bool = True
     ) -> tuple[str, Any]:
         """Build the Studio-style title suffix (state + paper/DPI) and canvas bounds for a live plan.
 
         Title suffix carries the plan's live state + paper/DPI (Studio-style header info),
-        rendered at half the plan-name size. The state is read from the live fub data — for
-        snapshots of deleted plans the suffix stays empty. paper_format: a backup's own format,
-        shown instead of the live one (the plan may have been switched to another paper since).
+        rendered at half the plan-name size. The state is read from the live fub data — a backup
+        of a plan that is gone shows only its stored format (nothing without one). paper_format:
+        a backup's own format, shown instead of the live one (the plan may have been switched to
+        another paper since). live=False without one: a backup whose format is not known — sized
+        like the live plan, but the title names no format it cannot vouch for.
         """
         if (active := self.api.get_fub_active(fub_id)) is None:
-            return "", None
+            return self._snapshot_format_title_and_canvas(fub_id, paper_format)
+        state = f"[{'aktiv' if active else 'inaktiv'}]"
+        if paper_format is not None:
+            format_suffix, canvas = self._snapshot_format_title_and_canvas(fub_id, paper_format)
+            return f"{state} {format_suffix}", canvas
+        # Paper-sized viewBox: same relative element scale for every plan of this paper
+        # format instead of blowing a nearly empty plan up to full card width.
+        canvas = self.api.get_fub_canvas_bounds(fub_id)
+        if not live:
+            return state, canvas
+        return f"{state} [{self.api.get_fub_paper_format(fub_id)} | {self.api.get_fub_dpi(fub_id)}dpi]", canvas
+
+    def _snapshot_format_title_and_canvas(
+        self, fub_id: int, paper_format: tuple[str, int, str] | None
+    ) -> tuple[str, Any]:
+        """Title suffix "[paper | dpi]" and canvas bounds of a backup's own format; ("", None) without one."""
         if paper_format is None:
-            paper = self.api.get_fub_paper_format(fub_id)
-            dpi = self.api.get_fub_dpi(fub_id)
-            # Paper-sized viewBox: same relative element scale for every plan of this paper
-            # format instead of blowing a nearly empty plan up to full card width.
-            canvas = self.api.get_fub_canvas_bounds(fub_id)
-        else:
-            paper, dpi, orientation = paper_format
-            canvas = self.api.get_fub_canvas_bounds(fub_id, paper_name=paper, orientation=orientation, resolution=dpi)
-        title_suffix = f"[{'aktiv' if active else 'inaktiv'}] [{paper} | {dpi}dpi]"
-        return title_suffix, canvas
+            return "", None
+        paper, dpi, orientation = paper_format
+        canvas = self.api.get_fub_canvas_bounds(fub_id, paper_name=paper, orientation=orientation, resolution=dpi)
+        return f"[{paper} | {dpi}dpi]", canvas
 
     def _update_live_preview_cache(
         self,
@@ -6380,7 +6397,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if renamed_count:
             self._schedule_knx_dpt_reload(renamed_count)
 
-    async def async_reload_entry(self, reason: str) -> None:
+    async def async_reload_entry(self, reason: str) -> bool:
         """Reload this config entry — unless a sync is running, whose closing reload covers it.
 
         A reload tears the coordinator down and detaches the API session (api.close()), so one
@@ -6397,6 +6414,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Checks the entry's *current* coordinator, not necessarily self: a caller that outlived
         an earlier reload (the uninstall cleanup task, the KNX auto-tag timer) still holds the
         torn-down instance, whose in_sync/_sync_lock say nothing about a sync on the new one.
+
+        Returns False when Home Assistant reports the reload as failed or the entry is not loaded
+        at all (an earlier reload failed); a reload skipped because another one covers it counts
+        as done. Only the restore's reload reports a False result (services/backup.py).
         """
         current = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         target = current if current is not None else self
@@ -6407,19 +6428,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
                 reason,
             )
-            return
+            return True
         async with target._sync_lock, target.restores_held_off():
             # Re-checked under the locks: a sync or cleanup that held them may have reloaded meanwhile
             # (a failed sync clears in_sync before its closing reload) — that reload covered this one,
             # and a second one would cut into whatever runs on the new coordinator by now.
-            if self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) is not target:
+            if (live := self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)) is not target:
+                if live is None:
+                    _LOGGER.warning(
+                        "[%s] Reload requested (%s) skipped — the integration is not loaded", self.server_id, reason
+                    )
+                    return False
                 _LOGGER.info(
                     "[%s] Reload requested (%s) skipped — the integration was reloaded meanwhile",
                     self.server_id,
                     reason,
                 )
-                return
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                return True
+            return await self.hass.config_entries.async_reload(self.config_entry.entry_id)
 
     def _schedule_knx_dpt_reload(self, renamed_count: int) -> None:
         """Reload the integration shortly after _auto_suffix_unambiguous_knx renamed at least

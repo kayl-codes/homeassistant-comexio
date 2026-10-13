@@ -67,8 +67,8 @@ def test_auto_backup_rotates_on_a_paper_format_change_alone(stores: dict[str, An
 
     assert asyncio.run(run()) == [1, 0, 0, 1]
     history = stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"]
-    assert (history[0]["paper"], history[0]["dpi"], history[0]["orientation"]) == A5
-    assert (history[1]["paper"], history[1]["dpi"], history[1]["orientation"]) == A4
+    assert backup_module.snapshot_paper_format(history[0]) == A5
+    assert backup_module.snapshot_paper_format(history[1]) == A4
 
 
 def test_a_snapshot_without_a_stored_format_is_no_format_change(stores: dict[str, Any], plan: dict[str, Any]) -> None:
@@ -238,6 +238,9 @@ def test_the_known_format_is_none_while_any_part_is_unread(parsing_api: ComexioA
     assert parsing_api.get_fub_known_format(2) == ("A3", 120, "portrait")
     assert parsing_api.get_fub_known_format(99) is None
 
+    parsing_api._fub_data["1"]["Orientation"] = 2
+    assert parsing_api.get_fub_known_format(1) is None  # neither landscape nor portrait
+
     parsing_api._paper_data = {}
     assert parsing_api.get_fub_known_format(2) is None
     assert parsing_api.get_fub_paper_format(2) == "A4"  # the guess the backups no longer take
@@ -259,6 +262,26 @@ def test_the_backfill_waits_for_a_live_plans_format(stores: dict[str, Any], plan
 
     assert asyncio.run(run()) == 0
     assert "paper" not in stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"][0]
+
+
+def test_a_snapshot_taken_while_the_format_was_unreadable_is_never_backfilled(
+    stores: dict[str, Any], plan: dict[str, Any]
+) -> None:
+    """(Review) a later readable format is no statement about the format at capture time."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+    legacy = {**plan, "hash": "old", "plan_name": "Lights"}
+
+    async def run() -> int:
+        await manager.async_auto_backup({1: plan}, fub_data)
+        manager._auto_data["1"]["Lights"].append(legacy)
+        return await manager.async_backfill_paper_metadata(fub_data, {"1": A5})
+
+    assert asyncio.run(run()) == 1
+    unread, backfilled = stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"]
+    assert backup_module.snapshot_paper_format(unread) is None
+    assert unread[backup_module.SNAPSHOT_PAPER_UNKNOWN] is True
+    assert backup_module.snapshot_paper_format(backfilled) == A5
 
 
 def test_a_backup_render_passes_its_paper_format_to_the_title_and_the_armed_cache() -> None:
@@ -287,7 +310,7 @@ def test_a_backup_render_passes_its_paper_format_to_the_title_and_the_armed_cach
     ):
         asyncio.run(coordinator.async_generate_plan_preview(7, "Lights", {}, {}, "snapshot:auto:1", paper_format=A5))
 
-    coordinator._build_preview_title_and_canvas.assert_called_once_with(7, A5)
+    coordinator._build_preview_title_and_canvas.assert_called_once_with(7, A5, False)
     assert coordinator._preview_plan_cache["paper_format"] == A5
 
 
@@ -313,9 +336,7 @@ def test_a_restore_onto_the_plan_keeps_its_paper_when_the_backup_stores_none(
 ) -> None:
     """(Review) without a stored format, "aligning" would switch the live A5 plan to the A3 rebuild default."""
     api = AsyncMock()
-    api.get_fub_paper_format = MagicMock(return_value="A5")
-    api.get_fub_dpi = MagicMock(return_value=120)
-    api.get_fub_orientation = MagicMock(return_value="landscape")
+    api.get_fub_known_format = MagicMock(return_value=A5)
     snapshot = {"elements": {}, "connections": {}, **stored}
 
     sanitized = AsyncMock(return_value=(snapshot, {}, None))
@@ -344,3 +365,90 @@ def test_a_backups_paper_outside_the_size_table_is_sized_from_its_paper_entry(pa
 
     parsing_api._fub_data["1"]["Paper"] = "9"
     assert letter == parsing_api.get_fub_canvas_bounds(1) != live
+
+
+def test_a_restore_never_renames_a_plan_whose_format_nobody_states() -> None:
+    """(Review) Comexio saves name and format together: a rename would write the A4/90 getter defaults."""
+    api = AsyncMock()
+    api.get_fub_known_format = MagicMock(return_value=None)
+    snapshot = {"elements": {}, "connections": {}}
+
+    sanitized = AsyncMock(return_value=(snapshot, {}, None))
+    with patch.object(backup_service, "_sanitize_missing_comments", sanitized):
+        apply = asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, "Renamed", "Lights", False))
+
+    api.function_plan_update_paper.assert_not_awaited()
+    assert apply["properties_changed"] is True
+    assert apply["paper_ok"] is False
+    assert "rename the plan in Comexio Studio" in backup_service._aligned_properties_line(apply, "Lights")
+
+
+def test_an_unknown_paper_name_is_never_sized_like_the_live_plan(parsing_api: ComexioAPI) -> None:
+    """(Review) plan 2 is A3 portrait live; a backup's 'Tabloid' (in neither table) gets the reference size."""
+    parsing_api.parse_config(load_json_fixture("config_basic.json"))
+
+    bounds = parsing_api.get_fub_canvas_bounds(2, paper_name="Tabloid", orientation="landscape", resolution=90)
+
+    assert bounds == (parsing_api._CANVAS_REF_X, parsing_api._CANVAS_REF_Y)
+
+
+def test_a_backup_of_a_deleted_plan_shows_its_own_format() -> None:
+    """(Review) the plan is gone, so there is no state to show — but the backup's format still is."""
+    coordinator = _preview_coordinator()
+    coordinator.api.get_fub_active = lambda _fub_id: None
+
+    assert coordinator._build_preview_title_and_canvas(7, A5) == ("[A5 | 120dpi]", (1.0, 2.0))
+    coordinator.api.get_fub_canvas_bounds.assert_called_once_with(
+        7, paper_name="A5", orientation="landscape", resolution=120
+    )
+    assert coordinator._build_preview_title_and_canvas(7) == ("", None)
+
+
+@pytest.mark.parametrize(
+    ("stored", "title", "canvas"),
+    [({"paper": "A5", "dpi": 120}, "[verwaist] [A5 | 120dpi]", (1.0, 2.0)), ({}, "[verwaist]", None)],
+)
+def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
+    stored: dict[str, Any], title: str, canvas: tuple | None
+) -> None:
+    coordinator = _preview_coordinator()
+    coordinator.server_id = SERVER_ID
+    coordinator.hass = MagicMock()
+    coordinator._preview_cache_generation = 0
+    coordinator.stop_preview = MagicMock()  # type: ignore[method-assign]
+    snapshot = {"elements": {}, "connections": {}, **stored}
+    coordinator.function_plan_backup = SimpleNamespace(async_get_snapshot=AsyncMock(return_value=snapshot))
+    coordinator.function_plan_catalog = SimpleNamespace(async_get_catalog=AsyncMock(return_value={}))
+    coordinator._resolve_preview_label_maps = MagicMock(return_value=({}, {}, {}))  # type: ignore[method-assign]
+    coordinator.function_plan_knx_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
+    coordinator._async_publish_plan_preview = AsyncMock(return_value="/local/x.svg")  # type: ignore[method-assign]
+    coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
+
+    with (
+        patch.object(coordinator_module, "_build_sun_times", return_value={}),
+        patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
+        patch.object(coordinator_module, "render_plan_svg", return_value="<svg/>") as render,
+    ):
+        asyncio.run(coordinator.async_generate_orphaned_plan_preview(7, "Lights", "auto", 0))
+
+    assert render.call_args.args[7] == title
+    assert render.call_args.kwargs["canvas"] == canvas
+
+
+def test_a_backup_preview_without_a_known_format_names_none() -> None:
+    """(Review) sized like the live plan, but the live "[A4 | 100dpi]" is no statement about the backup."""
+    coordinator = _preview_coordinator()
+
+    assert coordinator._build_preview_title_and_canvas(7, None, live=False) == ("[aktiv]", (1.0, 2.0))
+
+
+def test_a_restore_renaming_the_plan_keeps_its_live_format_when_the_backup_stores_none() -> None:
+    api = AsyncMock()
+    api.get_fub_known_format = MagicMock(return_value=A5)
+    snapshot = {"elements": {}, "connections": {}}
+
+    sanitized = AsyncMock(return_value=(snapshot, {}, None))
+    with patch.object(backup_service, "_sanitize_missing_comments", sanitized):
+        asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, "Renamed", "Lights", False))
+
+    api.function_plan_update_paper.assert_awaited_once_with(7, *A5, name="Lights")

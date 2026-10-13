@@ -525,15 +525,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
         notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
         notif_id = f"comexio_sync_{self.server_id}"
-        if self.coordinator._sync_lock.locked():
-            _LOGGER.warning("[%s] Sync already in progress, ignoring concurrent request", self.server_id)
+        # A restore rewrites function plans the sync writes into as well (sort, trigger pairs).
+        if self.coordinator._sync_lock.locked() or self.coordinator._restore_lock.locked():
+            _LOGGER.warning("[%s] Sync already in progress or a restore running, ignoring request", self.server_id)
             if notify_enabled:
                 # Own notification_id — notif_id is the *in-progress* sync's live-progress
                 # notification, and reusing it here would clobber that progress display.
                 persistent_notification.async_create(
                     self.hass,
-                    f"{ICON_WARNING} Sync request ignored — a sync or Web-IO range check is already "
-                    "running. Please try again shortly.",
+                    f"{ICON_WARNING} Sync request ignored — a sync, Web-IO range check or function plan "
+                    "restore is already running. Please try again shortly.",
                     title=f"Comexio Sync ({self.server_id})",
                     notification_id=f"comexio_sync_blocked_{self.server_id}",
                 )
@@ -1310,8 +1311,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # coordinator.async_reload_entry skipped during this sync.
         try:
             # The reload below closes the API session: wait for a restore that runs now and keep
-            # new ones out until it is done. in_sync stays True while waiting, so the restore's
-            # own reload request is skipped (async_reload_entry) — this reload covers it.
+            # new ones out until it is done. A sync and a restore refuse to start while the other
+            # runs, so this only guards the reload. in_sync stays True while waiting, so the
+            # restore's own reload request is skipped (async_reload_entry) — this reload covers it.
             async with self.coordinator.restores_held_off():
                 await self._reset_sync_state_and_reload()
         finally:

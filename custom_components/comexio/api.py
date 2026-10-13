@@ -1300,6 +1300,8 @@ class ComexioAPI:
             dpi, orient_id = int(fub["Resolution"]), int(fub["Orientation"])
         except (TypeError, ValueError):
             return None
+        if orient_id not in (0, 1):
+            return None
         return str(paper), dpi, "portrait" if orient_id == 1 else "landscape"
 
     def get_fub_active(self, fub_id: int) -> bool | None:
@@ -1334,8 +1336,9 @@ class ComexioAPI:
         if paper_name and paper_name in self._PAPER_MM_BY_NAME:
             mm_long, mm_short = self._PAPER_MM_BY_NAME[paper_name]
         else:
-            # A backup's paper outside the table is sized from $Paper by name, never by the live plan's.
-            paper = named if paper_name and named else self._paper_data.get(str(fub.get("Paper", "")), {})
+            # A backup's paper outside the table is sized from $Paper by name, never by the live plan's —
+            # not there either: the reference size.
+            paper = (named or {}) if paper_name else self._paper_data.get(str(fub.get("Paper", "")), {})
             mm_long = paper.get("MMX", self._CANVAS_REF_MM_LONG)
             mm_short = paper.get("MMY", self._CANVAS_REF_MM_SHORT)
 

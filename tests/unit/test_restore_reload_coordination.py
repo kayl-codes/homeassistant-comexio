@@ -81,13 +81,15 @@ def test_an_unexpected_restore_error_replaces_the_progress_notice() -> None:
     coordinator._auto_backup_pauses = 0
     coordinator._auto_backup_pause_generation = 0
 
+    hass, call = MagicMock(), SimpleNamespace(data={})
     with (
         patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
         patch.object(backup, "_run_function_plan_restore", AsyncMock(side_effect=RuntimeError("Session is closed"))),
         patch.object(backup.persistent_notification, "async_create") as create,
-        pytest.raises(RuntimeError),
     ):
-        asyncio.run(backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={})))
+        restore = backup._handle_function_plan_restore(hass, call)
+        with pytest.raises(RuntimeError):
+            asyncio.run(restore)
 
     create.assert_called_once()
     assert create.call_args.kwargs["notification_id"] == "comexio_function_plan_restore_cx1"
@@ -160,15 +162,16 @@ def test_a_failed_sync_and_the_restores_reload_reload_only_once() -> None:
 
     button = SimpleNamespace(coordinator=coordinator, _reset_sync_state_and_reload=sync_reload)
 
-    async def run() -> None:
+    async def run() -> bool:
         await coordinator._sync_lock.acquire()
         async with coordinator._restore_lock:
             finalize = asyncio.create_task(ComexioSyncButton._finalize_sync(button))  # type: ignore[arg-type]
             restore_reload = asyncio.create_task(coordinator.async_reload_entry("function plan restore"))
             await _settle()
-        await asyncio.gather(finalize, restore_reload)
+        await finalize
+        return await restore_reload
 
-    asyncio.run(run())
+    assert asyncio.run(run()) is True  # covered by the sync's reload, not a failure
     assert reload.await_count == 1
 
 
@@ -180,6 +183,71 @@ def test_a_failed_reload_after_a_restore_is_reported() -> None:
         asyncio.run(backup._async_reload_after_restore(MagicMock(), coordinator))  # type: ignore[arg-type]
     create.assert_called_once()
     assert "Reload the Comexio integration manually" in create.call_args.args[1]
+
+
+def test_a_reload_home_assistant_reports_as_failed_is_reported_too() -> None:
+    """(Review) config_entries.async_reload returns False instead of raising for a failed setup."""
+    coordinator = _coordinator()
+    coordinator.hass.config_entries.async_reload = AsyncMock(return_value=False)
+    with patch.object(backup.persistent_notification, "async_create") as create:
+        asyncio.run(backup._async_reload_after_restore(MagicMock(), coordinator))
+    create.assert_called_once()
+
+    coordinator.hass.config_entries.async_reload = AsyncMock(return_value=True)
+    with patch.object(backup.persistent_notification, "async_create") as create:
+        asyncio.run(backup._async_reload_after_restore(MagicMock(), coordinator))
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize("busy", ["sync_lock", "in_sync"])
+def test_a_restore_does_not_start_while_a_sync_or_cleanup_runs(busy: str) -> None:
+    """(Review) a sync or uninstall cleanup writes into or deletes the plans a restore rewrites."""
+    coordinator = _coordinator()
+    coordinator.in_sync = busy == "in_sync"
+    run_restore = AsyncMock()
+
+    async def run() -> None:
+        if busy == "sync_lock":
+            await coordinator._sync_lock.acquire()
+        await backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={}))
+
+    with (
+        patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+        patch.object(backup, "_run_function_plan_restore", run_restore),
+        patch.object(backup.persistent_notification, "async_create") as create,
+    ):
+        asyncio.run(run())
+
+    run_restore.assert_not_awaited()
+    assert "uninstall cleanup" in create.call_args.args[1]
+
+
+def test_a_sync_does_not_start_while_a_restore_runs() -> None:
+    coordinator = _coordinator()
+    coordinator.config_entry = SimpleNamespace(entry_id="e1", data={}, options={})
+    button = SimpleNamespace(coordinator=coordinator, hass=coordinator.hass, server_id="cx1")
+
+    async def run() -> None:
+        async with coordinator._restore_lock:
+            with patch("custom_components.comexio.button.persistent_notification.async_create") as create:
+                await ComexioSyncButton.async_handle_press(button)  # type: ignore[arg-type]
+            assert "function plan restore" in create.call_args.args[1]
+        assert not coordinator._sync_lock.locked()
+
+    asyncio.run(run())
+
+
+def test_an_uninstall_cleanup_does_not_start_while_a_restore_runs() -> None:
+    coordinator = _coordinator()
+    flow = SimpleNamespace(hass=coordinator.hass, _reraise_cleanup_issue=MagicMock())
+
+    async def run() -> bool:
+        async with coordinator._restore_lock:
+            with patch("custom_components.comexio.repairs._post_result_notification"):
+                return ComexioRepairFlow._cleanup_blocked_by_sync(flow, coordinator, "all", "n1", True)  # type: ignore[arg-type]
+
+    assert asyncio.run(run()) is True
+    flow._reraise_cleanup_issue.assert_called_once_with(coordinator, "all")
 
 
 @pytest.mark.parametrize(
@@ -203,3 +271,15 @@ def test_the_waiting_text_never_replaces_a_failed_syncs_report(
     asyncio.run(run())
     assert coordinator.sync_progress_text == "Sync failed: 1 write"
     coordinator.async_update_listeners.assert_not_called()
+
+
+def test_a_skipped_reload_counts_as_done_unless_the_entry_is_not_loaded() -> None:
+    """(Review) a restore's reload must not report a skip as a failure, nor a missing entry as a reload."""
+    coordinator = _coordinator()
+    coordinator.in_sync = True
+    assert asyncio.run(coordinator.async_reload_entry("x")) is True
+
+    coordinator.in_sync = False
+    coordinator.hass.data[DOMAIN] = {}
+    assert asyncio.run(coordinator.async_reload_entry("x")) is False
+    coordinator.hass.config_entries.async_reload.assert_not_awaited()
