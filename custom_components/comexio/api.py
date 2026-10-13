@@ -79,6 +79,7 @@ FUNCTION_PLAN_CONSTANT_TYPE = 16
 # Comexio's paper ids ($Fubs "Paper") per format aiocomexio accepts, for the plan cache after a settings save.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
 _PLAN_PAPER_FALLBACK = "A4"
+_PLAN_DPI_RANGE = range(45, 121)  # what Comexio accepts for a plan (aiocomexio raises outside it)
 # Comexio's answer (as quoted in aiocomexio's refusal message) for a plan that is not running.
 _PLAN_NOT_RUNNING_ANSWER = "0:not_found"
 # Comexio's editor action that stores block settings ($FubBaseConfig rows) of one element.
@@ -133,9 +134,9 @@ async def _attempt[T, F](
         return failed
 
 
-def plan_paper_supported(paper_format: str) -> bool:
-    """Whether a plan can be set to this paper format (_plan_paper_and_orientation replaces any other)."""
-    return paper_format.upper() in _PLAN_PAPER_IDS
+def plan_format_settable(paper_format: str, dpi: int) -> bool:
+    """Whether a plan can be set to this paper and DPI (_plan_paper_and_orientation replaces any other paper)."""
+    return paper_format.upper() in _PLAN_PAPER_IDS and dpi in _PLAN_DPI_RANGE
 
 
 def _plan_paper_and_orientation(paper_format: str, orientation: str) -> tuple[str, str]:

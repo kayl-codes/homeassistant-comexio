@@ -1860,7 +1860,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 await self._async_auto_backup_plans(plans, fub_data, plan_format, pause_generation)
             try:
-                await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
+                # A restore since the format was read may have changed it: backfill next cycle.
+                if self._auto_backup_held_back(pause_generation):
+                    _LOGGER.debug(
+                        "[%s] Function Plan paper/DPI backfill skipped: a restore ran meanwhile", self.server_id
+                    )
+                else:
+                    await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
             except Exception:
                 _LOGGER.exception("[%s] Function Plan paper/DPI backfill failed", self.server_id)
             try:
@@ -3919,7 +3925,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         "skipped": 0|1} summary; shared by the nightly schedule and the manual force trigger.
         "skipped" is 1 (with the other counters left at 0) when no data is loaded yet, or while
         a sync is in progress — save_single_command would otherwise race the sync button's
-        delta/full-recreate writes against the same Web-IO devices (see _sync_lock / R4) — so
+        delta/full-recreate writes against the same Web-IO devices (see _sync_lock / R4) — or a
+        function plan restore (sync and restore exclude each other, the range check counts as a sync) — so
         callers can tell "skipped" apart from a genuine clean run that found nothing to fix.
         "excluded" counts commands that were never read at all because they couldn't be matched
         to a target (naming mismatch, stale command) or are missing an id/device — kept separate
@@ -3937,8 +3944,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not self.data:
             result[RANGE_CHECK_SKIPPED] = 1
             return result
-        if self._sync_lock.locked():
-            _LOGGER.warning("[%s] Sync in progress, skipping Web-IO range check", self.server_id)
+        if self._sync_lock.locked() or self._restore_lock.locked():
+            _LOGGER.warning(
+                "[%s] Sync or function plan restore in progress, skipping Web-IO range check", self.server_id
+            )
             result[RANGE_CHECK_SKIPPED] = 1
             return result
 

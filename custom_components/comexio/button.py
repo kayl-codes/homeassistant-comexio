@@ -3155,8 +3155,8 @@ class ComexioWebioRangeCheckButton(CoordinatorEntity, ButtonEntity):
             if result[RANGE_CHECK_SKIPPED]:
                 icon = ICON_WARNING
                 msg = (
-                    f"{icon} Web-IO range check skipped — a sync is in progress or no data is "
-                    "loaded yet. Please try again shortly."
+                    f"{icon} Web-IO range check skipped — a sync or function plan restore is in "
+                    "progress, or no data is loaded yet. Please try again shortly."
                 )
             else:
                 has_problems = (

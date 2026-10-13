@@ -132,15 +132,34 @@ def test_a_failing_service_description_refresh_keeps_the_restores_result() -> No
     coordinator._auto_backup_pause_generation = 0
     with (
         patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
-        patch.object(backup, "_run_function_plan_restore", AsyncMock()),
-        patch.object(backup, "_refresh_service_descriptions", AsyncMock(side_effect=OSError("disk full"))),
         patch.object(backup.persistent_notification, "async_create") as create,
+        patch.object(backup, "_refresh_service_descriptions", AsyncMock(side_effect=OSError("disk full"))),
     ):
-        restore = backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={}))
-        with pytest.raises(OSError):
-            asyncio.run(restore)
 
-    create.assert_not_called()
+        async def restore_posting_its_result(hass: object, *_: object) -> None:
+            backup.persistent_notification.async_create(hass, "Restore: **OK**", notification_id="n")
+
+        with patch.object(backup, "_run_function_plan_restore", restore_posting_its_result):
+            restore = backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={}))
+            with pytest.raises(OSError):
+                asyncio.run(restore)
+
+    create.assert_called_once()
+    assert create.call_args.args[1] == "Restore: **OK**"
+
+
+def test_a_range_check_does_not_start_while_a_restore_runs() -> None:
+    """(Review) a restore refuses to start during a range check; the other way round must hold too."""
+    coordinator = _coordinator()
+    coordinator.data = {"webio_commands": {}}
+
+    async def run() -> dict[str, int]:
+        async with coordinator._restore_lock:
+            return await coordinator.async_force_webio_range_check()
+
+    result = asyncio.run(run())
+    assert result["skipped"] == 1
+    assert not coordinator._sync_lock.locked()
 
 
 def test_the_restores_own_reload_runs_after_it_instead_of_deadlocking() -> None:

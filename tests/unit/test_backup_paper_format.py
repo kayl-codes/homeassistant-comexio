@@ -12,7 +12,7 @@ from custom_components.comexio import (
     function_plan_backup as backup_module,
     plan_preview,
 )
-from custom_components.comexio.api import ComexioAPI, plan_paper_supported
+from custom_components.comexio.api import ComexioAPI, plan_format_settable
 from custom_components.comexio.const import DOMAIN
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
@@ -404,7 +404,7 @@ def test_a_rebuild_never_uses_a_paper_a_plan_cannot_be_set_to() -> None:
     """(Review) Comexio would get A4 instead of the backup's A2 — the spacious default is the safer guess."""
     snapshot = {"paper": "A2", "dpi": 120, "orientation": "portrait"}
     assert backup_service._rebuild_paper_format(snapshot) == ("A3", 90, "landscape")
-    assert "A2 cannot be set on a plan" in backup_service._paper_default_note(snapshot)
+    assert "A2 @ 120 DPI, portrait cannot be set on a plan" in backup_service._paper_default_note(snapshot)
 
 
 @pytest.mark.parametrize(("live_name", "renamed"), [("Lights", False), ("Renamed", True)])
@@ -452,9 +452,61 @@ def test_a_damaged_stored_format_is_named_unreadable() -> None:
     assert "unreadable" in backup_service._paper_default_note({"paper": "A5", "dpi": None})
 
 
-@pytest.mark.parametrize(("paper", "supported"), [("A3", True), ("a4", True), ("A5", True), ("A2", False), ("", False)])
-def test_which_papers_a_plan_can_be_set_to(paper: str, supported: bool) -> None:
-    assert plan_paper_supported(paper) is supported
+@pytest.mark.parametrize(
+    ("paper", "dpi", "settable"),
+    [("A3", 90, True), ("a4", 45, True), ("A5", 120, True), ("A2", 90, False), ("", 90, False)]
+    + [("A4", 44, False), ("A4", 121, False)],
+)
+def test_which_formats_a_plan_can_be_set_to(paper: str, dpi: int, settable: bool) -> None:
+    """(Review) aiocomexio rejects a DPI outside 45-120: such a format is never sent."""
+    assert plan_format_settable(paper, dpi) is settable
+
+
+def test_a_restore_never_sends_a_dpi_comexio_rejects() -> None:
+    api = AsyncMock()
+    api.get_fub_known_format = MagicMock(return_value=A5)
+    snapshot = {"elements": {}, "connections": {}, "paper": "A4", "dpi": 300, "orientation": "landscape"}
+
+    sanitized = AsyncMock(return_value=(snapshot, {}, None))
+    with patch.object(backup_service, "_sanitize_missing_comments", sanitized):
+        asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, "Renamed", "Lights", False))
+
+    api.function_plan_update_paper.assert_awaited_once_with(7, *A5, name="Lights")
+    assert backup_service._rebuild_paper_format(snapshot) == ("A3", 90, "landscape")
+
+
+def test_a_malformed_stored_format_is_replaced_by_the_readable_one(
+    stores: dict[str, Any], plan: dict[str, Any]
+) -> None:
+    """(Review) no unknown marker and a 'paper' key the backfill skips: only a new backup repairs it."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+
+    async def run() -> int:
+        await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A4})
+        manager._auto_data["1"]["Lights"][0]["dpi"] = None
+        return len(await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A4}))
+
+    assert asyncio.run(run()) == 1
+    assert backup_module.snapshot_paper_format(stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"][0]) == A4
+
+
+def test_an_auto_backup_that_could_not_be_saved_is_taken_again(stores: dict[str, Any], plan: dict[str, Any]) -> None:
+    """(Review) left in memory, the unsaved snapshot hid the format change from every later cycle."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+
+    async def run() -> int:
+        await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A4})
+        with (
+            patch.object(manager._auto_store, "async_save", AsyncMock(side_effect=OSError("disk full"))),
+            pytest.raises(OSError),
+        ):
+            await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A5})
+        assert backup_module.snapshot_paper_format(manager._auto_data["1"]["Lights"][0]) == A4
+        return len(await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A5}))
+
+    assert asyncio.run(run()) == 1
 
 
 def test_a_restore_never_renames_a_plan_whose_live_paper_cannot_be_set() -> None:

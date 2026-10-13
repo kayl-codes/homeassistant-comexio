@@ -22,7 +22,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.util import dt as dt_util
 
-from ..api import plan_paper_supported
+from ..api import plan_format_settable
 from ..const import (
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
@@ -96,8 +96,8 @@ _REBUILD_ORIENTATION = "landscape"
 
 
 def _settable_format(paper_format: tuple[str, int, str] | None) -> tuple[str, int, str] | None:
-    """paper_format when a plan can be set to it, else None (Comexio would get A4 instead)."""
-    return paper_format if paper_format is not None and plan_paper_supported(paper_format[0]) else None
+    """paper_format when a plan can be set to it, else None (Comexio would get A4 or reject the DPI)."""
+    return paper_format if paper_format is not None and plan_format_settable(paper_format[0], paper_format[1]) else None
 
 
 def _rebuild_paper_format(snapshot: dict[str, Any]) -> tuple[str, int, str]:
@@ -117,7 +117,7 @@ def _paper_default_note(snapshot: dict[str, Any]) -> str:
             return " (the backup's paper format is unreadable — default used)"
         return " (the backup stores no paper format — default used)"
     if _settable_format(stored) is None:
-        return f" (the backup's paper {stored[0]} cannot be set on a plan — default used)"
+        return f" (the backup's {format_paper_format(stored)} cannot be set on a plan — default used)"
     return ""
 
 

@@ -231,12 +231,13 @@ def _paper_format_changed(previous: Mapping[str, Any], current: tuple[Any, Any, 
     """Whether today's paper/DPI/orientation differ from the ones the previous snapshot stored.
 
     Not read this poll (None) never counts as a change, nor does a previous snapshot from before
-    the format was tracked — but one taken while it was unreadable does, so it gets stored.
+    the format was tracked — but one taken while it was unreadable, or storing a malformed one,
+    does, so the readable format gets stored.
     """
     if None in current:
         return False
     if (stored := snapshot_paper_format(previous)) is None:
-        return bool(previous.get(SNAPSHOT_PAPER_UNKNOWN))
+        return bool(previous.get(SNAPSHOT_PAPER_UNKNOWN)) or "paper" in previous
     return stored != (str(current[0]), int(current[1]), str(current[2]))
 
 
@@ -527,6 +528,7 @@ class FunctionPlanBackupManager:
             _LOGGER.debug("[%s] Function Plan auto backup skipped: a restore started meanwhile", self._server_id)
             return []
         changed_identities: list[dict[str, Any]] = []
+        rollback: list[tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]] = []
         for fub_id, plan_data in plans.items():
             key = str(fub_id)
             new_hash = plan_hash(plan_data)
@@ -551,6 +553,7 @@ class FunctionPlanBackupManager:
                 block_settings=plan_settings,
             )
             _freeze_block_keys(snapshot, fub_base)
+            rollback.append((history, list(history), snapshot))
             history.insert(0, snapshot)
             del history[FUNCTION_PLAN_AUTO_BACKUP_SLOTS:]
             changed_identities.append(
@@ -566,8 +569,26 @@ class FunctionPlanBackupManager:
                 FUNCTION_PLAN_AUTO_BACKUP_SLOTS,
             )
         if changed_identities:
-            await self._auto_store.async_save(self._auto_data)
+            await self._async_save_auto_or_roll_back(rollback)
         return changed_identities
+
+    async def _async_save_auto_or_roll_back(
+        self, rollback: list[tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]]
+    ) -> None:
+        """Save the auto backups; on failure put each changed history back as it was, then raise.
+
+        Kept in memory, an unsaved snapshot would be what the next cycle compares against: the
+        change it records would never be backed up again (until a restart or another change).
+        A history changed meanwhile (e.g. a restore promoting a slot during the save) is left
+        alone rather than overwritten with the copy taken before.
+        """
+        try:
+            await self._auto_store.async_save(self._auto_data)
+        except Exception:
+            for history, before, inserted in rollback:
+                if history and history[0] is inserted:
+                    history[:] = before
+            raise
 
     async def async_change_backup(
         self,
