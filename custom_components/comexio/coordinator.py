@@ -4228,14 +4228,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         return self.api.get_fub_active(fub_id)
 
+    def _plan_watch_blocked(self) -> bool:
+        """Whether a sync, repair, restore, full poll or bus-load cascade runs — the watchdog judges nothing."""
+        return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
+
     @property
     def managed_plan_start_blocked(self) -> bool:
-        """Whether a sync, repair, restore, full poll or bus-load cascade runs — no plan is started meanwhile."""
-        return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
+        """_plan_watch_blocked or a plan edit runs — no plan starts meanwhile.
+
+        A plan edit leaves the judgement alone (HA's own stop is excused by ha_stopped_within), only
+        an auto-start in it is deferred to the next check.
+        """
+        return self._plan_watch_blocked() or self.plan_edits_running
 
     async def async_watch_managed_plans(self) -> bool:
         """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
-        if self.managed_plan_start_blocked:
+        if self._plan_watch_blocked():
             return False
         if self.live_plan_list() is None:
             # Until a poll read the whole plan list, the cache holds only the plans HA created or looked
@@ -4257,7 +4265,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             {**user_plans, **self._managed_plan_names()},
             self._watchdog_grace_run_state if in_grace else self._watchdog_run_state,
             user_plans.keys(),
-            auto_start=not in_grace,
+            # During a plan edit the start would only be deferred, logged on every tick: it follows
+            # with the first check after the edit.
+            auto_start=not in_grace and not self.plan_edits_running,
         )
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
@@ -4339,11 +4349,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         True if started, False if Comexio refused it, None if not attempted (a sync, restore or poll
         runs) or not answered — the auto-start counts only a refusal as a failed attempt.
+        Marked as a plan edit with no await since the check: a sort, connect, restore or sync starting
+        meanwhile refuses until the start request is answered.
         """
         if self.managed_plan_start_blocked:
             return None
-        async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
-            return await self.api.function_plan_run_fup_outcome(fub_id)
+        with self.plan_edit():
+            async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
+                return await self.api.function_plan_run_fup_outcome(fub_id)
 
     async def _async_watchdog_auto_start_plan(self, fub_id: int) -> bool | None:
         """_async_watchdog_start_plan for the auto-start, which stays off in an outage and the boot grace after it.
@@ -4355,10 +4368,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         return await self._async_watchdog_start_plan(fub_id)
 
-    async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool:
-        """Start a stopped managed plan from its repair or push; False if Comexio did not confirm it."""
+    async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool | None:
+        """Start a stopped managed plan from its repair or push.
+
+        False if Comexio did not confirm it, None if not sent: a sync, restore, poll, plan edit or
+        cascade runs (checked again after the login, which awaits Comexio).
+        """
+        if self.managed_plan_start_blocked:
+            return None
         if not await self.api.login():
             return False
+        if self.managed_plan_start_blocked:
+            return None
         if not await self._async_watchdog_start_plan(fub_id):
             return False
         # Clear the stopped verdict before the verification fetch: a plan that stopped again
@@ -4405,10 +4426,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self.plan_watchdog.async_plan_started(fub_id, confirm=True)
             self.async_update_listeners()
             return
-        if not self.managed_plan_start_blocked and await self.async_start_managed_plan(fub_id, from_push=True):
+        started = await self.async_start_managed_plan(fub_id, from_push=True)
+        if started:
+            return
+        name = self.api.function_plan_name(fub_id)
+        if started is None:
+            _LOGGER.warning(
+                "[%s] Function plan %s not started from the watchdog push: a sync, restore, poll, function plan "
+                "edit or bus-load cascade is running",
+                self.server_id,
+                fub_id,
+            )
+            await self.plan_watchdog.async_push_start_busy(fub_id, name)
             return
         _LOGGER.warning("[%s] Function plan %s could not be started from the watchdog push", self.server_id, fub_id)
-        await self.plan_watchdog.async_push_start_failed(fub_id, self.api.function_plan_name(fub_id))
+        await self.plan_watchdog.async_push_start_failed(fub_id, name)
 
     def _apply_fetched_run_states(self, states: dict[int, bool], run_state_mark: int, cache_epoch: int) -> bool:
         """Write a run-state answer into the cache unless a newer plan list arrived meanwhile; True if changed.

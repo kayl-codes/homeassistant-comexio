@@ -1403,7 +1403,11 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_abort(reason="already_running", description_placeholders=placeholders)
         if coordinator.managed_plan_start_blocked:
             return self.async_abort(reason="busy")
-        if not await coordinator.async_start_managed_plan(fub_id):
+        started = await coordinator.async_start_managed_plan(fub_id)
+        if started is None:
+            # An edit, sync or restore started while the login awaited Comexio: nothing was sent.
+            return self.async_abort(reason="busy")
+        if not started:
             return self.async_abort(reason="start_failed", description_placeholders=placeholders)
         title = "Plan gestartet" if self.hass.config.language == "de" else "Plan started"
         return self.async_create_entry(title=title, data={})

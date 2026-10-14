@@ -55,6 +55,11 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         ),
         "failed_title": "Comexio: start failed",
         "failed": "Comexio did not confirm the start of {name} (ID {fub_id}).",
+        "busy_title": "Comexio: start not sent",
+        "busy": (
+            "{name} (ID {fub_id}) was not started: a sync, restore, poll, function plan edit or bus-load "
+            "watchdog run is in progress. Try again in a moment."
+        ),
         "suspended_title": "Comexio: check function plan",
         "suspended": (
             "Plan Auto-Start could not keep {name} (ID {fub_id}) running after {attempts} attempts and "
@@ -71,6 +76,11 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "auto_started": "Der Logikplan {name} (ID {fub_id}) lief nicht und wurde per Plan Auto-Start gestartet.",
         "failed_title": "Comexio: Start fehlgeschlagen",
         "failed": "Comexio hat den Start von {name} (ID {fub_id}) nicht bestätigt.",
+        "busy_title": "Comexio: Start nicht gesendet",
+        "busy": (
+            "{name} (ID {fub_id}) wurde nicht gestartet: Gerade läuft ein Sync, eine Wiederherstellung, ein "
+            "Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Versuche es gleich noch einmal."
+        ),
         "suspended_title": "Comexio: Logikplan prüfen",
         "suspended": (
             "Plan Auto-Start konnte {name} (ID {fub_id}) nach {attempts} Versuchen nicht am Laufen halten "
@@ -241,6 +251,10 @@ class ManagedPlanWatchdog:
     async def async_push_start_failed(self, fub_id: int, name: str) -> None:
         """Tell the phone a start from its push failed, with the "Start plan" action again."""
         await self._async_push(fub_id, name, "failed_title", "failed", with_action=True)
+
+    async def async_push_start_busy(self, fub_id: int, name: str) -> None:
+        """Tell the phone a start from its push was not sent (something else runs), with the action again."""
+        await self._async_push(fub_id, name, "busy_title", "busy", with_action=True)
 
     def _log_transitions(
         self, previous: Mapping[int, str], stopped: Mapping[int, str], managed: Mapping[int, str]
