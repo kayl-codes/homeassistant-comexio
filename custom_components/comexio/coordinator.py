@@ -110,6 +110,7 @@ from .const import (
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    FUNCTION_PLAN_UNLOAD_POLL_SEC,
     FUNCTION_PLAN_UNLOAD_WAIT_SEC,
     FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
     FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC,
@@ -1990,6 +1991,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         leaves a half-built plan ("Session is closed", seen live 2026-10-14: an empty copy). A
         reload through async_reload_entry already waited and holds the restores off, so it skips
         this. Bounded by FUNCTION_PLAN_UNLOAD_WAIT_SEC: an unload that never ends would block HA.
+
+        It watches the lock instead of queueing for it: a reload through async_reload_entry queued
+        first would get the lock next and then wait for HA's setup lock, which this unload holds;
+        both would wait for each other until the timeout. Once such a reload holds the lock, the
+        restore is over and this unload goes ahead.
         """
         if self._restores_held_for_reload:
             return
@@ -1997,8 +2003,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             async with asyncio.timeout(FUNCTION_PLAN_UNLOAD_WAIT_SEC):
                 if self._restore_lock.locked():
                     _LOGGER.info("[%s] Unload waits for the running function plan restore to finish", self.server_id)
-                    async with self._restore_lock:
-                        pass
+                while self._restore_lock.locked() and not self._restores_held_for_reload:
+                    await asyncio.sleep(FUNCTION_PLAN_UNLOAD_POLL_SEC)
                 await self.async_wait_for_plan_edits()
         except TimeoutError:
             _LOGGER.warning(
@@ -4353,6 +4359,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_stop_unverified = {
             fub_id: seen for fub_id, seen in self._plan_stop_unverified.items() if fub_id in watched
         }
+        vanished = self._vanished_user_plans()
         # In an outage and the boot grace after it a plan seen running still clears its verdict,
         # but no plan is judged stopped anew or started: a booting Comexio starts its plans itself.
         stopped_changed = await self.plan_watchdog.async_check(
@@ -4362,10 +4369,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # During a plan edit the start would only be deferred, logged on every tick: it follows
             # with the first check after the edit.
             auto_start=not in_grace and not self.plan_edits_running,
+            # Their "stopped" push is replaced by the vanished one below (same tag), not cleared first.
+            keep_push=vanished.keys() if self.plan_watchdog.vanished is not None else (),
         )
-        # After the check: a stopped plan that dropped out there had its push cleared, and the
-        # vanished push shares its tag.
-        await self.plan_watchdog.async_sync_vanished(self._vanished_user_plans())
+        await self.plan_watchdog.async_sync_vanished(vanished)
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
         return stopped_changed
@@ -4523,7 +4530,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _handle_vanished_plan_action(self, kind: str, fub_id: int) -> None:
         """ "Restore" or "Stop watching" from the push of a watched user plan Comexio no longer has."""
-        name = (self.plan_watchdog.vanished or {}).get(fub_id)
+        if self.plan_watchdog.vanished is None:
+            # Not checked since setup (no plan list read yet): unknown, not "no longer missing".
+            _LOGGER.warning(
+                "[%s] Watchdog push action for function plan %s deferred: the plan list was not read yet",
+                self.server_id,
+                fub_id,
+            )
+            self.hass.async_create_background_task(
+                self.plan_watchdog.async_push_check_pending(fub_id),
+                name=f"{DOMAIN}_{self.server_id}_check_pending_push_{fub_id}",
+            )
+            return
+        name = self.plan_watchdog.vanished.get(fub_id)
         if name is None:
             # Restored, unpicked or back meanwhile: the push is stale.
             _LOGGER.warning(
@@ -4550,7 +4569,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Runs the function_plan_restore action like the plan card's restore of a deleted plan: its
         checks, locks, notifications and the move of the watchdog pick to the new ID (restore-as-new)
-        all apply. The plan is started: it was watched, so it is meant to run.
+        all apply. The plan is started: it was watched, so it is meant to run. The action reports a
+        refusal or failure only as a notification, so the outcome is read afterwards: the plan is
+        back once its pick no longer points at a missing plan. The phone hears it either way
+        (from_push), and the old alarm push goes once the plan is back.
         """
         snapshot = await self.async_newest_backup_field(fub_id, name)
         if snapshot is None:
@@ -4574,9 +4596,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 },
                 blocking=True,
             )
-        except HomeAssistantError as err:
-            # The action reports its own failures as notifications; this is the call itself failing.
-            _LOGGER.warning("[%s] Restore of function plan '%s' failed: %s", self.server_id, name, err)
+        except Exception:
+            # A background task: anything left uncaught would only surface as "never retrieved".
+            _LOGGER.exception("[%s] Restore of function plan '%s' failed", self.server_id, name)
+        if fub_id in self._vanished_user_plans():
+            _LOGGER.warning(
+                "[%s] Function plan '%s' (ID %s) was not restored; see the restore notification",
+                self.server_id,
+                name,
+                fub_id,
+            )
+            if from_push:
+                await self.plan_watchdog.async_push_restore_failed(fub_id, name)
+            return False
+        if from_push:
+            await self.plan_watchdog.async_push_restored(fub_id, name)
+        else:
+            await self.plan_watchdog.async_dismiss_push(fub_id)
         return True
 
     async def async_newest_backup_field(self, fub_id: int, name: str) -> str | None:

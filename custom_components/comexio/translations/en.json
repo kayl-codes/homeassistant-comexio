@@ -458,7 +458,8 @@
         "abort": {
           "entry_not_found": "The associated config entry could not be found — it may have been removed.",
           "plan_not_missing": "The plan {plan_name} (ID {fub_id}) is no longer missing (restored or no longer watched). Nothing was changed.",
-          "no_backup": "There is no backup of {plan_name} (ID {fub_id}) to restore it from. Nothing was changed — you can stop watching it instead."
+          "no_backup": "There is no backup of {plan_name} (ID {fub_id}) to restore it from. Nothing was changed — you can stop watching it instead.",
+          "check_pending": "The plan list was not read since Home Assistant started, so it is not known yet whether {plan_name} (ID {fub_id}) is still missing. Nothing was changed; please try again shortly."
         }
       }
     },

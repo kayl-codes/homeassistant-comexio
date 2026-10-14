@@ -733,6 +733,8 @@ CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
 FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC = 120
 # Longest an unload (HA's own reload) waits for a running function plan restore or edit.
 FUNCTION_PLAN_UNLOAD_WAIT_SEC = 120
+# How often that unload looks whether the restore is over (it watches the lock, see async_wait_before_unload).
+FUNCTION_PLAN_UNLOAD_POLL_SEC = 0.5
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
 MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 

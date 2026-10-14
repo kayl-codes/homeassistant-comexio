@@ -458,7 +458,8 @@
         "abort": {
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
           "plan_not_missing": "Der Plan {plan_name} (ID {fub_id}) fehlt nicht mehr (wiederhergestellt oder nicht mehr überwacht). Es wurde nichts geändert.",
-          "no_backup": "Es gibt kein Backup von {plan_name} (ID {fub_id}), aus dem er wiederhergestellt werden kann. Es wurde nichts geändert — du kannst ihn stattdessen nicht mehr überwachen."
+          "no_backup": "Es gibt kein Backup von {plan_name} (ID {fub_id}), aus dem er wiederhergestellt werden kann. Es wurde nichts geändert — du kannst ihn stattdessen nicht mehr überwachen.",
+          "check_pending": "Die Planliste wurde seit dem Start von Home Assistant noch nicht gelesen, daher ist noch unklar, ob {plan_name} (ID {fub_id}) noch fehlt. Es wurde nichts geändert; bitte gleich erneut versuchen."
         }
       }
     },

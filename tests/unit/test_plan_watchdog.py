@@ -484,3 +484,41 @@ def test_vanished_and_stopped_repairs_do_not_clean_up_each_other(ir: MagicMock) 
 def test_parse_plan_action(action: object, parsed: tuple[str, int] | None) -> None:
     assert plan_watchdog.parse_plan_action(SERVER_ID, action) == parsed
     assert parse_start_action(SERVER_ID, action) == (parsed[1] if parsed and parsed[0] == ACTION_START else None)
+
+
+def test_a_stopped_plan_whose_push_is_replaced_keeps_it(ir: MagicMock) -> None:
+    """keep_push: no clear_notification that could overtake the vanished push of the same tag."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False), [47]))
+    asyncio.run(watchdog.async_check({}, _states(), keep_push={47}))
+    assert [data["message"] for *_, data in _pushes(watchdog)] != [] and all(
+        data["message"] != "clear_notification" for *_, data in _pushes(watchdog)
+    )
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False), [47]))
+    asyncio.run(watchdog.async_check({}, _states()))
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "actions"),
+    [
+        ("async_push_restored", (47, "Test4"), []),
+        ("async_push_restore_failed", (47, "Test4"), [ACTION_RESTORE, ACTION_UNWATCH]),
+        ("async_push_check_pending", (47,), [ACTION_RESTORE, ACTION_UNWATCH]),
+        ("async_push_no_backup", (47, "Test4"), [ACTION_UNWATCH]),
+    ],
+)
+def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[str]) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(getattr(watchdog, method)(*args))
+    ((_domain, _service, data),) = _pushes(watchdog)
+    assert [action["action"] for action in data["data"].get("actions", [])] == [
+        plan_action_id(kind, SERVER_ID, 47) for kind in actions
+    ]
+    assert "{" not in data["message"] and "{" not in data["title"]
+    assert data["data"]["tag"] == watchdog._push_tag(47)  # replaces the plan's alarm push
+
+
+def test_push_texts_have_the_same_keys_in_every_language() -> None:
+    keys = {lang: set(texts) for lang, texts in plan_watchdog.PUSH_TEXTS.items()}
+    assert all(lang_keys == keys["en"] for lang_keys in keys.values())

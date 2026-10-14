@@ -458,7 +458,8 @@
         "abort": {
           "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado.",
           "plan_not_missing": "El plan {plan_name} (ID {fub_id}) ya no falta (restaurado o ya no supervisado). No se cambió nada.",
-          "no_backup": "No hay ninguna copia de seguridad de {plan_name} (ID {fub_id}) para restaurarlo. No se cambió nada — puedes dejar de supervisarlo."
+          "no_backup": "No hay ninguna copia de seguridad de {plan_name} (ID {fub_id}) para restaurarlo. No se cambió nada — puedes dejar de supervisarlo.",
+          "check_pending": "La lista de planes aún no se ha leído desde que se inició Home Assistant, así que todavía no se sabe si {plan_name} (ID {fub_id}) sigue faltando. No se cambió nada; vuelve a intentarlo en un momento."
         }
       }
     },

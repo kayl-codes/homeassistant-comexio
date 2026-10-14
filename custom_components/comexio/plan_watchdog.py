@@ -89,6 +89,12 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "unwatch": "Stop watching",
         "no_backup_title": "Comexio: restore not possible",
         "no_backup": "There is no backup of {name} (ID {fub_id}) to restore it from.",
+        "restored_title": "Comexio: function plan restored",
+        "restored": "{name} was restored from its newest backup as a new plan and stays monitored.",
+        "restore_failed_title": "Comexio: restore failed",
+        "restore_failed": "{name} (ID {fub_id}) was not restored; see the Home Assistant notifications.",
+        "check_pending_title": "Comexio: plan list not read yet",
+        "check_pending": "The plan list was not read since the start yet. Please try again shortly.",
         "time_format": "%Y-%m-%d %H:%M:%S",
     },
     "de": {
@@ -116,6 +122,12 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "unwatch": "Nicht mehr überwachen",
         "no_backup_title": "Comexio: Wiederherstellen nicht möglich",
         "no_backup": "Es gibt kein Backup von {name} (ID {fub_id}), aus dem er wiederhergestellt werden kann.",
+        "restored_title": "Comexio: Logikplan wiederhergestellt",
+        "restored": "{name} wurde aus seinem neuesten Backup als neuer Plan wiederhergestellt und bleibt überwacht.",
+        "restore_failed_title": "Comexio: Wiederherstellen fehlgeschlagen",
+        "restore_failed": "{name} (ID {fub_id}) wurde nicht wiederhergestellt, siehe HA-Benachrichtigungen.",
+        "check_pending_title": "Comexio: Planliste noch nicht gelesen",
+        "check_pending": "Die Planliste wurde seit dem Start noch nicht gelesen. Bitte gleich erneut versuchen.",
         "time_format": "%d.%m.%Y %H:%M:%S",
     },
 }
@@ -243,12 +255,15 @@ class ManagedPlanWatchdog:
         user_plans: Collection[int] = (),
         *,
         auto_start: bool = True,
+        keep_push: Collection[int] = (),
     ) -> bool:
         """Judge the watched plans; True if the set of stopped plans changed.
 
         managed holds every watched plan; user_plans names the ones that are user plans, which
         follow the user-plan auto-start switch instead of the HA-plan one. auto_start=False
-        starts nothing, whatever the switches say.
+        starts nothing, whatever the switches say. keep_push names plans whose push is replaced
+        right after (vanished): clearing it first could reach the phone after the new one and
+        remove it, as two pushes have no guaranteed order.
         """
         if self._checking:
             return False
@@ -271,7 +286,9 @@ class ManagedPlanWatchdog:
             self._sync_issues(stopped)
             changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
-            await self._async_push_transitions(previous, stopped, auto_started, self.suspended - suspended_before)
+            await self._async_push_transitions(
+                previous, stopped, auto_started, self.suspended - suspended_before, keep_push
+            )
             return changed
         finally:
             self._checking = False
@@ -480,6 +497,7 @@ class ManagedPlanWatchdog:
         stopped: Mapping[int, str],
         auto_started: Mapping[int, str],
         newly_suspended: Collection[int],
+        keep_push: Collection[int] = (),
     ) -> None:
         """Alarm push for a newly stopped plan or one Auto-Start gave up on; the push of a plan running
         again is replaced or removed."""
@@ -491,7 +509,7 @@ class ManagedPlanWatchdog:
             )
         for fub_id, name in sorted(auto_started.items()):
             await self._async_push(fub_id, name, "started_title", "auto_started")
-        for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys()):
+        for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys() - set(keep_push)):
             await self._async_clear_push(fub_id)
 
     def _texts(self) -> dict[str, str]:
@@ -581,6 +599,22 @@ class ManagedPlanWatchdog:
     async def async_push_no_backup(self, fub_id: int, name: str) -> None:
         """Tell the phone a vanished plan has no backup to restore it from; "Stop watching" stays."""
         await self._async_push(fub_id, name, "no_backup_title", "no_backup", actions=(ACTION_UNWATCH,))
+
+    async def async_push_restored(self, fub_id: int, name: str) -> None:
+        """Replace the vanished push with "restored" once its Restore action brought the plan back."""
+        await self._async_push(fub_id, name, "restored_title", "restored")
+
+    async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
+        """Tell the phone a Restore from its push failed or was refused, with both actions again."""
+        await self._async_push(
+            fub_id, name, "restore_failed_title", "restore_failed", actions=(ACTION_RESTORE, ACTION_UNWATCH)
+        )
+
+    async def async_push_check_pending(self, fub_id: int) -> None:
+        """A push action arrived before the first check after setup: nothing is known yet, try again."""
+        await self._async_push(
+            fub_id, "", "check_pending_title", "check_pending", actions=(ACTION_RESTORE, ACTION_UNWATCH)
+        )
 
     async def async_dismiss_push(self, fub_id: int) -> None:
         """Remove a plan's push from the phones, e.g. one whose "Start plan" action is no longer honoured."""

@@ -458,7 +458,8 @@
         "abort": {
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
           "plan_not_missing": "Le plan {plan_name} (ID {fub_id}) ne manque plus (restauré ou plus surveillé). Rien n'a été modifié.",
-          "no_backup": "Il n'existe aucune sauvegarde de {plan_name} (ID {fub_id}) pour le restaurer. Rien n'a été modifié — vous pouvez cesser de le surveiller."
+          "no_backup": "Il n'existe aucune sauvegarde de {plan_name} (ID {fub_id}) pour le restaurer. Rien n'a été modifié — vous pouvez cesser de le surveiller.",
+          "check_pending": "La liste des plans n'a pas encore été lue depuis le démarrage de Home Assistant ; on ne sait donc pas encore si {plan_name} (ID {fub_id}) manque toujours. Rien n'a été modifié ; veuillez réessayer dans un instant."
         }
       }
     },

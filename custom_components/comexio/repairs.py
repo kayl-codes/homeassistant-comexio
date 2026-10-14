@@ -1439,7 +1439,10 @@ class ComexioRepairFlow(RepairsFlow):
         if coordinator is None:
             return self.async_abort(reason="entry_not_found")
         fub_id = int(self.issue_data["fub_id"])
-        name = (coordinator.plan_watchdog.vanished or {}).get(fub_id)
+        if coordinator.plan_watchdog.vanished is None:
+            # Not checked since setup (no plan list read yet): unknown, so the repair stays.
+            return self.async_abort(reason="check_pending", description_placeholders=placeholders)
+        name = coordinator.plan_watchdog.vanished.get(fub_id)
         if name is None:
             # Restored, unpicked or back meanwhile.
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
