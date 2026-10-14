@@ -590,8 +590,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # while one runs or ran during its cycle (see pause_auto_backup).
         self._auto_backup_pauses = 0
         # Plan-editing service calls (sort, stop, activate, connect, marker delete) and bus-load
-        # cascades running right now — a restore refuses to start meanwhile (see plan_edit).
+        # cascades running right now — a restore refuses to start meanwhile (see plan_edit); set
+        # while none runs, so a reload can wait for the last one (see async_wait_for_plan_edits).
         self._plan_edits_running = 0
+        self._plan_edits_done = asyncio.Event()
+        self._plan_edits_done.set()
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
@@ -1919,21 +1922,34 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     @contextlib.contextmanager
     def plan_edit(self) -> Iterator[None]:
-        """Mark a plan edit as running until it ends — a restore, sync or uninstall cleanup refuses to start meanwhile.
+        """Mark a plan edit as running until it ends — a restore, sync, uninstall cleanup, bus-load
+        cascade or another plan edit refuses to start meanwhile, and a reload waits for it.
 
         Entered right after the edit's last refuse_while_plans_busy check, with no await in
         between: one of those starting after that check sees the mark, so they never overlap.
         """
         self._plan_edits_running += 1
+        self._plan_edits_done.clear()
         try:
             yield
         finally:
             self._plan_edits_running -= 1
+            if not self._plan_edits_running:
+                self._plan_edits_done.set()
 
     @property
     def plan_edits_running(self) -> bool:
         """Whether a plan edit (see plan_edit) is running."""
         return self._plan_edits_running > 0
+
+    async def async_wait_for_plan_edits(self) -> None:
+        """Wait until no plan edit runs — a reload closes the API session under the edit's requests.
+
+        Awaited with _sync_lock held, so no plan edit or bus-load cascade starts meanwhile.
+        """
+        if self._plan_edits_running:
+            _LOGGER.info("[%s] Reload waits for the running function plan edit to finish", self.server_id)
+            await self._plan_edits_done.wait()
 
     @contextlib.asynccontextmanager
     async def restores_held_off(self) -> AsyncIterator[None]:
@@ -4612,10 +4628,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 baseline,
                 len(plan_map),
             )
-            if self._restore_lock.locked() or self._sync_lock.locked() or self.in_sync:
-                # A restore (or sync) rewrites and restarts plans itself; a stop now could leave one stopped.
+            if self._restore_lock.locked() or self._sync_lock.locked() or self.in_sync or self.plan_edits_running:
+                # A restore (or sync) rewrites and restarts plans itself, a plan edit stops and changes
+                # one — a stop or restart now could leave one stopped or mixed.
                 _LOGGER.warning(
-                    "[%s] Bus-load watchdog: cascade not started — a function plan restore, sync or reload is running",
+                    "[%s] Bus-load watchdog: cascade not started — a function plan restore, edit, sync or reload "
+                    "is running",
                     self.server_id,
                 )
                 return
@@ -6453,7 +6471,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cut into a Web-IO range check, and a sync pressed meanwhile is rejected as concurrent
         instead of running against the coordinator being torn down. It also waits for a running
         function plan restore (restores_held_off) — so a caller holding _restore_lock must not
-        await this, but schedule it (see the restore's own reload in services/backup.py).
+        await this, but schedule it (see the restore's own reload in services/backup.py) — and for
+        running plan edits (async_wait_for_plan_edits), so a plan edit must not await it either.
 
         Checks the entry's *current* coordinator, not necessarily self: a caller that outlived
         an earlier reload (the uninstall cleanup task, the KNX auto-tag timer) still holds the
@@ -6474,6 +6493,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             return True
         async with target._sync_lock, target.restores_held_off():
+            await target.async_wait_for_plan_edits()
             # Re-checked under the locks: a sync or cleanup that held them may have reloaded meanwhile
             # (a failed sync clears in_sync before its closing reload) — that reload covered this one,
             # and a second one would cut into whatever runs on the new coordinator by now.

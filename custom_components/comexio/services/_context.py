@@ -45,6 +45,11 @@ SYNC_RUNNING_MSG = (
     "A sync, Web-IO range check, uninstall cleanup or integration reload is running — please wait for it to "
     "finish. It writes into the function plans too, so a change made now could be lost or mixed into its writes."
 )
+PLAN_EDIT_RUNNING_MSG = (
+    "Another function plan change (sort, connect, start/stop, marker deletion, backup deletion or a bus-load "
+    "restart) is running — please wait for it to finish. Changes run one at a time: two at once could load the "
+    "same plan, and the later save would undo the other change."
+)
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
@@ -231,19 +236,25 @@ def _parse_snapshot_field(raw: str) -> tuple[int, str, int, str | None] | None:
 
 
 def refuse_while_plans_busy(hass: HomeAssistant, coordinator: ComexioCoordinator, error_title: str) -> bool:
-    """Whether a restore, or a sync / range check / uninstall cleanup / reload (they hold _sync_lock), runs.
+    """Whether a restore, a sync / range check / uninstall cleanup / reload (they hold _sync_lock) or
+    another plan edit (see coordinator.plan_edit) runs.
 
-    Then notify and return True: the caller must not edit a plan. Both rewrite function plans,
-    and a reload closes the API session.
+    Then notify and return True: the caller must not edit a plan. All of them rewrite function
+    plans, and a reload closes the API session.
     """
-    if coordinator._restore_lock.locked():
-        msg = RESTORE_RUNNING_MSG
-    elif coordinator._sync_lock.locked() or coordinator.in_sync:
+    # Sync first: a reload holds _restore_lock too (restores_held_off), and is no restore.
+    if coordinator._sync_lock.locked() or coordinator.in_sync:
         msg = SYNC_RUNNING_MSG
+    elif coordinator._restore_lock.locked():
+        msg = RESTORE_RUNNING_MSG
+    elif coordinator.plan_edits_running:
+        msg = PLAN_EDIT_RUNNING_MSG
     else:
         return False
     _LOGGER.warning(
-        "[%s] %s not started — a restore, sync, cleanup or reload is running", coordinator.server_id, error_title
+        "[%s] %s not started — a restore, sync, cleanup, reload or another function plan edit is running",
+        coordinator.server_id,
+        error_title,
     )
     persistent_notification.async_create(hass, msg, title=error_title)
     return True

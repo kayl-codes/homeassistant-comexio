@@ -27,6 +27,8 @@ def _coordinator() -> ComexioCoordinator:
     coordinator._sync_lock = asyncio.Lock()
     coordinator._restore_lock = asyncio.Lock()
     coordinator._plan_edits_running = 0
+    coordinator._plan_edits_done = asyncio.Event()
+    coordinator._plan_edits_done.set()
     coordinator.config_entry = SimpleNamespace(entry_id="e1")
     coordinator.hass = MagicMock()
     coordinator.hass.data = {DOMAIN: {"e1": coordinator}}
@@ -365,14 +367,17 @@ def test_plan_run_and_stop_write_as_a_marked_plan_edit(handler: Any) -> None:
 
 
 def test_a_marker_delete_writes_as_a_marked_plan_edit() -> None:
+    """(Review) checked at delete_marker itself, not at the eligibility read before it."""
     coordinator = _coordinator()
     marked: list[bool] = []
 
-    async def eligibility(*_args: Any, **_kwargs: Any) -> Any:
+    async def delete_marker(_marker_id: int) -> bool:
         marked.append(coordinator.plan_edits_running)
         raise _WriteSeen
 
-    api = SimpleNamespace(get_marker_delete_eligibility=eligibility)
+    api = SimpleNamespace(
+        get_marker_delete_eligibility=AsyncMock(return_value=([5], [], {5}, None)), delete_marker=delete_marker
+    )
     call = SimpleNamespace(data={"marker_id": "5", "confirm": True})
     delete = marker_actions.handle_marker_delete(coordinator.hass, call)
     with (
@@ -391,12 +396,15 @@ def test_a_connect_writes_as_a_marked_plan_edit() -> None:
     coordinator.config_entry = SimpleNamespace(entry_id="e1", data={}, options={})
     marked: list[bool] = []
 
-    async def first_write(*_args: Any) -> None:
+    async def stop_plan(_fub_id: int) -> None:
         marked.append(coordinator.plan_edits_running)
         raise _WriteSeen
 
-    coordinator.async_function_plan_change_backup = first_write  # type: ignore[method-assign]
-    api = SimpleNamespace(fub_data={}, login=AsyncMock(return_value=True))
+    # (Review) checked at the plan stop, the first write to the plan — the change backup before it is no plan write.
+    coordinator.async_function_plan_change_backup = AsyncMock()  # type: ignore[method-assign]
+    api = SimpleNamespace(
+        fub_data={"1": {"Active": True}}, login=AsyncMock(return_value=True), function_plan_stop_fup=stop_plan
+    )
     connect_call = connect.handle_function_plan_connect(coordinator.hass, SimpleNamespace(data={"marker_id": "2"}))
     with (
         patch.object(connect, "_resolve_function_plan", return_value=(coordinator, api, 1)),
@@ -518,7 +526,9 @@ def test_an_uninstall_cleanup_does_not_start_while_a_plan_edit_runs() -> None:
     assert "function plan edit" in post.call_args.args[2]
 
 
-def test_the_bus_load_cascade_stops_while_a_sync_runs() -> None:
+@pytest.mark.parametrize("busy", ["sync", "plan_edit"])
+def test_the_bus_load_cascade_stops_while_a_sync_or_plan_edit_runs(busy: str) -> None:
+    """(Review) a cascade stopping a plan a sort or connect is changing leaves it stopped or mixed."""
     coordinator = _coordinator()
     coordinator.config_entry = SimpleNamespace(entry_id="e1", options={CONF_FUNCTION_PLAN_PLAN_MAP: {"A": 1}})
     coordinator._watchdog_lock = asyncio.Lock()
@@ -526,11 +536,66 @@ def test_the_bus_load_cascade_stops_while_a_sync_runs() -> None:
     coordinator._async_finish_watchdog_cascade = AsyncMock()  # type: ignore[method-assign]
 
     async def run() -> None:
-        async with coordinator._sync_lock:
+        async with contextlib.AsyncExitStack() as stack:
+            if busy == "sync":
+                await stack.enter_async_context(coordinator._sync_lock)
+            else:
+                stack.enter_context(coordinator.plan_edit())
             await coordinator._async_bus_load_cascade_restart(50.0)
 
     asyncio.run(run())
     coordinator.api.function_plan_stop_fup.assert_not_awaited()
+    coordinator._async_finish_watchdog_cascade.assert_not_awaited()
+
+
+def test_a_plan_edit_does_not_start_while_another_plan_edit_runs() -> None:
+    """(Review) two edits of one plan load the same topology, and the later save undoes the other."""
+    coordinator = _coordinator()
+    with coordinator.plan_edit(), patch.object(_context.persistent_notification, "async_create") as create:
+        assert _context.refuse_while_plans_busy(coordinator.hass, coordinator, "T") is True
+    assert create.call_args.args[1] == _context.PLAN_EDIT_RUNNING_MSG
+    with patch.object(_context.persistent_notification, "async_create") as create:
+        assert _context.refuse_while_plans_busy(coordinator.hass, coordinator, "T") is False
+    create.assert_not_called()
+
+
+def test_a_reload_waits_for_the_last_of_overlapping_plan_edits() -> None:
+    coordinator = _coordinator()
+    reload = coordinator.hass.config_entries.async_reload
+
+    async def run() -> None:
+        first, second = coordinator.plan_edit(), coordinator.plan_edit()
+        first.__enter__()
+        second.__enter__()
+        task = asyncio.create_task(coordinator.async_reload_entry("options changed"))
+        first.__exit__(None, None, None)
+        await _settle()
+        reload.assert_not_awaited()
+        second.__exit__(None, None, None)
+        await task
+        reload.assert_awaited_once_with("e1")
+
+    asyncio.run(run())
+
+
+def test_a_reload_waits_for_a_running_plan_edit_and_keeps_new_ones_out() -> None:
+    """(Review) a reload closes the API session under the requests a sort or connect still makes."""
+    coordinator = _coordinator()
+    reload = coordinator.hass.config_entries.async_reload
+
+    async def run() -> None:
+        with coordinator.plan_edit():
+            task = asyncio.create_task(coordinator.async_reload_entry("options changed"))
+            await _settle()
+            reload.assert_not_awaited()
+            # The reload holds _sync_lock while it waits: a new edit refuses instead of starting.
+            with patch.object(_context.persistent_notification, "async_create") as create:
+                assert _context.refuse_while_plans_busy(coordinator.hass, coordinator, "T") is True
+            assert create.call_args.args[1] == _context.SYNC_RUNNING_MSG
+        await task
+        reload.assert_awaited_once_with("e1")
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
