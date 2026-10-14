@@ -217,6 +217,8 @@ class _FakeCoordinator(SimpleNamespace):
     async_restore_vanished_plan = ComexioCoordinator.async_restore_vanished_plan
     async_newest_backup_field = ComexioCoordinator.async_newest_backup_field
     async_unwatch_user_plan = ComexioCoordinator.async_unwatch_user_plan
+    _live_plan_named = ComexioCoordinator._live_plan_named
+    _async_report_vanished_restored = ComexioCoordinator._async_report_vanished_restored
     comexio_unreachable = ComexioCoordinator.comexio_unreachable
     _async_bus_load_emergency_reboot = ComexioCoordinator._async_bus_load_emergency_reboot
 
@@ -1506,3 +1508,34 @@ def test_an_unverified_stop_of_a_plan_no_longer_watched_is_forgotten(api: Comexi
     coordinator = _coordinator(api, _plan_stop_unverified={99: (0, 0.0)})
     asyncio.run(coordinator._async_refresh_plan_run_states())
     assert coordinator._plan_stop_unverified == {}
+
+
+def test_a_restore_that_built_the_plan_but_kept_the_pick_counts_as_restored(api: ComexioAPI) -> None:
+    """(Review) Moving the pick can fail after the plan was built: a second Restore would duplicate it."""
+    coordinator = _restore_coordinator(api, True)
+    coordinator.hass.services.async_call.side_effect = lambda *_a, **_k: api._fub_data.update(
+        {"52": {"Id": 52, "Name": "Test4", "Active": 1}}
+    )
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
+    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4")
+
+
+def test_a_second_restore_tap_does_not_restore_again(api: ComexioAPI) -> None:
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["52"] = {"Id": 52, "Name": "Test4", "Active": 1}  # the first tap's plan
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
+    coordinator.hass.services.async_call.assert_not_called()
+    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4")
+
+
+def test_a_restore_tap_while_a_restore_runs_leaves_it_to_that_restore(api: ComexioAPI) -> None:
+    coordinator = _restore_coordinator(api, True)
+
+    async def run() -> bool:
+        async with coordinator._restore_lock:
+            return await coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)
+
+    assert asyncio.run(run()) is False
+    coordinator.hass.services.async_call.assert_not_called()
+    coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
+    coordinator.plan_watchdog.async_push_restored.assert_not_awaited()
