@@ -150,12 +150,19 @@ def test_a_failed_fetch_keeps_every_last_known_value(api: ComexioAPI, caplog: py
     assert f"{FETCH_FAILED_LOG}; 4 IOs keep their last known value, 0 without one yet" in caplog.text
 
 
-def test_a_refused_request_is_a_failed_fetch_not_a_failed_poll(api: ComexioAPI) -> None:
-    """aiocomexio refuses a contradictory request with ValueError; the poll goes on with the last known values."""
+def test_a_refused_request_is_a_failed_fetch_not_a_failed_poll(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """aiocomexio refuses a contradictory request with ValueError; the poll goes on with the last known values.
+
+    The one warning names the cause, so a bug behind it is visible without DEBUG logging.
+    """
     coordinator = _coordinator(api, io_states={"13": 18.25})
-    ios, _markers, _fetch = _poll(coordinator, _config(), ValueError("IO 13 under two extensions"))
+    with caplog.at_level(logging.WARNING):
+        ios, _markers, _fetch = _poll(coordinator, _config(), ValueError("IO 13 under two extensions"))
 
     assert ios["13"]["value"] == 18.25
+    assert "(cause: ValueError: IO 13 under two extensions)" in caplog.text
 
 
 def test_cold_start_without_a_real_value_is_unknown_never_the_placeholder(
@@ -416,7 +423,7 @@ def test_a_persistent_fetch_failure_warns_once_and_reports_its_end(
     assert "gone" in first[0][2]
     assert (
         f"[iosrv1] {FETCH_FAILED_LOG}; 1 IOs keep their last known value, 3 without one yet show unknown"
-        == (first[1][2])
+        " (cause: ComexioConnectionError: gone)" == (first[1][2])
     )
 
     second = poll(ComexioConnectionError("gone"))

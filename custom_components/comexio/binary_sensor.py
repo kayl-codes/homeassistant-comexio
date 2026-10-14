@@ -105,6 +105,7 @@ class ComexioBinarySensor(ComexioIOEntity, BinarySensorEntity):
         try:
             return float(value) > 0
         except (ValueError, TypeError):
+            _LOGGER.debug("IO %s has a non-numeric value %r, shown as unknown", self._io_id, value)
             return None
 
 

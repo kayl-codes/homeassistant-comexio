@@ -888,25 +888,34 @@ def test_get_io_live_states_failure_is_none_not_empty(
 
     [record] = [r for r in caplog.records if r.name == api_module.__name__]
     assert (record.levelno, record.exc_info is not None) == (logging.DEBUG, True)
-    assert record.getMessage().startswith("IO live states fetch failed: ")
+    assert record.getMessage().startswith("IO live states fetch failed: ComexioConnectionError: ")
+    assert (comexio_api.io_live_fetch_error or "").startswith("ComexioConnectionError: ")
 
 
 def test_get_io_live_states_refused_request_is_none(
     comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A ValueError still reaching here is a bug (the coordinator drops conflicts): None, logged as an error."""
+    """A ValueError still reaching here (the coordinator drops conflicts) is a failed fetch: None, its cause kept.
+
+    DEBUG only, like any failure: the coordinator warns once per outage and names the cause there.
+    """
     _fail(client, "get_io_live_states", ValueError("conflicting extension ids for IO 11"))
+    caplog.set_level(logging.DEBUG, logger=api_module.__name__)
 
     assert asyncio.run(comexio_api.get_io_live_states([(1, "11"), (2, "11")])) is None
 
     [record] = [r for r in caplog.records if r.name == api_module.__name__]
-    assert (record.levelno, record.exc_info is not None) == (logging.ERROR, True)
+    assert (record.levelno, record.exc_info is not None) == (logging.DEBUG, True)
+    assert comexio_api.io_live_fetch_error == "ValueError: conflicting extension ids for IO 11"
 
 
 def test_get_io_live_states_passes_the_pairs_through(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """A success also clears the cause of an earlier failure."""
+    comexio_api.io_live_fetch_error = "ComexioConnectionError: gone"
     client.get_io_live_states = AsyncMock(return_value={"11": "74"})
     assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) == {"11": "74"}
     client.get_io_live_states.assert_awaited_once_with([(1, "11")])
+    assert comexio_api.io_live_fetch_error is None
 
 
 def test_knx_catalog_failure_keeps_last_known_good(comexio_api: ComexioAPI, client: MagicMock) -> None:

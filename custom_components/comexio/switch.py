@@ -190,6 +190,7 @@ class ComexioIOSwitch(ComexioIOEntity, SwitchEntity):
         try:
             return float(val) >= 1.0
         except (ValueError, TypeError):
+            _LOGGER.debug("IO %s has a non-numeric value %r, shown as unknown", self._io_id, val)
             return None
 
     async def async_turn_on(self, **kwargs: Any) -> None:

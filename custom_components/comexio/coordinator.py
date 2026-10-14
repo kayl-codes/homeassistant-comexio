@@ -1179,14 +1179,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._polled_io_real_ids = _apply_io_live_values(ios, io_live_states, known)
 
     def _log_io_live_fetch_failed(self, ios: list[dict[str, Any]], known: Mapping[str, Any]) -> None:
-        """WARNING on the first failed IO live fetch, DEBUG while it keeps failing (the cause: api.py, DEBUG)."""
+        """WARNING with its cause on the first failed IO live fetch, DEBUG while it keeps failing."""
         kept = sum(io["id"] in known for io in ios)
         _LOGGER.log(
             logging.DEBUG if self._io_live_fetch_failing else logging.WARNING,
-            "[%s] IO live states fetch failed; %s IOs keep their last known value, %s without one yet show unknown",
+            "[%s] IO live states fetch failed; %s IOs keep their last known value, %s without one yet show unknown"
+            " (cause: %s)",
             self.server_id,
             kept,
             len(ios) - kept,
+            self.api.io_live_fetch_error or "unknown",
         )
         self._io_live_fetch_failing = True
 

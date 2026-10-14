@@ -563,6 +563,9 @@ class ComexioAPI:
         self._login_generation: int = 0
         # Plans whose connection values last came back in an unexpected shape (warned once).
         self._connection_values_shape_warned: set[int] = set()
+        # Why the last get_io_live_states failed ("<error type>: <message>"), None after a success; the
+        # coordinator names it in its once-per-outage warning.
+        self.io_live_fetch_error: str | None = None
         # Guards ensure_preview_session()'s check-then-act window: HA's interval scheduler
         # fires poll ticks without awaiting the previous one, so at the 0.5s fast-poll
         # cadence (debug box active) multiple ticks can see _preview_session is None before
@@ -1105,19 +1108,20 @@ class ComexioAPI:
         Returns {IO id: numeric value text}; an IO Comexio does not answer with a number is
         absent. None on any fetch/parse failure — never {} — for the same reason as
         get_live_states: the caller keeps the last known values instead of reading 0. A fetch
-        failure is logged at DEBUG only — the coordinator reports it with the server context, once
-        per outage. A request aiocomexio refuses as contradictory (ValueError, e.g. one IO id under
-        two extensions) is such a failure too, not a reason to fail the whole poll; the coordinator
-        leaves such IOs out of the request, so a ValueError here is a bug and logged as an error.
+        failure is logged at DEBUG only and its cause kept in io_live_fetch_error — the coordinator
+        reports it with the server context, once per outage. A request aiocomexio refuses as
+        contradictory (ValueError, e.g. one IO id under two extensions) is such a failure too, not a
+        reason to fail the whole poll; the coordinator leaves such IOs out of the request, so a
+        ValueError here points to a bug — its cause names it in that same warning.
         """
         try:
-            return await self.client.get_io_live_states(ios)
-        except ComexioError as err:
-            _LOGGER.debug("IO live states fetch failed: %s", err, exc_info=True)
+            states = await self.client.get_io_live_states(ios)
+        except (ComexioError, ValueError) as err:
+            self.io_live_fetch_error = f"{type(err).__name__}: {err}"
+            _LOGGER.debug("IO live states fetch failed: %s", self.io_live_fetch_error, exc_info=True)
             return None
-        except ValueError:
-            _LOGGER.error("IO live states request refused by aiocomexio", exc_info=True)
-            return None
+        self.io_live_fetch_error = None
+        return states
 
     async def get_function_plan_connection_values(
         self, fub_id: int, session: aiohttp.ClientSession | None = None
