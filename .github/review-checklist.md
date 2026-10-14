@@ -59,6 +59,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Re-check under the lock:** state checked before waiting for a lock (an armed preview, a selection generation, a
   cached object, a running sync or restore) can change while waiting; check it again once the lock is held, as
   `plan_preview.async_follow_selection` does. Flag a check followed by `async with <lock>` without that re-check.
+- **Hold the guard across the writes:** a check that refuses to start while a restore, sync, cleanup or plan edit
+  runs protects only if the caller then holds the lock or the `coordinator.plan_edit()` marker across all of its
+  writes, and the other operation checks that lock or marker too, in both directions. Flag a "nothing is running"
+  check followed by writes without either, and a new operation that writes function plans or backups without
+  joining the mutual exclusion (`refuse_while_plans_busy`, `_async_acquire_sync_lock`, `_cleanup_blocked_by_sync`,
+  the restore refusal) (#176).
 - **Early returns:** a coordinator cycle that changes state an entity shows and then returns early still calls
   `async_update_listeners()`, otherwise the entity shows the old state until the next poll.
 - **Timestamps:** a timestamp that starts a cooldown or retry interval, or records the last attempt, is taken
