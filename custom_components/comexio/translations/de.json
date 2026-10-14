@@ -106,6 +106,12 @@
         "ignore": "🔇 Ignorieren (alles behalten)",
         "enable": "🔁 Import wieder einschalten"
       }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Aus dem neuesten Backup wiederherstellen",
+        "unwatch": "🚫 Diesen Plan nicht mehr überwachen"
+      }
     }
   },
   "options": {
@@ -437,6 +443,22 @@
           "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
           "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
           "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "Logikplan {plan_name} existiert nicht mehr",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Überwachter Logikplan gelöscht",
+            "description": "Der überwachte Logikplan **{plan_name}** (ID {fub_id}) existiert in Comexio nicht mehr — er wurde gelöscht, zum Beispiel im Comexio Studio.\n\n**Wiederherstellen** baut ihn aus seinem neuesten Backup als neuen Plan wieder auf und startet ihn; er bleibt unter seiner neuen ID überwacht. Ein älteres Backup stellst du über die Plan-Karte wieder her (Plan → Orphaned plans).\n**Nicht mehr überwachen** nimmt ihn aus den überwachten Benutzerplänen."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "plan_not_missing": "Der Plan {plan_name} (ID {fub_id}) fehlt nicht mehr (wiederhergestellt oder nicht mehr überwacht). Es wurde nichts geändert.",
+          "no_backup": "Es gibt kein Backup von {plan_name} (ID {fub_id}), aus dem er wiederhergestellt werden kann. Es wurde nichts geändert — du kannst ihn stattdessen nicht mehr überwachen."
         }
       }
     },

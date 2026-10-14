@@ -106,6 +106,12 @@
         "ignore": "🔇 Ignorer (tout conserver)",
         "enable": "🔁 Réactiver l'import"
       }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Restaurer depuis la sauvegarde la plus récente",
+        "unwatch": "🚫 Ne plus surveiller ce plan"
+      }
     }
   },
   "options": {
@@ -437,6 +443,22 @@
           "plan_not_watched": "Le plan {plan_name} (ID {fub_id}) n'est plus surveillé (désélectionné, supprimé ou son ID réattribué). Rien n'a été démarré.",
           "busy": "Une synchronisation, une restauration, une interrogation, une modification de plan de fonctions ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
           "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "Le plan de fonctions {plan_name} n'existe plus",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de fonctions surveillé supprimé",
+            "description": "Le plan de fonctions surveillé **{plan_name}** (ID {fub_id}) n'existe plus dans Comexio — il a été supprimé, par exemple dans Comexio Studio.\n\n**Restaurer** le reconstruit à partir de sa sauvegarde la plus récente en tant que nouveau plan et le démarre ; il reste surveillé sous son nouvel ID. Pour restaurer une sauvegarde plus ancienne, utilisez la carte du plan (Plan → Orphaned plans).\n**Ne plus surveiller** le retire des plans utilisateur surveillés."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "plan_not_missing": "Le plan {plan_name} (ID {fub_id}) ne manque plus (restauré ou plus surveillé). Rien n'a été modifié.",
+          "no_backup": "Il n'existe aucune sauvegarde de {plan_name} (ID {fub_id}) pour le restaurer. Rien n'a été modifié — vous pouvez cesser de le surveiller."
         }
       }
     },

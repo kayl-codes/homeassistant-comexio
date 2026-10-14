@@ -112,6 +112,7 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
     FUNCTION_PLAN_UNLOAD_WAIT_SEC,
     FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
+    FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC,
     FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC,
     ICON_ADD,
     ICON_DELETE,
@@ -187,7 +188,7 @@ from .orphaned_statistics import (
     legacy_statistic_prefixes,
     stable_statistic_id_pattern,
 )
-from .plan_watchdog import ManagedPlanWatchdog, parse_start_action
+from .plan_watchdog import ACTION_RESTORE, ACTION_START, ManagedPlanWatchdog, parse_plan_action
 from .reference_monitor import ReferenceCatalogMonitor
 
 _LOGGER = logging.getLogger(__name__)
@@ -602,6 +603,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
+        # fub_id → (plan_scrape_generation, time.monotonic()) when a watched plan first read as stopped:
+        # judged only once a plan list read after that tells a stopped plan from a deleted one.
+        self._plan_stop_unverified: dict[int, tuple[int, float]] = {}
         # Bulk snapshot of every live plan's elements/connections, refreshed each backup
         # cycle — lets function_plan_search answer instantly instead of a fresh ~11s
         # live fetch per plan (Comexio serializes requests server-side regardless of
@@ -4265,6 +4269,55 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         return self.api.get_fub_active(fub_id)
 
+    def _watchdog_verified_run_state(self, fub_id: int) -> bool | None:
+        """_watchdog_run_state, but a watched plan newly read as stopped stays None until its existence is checked.
+
+        Comexio answers a deleted plan's run state like a stopped one's: reported straight away,
+        a plan deleted in Comexio Studio raised a "not running" alarm with a "Start plan" action
+        and a doomed auto-start (seen live 2026-10-14). So the first "stopped" asks for a full
+        poll, which re-reads the plan list; a plan still listed after it is stopped, a deleted
+        one drops out of the watched plans. A poll that brings no plan list must not silence the
+        watchdog: after FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC the plan is judged anyway.
+        """
+        state = self._watchdog_run_state(fub_id)
+        if state is not False or fub_id in (self.plan_watchdog.stopped or {}):
+            self._plan_stop_unverified.pop(fub_id, None)
+            return state
+        if (seen := self._plan_stop_unverified.get(fub_id)) is None:
+            self._plan_stop_unverified[fub_id] = (self.plan_scrape_generation, time.monotonic())
+            _LOGGER.info(
+                "[%s] Function plan %s reads as not running; re-reading the plan list before reporting it",
+                self.server_id,
+                fub_id,
+            )
+            self.hass.async_create_background_task(
+                self.async_request_refresh(), name=f"{DOMAIN}_{self.server_id}_plan_existence_check"
+            )
+            return None
+        generation, since = seen
+        if (
+            self.plan_scrape_generation > generation
+            or time.monotonic() - since >= FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC
+        ):
+            return False
+        return None
+
+    def _vanished_user_plans(self) -> dict[int, str]:
+        """fub_id → name of the named user picks whose ID Comexio no longer has at all (deleted).
+
+        Only with a live plan list (see _unresolved_plan_identities). An ID now carrying another
+        name is left to _warn_unresolved_watch_picks: renamed and deleted-then-reused look alike.
+        """
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        if self.live_plan_list() is None or not isinstance(raw_picks, list):
+            return {}
+        picks = (parse_watchdog_user_plan_pick(value) for value in raw_picks)
+        return {
+            fub_id: name
+            for pick in picks
+            if pick is not None and (name := pick[1]) is not None and str(fub_id := pick[0]) not in self.api.fub_data
+        }
+
     def _plan_watch_blocked(self) -> bool:
         """Whether a sync, repair, restore, full poll or bus-load cascade runs — the watchdog judges nothing."""
         return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
@@ -4296,16 +4349,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
         in_grace = self._plan_watch_held()
         self._warn_unresolved_watch_picks()
         user_plans = self._watched_user_plan_names()
+        watched = {**user_plans, **self._managed_plan_names()}
+        self._plan_stop_unverified = {
+            fub_id: seen for fub_id, seen in self._plan_stop_unverified.items() if fub_id in watched
+        }
         # In an outage and the boot grace after it a plan seen running still clears its verdict,
         # but no plan is judged stopped anew or started: a booting Comexio starts its plans itself.
         stopped_changed = await self.plan_watchdog.async_check(
-            {**user_plans, **self._managed_plan_names()},
-            self._watchdog_grace_run_state if in_grace else self._watchdog_run_state,
+            watched,
+            self._watchdog_grace_run_state if in_grace else self._watchdog_verified_run_state,
             user_plans.keys(),
             # During a plan edit the start would only be deferred, logged on every tick: it follows
             # with the first check after the edit.
             auto_start=not in_grace and not self.plan_edits_running,
         )
+        # After the check: a stopped plan that dropped out there had its push cleared, and the
+        # vanished push shares its tag.
+        await self.plan_watchdog.async_sync_vanished(self._vanished_user_plans())
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
         return stopped_changed
@@ -4437,9 +4497,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     @callback
     def async_handle_notification_action(self, event: Event) -> None:
-        """The "Start plan" button of a watchdog push was pressed on a phone."""
-        fub_id = parse_start_action(self.server_id, event.data.get("action"))
-        if fub_id is None:
+        """A button of a watchdog push was pressed on a phone: start, restore or stop watching a plan."""
+        parsed = parse_plan_action(self.server_id, event.data.get("action"))
+        if parsed is None:
+            return
+        kind, fub_id = parsed
+        if kind != ACTION_START:
+            self._handle_vanished_plan_action(kind, fub_id)
             return
         if self.is_watched_plan(fub_id):
             self.hass.async_create_background_task(
@@ -4456,6 +4520,99 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.hass.async_create_background_task(
             self.plan_watchdog.async_dismiss_push(fub_id), name=f"{DOMAIN}_{self.server_id}_dismiss_push_{fub_id}"
         )
+
+    def _handle_vanished_plan_action(self, kind: str, fub_id: int) -> None:
+        """ "Restore" or "Stop watching" from the push of a watched user plan Comexio no longer has."""
+        name = (self.plan_watchdog.vanished or {}).get(fub_id)
+        if name is None:
+            # Restored, unpicked or back meanwhile: the push is stale.
+            _LOGGER.warning(
+                "[%s] Watchdog push action for function plan %s ignored: the plan is not missing (any more)",
+                self.server_id,
+                fub_id,
+            )
+            self.hass.async_create_background_task(
+                self.plan_watchdog.async_dismiss_push(fub_id), name=f"{DOMAIN}_{self.server_id}_dismiss_push_{fub_id}"
+            )
+            return
+        if kind == ACTION_RESTORE:
+            self.hass.async_create_background_task(
+                self.async_restore_vanished_plan(fub_id, name, from_push=True),
+                name=f"{DOMAIN}_{self.server_id}_restore_plan_{fub_id}",
+            )
+            return
+        self.hass.async_create_background_task(
+            self.async_unwatch_user_plan(fub_id, name), name=f"{DOMAIN}_{self.server_id}_unwatch_plan_{fub_id}"
+        )
+
+    async def async_restore_vanished_plan(self, fub_id: int, name: str, *, from_push: bool = False) -> bool:
+        """Restore a deleted watched user plan from its newest backup, as a new plan; False without a backup.
+
+        Runs the function_plan_restore action like the plan card's restore of a deleted plan: its
+        checks, locks, notifications and the move of the watchdog pick to the new ID (restore-as-new)
+        all apply. The plan is started: it was watched, so it is meant to run.
+        """
+        snapshot = await self.async_newest_backup_field(fub_id, name)
+        if snapshot is None:
+            _LOGGER.warning(
+                "[%s] Function plan '%s' (ID %s) cannot be restored: it has no backup", self.server_id, name, fub_id
+            )
+            if from_push:
+                await self.plan_watchdog.async_push_no_backup(fub_id, name)
+            return False
+        _LOGGER.info("[%s] Restoring deleted function plan '%s' from backup %s", self.server_id, name, snapshot)
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                "function_plan_restore",
+                {
+                    "config_entry": self.config_entry.entry_id,
+                    "snapshot": snapshot,
+                    "confirm": True,
+                    "on_conflict": "new_id",
+                    "auto_start": True,
+                },
+                blocking=True,
+            )
+        except HomeAssistantError as err:
+            # The action reports its own failures as notifications; this is the call itself failing.
+            _LOGGER.warning("[%s] Restore of function plan '%s' failed: %s", self.server_id, name, err)
+        return True
+
+    async def async_newest_backup_field(self, fub_id: int, name: str) -> str | None:
+        """The restore action's 'snapshot' value of a plan identity's newest backup (auto or change)."""
+        manager = self.function_plan_backup
+        await manager.async_load()
+        dated = [
+            (captured, entry)
+            for entry in manager.plan_backups_for_identity_sync(fub_id, name)
+            if (captured := dt_util.parse_datetime(str(entry.get("captured_at") or ""))) is not None
+        ]
+        if not dated:
+            return None
+        _captured, newest = max(dated, key=lambda item: item[0])
+        return f"{fub_id}:{newest['kind']}:{newest['slot']}:{name}"
+
+    async def async_unwatch_user_plan(self, fub_id: int, name: str) -> bool:
+        """Take a user plan off the watchdog's list (its pick by ID and name, or a bare-ID one); False if not picked."""
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        if not isinstance(raw_picks, list):
+            return False
+        kept = [
+            value for value in raw_picks if parse_watchdog_user_plan_pick(value) not in ((fub_id, name), (fub_id, None))
+        ]
+        if len(kept) == len(raw_picks):
+            return False
+        _LOGGER.info(
+            "[%s] Function plan '%s' (ID %s) is no longer watched (stop watching)", self.server_id, name, fub_id
+        )
+        self.request_options_update_without_reload(
+            {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: kept}
+        )
+        # Drops its repair and push right away, not only with the next run-state poll.
+        if await self.async_watch_managed_plans():
+            self.async_update_listeners()
+        return True
 
     async def _async_start_plan_from_push(self, fub_id: int) -> None:
         _LOGGER.info("[%s] Starting function plan %s from the watchdog push", self.server_id, fub_id)

@@ -8,6 +8,12 @@ and, with the auto-start switch of its kind (HA plans / user plans) on, is start
 right away. After FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS failed auto-starts (refused, or
 stopped again shortly after) Auto-Start gives up on the plan with a "check the plan" repair and
 alarm push, until a run-state poll sees the plan running again.
+
+A watched user plan Comexio no longer has at all (deleted in Comexio Studio) is not reported as
+stopped: it gets a "plan no longer exists" repair and alarm push, with the actions "Restore"
+(its newest backup, as a new plan) and "Stop watching". Comexio answers a deleted plan's run
+state like a stopped one's, so the coordinator re-reads the plan list before it reports a
+watched plan as newly stopped.
 """
 
 from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -38,7 +44,19 @@ ISSUE_FUNCTION_PLAN_STOPPED = "function_plan_stopped"
 ISSUE_FUNCTION_PLAN_STOPPED_USER = "function_plan_stopped_user"
 # Translation key once Plan Auto-Start gave up on a plan ("check the plan"); same issue id and fix flow.
 ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED = "function_plan_auto_start_suspended"
+# Repair of a watched user plan Comexio no longer has (deleted); one per plan, its own id scheme.
+ISSUE_FUNCTION_PLAN_VANISHED = "function_plan_vanished"
 START_ACTION_PREFIX = "COMEXIO_START_PLAN_"
+RESTORE_ACTION_PREFIX = "COMEXIO_RESTORE_PLAN_"
+UNWATCH_ACTION_PREFIX = "COMEXIO_UNWATCH_PLAN_"
+ACTION_START = "start"
+ACTION_RESTORE = "restore"
+ACTION_UNWATCH = "unwatch"
+_ACTION_PREFIXES = {
+    ACTION_START: START_ACTION_PREFIX,
+    ACTION_RESTORE: RESTORE_ACTION_PREFIX,
+    ACTION_UNWATCH: UNWATCH_ACTION_PREFIX,
+}
 NOTIFY_DOMAIN = "notify"
 MOBILE_APP_SERVICE_PREFIX = "mobile_app_"
 
@@ -65,6 +83,12 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
             "Plan Auto-Start could not keep {name} (ID {fub_id}) running after {attempts} attempts and "
             "stopped trying. Please check the plan."
         ),
+        "vanished_title": "Comexio: function plan deleted",
+        "vanished": "The monitored function plan {name} (ID {fub_id}) no longer exists in Comexio.",
+        "restore": "Restore",
+        "unwatch": "Stop watching",
+        "no_backup_title": "Comexio: restore not possible",
+        "no_backup": "There is no backup of {name} (ID {fub_id}) to restore it from.",
         "time_format": "%Y-%m-%d %H:%M:%S",
     },
     "de": {
@@ -86,6 +110,12 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
             "Plan Auto-Start konnte {name} (ID {fub_id}) nach {attempts} Versuchen nicht am Laufen halten "
             "und versucht es nicht weiter. Bitte den Plan prüfen."
         ),
+        "vanished_title": "Comexio: Logikplan gelöscht",
+        "vanished": "Der überwachte Logikplan {name} (ID {fub_id}) existiert in Comexio nicht mehr.",
+        "restore": "Wiederherstellen",
+        "unwatch": "Nicht mehr überwachen",
+        "no_backup_title": "Comexio: Wiederherstellen nicht möglich",
+        "no_backup": "Es gibt kein Backup von {name} (ID {fub_id}), aus dem er wiederhergestellt werden kann.",
         "time_format": "%d.%m.%Y %H:%M:%S",
     },
 }
@@ -95,18 +125,28 @@ def _issue_prefix(server_id: str) -> str:
     return f"{ISSUE_FUNCTION_PLAN_STOPPED}_{server_id}_"
 
 
+def _vanished_issue_prefix(server_id: str) -> str:
+    return f"{ISSUE_FUNCTION_PLAN_VANISHED}_{server_id}_"
+
+
 def stopped_plan_issue_id(server_id: str, fub_id: int) -> str:
     """Repair issue id for one stopped managed plan."""
     return f"{_issue_prefix(server_id)}{fub_id}"
 
 
-def _own_issue_ids(hass: HomeAssistant, server_id: str) -> list[str]:
-    """Ids of this instance's stopped-plan repairs.
+def vanished_plan_issue_id(server_id: str, fub_id: int) -> str:
+    """Repair issue id for one watched user plan Comexio no longer has."""
+    return f"{_vanished_issue_prefix(server_id)}{fub_id}"
+
+
+def _own_issue_ids(hass: HomeAssistant, server_id: str, *, vanished: bool = False) -> list[str]:
+    """Ids of this instance's stopped-plan (or vanished-plan) repairs.
 
     The prefix alone is not enough: for server "home" it also matches the repairs of a
     server "home_2", so the rest of the id must be exactly the plan id.
     """
-    own = re.compile(rf"{re.escape(_issue_prefix(server_id))}\d+")
+    prefix = _vanished_issue_prefix(server_id) if vanished else _issue_prefix(server_id)
+    own = re.compile(rf"{re.escape(prefix)}\d+")
     return [issue_id for domain, issue_id in ir.async_get(hass).issues if domain == DOMAIN and own.fullmatch(issue_id)]
 
 
@@ -115,15 +155,28 @@ def start_action_id(server_id: str, fub_id: int) -> str:
     return f"{START_ACTION_PREFIX}{server_id}_{fub_id}"
 
 
-def parse_start_action(server_id: str, action: Any) -> int | None:
-    """The plan id of this instance's "Start plan" action, None for any other action.
+def plan_action_id(kind: str, server_id: str, fub_id: int) -> str:
+    """Action id of a push button: ACTION_START, ACTION_RESTORE or ACTION_UNWATCH."""
+    return f"{_ACTION_PREFIXES[kind]}{server_id}_{fub_id}"
+
+
+def parse_plan_action(server_id: str, action: Any) -> tuple[str, int] | None:
+    """(kind, plan id) of one of this instance's push actions, None for any other action.
 
     fullmatch on digits, so server "home" does not pick up the actions of server "home_2".
     """
     if not isinstance(action, str):
         return None
-    match = re.fullmatch(rf"{re.escape(START_ACTION_PREFIX + server_id)}_(\d+)", action)
-    return int(match[1]) if match else None
+    for kind, prefix in _ACTION_PREFIXES.items():
+        if match := re.fullmatch(rf"{re.escape(prefix + server_id)}_(\d+)", action):
+            return kind, int(match[1])
+    return None
+
+
+def parse_start_action(server_id: str, action: Any) -> int | None:
+    """The plan id of this instance's "Start plan" action, None for any other action."""
+    parsed = parse_plan_action(server_id, action)
+    return parsed[1] if parsed is not None and parsed[0] == ACTION_START else None
 
 
 def next_stopped_plans(
@@ -177,6 +230,8 @@ class ManagedPlanWatchdog:
         self._gave_up_at: dict[int, str] = {}
         # fub_id → time.monotonic() of its last refused auto-start (FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC).
         self._refused_at: dict[int, float] = {}
+        # fub_id → name of the watched user plans Comexio no longer has (deleted); None until the first check.
+        self.vanished: dict[int, str] | None = None
         # Local time of the last check; shown in the repair dialogs and on the problem sensor.
         self.last_check: datetime | None = None
         self._checking = False
@@ -454,12 +509,17 @@ class ManagedPlanWatchdog:
         message_key: str,
         *,
         with_action: bool = False,
+        actions: Collection[str] = (),
         alarm: bool = False,
     ) -> None:
+        """One push for a plan; with_action adds the "Start plan" button, actions further buttons."""
         texts = self._texts()
         data: dict[str, Any] = {"tag": self._push_tag(fub_id), "group": f"{DOMAIN}_{self._server_id}"}
-        if with_action:
-            data["actions"] = [{"action": start_action_id(self._server_id, fub_id), "title": texts["start"]}]
+        buttons = [*([ACTION_START] if with_action else []), *actions]
+        if buttons:
+            data["actions"] = [
+                {"action": plan_action_id(kind, self._server_id, fub_id), "title": texts[kind]} for kind in buttons
+            ]
         if alarm:
             # Delivered at once and through Do Not Disturb focus (Android: ttl/priority, iOS: interruption-level).
             data |= {"ttl": 0, "priority": "high", "push": {"interruption-level": "time-sensitive"}}
@@ -472,6 +532,55 @@ class ManagedPlanWatchdog:
                 "data": data,
             }
         )
+
+    async def async_sync_vanished(self, vanished: Mapping[int, str]) -> None:
+        """Repair per watched user plan Comexio no longer has; alarm push for a newly vanished one.
+
+        The first call after setup pushes nothing: a plan deleted before HA started was reported
+        then already, and a push on every restart would only repeat it. A plan back again (restored
+        under a new ID) or unpicked loses its repair and push.
+        """
+        previous = self.vanished
+        self.vanished = dict(vanished)
+        for fub_id, name in vanished.items():
+            details = {"plan_name": name, "fub_id": str(fub_id)}
+            ir.async_create_issue(
+                self._hass,
+                DOMAIN,
+                vanished_plan_issue_id(self._server_id, fub_id),
+                is_fixable=True,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key=ISSUE_FUNCTION_PLAN_VANISHED,
+                translation_placeholders=details,
+                data={"entry_id": self._entry_id, **details},
+            )
+        wanted = {vanished_plan_issue_id(self._server_id, fub_id) for fub_id in vanished}
+        for issue_id in _own_issue_ids(self._hass, self._server_id, vanished=True):
+            if issue_id not in wanted:
+                ir.async_delete_issue(self._hass, DOMAIN, issue_id)
+        if previous is None:
+            return
+        for fub_id in sorted(vanished.keys() - previous.keys()):
+            _LOGGER.warning(
+                "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio",
+                self._server_id,
+                vanished[fub_id],
+                fub_id,
+            )
+            await self._async_push(
+                fub_id,
+                vanished[fub_id],
+                "vanished_title",
+                "vanished",
+                actions=(ACTION_RESTORE, ACTION_UNWATCH),
+                alarm=True,
+            )
+        for fub_id in sorted(previous.keys() - vanished.keys()):
+            await self._async_clear_push(fub_id)
+
+    async def async_push_no_backup(self, fub_id: int, name: str) -> None:
+        """Tell the phone a vanished plan has no backup to restore it from; "Stop watching" stays."""
+        await self._async_push(fub_id, name, "no_backup_title", "no_backup", actions=(ACTION_UNWATCH,))
 
     async def async_dismiss_push(self, fub_id: int) -> None:
         """Remove a plan's push from the phones, e.g. one whose "Start plan" action is no longer honoured."""

@@ -21,6 +21,7 @@ from custom_components.comexio.const import (
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
+    FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC,
     PLAN_TRANSITION_STARTING,
     PLAN_TRANSITION_STOPPING,
     function_plan_ids,
@@ -28,7 +29,13 @@ from custom_components.comexio.const import (
     plan_watch_signal,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
-from custom_components.comexio.plan_watchdog import ManagedPlanWatchdog, start_action_id
+from custom_components.comexio.plan_watchdog import (
+    ACTION_RESTORE,
+    ACTION_UNWATCH,
+    ManagedPlanWatchdog,
+    plan_action_id,
+    start_action_id,
+)
 from custom_components.comexio.services import _context
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
@@ -204,6 +211,12 @@ class _FakeCoordinator(SimpleNamespace):
     _in_plan_watch_boot_grace = ComexioCoordinator._in_plan_watch_boot_grace
     _plan_watch_held = ComexioCoordinator._plan_watch_held
     _watchdog_grace_run_state = ComexioCoordinator._watchdog_grace_run_state
+    _watchdog_verified_run_state = ComexioCoordinator._watchdog_verified_run_state
+    _vanished_user_plans = ComexioCoordinator._vanished_user_plans
+    _handle_vanished_plan_action = ComexioCoordinator._handle_vanished_plan_action
+    async_restore_vanished_plan = ComexioCoordinator.async_restore_vanished_plan
+    async_newest_backup_field = ComexioCoordinator.async_newest_backup_field
+    async_unwatch_user_plan = ComexioCoordinator.async_unwatch_user_plan
     comexio_unreachable = ComexioCoordinator.comexio_unreachable
     _async_bus_load_emergency_reboot = ComexioCoordinator._async_bus_load_emergency_reboot
 
@@ -229,7 +242,10 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         scraped_plan_ids=function_plan_ids(api.fub_data),
         plan_scrape_generation=0,
         _plan_watch_deferred=False,
-        hass=None,
+        _plan_stop_unverified={},
+        # Closes the scheduled coroutine (the existence check's full poll) instead of running it.
+        hass=SimpleNamespace(async_create_background_task=MagicMock(side_effect=lambda coro, **_kw: coro.close())),
+        async_request_refresh=AsyncMock(),
         async_update_listeners=MagicMock(),
         _watchdog_lock=asyncio.Lock(),
         _plan_edits_running=0,
@@ -239,7 +255,9 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _comexio_unreachable=False,
         _plan_watch_grace_until=None,
         config_entry=SimpleNamespace(options={}),
-        plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=False)),
+        plan_watchdog=SimpleNamespace(
+            async_check=AsyncMock(return_value=False), async_sync_vanished=AsyncMock(), stopped=None, vanished=None
+        ),
     )
     fake.__dict__.update(overrides)
     return fake
@@ -706,7 +724,11 @@ def test_poll_hands_the_managed_plans_to_the_watchdog(api: ComexioAPI) -> None:
     managed, run_state, user_plans = coordinator.plan_watchdog.async_check.call_args.args
     assert managed == {19: "Test1", 43: "Licht"}
     assert set(user_plans) == set()
-    assert (run_state(19), run_state(43)) == (False, True)
+    # (cl) A plan newly read as stopped waits for a plan list read after it: deleted plans read alike.
+    assert (run_state(19), run_state(43)) == (None, True)
+    coordinator.async_request_refresh.assert_called_once()
+    coordinator.plan_scrape_generation += 1
+    assert run_state(19) is False
     api.set_fub_active(43, False)  # HA itself stopped it, e.g. for a sort
     assert run_state(43) is None
 
@@ -970,7 +992,9 @@ def test_setup_judges_the_watched_plans_without_waiting_for_a_poll(api: ComexioA
     coordinator = _coordinator(
         api,
         config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}),
-        plan_watchdog=SimpleNamespace(async_check=AsyncMock(return_value=True)),
+        plan_watchdog=SimpleNamespace(
+            async_check=AsyncMock(return_value=True), async_sync_vanished=AsyncMock(), stopped=None
+        ),
     )
     asyncio.run(coordinator.async_initial_plan_watch())
     managed, _, _ = coordinator.plan_watchdog.async_check.call_args.args
@@ -1070,6 +1094,8 @@ def test_after_an_outage_the_watchdog_only_clears_plans_for_a_while(
     asyncio.run(coordinator._async_refresh_plan_run_states())
     run_state, auto_start = _check_args(coordinator)
     assert auto_start is True
+    assert run_state(19) is None  # (cl) re-reads the plan list first
+    coordinator.plan_scrape_generation += 1
     assert run_state(19) is False
     assert coordinator._plan_watch_grace_until is None
     assert "reports and starts stopped plans again" in caplog.text
@@ -1260,3 +1286,125 @@ def test_a_poll_whose_relogin_got_no_reply_counts_as_an_outage(api: ComexioAPI, 
     with pytest.raises(_StopAfterFetch):
         asyncio.run(fetch_parsed)
     assert coordinator.comexio_unreachable is relogin_unreachable
+
+
+# (cl) A watched plan deleted in Comexio reads as stopped: verified against the plan list first.
+
+
+def test_a_newly_stopped_plan_is_judged_after_the_check_timeout_without_a_plan_list(api: ComexioAPI) -> None:
+    """A poll that brings no plan list must not silence the watchdog."""
+    api._fub_data["19"]["Active"] = 0  # read from Comexio, not stopped by HA
+    coordinator = _coordinator(api)
+    assert coordinator._watchdog_verified_run_state(19) is None
+    assert coordinator._watchdog_verified_run_state(19) is None  # asks for one poll only
+    coordinator.async_request_refresh.assert_called_once()
+    generation, since = coordinator._plan_stop_unverified[19]
+    coordinator._plan_stop_unverified[19] = (generation, since - FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC)
+    assert coordinator._watchdog_verified_run_state(19) is False
+
+
+def test_a_plan_already_judged_stopped_or_running_needs_no_existence_check(api: ComexioAPI) -> None:
+    api._fub_data["19"]["Active"] = 0  # read from Comexio, not stopped by HA
+    coordinator = _coordinator(api, _plan_stop_unverified={43: (0, 0.0)})
+    coordinator.plan_watchdog.stopped = {19: "Test1"}
+    assert coordinator._watchdog_verified_run_state(19) is False
+    assert coordinator._watchdog_verified_run_state(43) is True
+    assert coordinator._plan_stop_unverified == {}  # running again: a later stop is verified anew
+    coordinator.async_request_refresh.assert_not_called()
+
+
+def test_only_named_user_picks_gone_from_the_plan_list_are_vanished(api: ComexioAPI) -> None:
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["99:Gone", "19:Test1", "98", "x"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    assert coordinator._vanished_user_plans() == {99: "Gone"}
+    coordinator.scraped_plan_ids = None  # no plan list read yet: nothing is judged deleted
+    assert coordinator._vanished_user_plans() == {}
+
+
+def test_the_poll_hands_the_vanished_user_plans_to_the_watchdog(api: ComexioAPI) -> None:
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: True, 43: True})
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with({47: "Test4"})
+
+
+def _task_names(coordinator: _FakeCoordinator) -> list[str]:
+    return [call.kwargs["name"] for call in coordinator.hass.async_create_background_task.call_args_list]
+
+
+@pytest.mark.parametrize(("kind", "task"), [(ACTION_RESTORE, "restore_plan_47"), (ACTION_UNWATCH, "unwatch_plan_47")])
+def test_push_actions_of_a_vanished_plan(api: ComexioAPI, kind: str, task: str) -> None:
+    coordinator = _coordinator(api)
+    coordinator.plan_watchdog.vanished = {47: "Test4"}
+    coordinator.async_handle_notification_action(SimpleNamespace(data={"action": plan_action_id(kind, "iosrv1", 47)}))
+    assert _task_names(coordinator) == [f"comexio_iosrv1_{task}"]
+
+
+def test_a_stale_vanished_plan_push_is_dismissed(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    coordinator = _coordinator(api)
+    coordinator.plan_watchdog.vanished = {}
+    coordinator.plan_watchdog.async_dismiss_push = AsyncMock()
+    action = plan_action_id(ACTION_RESTORE, "iosrv1", 47)
+    coordinator.async_handle_notification_action(SimpleNamespace(data={"action": action}))
+    assert _task_names(coordinator) == ["comexio_iosrv1_dismiss_push_47"]
+    assert "the plan is not missing" in caplog.text
+
+
+def _backups(*entries: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(async_load=AsyncMock(), plan_backups_for_identity_sync=MagicMock(return_value=list(entries)))
+
+
+def test_the_restore_takes_the_newest_backup_of_any_kind(api: ComexioAPI) -> None:
+    backups = _backups(
+        {"kind": "change", "slot": 3, "captured_at": "2026-10-02T08:00:00+00:00"},
+        {"kind": "auto", "slot": 1, "captured_at": "2026-10-02T09:00:00+00:00"},
+        {"kind": "auto", "slot": 2, "captured_at": None},
+    )
+    coordinator = _coordinator(api, function_plan_backup=backups)
+    assert asyncio.run(coordinator.async_newest_backup_field(47, "Test4")) == "47:auto:1:Test4"
+    backups.plan_backups_for_identity_sync.assert_called_once_with(47, "Test4")
+
+
+def test_restoring_a_vanished_plan_runs_the_restore_action_as_a_new_started_plan(api: ComexioAPI) -> None:
+    coordinator = _coordinator(
+        api,
+        function_plan_backup=_backups({"kind": "change", "slot": 0, "captured_at": "2026-10-02T08:00:00+00:00"}),
+        config_entry=SimpleNamespace(options={}, entry_id="entry1"),
+    )
+    coordinator.hass.services = SimpleNamespace(async_call=AsyncMock())
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4")) is True
+    coordinator.hass.services.async_call.assert_awaited_once_with(
+        "comexio",
+        "function_plan_restore",
+        {
+            "config_entry": "entry1",
+            "snapshot": "47:change:0:Test4",
+            "confirm": True,
+            "on_conflict": "new_id",
+            "auto_start": True,
+        },
+        blocking=True,
+    )
+
+
+@pytest.mark.parametrize("from_push", [False, True])
+def test_a_vanished_plan_without_a_backup_is_not_restored(api: ComexioAPI, from_push: bool) -> None:
+    coordinator = _coordinator(api, function_plan_backup=_backups())
+    coordinator.plan_watchdog.async_push_no_backup = AsyncMock()
+    coordinator.hass.services = SimpleNamespace(async_call=AsyncMock())
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=from_push)) is False
+    coordinator.hass.services.async_call.assert_not_called()
+    assert coordinator.plan_watchdog.async_push_no_backup.await_count == int(from_push)
+
+
+def test_stop_watching_drops_the_named_and_the_bare_pick(api: ComexioAPI) -> None:
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4", "47", "19:Test1", "47:Other"]}
+    coordinator = _coordinator(
+        api, config_entry=SimpleNamespace(options=options), request_options_update_without_reload=MagicMock()
+    )
+    assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["19:Test1", "47:Other"]
+    coordinator.config_entry.options = new_options
+    assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is False

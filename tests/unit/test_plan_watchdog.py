@@ -14,12 +14,17 @@ from custom_components.comexio.const import (
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
 )
 from custom_components.comexio.plan_watchdog import (
+    ACTION_RESTORE,
+    ACTION_START,
+    ACTION_UNWATCH,
     ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED,
     ISSUE_FUNCTION_PLAN_STOPPED,
     ISSUE_FUNCTION_PLAN_STOPPED_USER,
+    ISSUE_FUNCTION_PLAN_VANISHED,
     ManagedPlanWatchdog,
     next_stopped_plans,
     parse_start_action,
+    plan_action_id,
     start_action_id,
     stopped_plan_issue_id,
 )
@@ -419,3 +424,63 @@ def test_without_auto_start_a_stopped_plan_only_keeps_its_repair(ir: MagicMock) 
     assert started == []
     assert watchdog.stopped == {34: "HA - Marker 1"}  # unknown keeps the verdict, no new one for 42
     assert set(ir.async_get.return_value.issues) == {(DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))}
+
+
+# (cl) A watched user plan deleted in Comexio: "no longer exists" with Restore / Stop watching.
+
+
+def test_a_vanished_plan_gets_its_repair_and_one_alarm_push(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished({}))  # first check after setup
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    issue_id = plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47)
+    assert (DOMAIN, issue_id) in ir.async_get.return_value.issues
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_VANISHED
+    ((_domain, service, data),) = _pushes(watchdog)
+    assert service == "mobile_app_phone"
+    assert data["message"] == "Der überwachte Logikplan Test4 (ID 47) existiert in Comexio nicht mehr."
+    assert [action["action"] for action in data["data"]["actions"]] == [
+        plan_action_id(ACTION_RESTORE, SERVER_ID, 47),
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47),
+    ]
+    assert data["data"]["priority"] == "high"  # an alarm
+
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))  # still missing: no second push
+    assert len(_pushes(watchdog)) == 1
+    asyncio.run(watchdog.async_sync_vanished({}))  # restored under a new ID, or unpicked
+    assert (DOMAIN, issue_id) not in ir.async_get.return_value.issues
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_a_plan_vanished_before_setup_gets_its_repair_but_no_push(ir: MagicMock) -> None:
+    """A restart must not repeat the alarm of a plan deleted long ago."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47)) in ir.async_get.return_value.issues
+    assert _pushes(watchdog) == []
+
+
+def test_vanished_and_stopped_repairs_do_not_clean_up_each_other(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog()
+    asyncio.run(watchdog.async_check({34: "HA - Marker 1"}, _states(p34=False)))
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    asyncio.run(watchdog.async_check({34: "HA - Marker 1"}, _states(p34=False)))
+    issues = ir.async_get.return_value.issues
+    assert (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34)) in issues
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47)) in issues
+
+
+@pytest.mark.parametrize(
+    ("action", "parsed"),
+    [
+        ("COMEXIO_START_PLAN_cx1_47", (ACTION_START, 47)),
+        ("COMEXIO_RESTORE_PLAN_cx1_47", (ACTION_RESTORE, 47)),
+        ("COMEXIO_UNWATCH_PLAN_cx1_47", (ACTION_UNWATCH, 47)),
+        ("COMEXIO_RESTORE_PLAN_cx1_2_47", None),  # another server's ("cx1_2")
+        ("COMEXIO_RESTORE_PLAN_cx1_x", None),
+        (None, None),
+    ],
+)
+def test_parse_plan_action(action: object, parsed: tuple[str, int] | None) -> None:
+    assert plan_watchdog.parse_plan_action(SERVER_ID, action) == parsed
+    assert parse_start_action(SERVER_ID, action) == (parsed[1] if parsed and parsed[0] == ACTION_START else None)

@@ -728,6 +728,9 @@ LOGIN_ERROR_CONNECTION = "connection"
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
 # User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
 # (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
+# Longest the watchdog holds back a newly stopped plan while the plan list is re-read to tell a deleted
+# plan from a stopped one (a full poll takes a few seconds; one that brings no plan list must not mute it).
+FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC = 120
 # Longest an unload (HA's own reload) waits for a running function plan restore or edit.
 FUNCTION_PLAN_UNLOAD_WAIT_SEC = 120
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"

@@ -106,6 +106,12 @@
         "ignore": "🔇 Ignorar (conservarlo todo)",
         "enable": "🔁 Volver a activar la importación"
       }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Restaurar desde la copia más reciente",
+        "unwatch": "🚫 Dejar de supervisar este plan"
+      }
     }
   },
   "options": {
@@ -437,6 +443,22 @@
           "plan_not_watched": "El plan {plan_name} (ID {fub_id}) ya no se supervisa (deseleccionado, eliminado o su ID reasignado). No se inició nada.",
           "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta, una edición de plan de funciones o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
           "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "El plan de funciones {plan_name} ya no existe",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de funciones supervisado eliminado",
+            "description": "El plan de funciones supervisado **{plan_name}** (ID {fub_id}) ya no existe en Comexio — se eliminó, por ejemplo en Comexio Studio.\n\n**Restaurar** lo reconstruye a partir de su copia de seguridad más reciente como un plan nuevo y lo inicia; sigue supervisado con su nuevo ID. Para restaurar una copia más antigua, usa la tarjeta del plan (Plan → Orphaned plans).\n**Dejar de supervisar** lo quita de los planes de usuario supervisados."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado.",
+          "plan_not_missing": "El plan {plan_name} (ID {fub_id}) ya no falta (restaurado o ya no supervisado). No se cambió nada.",
+          "no_backup": "No hay ninguna copia de seguridad de {plan_name} (ID {fub_id}) para restaurarlo. No se cambió nada — puedes dejar de supervisarlo."
         }
       }
     },

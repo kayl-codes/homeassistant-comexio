@@ -106,6 +106,12 @@
         "ignore": "🔇 Ignore (keep everything)",
         "enable": "🔁 Switch the import on again"
       }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Restore from the newest backup",
+        "unwatch": "🚫 Stop watching this plan"
+      }
     }
   },
   "options": {
@@ -437,6 +443,22 @@
           "plan_not_watched": "The plan {plan_name} (ID {fub_id}) is no longer watched (unselected, deleted or its ID reused). Nothing was started.",
           "busy": "A sync, restore, poll, function plan edit or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
           "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "Function plan {plan_name} no longer exists",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Watched function plan deleted",
+            "description": "The watched function plan **{plan_name}** (ID {fub_id}) no longer exists in Comexio — it was deleted, for example in Comexio Studio.\n\n**Restore** rebuilds it from its newest backup as a new plan and starts it; it stays watched under its new ID. To restore an older backup instead, use the plan card (Plan → Orphaned plans).\n**Stop watching** removes it from the watched user plans."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "plan_not_missing": "The plan {plan_name} (ID {fub_id}) is no longer missing (restored or no longer watched). Nothing was changed.",
+          "no_backup": "There is no backup of {plan_name} (ID {fub_id}) to restore it from. Nothing was changed — you can stop watching it instead."
         }
       }
     },
