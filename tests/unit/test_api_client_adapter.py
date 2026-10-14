@@ -882,6 +882,12 @@ def test_get_io_live_states_failure_is_none_not_empty(comexio_api: ComexioAPI, c
     assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) is None
 
 
+def test_get_io_live_states_refused_request_is_none(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """aiocomexio raises ValueError for a contradictory request (one IO id, two extensions): a failed fetch."""
+    _fail(client, "get_io_live_states", ValueError("conflicting extension ids for IO 11"))
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11"), (2, "11")])) is None
+
+
 def test_get_io_live_states_passes_the_pairs_through(comexio_api: ComexioAPI, client: MagicMock) -> None:
     client.get_io_live_states = AsyncMock(return_value={"11": "74"})
     assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) == {"11": "74"}

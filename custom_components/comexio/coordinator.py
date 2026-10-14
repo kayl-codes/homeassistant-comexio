@@ -6,6 +6,7 @@ import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import logging
+import math
 import pathlib
 import re
 import socket
@@ -14,7 +15,6 @@ from typing import Any
 import uuid
 
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
-from aiocomexio.config import clean_value
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -315,28 +315,71 @@ def _format_by_ref(by_ref: dict[int, list[int]]) -> str:
     )
 
 
+def _io_label(io: Mapping[str, Any]) -> str:
+    """An IO as the user knows it from Comexio: "<extension> <identifier>" (e.g. "BASE AI1")."""
+    return f"{io['ext_name']} {io['identifier']}"
+
+
+def _io_labels(ios_by_id: Mapping[str, Mapping[str, Any]], io_ids: Iterable[str]) -> str:
+    """Sorted, comma-separated labels of io_ids for a log line."""
+    return ", ".join(sorted(_io_label(ios_by_id[io_id]) for io_id in io_ids))
+
+
+def _has_usable_ext_id(io: Mapping[str, Any]) -> bool:
+    """Whether the IO's extension id is a plain non-negative integer the IO live request can carry.
+
+    isdecimal, not isdigit: "²" passes isdigit but int() rejects it.
+    """
+    return str(io["ext_id"]).isdecimal()
+
+
 def _io_live_requests(ios: Iterable[Mapping[str, Any]]) -> list[tuple[int, str]]:
     """(extension id, IO id) of every IO whose live value to ask for: those on online extensions.
 
-    An offline extension cannot answer; its IOs keep their last known value.
+    An offline extension cannot answer; its IOs keep their last known value. An IO whose
+    extension id is no integer is left out (logged by the coordinator, see
+    _track_ios_without_ext_id).
     """
-    return [(int(io["ext_id"]), io["id"]) for io in ios if not io.get("offline") and str(io["ext_id"]).isdigit()]
+    return [(int(io["ext_id"]), io["id"]) for io in ios if not io.get("offline") and _has_usable_ext_id(io)]
+
+
+def _live_io_number(raw: Any) -> float | None:
+    """A live IO value as float (German decimal comma accepted), None unless it is a finite number.
+
+    Not clean_value: that turns "" or an error text into 0.0, which would show as a real reading.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        return None
+    try:
+        number = float(str(raw).strip().replace(",", "."))
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _apply_io_live_values(
-    ios: Iterable[dict[str, Any]], live_values: Mapping[str, str] | None, known_values: Mapping[str, Any]
-) -> None:
-    """Set each IO's value from its live value, else its last known one (#175).
+    ios: Iterable[dict[str, Any]], live_values: Mapping[str, Any] | None, known_values: Mapping[str, Any]
+) -> set[str]:
+    """Set each IO's value from its live value, else its last known one (#175); return the ids that got either.
 
-    The config page carries no live IO value: parse_config's value is a default (0 on a live
-    install), so it only counts for an IO that never had a value. live_values None means the
-    whole fetch failed — every IO keeps its last known value.
+    The config page carries no live IO value: parse_config's value is a placeholder (0 on a live
+    install), so it only stays for an IO with no real value yet — known_values holds real values
+    only (live answers and webhook pushes), never an earlier placeholder. live_values None means
+    the whole fetch failed — every IO keeps its last known value. The returned ids hold a real
+    value; every other IO kept the placeholder.
     """
+    real_ids: set[str] = set()
     for io in ios:
-        if live_values is not None and (live := live_values.get(io["id"])) is not None:
-            io["value"] = clean_value(live)
-        elif io["id"] in known_values:
-            io["value"] = known_values[io["id"]]
+        io_id = io["id"]
+        live = _live_io_number(live_values.get(io_id)) if live_values is not None else None
+        if live is not None:
+            io["value"] = live
+        elif io_id in known_values:
+            io["value"] = known_values[io_id]
+        else:
+            continue
+        real_ids.add(io_id)
+    return real_ids
 
 
 def _source_max_ids(raw_config: dict[str, Any]) -> tuple[int, int]:
@@ -641,6 +684,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._last_referenced_markers_from_snapshot = False
         self.marker_states: dict[str, Any] = {}
         self.io_states: dict[str, Any] = {}
+        # IO ids whose io_states value is a real reading — a live answer or a webhook push — and not
+        # parse_config's placeholder (#175): only those count as "last known" when a live answer is
+        # missing, so a placeholder stored on a cold start is never frozen as a reading.
+        self._io_real_value_ids: set[str] = set()
+        # The ids that got a real value in this poll's _async_apply_io_live_states, committed by
+        # _merge_polled_states once their value lands in io_states.
+        self._polled_io_real_ids: set[str] = set()
+        # Requested IOs without a usable live answer, and IOs left out of the request for an
+        # unusable extension id, as of the last poll — logged on change only.
+        self._unanswered_io_ids: set[str] = set()
+        self._ios_without_ext_id: set[str] = set()
         self.knx_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
         self._io_index: dict[tuple[str, str], dict[str, Any]] = {}
@@ -991,16 +1045,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._merge_polled_states(final_data)
         self._merge_polled_knx_states(final_data["knx"], knx_live_states)
 
-        # Prune knx_states down to the object ids the server still reports. The merge loop
-        # above only revisits ids currently present in final_data["knx"] — a value cached
-        # for a since-deleted KNX object would otherwise linger forever and be inherited by
-        # a different object that later reuses the same numeric id. Keyed off parsed_data
-        # (not final_data) so the cache stays correct even while import_knx is off, and
-        # gated on a non-empty scrape (get_raw_config returns {} on a transient
-        # HTTP failure — pruning then would wipe every cached value over a blip).
-        if raw_config.get("FubModules"):
-            known_knx_ids = {k["id"] for k in parsed_data.get("knx", [])}
-            self.knx_states = {kid: v for kid, v in self.knx_states.items() if kid in known_knx_ids}
+        self._prune_vanished_states(raw_config, parsed_data)
 
         # Rebuild O(1) lookup index for webhook IO updates
         self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
@@ -1080,11 +1125,62 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return raw_config, parsed_data, knx_live_states
 
     async def _async_apply_io_live_states(self, ios: list[dict[str, Any]]) -> None:
-        """Live IO values from their own dashboard refresh, over parse_config's default (#175)."""
-        io_live_states = await self.api.get_io_live_states(_io_live_requests(ios))
+        """Live IO values from their own dashboard refresh, over parse_config's placeholder (#175)."""
+        self._track_ios_without_ext_id(ios)
+        requests = _io_live_requests(ios)
+        io_live_states = await self.api.get_io_live_states(requests)
+        # Read after the await: a webhook push during it is a real value as well (R1 keeps it anyway).
+        known = {io_id: value for io_id, value in self.io_states.items() if io_id in self._io_real_value_ids}
         if io_live_states is None:
-            _LOGGER.warning("[%s] IO live states fetch failed; keeping last known values", self.server_id)
-        _apply_io_live_values(ios, io_live_states, self.io_states)
+            kept = sum(io["id"] in known for io in ios)
+            _LOGGER.warning(
+                "[%s] IO live states fetch failed; %s IOs keep their last known value, %s without one yet "
+                "show the config page value",
+                self.server_id,
+                kept,
+                len(ios) - kept,
+            )
+        else:
+            self._track_unanswered_ios(ios, requests, io_live_states)
+        self._polled_io_real_ids = _apply_io_live_values(ios, io_live_states, known)
+
+    def _track_ios_without_ext_id(self, ios: list[dict[str, Any]]) -> None:
+        """Warn once when IOs of an online extension get left out of the live request for a non-integer extension id.
+
+        A changed set warns again, an unchanged one stays quiet: the scrape repeats the same ids on
+        every poll, and a warning each time would bury everything else.
+        """
+        skipped = {io["id"]: io for io in ios if not io.get("offline") and not _has_usable_ext_id(io)}
+        if new := skipped.keys() - self._ios_without_ext_id:
+            _LOGGER.warning(
+                "[%s] No live value requested for IOs %s: their extension id is no integer (%s)",
+                self.server_id,
+                _io_labels(skipped, new),
+                ", ".join(sorted({str(skipped[io_id]["ext_id"]) for io_id in new})),
+            )
+        self._ios_without_ext_id = set(skipped)
+
+    def _track_unanswered_ios(
+        self, ios: list[dict[str, Any]], requests: list[tuple[int, str]], live_values: Mapping[str, Any]
+    ) -> None:
+        """Log requested IOs that got no usable live value when new ones appear, and their recovery once.
+
+        An unchanged set stays quiet. An IO that left the request (offline extension, deleted) is
+        not reported as recovered.
+        """
+        ios_by_id = {io["id"]: io for io in ios}
+        requested = {io_id for _ext_id, io_id in requests}
+        unanswered = {io_id for io_id in requested if _live_io_number(live_values.get(io_id)) is None}
+        if new := unanswered - self._unanswered_io_ids:
+            _LOGGER.warning(
+                "[%s] Comexio sent no live value for IOs %s; they keep their last known value "
+                "(the config page value if none is known yet)",
+                self.server_id,
+                _io_labels(ios_by_id, new),
+            )
+        if recovered := (self._unanswered_io_ids - unanswered) & requested:
+            _LOGGER.info("[%s] Live values back for IOs %s", self.server_id, _io_labels(ios_by_id, recovered))
+        self._unanswered_io_ids = unanswered
 
     def _merge_polled_states(self, final_data: dict[str, Any]) -> None:
         """R1: Merge the API snapshot with any webhook values that arrived during the fetch.
@@ -1101,8 +1197,31 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for io in final_data["io"]:
             if io["id"] in self._webhook_updated_io_ids:
                 io["value"] = self.io_states.get(io["id"], io["value"])
+                continue
+            self.io_states[io["id"]] = io["value"]
+            # A placeholder stored here must not count as a reading on the next failed fetch (#175).
+            if io["id"] in self._polled_io_real_ids:
+                self._io_real_value_ids.add(io["id"])
             else:
-                self.io_states[io["id"]] = io["value"]
+                self._io_real_value_ids.discard(io["id"])
+
+    def _prune_vanished_states(self, raw_config: dict[str, Any], parsed_data: dict[str, Any]) -> None:
+        """Prune knx_states and io_states down to the ids the server still reports.
+
+        The merge loops only revisit ids currently present in final_data — a value cached for a
+        since-deleted KNX object or IO would otherwise linger forever and be inherited by a
+        different one that later reuses the same numeric id (for IOs also its real-value mark,
+        #175). Keyed off parsed_data (not final_data) so the caches stay correct even while
+        import_knx / import_ios is off, and gated on a non-empty scrape (get_raw_config returns
+        {} on a transient HTTP failure — pruning then would wipe every cached value over a blip).
+        """
+        if not raw_config.get("FubModules"):
+            return
+        known_knx_ids = {k["id"] for k in parsed_data.get("knx", [])}
+        self.knx_states = {kid: v for kid, v in self.knx_states.items() if kid in known_knx_ids}
+        known_io_ids = {io["id"] for io in parsed_data.get("io", [])}
+        self.io_states = {io_id: v for io_id, v in self.io_states.items() if io_id in known_io_ids}
+        self._io_real_value_ids &= known_io_ids
 
     def _merge_polled_knx_states(self, knx_items: list[dict[str, Any]], knx_live_states: dict[str, Any]) -> None:
         """The R1 merge of _merge_polled_states for KNX objects.
@@ -3634,6 +3753,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if io := self._io_index.get(key):
             previous = self.io_states.get(io["id"])
             self.io_states[io["id"]] = value
+            self._io_real_value_ids.add(io["id"])
             io["value"] = value
             self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
             label = io.get("name") or f"{ext_name} {identifier}"

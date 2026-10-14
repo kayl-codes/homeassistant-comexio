@@ -246,6 +246,20 @@ async def test_setup_retry_when_unreachable(
     mock_comexio_api[0].close.assert_called_once()
 
 
+async def test_io_entities_show_their_live_values(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+) -> None:
+    """The IO live answer, not the config page value, reaches the IO entities (#175)."""
+    api_returns["get_io_live_states"] = {"11": "0", "12": "1", "13": "22,75"}
+
+    await _setup(hass, mock_config_entry)
+
+    assert hass.states.get("binary_sensor.iosrv1_base_i1").state == "off"  # config page: "1"
+    assert hass.states.get("switch.iosrv1_base_q1").state == "on"  # config page: 0
+    assert hass.states.get("sensor.iosrv1_base_ai1").state == "22.75"  # config page: "21,5"
+    mock_comexio_api[0].get_io_live_states.assert_awaited_once_with([(1, "11"), (1, "12"), (1, "13")])
+
+
 @pytest.mark.logged_exception  # the coordinator logs the failed first refresh with its traceback
 async def test_setup_retry_when_first_refresh_fails(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
