@@ -41,6 +41,10 @@ RESTORE_RUNNING_MSG = (
     "A function plan restore is running — please wait for it to finish. It rewrites the plan, so a change "
     "made now could be lost or mixed into the restored plan."
 )
+SYNC_RUNNING_MSG = (
+    "A sync, Web-IO range check, uninstall cleanup or integration reload is running — please wait for it to "
+    "finish. It writes into the function plans too, so a change made now could be lost or mixed into its writes."
+)
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
@@ -226,12 +230,22 @@ def _parse_snapshot_field(raw: str) -> tuple[int, str, int, str | None] | None:
         return None
 
 
-def refuse_while_restoring(hass: HomeAssistant, coordinator: ComexioCoordinator, error_title: str) -> bool:
-    """Whether a function plan restore runs — then notify and return True, the caller must not edit a plan."""
-    if not coordinator._restore_lock.locked():
+def refuse_while_plans_busy(hass: HomeAssistant, coordinator: ComexioCoordinator, error_title: str) -> bool:
+    """Whether a restore, or a sync / range check / uninstall cleanup / reload (they hold _sync_lock), runs.
+
+    Then notify and return True: the caller must not edit a plan. Both rewrite function plans,
+    and a reload closes the API session.
+    """
+    if coordinator._restore_lock.locked():
+        msg = RESTORE_RUNNING_MSG
+    elif coordinator._sync_lock.locked() or coordinator.in_sync:
+        msg = SYNC_RUNNING_MSG
+    else:
         return False
-    _LOGGER.warning("[%s] %s not started — a function plan restore is running", coordinator.server_id, error_title)
-    persistent_notification.async_create(hass, RESTORE_RUNNING_MSG, title=error_title)
+    _LOGGER.warning(
+        "[%s] %s not started — a restore, sync, cleanup or reload is running", coordinator.server_id, error_title
+    )
+    persistent_notification.async_create(hass, msg, title=error_title)
     return True
 
 
@@ -248,7 +262,7 @@ def _resolve_function_plan(
     coordinator = _resolve_coordinator(hass, call, error_title)
     if coordinator is None:
         return None
-    if edits_plan and refuse_while_restoring(hass, coordinator, error_title):
+    if edits_plan and refuse_while_plans_busy(hass, coordinator, error_title):
         return None
 
     api = coordinator.api
@@ -292,7 +306,7 @@ async def _resolve_function_plan_context(
     if not await _ensure_comexio_login(hass, api, error_title):
         return None
     # Again after the login round-trip: a restore may have started meanwhile.
-    if edits_plan and refuse_while_restoring(hass, coordinator, error_title):
+    if edits_plan and refuse_while_plans_busy(hass, coordinator, error_title):
         return None
     return ctx
 

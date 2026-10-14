@@ -26,7 +26,7 @@ from ._context import (
     _get_canvas_grid_dims,
     _plan_activation_note,
     _resolve_function_plan,
-    refuse_while_restoring,
+    refuse_while_plans_busy,
 )
 from ._grid import _find_first_free_grid_position, _get_occupied_grid_slots
 
@@ -374,7 +374,7 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
     if not await _ensure_comexio_login(hass, api, error_title):
         return
     # Again after the login round-trip: a restore may have started meanwhile.
-    if refuse_while_restoring(hass, coordinator, error_title):
+    if refuse_while_plans_busy(hass, coordinator, error_title):
         return
 
     # No await since the check: a restore starting from here on refuses until the writes end.

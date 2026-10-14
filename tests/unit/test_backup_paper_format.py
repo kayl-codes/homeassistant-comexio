@@ -599,6 +599,24 @@ def test_a_promotion_that_could_not_be_saved_is_taken_back(stores: dict[str, Any
     assert all("restored_at" not in snap for snap in history)
 
 
+def test_a_keep_record_that_could_not_be_saved_never_fails_the_lineage_move(
+    stores: dict[str, Any], plan: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Review) a failing keep-store save made a saved move read as "backups not moved"."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+
+    async def run() -> None:
+        await manager.async_auto_backup({1: plan}, {"1": {"Name": "Lights"}}, plan_format={"1": A4})
+        manager._kept.add((1, "Lights"))
+        with patch.object(manager, "_async_save_kept", AsyncMock(side_effect=OSError("disk full"))):
+            await manager.async_rekey_fub_id(1, 5, "Lights")
+
+    asyncio.run(run())
+    assert len(manager._auto_data["5"]["Lights"]) == 1
+    assert (1, "Lights") not in manager._kept
+    assert "keep decision for 'Lights' (fub=1) not saved" in caplog.text
+
+
 @pytest.mark.parametrize("old_id_still_live", [False, True])
 def test_a_lineage_move_that_could_not_be_saved_is_put_back(
     stores: dict[str, Any], plan: dict[str, Any], old_id_still_live: bool

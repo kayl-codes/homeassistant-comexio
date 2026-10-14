@@ -1581,7 +1581,7 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
 
     # A sync, an uninstall cleanup and a plan edit write into function plans too, and a reload closes
     # the API session: none may overlap a restore (they refuse to start while one runs, see
-    # restores_held_off and refuse_while_restoring). From the check to the lock below runs no await.
+    # restores_held_off and refuse_while_plans_busy). From the check to the lock below runs no await.
     if (
         coordinator._restore_lock.locked()
         or coordinator._sync_lock.locked()
@@ -1591,9 +1591,9 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         _LOGGER.warning("Function Plan Restore not started — a restore, sync, cleanup, reload or plan edit is running")
         persistent_notification.async_create(
             hass,
-            "A restore, sync, Web-IO range check, uninstall cleanup, integration reload or function plan edit "
-            "(sort, stop, activate, connect, marker delete, bus-load cascade) is running — please wait for it "
-            "to finish before starting a restore.",
+            "A restore, sync, Web-IO range check, uninstall cleanup, integration reload, function plan edit "
+            "(sort, stop, activate, connect, marker delete, bus-load cascade) or backup deletion is running — "
+            "please wait for it to finish before starting a restore.",
             title=_TITLE_RESTORE_ERR,
             # Not the running restore's own id: that would overwrite its progress notice.
             notification_id=f"comexio_function_plan_restore_blocked_{coordinator.server_id}",
@@ -1812,20 +1812,11 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
         )
         return
 
-    snapshot_raw = call.data.get("snapshot")
-    fub_id_raw = call.data.get("fub_id")
-
-    if snapshot_raw:
-        msg = await _delete_one_snapshot(hass, coordinator, snapshot_raw)
-    elif fub_id_raw not in (None, ""):
-        msg = await _delete_plan_backups_by_fub_id(hass, coordinator, fub_id_raw)
-    else:
-        count = await coordinator.function_plan_backup.async_delete_all_backups()
-        delete_all_orphaned_backup_issues(hass, coordinator.server_id)
-        msg = (
-            f"Deleted ALL {count} stored snapshot(s) across ALL plans on this instance.\n"
-            "Fresh backups will be created automatically starting with the next backup cycle / next change."
-        )
+    if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_DELETE_BACKUPS_ERR):
+        return
+    # No await since the check: a restore starting from here on refuses until the deletion ends.
+    with coordinator.plan_edit():
+        msg = await _delete_requested_backups(hass, call, coordinator)
     if msg is None:
         return
 
@@ -1833,6 +1824,37 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
     coordinator.async_update_listeners()  # refresh the backup-summary diagnostic sensor
     await _refresh_service_descriptions(hass)
     persistent_notification.async_create(hass, msg, title="Function Plan Delete Backups")
+
+
+def _refuse_backup_change_while_restoring(hass: HomeAssistant, coordinator: ComexioCoordinator, title: str) -> bool:
+    """Whether a restore runs — it moves and marks backups, and a deletion meanwhile could be undone on disk."""
+    if not coordinator._restore_lock.locked():
+        return False
+    _LOGGER.warning("[%s] %s not started — a function plan restore is running", coordinator.server_id, title)
+    persistent_notification.async_create(
+        hass,
+        "A function plan restore is running — it moves and marks backups. Please try again once it has finished.",
+        title=title,
+    )
+    return True
+
+
+async def _delete_requested_backups(
+    hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator
+) -> str | None:
+    """The deletion of _handle_function_plan_delete_backups; its result message (None: reported already)."""
+    snapshot_raw = call.data.get("snapshot")
+    fub_id_raw = call.data.get("fub_id")
+    if snapshot_raw:
+        return await _delete_one_snapshot(hass, coordinator, snapshot_raw)
+    if fub_id_raw not in (None, ""):
+        return await _delete_plan_backups_by_fub_id(hass, coordinator, fub_id_raw)
+    count = await coordinator.function_plan_backup.async_delete_all_backups()
+    delete_all_orphaned_backup_issues(hass, coordinator.server_id)
+    return (
+        f"Deleted ALL {count} stored snapshot(s) across ALL plans on this instance.\n"
+        "Fresh backups will be created automatically starting with the next backup cycle / next change."
+    )
 
 
 async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call: ServiceCall):
@@ -1865,9 +1887,13 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     retention_months = coordinator.config_entry.options.get(
         CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
     )
-    purged = await coordinator.function_plan_backup.async_purge_orphaned(
-        live_plans, cutoff=retention_cutoff(int(retention_months))
-    )
+    if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_PURGE_ORPHANED_BACKUPS_ERR):
+        return
+    # No await since the check: a restore starting from here on refuses until the purge ends.
+    with coordinator.plan_edit():
+        purged = await coordinator.function_plan_backup.async_purge_orphaned(
+            live_plans, cutoff=retention_cutoff(int(retention_months))
+        )
     for plan in purged:
         delete_orphaned_backup_issue(hass, coordinator.server_id, plan["fub_id"], plan["plan_name"])
     total = sum(p["removed"] for p in purged)

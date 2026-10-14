@@ -130,7 +130,11 @@ async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
             try:
                 await store.async_save(data)
             except Exception:
-                _LOGGER.exception("Function Plan backup: a store could not be put back after a failed lineage move")
+                # Memory holds the state before the move; this store's next save writes it to disk.
+                _LOGGER.exception(
+                    "Function Plan backup: a store could not be put back on disk after a failed lineage move — "
+                    "until its next save it keeps the moved lineage there"
+                )
         raise
 
 
@@ -508,6 +512,23 @@ class FunctionPlanBackupManager:
             self._kept.discard((fub_id, plan_name))
             await self._async_save_kept()
 
+    async def _async_forget_kept_after_move(self, fub_id: int, plan_name: str) -> None:
+        """_async_forget_kept_if_gone after a rekey/purge whose backups are saved by then.
+
+        A failing keep-store save is logged, never raised: the caller would report the backups as
+        not moved although they were. The keep decision stays dropped in memory, so the next
+        keep-store save writes it.
+        """
+        try:
+            await self._async_forget_kept_if_gone(fub_id, plan_name)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Function Plan backup: keep decision for '%s' (fub=%s) not saved as dropped",
+                self._server_id,
+                plan_name,
+                fub_id,
+            )
+
     @staticmethod
     def _build_snapshot(
         plan_data: dict[str, Any],
@@ -814,7 +835,7 @@ class FunctionPlanBackupManager:
             moved += len(old_history)
         await _async_save_all_or_put_back(saves)
         # The restored plan is live again under new_fub_id, so the keep decision is not carried over.
-        await self._async_forget_kept_if_gone(old_fub_id, plan_name)
+        await self._async_forget_kept_after_move(old_fub_id, plan_name)
         if moved:
             _LOGGER.info(
                 "[%s] Function Plan backup: rekeyed %d snapshot(s) of '%s' from fub=%s to fub=%s",
@@ -851,7 +872,7 @@ class FunctionPlanBackupManager:
             saves.append((store, data, before))
             removed += len(purged)
         await _async_save_all_or_put_back(saves)
-        await self._async_forget_kept_if_gone(fub_id, plan_name)
+        await self._async_forget_kept_after_move(fub_id, plan_name)
         if removed:
             _LOGGER.info(
                 "[%s] Function Plan backup: purged %d superseded snapshot(s) of '%s' at old fub=%s",

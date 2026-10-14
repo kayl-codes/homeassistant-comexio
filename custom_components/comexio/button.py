@@ -535,12 +535,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def _async_acquire_sync_lock(self, notify_enabled: bool) -> bool:
         """Take the sync lock for this press; False (lock not held, user told why) when the sync must not run."""
-        # A restore rewrites function plans the sync writes into as well (sort, trigger pairs).
-        if self.coordinator._sync_lock.locked() or self.coordinator._restore_lock.locked():
-            _LOGGER.warning("[%s] Sync already in progress or a restore running, ignoring request", self.server_id)
+        # A restore or a plan edit (sort, connect, …) changes function plans the sync writes into as well.
+        if (
+            self.coordinator._sync_lock.locked()
+            or self.coordinator._restore_lock.locked()
+            or self.coordinator.plan_edits_running
+        ):
+            _LOGGER.warning(
+                "[%s] Sync already in progress or a restore / plan edit running, ignoring request", self.server_id
+            )
             self._notify_sync_blocked(
                 notify_enabled,
-                "a sync, Web-IO range check or function plan restore is already running. Please try again shortly.",
+                "a sync, Web-IO range check, function plan restore or function plan edit is already running. "
+                "Please try again shortly.",
             )
             return False
         await self.coordinator._sync_lock.acquire()
@@ -1363,7 +1370,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         # 5. Restart integration (necessary!)
         _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
-        await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
+        if not await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id):
+            _LOGGER.error("[%s] The integration did not load again after the sync", self.server_id)
+            # Regardless of notify_enabled: without the reload the entities keep the pre-sync state.
+            persistent_notification.async_create(
+                self.hass,
+                "The sync finished, but the integration did not load again afterwards (see the log; Home "
+                "Assistant retries on its own when Comexio was not ready). If it stays unavailable, reload the "
+                "Comexio integration manually.",
+                title="Comexio: reload after sync failed",
+                notification_id=f"comexio_sync_reload_{self.server_id}",
+            )
 
     async def _decide_effective_action(
         self,

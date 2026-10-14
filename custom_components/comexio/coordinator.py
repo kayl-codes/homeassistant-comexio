@@ -1919,10 +1919,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     @contextlib.contextmanager
     def plan_edit(self) -> Iterator[None]:
-        """Mark a plan edit as running until it ends — a restore refuses to start meanwhile.
+        """Mark a plan edit as running until it ends — a restore, sync or uninstall cleanup refuses to start meanwhile.
 
-        Entered right after the edit's last refuse_while_restoring check, with no await in
-        between: a restore starting after that check sees the mark, so the two never overlap.
+        Entered right after the edit's last refuse_while_plans_busy check, with no await in
+        between: one of those starting after that check sees the mark, so they never overlap.
         """
         self._plan_edits_running += 1
         try:
@@ -4612,10 +4612,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 baseline,
                 len(plan_map),
             )
-            if self._restore_lock.locked():
-                # The restore rewrites and restarts plans itself; a stop now could leave one stopped.
+            if self._restore_lock.locked() or self._sync_lock.locked() or self.in_sync:
+                # A restore (or sync) rewrites and restarts plans itself; a stop now could leave one stopped.
                 _LOGGER.warning(
-                    "[%s] Bus-load watchdog: cascade not started — a function plan restore is running", self.server_id
+                    "[%s] Bus-load watchdog: cascade not started — a function plan restore, sync or reload is running",
+                    self.server_id,
                 )
                 return
             # No await since the check: a restore starting from here on refuses until the cascade ends.

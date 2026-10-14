@@ -287,7 +287,7 @@ def test_a_restore_as_new_whose_references_could_not_move_still_moves_its_backup
 def test_a_free_restore_lock_lets_a_plan_edit_through_and_visualize_never_waits() -> None:
     coordinator = _coordinator()
     with patch.object(_context.persistent_notification, "async_create") as create:
-        assert _context.refuse_while_restoring(coordinator.hass, coordinator, "T") is False
+        assert _context.refuse_while_plans_busy(coordinator.hass, coordinator, "T") is False
     create.assert_not_called()
 
     resolver = AsyncMock(return_value=None)
@@ -374,12 +374,13 @@ def test_a_marker_delete_writes_as_a_marked_plan_edit() -> None:
 
     api = SimpleNamespace(get_marker_delete_eligibility=eligibility)
     call = SimpleNamespace(data={"marker_id": "5", "confirm": True})
+    delete = marker_actions.handle_marker_delete(coordinator.hass, call)
     with (
         patch.object(marker_actions, "_async_get_service_context", AsyncMock(return_value=(coordinator, api, None))),
         patch.object(marker_actions, "_ensure_comexio_login", AsyncMock(return_value=True)),
         pytest.raises(_WriteSeen),
     ):
-        asyncio.run(marker_actions.handle_marker_delete(coordinator.hass, call))
+        asyncio.run(delete)
     assert marked == [True]
     assert not coordinator.plan_edits_running
 
@@ -396,11 +397,12 @@ def test_a_connect_writes_as_a_marked_plan_edit() -> None:
 
     coordinator.async_function_plan_change_backup = first_write  # type: ignore[method-assign]
     api = SimpleNamespace(fub_data={}, login=AsyncMock(return_value=True))
+    connect_call = connect.handle_function_plan_connect(coordinator.hass, SimpleNamespace(data={"marker_id": "2"}))
     with (
         patch.object(connect, "_resolve_function_plan", return_value=(coordinator, api, 1)),
         pytest.raises(_WriteSeen),
     ):
-        asyncio.run(connect.handle_function_plan_connect(coordinator.hass, SimpleNamespace(data={"marker_id": "2"})))
+        asyncio.run(connect_call)
     assert marked == [True]
     assert not coordinator.plan_edits_running
 
@@ -469,6 +471,161 @@ def test_the_bus_load_cascade_stops_while_a_restore_runs() -> None:
     asyncio.run(run())
     coordinator.api.function_plan_stop_fup.assert_not_awaited()
     coordinator.api.function_plan_run_fup.assert_not_awaited()
+
+
+@pytest.mark.parametrize("busy", ["sync_lock", "in_sync"])
+def test_a_plan_edit_does_not_start_while_a_sync_or_cleanup_runs(busy: str) -> None:
+    """(Review) a sync, range check or cleanup writes into or deletes the plans an edit changes."""
+    coordinator = _coordinator()
+    coordinator.in_sync = busy == "in_sync"
+
+    async def run() -> bool:
+        if busy == "sync_lock":
+            await coordinator._sync_lock.acquire()
+        return _context.refuse_while_plans_busy(coordinator.hass, coordinator, "T")
+
+    with patch.object(_context.persistent_notification, "async_create") as create:
+        assert asyncio.run(run()) is True
+    assert create.call_args.args[1] == _context.SYNC_RUNNING_MSG
+
+
+def test_a_sync_does_not_start_while_a_plan_edit_runs() -> None:
+    """(Review) a sort or connect meanwhile could be overwritten by the sync's plan writes."""
+    coordinator = _coordinator()
+    coordinator.config_entry = SimpleNamespace(entry_id="e1", data={}, options={})
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button.coordinator = coordinator
+    button.hass = coordinator.hass
+    button.server_id = "cx1"
+
+    async def run() -> None:
+        with (
+            coordinator.plan_edit(),
+            patch("custom_components.comexio.button.persistent_notification.async_create") as create,
+        ):
+            await button.async_handle_press()
+        assert "function plan edit" in create.call_args.args[1]
+        assert not coordinator._sync_lock.locked()
+
+    asyncio.run(run())
+
+
+def test_an_uninstall_cleanup_does_not_start_while_a_plan_edit_runs() -> None:
+    coordinator = _coordinator()
+    flow = SimpleNamespace(hass=coordinator.hass, _reraise_cleanup_issue=MagicMock())
+    with coordinator.plan_edit(), patch("custom_components.comexio.repairs._post_result_notification") as post:
+        assert ComexioRepairFlow._cleanup_blocked_by_sync(flow, coordinator, "all", "n1", True) is True  # type: ignore[arg-type]
+    assert "function plan edit" in post.call_args.args[2]
+
+
+def test_the_bus_load_cascade_stops_while_a_sync_runs() -> None:
+    coordinator = _coordinator()
+    coordinator.config_entry = SimpleNamespace(entry_id="e1", options={CONF_FUNCTION_PLAN_PLAN_MAP: {"A": 1}})
+    coordinator._watchdog_lock = asyncio.Lock()
+    coordinator.api = SimpleNamespace(function_plan_stop_fup=AsyncMock(), function_plan_run_fup=AsyncMock())
+    coordinator._async_finish_watchdog_cascade = AsyncMock()  # type: ignore[method-assign]
+
+    async def run() -> None:
+        async with coordinator._sync_lock:
+            await coordinator._async_bus_load_cascade_restart(50.0)
+
+    asyncio.run(run())
+    coordinator.api.function_plan_stop_fup.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("handler", "data"),
+    [
+        (backup._handle_function_plan_delete_backups, {"confirm": True}),
+        (backup._handle_function_plan_purge_orphaned_backups, {"confirm": True}),
+    ],
+)
+def test_backups_are_not_deleted_while_a_restore_runs(handler: Any, data: dict[str, Any]) -> None:
+    """(Review) a restore moving or marking the deleted backups could write them back."""
+    coordinator = _coordinator()
+    coordinator.function_plan_backup = SimpleNamespace(
+        async_delete_all_backups=AsyncMock(), async_purge_orphaned=AsyncMock()
+    )
+    coordinator.config_entry = SimpleNamespace(entry_id="e1", data={}, options={})
+    coordinator.live_plan_list = MagicMock(return_value={1: "A"})  # type: ignore[method-assign]
+
+    async def run() -> None:
+        async with coordinator._restore_lock:
+            await handler(coordinator.hass, SimpleNamespace(data=data))
+
+    with (
+        patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+        patch.object(backup.persistent_notification, "async_create") as create,
+    ):
+        asyncio.run(run())
+
+    coordinator.function_plan_backup.async_delete_all_backups.assert_not_awaited()
+    coordinator.function_plan_backup.async_purge_orphaned.assert_not_awaited()
+    assert "restore is running" in create.call_args.args[1]
+
+
+def test_a_backup_deletion_runs_as_a_marked_plan_edit() -> None:
+    coordinator = _coordinator()
+    coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
+    marked: list[bool] = []
+
+    async def delete_all() -> int:
+        marked.append(coordinator.plan_edits_running)
+        return 0
+
+    coordinator.function_plan_backup = SimpleNamespace(async_delete_all_backups=delete_all)
+    with (
+        patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+        patch.object(backup, "_refresh_service_descriptions", AsyncMock()),
+        patch.object(backup, "delete_all_orphaned_backup_issues"),
+        patch.object(backup.persistent_notification, "async_create"),
+    ):
+        asyncio.run(
+            backup._handle_function_plan_delete_backups(coordinator.hass, SimpleNamespace(data={"confirm": True}))
+        )
+    assert marked == [True]
+    assert not coordinator.plan_edits_running
+
+
+def test_a_sync_whose_reload_did_not_load_the_integration_again_is_reported() -> None:
+    """(Review) config_entries.async_reload returns False instead of raising for a failed setup."""
+    coordinator = _coordinator()
+    coordinator.config_entry = SimpleNamespace(entry_id="e1", data={}, options={})
+    coordinator.hass.config_entries.async_reload = AsyncMock(return_value=False)
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button.coordinator = coordinator
+    button.hass = coordinator.hass
+    button.server_id = "cx1"
+    button.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
+
+    with patch("custom_components.comexio.button.persistent_notification.async_create") as create:
+        asyncio.run(button._reset_sync_state_and_reload())
+    assert create.call_args.kwargs["notification_id"] == "comexio_sync_reload_cx1"
+
+    coordinator.hass.config_entries.async_reload = AsyncMock(return_value=True)
+    with patch("custom_components.comexio.button.persistent_notification.async_create") as create:
+        asyncio.run(button._reset_sync_state_and_reload())
+    create.assert_not_called()
+
+
+def test_a_cleanup_whose_reload_did_not_load_the_integration_again_is_reported() -> None:
+    coordinator = _coordinator()
+    coordinator.async_uninstall_cleanup = AsyncMock(return_value={})  # type: ignore[method-assign]
+    coordinator.hass.config_entries.async_reload = AsyncMock(return_value=False)
+    flow = SimpleNamespace(hass=coordinator.hass)
+    with patch("custom_components.comexio.repairs.persistent_notification.async_create") as create:
+        asyncio.run(
+            ComexioRepairFlow._async_cleanup_then_reload(
+                flow,  # type: ignore[arg-type]
+                coordinator,
+                SimpleNamespace(entry_id="e1"),
+                "all",
+                "n1",
+                False,
+                None,
+            )
+        )
+    assert create.call_args.kwargs["notification_id"] == "comexio_cleanup_reload_cx1"
 
 
 def test_the_reload_after_an_uninstall_cleanup_waits_for_a_running_restore() -> None:
