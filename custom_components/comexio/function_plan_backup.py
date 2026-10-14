@@ -14,11 +14,13 @@ block settings of its elements, which Comexio keeps outside the plan (function_p
 Snapshots live under .storage/ and are therefore included in Home Assistant's own backups.
 """
 
-from collections.abc import Callable, Mapping
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
+import functools
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Concatenate
 
 from aiocomexio.function_plan import plan_hash, referenced_label_metadata
 from homeassistant.core import HomeAssistant
@@ -96,6 +98,27 @@ def _backfill_identity_group(
 def _copy_keys(data: dict[str, Any], keys: tuple[str, ...]) -> dict[str, dict[str, Any] | None]:
     """The identity maps under these fub_id keys (None: absent), copied deep enough to put them back."""
     return {key: ({name: list(h) for name, h in data[key].items()} if key in data else None) for key in keys}
+
+
+def _serialized[**P, R](
+    method: Callable[Concatenate["FunctionPlanBackupManager", P], Awaitable[R]],
+) -> Callable[Concatenate["FunctionPlanBackupManager", P], Awaitable[R]]:
+    """Run a backup-store write under the manager's write lock, one at a time.
+
+    The writes await their saves: overlapping, a deletion could land between another write's
+    change and its save, and a failed save's put-back (_put_back, the roll-backs) would restore
+    a whole fub_id bucket over a change made meanwhile — deleted backups would come back or a
+    new one would be lost. Never call one serialized method from another (the lock is not
+    reentrant): a serialized method that needs another's work calls its unserialized helper
+    (e.g. async_purge_orphaned → _async_delete_plan_backups).
+    """
+
+    @functools.wraps(method)
+    async def wrapper(self: "FunctionPlanBackupManager", *args: P.args, **kwargs: P.kwargs) -> R:
+        async with self._write_lock:
+            return await method(self, *args, **kwargs)
+
+    return wrapper
 
 
 # (store, its data, the keys _copy_keys copied before the change)
@@ -440,6 +463,8 @@ class FunctionPlanBackupManager:
         # by hand (or un-kept in the plan card).
         self._kept_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_function_plan_backup_kept_{server_id}")
         self._kept: set[tuple[int, str]] = set()
+        # Serializes every write to the three stores (see _serialized).
+        self._write_lock = asyncio.Lock()
         # Lazy-loaded caches: {fub_id_str: {plan_name: [snapshot, ...]}} — newest first per identity.
         # fub_id alone is not a stable identity (Comexio reuses IDs after deletion), so rotation
         # and lookups are always scoped to the (fub_id, plan_name) pair, never to fub_id alone.
@@ -570,6 +595,7 @@ class FunctionPlanBackupManager:
             snapshot[SNAPSHOT_COMEXIO_VERSION] = comexio_version
         return snapshot
 
+    @_serialized
     async def async_auto_backup(
         self,
         plans: dict[int, dict[str, Any]],
@@ -667,6 +693,7 @@ class FunctionPlanBackupManager:
                     history[:] = before
             raise
 
+    @_serialized
     async def async_change_backup(
         self,
         fub_id: int,
@@ -715,6 +742,7 @@ class FunctionPlanBackupManager:
             FUNCTION_PLAN_CHANGE_BACKUP_SLOTS,
         )
 
+    @_serialized
     async def async_backfill_paper_metadata(
         self,
         fub_data: dict[str, Any],
@@ -771,6 +799,7 @@ class FunctionPlanBackupManager:
         fub_base, _changed_at = await self._async_catalog_state()
         return fub_base
 
+    @_serialized
     async def async_backfill_block_keys(self) -> dict[str, int]:
         """Add block keys to snapshots stored before they were captured (idempotent).
 
@@ -799,6 +828,7 @@ class FunctionPlanBackupManager:
             )
         return filled
 
+    @_serialized
     async def async_rekey_fub_id(self, old_fub_id: int, new_fub_id: int, plan_name: str) -> int:
         """Move one identity's stored backup history from old_fub_id to new_fub_id.
 
@@ -847,6 +877,7 @@ class FunctionPlanBackupManager:
             )
         return moved
 
+    @_serialized
     async def async_purge_identity(self, fub_id: int, plan_name: str) -> int:
         """Remove only the plan_name bucket at fub_id (auto + change).
 
@@ -883,6 +914,7 @@ class FunctionPlanBackupManager:
             )
         return removed
 
+    @_serialized
     async def async_mark_restored(self, kind: str, fub_id: int, plan_name: str, snapshot: Mapping[str, Any]) -> bool:
         """Promote a just-restored snapshot to slot 0 of its own kind-array and flag it.
 
@@ -944,6 +976,7 @@ class FunctionPlanBackupManager:
         )
         return True
 
+    @_serialized
     async def async_delete_snapshot(self, kind: str, fub_id: int, plan_name: str, slot: int) -> bool:
         """Delete a single stored snapshot (one slot of one plan identity/kind). Returns True if removed."""
         await self._async_ensure_loaded()
@@ -971,8 +1004,13 @@ class FunctionPlanBackupManager:
         )
         return True
 
+    @_serialized
     async def async_delete_plan_backups(self, fub_id: int, plan_name: str) -> int:
         """Delete ALL stored snapshots (auto + change) for one plan identity. Returns the number removed."""
+        return await self._async_delete_plan_backups(fub_id, plan_name)
+
+    async def _async_delete_plan_backups(self, fub_id: int, plan_name: str) -> int:
+        """async_delete_plan_backups without taking the write lock — for a caller already holding it."""
         await self._async_ensure_loaded()
         key = str(fub_id)
         removed = 0
@@ -995,6 +1033,7 @@ class FunctionPlanBackupManager:
             )
         return removed
 
+    @_serialized
     async def async_delete_all_backups(self) -> int:
         """Delete every stored snapshot for every plan (auto + change). Returns the number removed."""
         await self._async_ensure_loaded()
@@ -1079,6 +1118,7 @@ class FunctionPlanBackupManager:
                 expired.append((fub_id, plan_name, newest))
         return expired
 
+    @_serialized
     async def async_expired_orphans(
         self, fub_data: dict[str, Any] | None, cutoff: datetime
     ) -> list[dict[str, Any]] | None:
@@ -1105,6 +1145,7 @@ class FunctionPlanBackupManager:
             for fub_id, name, newest in self._expired_orphans(fub_data, cutoff)
         ]
 
+    @_serialized
     async def async_keep_orphaned(self, fub_id: int, plan_name: str) -> bool:
         """Keep an orphaned identity's snapshots for good: no repair, no purge, only manual deletion.
 
@@ -1123,6 +1164,7 @@ class FunctionPlanBackupManager:
         )
         return True
 
+    @_serialized
     async def async_unkeep_orphaned(self, fub_id: int, plan_name: str) -> bool:
         """Take back a keep decision (plan card's orphaned-plans view). True if one was stored.
 
@@ -1158,12 +1200,14 @@ class FunctionPlanBackupManager:
         orphans.sort(key=lambda orphan: (orphan["plan_name"].lower(), orphan["fub_id"]))
         return orphans
 
+    @_serialized
     async def async_purge_orphaned(self, fub_data: dict[str, Any] | None, cutoff: datetime) -> list[dict[str, Any]]:
         """Delete all snapshots (auto + change) of every orphaned identity older than cutoff.
 
         Only the manual function_plan_purge_orphaned_backups service calls this; the periodic
         backup cycle raises a repair per identity instead (see orphaned_backups.py). A live
-        plan's backups are never touched, no matter how old, and neither are kept ones.
+        plan's backups are never touched, no matter how old, and neither are kept ones — the
+        whole purge holds the write lock, so a keep decision cannot slip in between.
         Returns one {fub_id, plan_name, removed, captured_at} entry per identity actually purged.
         """
         await self._async_ensure_loaded()
@@ -1173,7 +1217,7 @@ class FunctionPlanBackupManager:
             return []
         purged: list[dict[str, Any]] = []
         for fub_id, plan_name, newest in self._expired_orphans(fub_data, cutoff):
-            if removed := await self.async_delete_plan_backups(fub_id, plan_name):
+            if removed := await self._async_delete_plan_backups(fub_id, plan_name):
                 purged.append({"fub_id": fub_id, "plan_name": plan_name, "removed": removed, "captured_at": newest})
         return purged
 

@@ -3,6 +3,7 @@
 import asyncio
 import copy
 from functools import partial
+import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -641,6 +642,75 @@ def test_a_lineage_move_that_could_not_be_saved_is_put_back(
     asyncio.run(run())
     assert len(manager._auto_data["1"]["Lights"]) == 1
     assert "5" not in manager._auto_data
+
+
+# Public coroutines that only read the stores (or are serialized through another name).
+UNSERIALIZED_BACKUP_READERS = {
+    "async_list_backups",
+    "async_load",
+    "async_backed_up_plans",
+    "async_referenced_marker_ids",
+    "async_get_snapshot",
+}
+
+
+def test_every_backup_store_write_is_serialized() -> None:
+    """A new writing method without @_serialized would bring back the lost/undone writes (#176)."""
+    unserialized = {
+        name
+        for name, method in inspect.getmembers(FunctionPlanBackupManager, inspect.iscoroutinefunction)
+        if name.startswith("async_") and not hasattr(method, "__wrapped__")
+    }
+    assert unserialized == UNSERIALIZED_BACKUP_READERS
+
+
+@pytest.mark.parametrize("second", ["change_backup", "delete"])
+def test_a_backup_write_during_a_failing_lineage_move_survives_its_put_back(
+    stores: dict[str, Any], plan: dict[str, Any], second: str
+) -> None:
+    """(Review) the move's put-back restored the whole fub_id bucket over a write made during its save.
+
+    A pre-change backup taken meanwhile was lost; a deletion meanwhile came back.
+    """
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    in_save = asyncio.Event()
+    release = asyncio.Event()
+    real_save = manager._change_store.async_save
+    calls = 0
+
+    async def save(data: dict[str, Any]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the move's save: fails once the other write had its chance to run
+            in_save.set()
+            await release.wait()
+            raise OSError("disk full")
+        await real_save(data)
+
+    async def run() -> None:
+        await manager.async_change_backup(1, plan, "Lights", "sort")
+        with patch.object(manager._change_store, "async_save", save):
+            await manager.async_change_backup(1, plan, "Lights", "sort")  # call 1: a plain save
+            move = asyncio.create_task(manager.async_rekey_fub_id(1, 5, "Lights"))
+            await in_save.wait()
+            other = asyncio.create_task(
+                manager.async_change_backup(1, plan, "Lights", "connect")
+                if second == "change_backup"
+                else manager.async_delete_plan_backups(1, "Lights")
+            )
+            for _ in range(5):
+                await asyncio.sleep(0)
+            release.set()
+            with pytest.raises(OSError):
+                await move
+            await other
+
+    asyncio.run(run())
+    assert "5" not in manager._change_data
+    if second == "change_backup":
+        assert [s["operation"] for s in manager._change_data["1"]["Lights"]][0] == "connect"
+    else:
+        assert "1" not in manager._change_data
 
 
 @pytest.mark.parametrize("old_id_still_live", [False, True])

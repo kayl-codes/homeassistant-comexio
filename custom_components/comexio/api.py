@@ -1326,7 +1326,8 @@ class ComexioAPI:
 
         Scales proportionally from the A4-landscape-90-DPI reference (870×720).
         resolution overrides the DPI (a backup's own); None = read from $Fubs.
-        paper_name overrides the format (A2/A3/A4/A5); None = read from $Fubs/$Paper.
+        paper_name overrides the format by name (a backup's): A2/A3/A4/A5 from the built-in table, any
+        other from the $Paper entry of that name, else the reference size; None = read from $Fubs/$Paper.
         orientation overrides as "landscape"/"portrait" — needed for a plan that was just
         created and is not in the cached $Fubs data yet; None = read from $Fubs, where
         0 = landscape (long side → X), 1 = portrait (long side → Y).
