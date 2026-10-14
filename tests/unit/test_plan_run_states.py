@@ -957,8 +957,9 @@ def test_a_failing_plan_start_releases_the_plan_edit_mark(
     """Otherwise every restore, sort and sync would refuse until HA restarts."""
     monkeypatch.setattr(api, "function_plan_run_fup_outcome", AsyncMock(side_effect=error))
     coordinator = _coordinator(api)
+    start = coordinator._async_watchdog_start_plan(19)
     with pytest.raises(type(error)):
-        asyncio.run(coordinator._async_watchdog_start_plan(19))
+        asyncio.run(start)
     assert not coordinator.plan_edits_running
     assert coordinator._plan_edits_done.is_set()
     assert not coordinator._watchdog_lock.locked()
