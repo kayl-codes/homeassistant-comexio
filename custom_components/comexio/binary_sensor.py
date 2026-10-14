@@ -96,14 +96,16 @@ class ComexioBinarySensor(ComexioIOEntity, BinarySensorEntity):
             self._attr_device_class = BinarySensorDeviceClass.DOOR
 
     @property
-    def is_on(self) -> bool:
-        """Return true if the binary sensor is active."""
+    def is_on(self) -> bool | None:
+        """Return true if the binary sensor is active, None ("unknown") while no real value is known (#175)."""
         # Convert Comexio numeric states (1.0/0.0) to boolean
-        value = self.coordinator.io_states.get(self._io_id, 0)
+        value = self.coordinator.io_states.get(self._io_id)
+        if value is None:
+            return None
         try:
             return float(value) > 0
         except (ValueError, TypeError):
-            return False
+            return None
 
 
 class ComexioMarkerBinarySensor(ComexioMarkerEntity, BinarySensorEntity):

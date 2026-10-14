@@ -877,15 +877,30 @@ def test_get_live_states_splits_markers_and_knx(comexio_api: ComexioAPI, client:
     assert asyncio.run(comexio_api.get_live_states(5, 5)) == ({"5": 1}, {"5": 0})
 
 
-def test_get_io_live_states_failure_is_none_not_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
+def test_get_io_live_states_failure_is_none_not_empty(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A fetch failure logs at DEBUG only (the coordinator reports it once per outage), with its cause."""
     _fail(client, "get_io_live_states", _connection_error())
+    caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+
     assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) is None
 
+    [record] = [r for r in caplog.records if r.name == api_module.__name__]
+    assert (record.levelno, record.exc_info is not None) == (logging.DEBUG, True)
+    assert record.getMessage().startswith("IO live states fetch failed: ")
 
-def test_get_io_live_states_refused_request_is_none(comexio_api: ComexioAPI, client: MagicMock) -> None:
-    """aiocomexio raises ValueError for a contradictory request (one IO id, two extensions): a failed fetch."""
+
+def test_get_io_live_states_refused_request_is_none(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ValueError still reaching here is a bug (the coordinator drops conflicts): None, logged as an error."""
     _fail(client, "get_io_live_states", ValueError("conflicting extension ids for IO 11"))
+
     assert asyncio.run(comexio_api.get_io_live_states([(1, "11"), (2, "11")])) is None
+
+    [record] = [r for r in caplog.records if r.name == api_module.__name__]
+    assert (record.levelno, record.exc_info is not None) == (logging.ERROR, True)
 
 
 def test_get_io_live_states_passes_the_pairs_through(comexio_api: ComexioAPI, client: MagicMock) -> None:

@@ -1104,14 +1104,19 @@ class ComexioAPI:
 
         Returns {IO id: numeric value text}; an IO Comexio does not answer with a number is
         absent. None on any fetch/parse failure — never {} — for the same reason as
-        get_live_states: the caller keeps the last known values instead of reading 0. A request
-        aiocomexio refuses as contradictory (ValueError, e.g. one IO id under two extensions) is
-        such a failure too, not a reason to fail the whole poll.
+        get_live_states: the caller keeps the last known values instead of reading 0. A fetch
+        failure is logged at DEBUG only — the coordinator reports it with the server context, once
+        per outage. A request aiocomexio refuses as contradictory (ValueError, e.g. one IO id under
+        two extensions) is such a failure too, not a reason to fail the whole poll; the coordinator
+        leaves such IOs out of the request, so a ValueError here is a bug and logged as an error.
         """
         try:
             return await self.client.get_io_live_states(ios)
-        except (ComexioError, ValueError) as err:
-            _LOGGER.error("IO live states fetch failed: %s", err)
+        except ComexioError as err:
+            _LOGGER.debug("IO live states fetch failed: %s", err, exc_info=True)
+            return None
+        except ValueError:
+            _LOGGER.error("IO live states request refused by aiocomexio", exc_info=True)
             return None
 
     async def get_function_plan_connection_values(

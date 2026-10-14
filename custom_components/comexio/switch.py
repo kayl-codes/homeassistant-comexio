@@ -182,10 +182,15 @@ class ComexioIOSwitch(ComexioIOEntity, SwitchEntity):
         self._attr_device_class = SwitchDeviceClass.OUTLET
 
     @property
-    def is_on(self) -> bool:
-        """Return true if the relay is active."""
-        val = self.coordinator.io_states.get(self._io_id, 0)
-        return float(val) >= 1.0
+    def is_on(self) -> bool | None:
+        """Return true if the relay is active, None ("unknown") while no real value is known (#175)."""
+        val = self.coordinator.io_states.get(self._io_id)
+        if val is None:
+            return None
+        try:
+            return float(val) >= 1.0
+        except (ValueError, TypeError):
+            return None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the relay on via API."""

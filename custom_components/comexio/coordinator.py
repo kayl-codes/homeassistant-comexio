@@ -186,6 +186,8 @@ from .reference_monitor import ReferenceCatalogMonitor
 
 _LOGGER = logging.getLogger(__name__)
 
+_IMPORT_IOS_KEY = "import_ios"
+
 # Errors that mean Comexio could not be reached at all (not: answered with an error or odd data).
 UNREACHABLE_ERRORS = (ComexioConnectionError, aiohttp.ClientError, TimeoutError)
 
@@ -328,19 +330,29 @@ def _io_labels(ios_by_id: Mapping[str, Mapping[str, Any]], io_ids: Iterable[str]
 def _has_usable_ext_id(io: Mapping[str, Any]) -> bool:
     """Whether the IO's extension id is a plain non-negative integer the IO live request can carry.
 
-    isdecimal, not isdigit: "²" passes isdigit but int() rejects it.
+    ASCII decimal digits only, as aiocomexio accepts them: "²" passes isdigit and "٣" isdecimal,
+    but aiocomexio refuses both.
     """
-    return str(io["ext_id"]).isdecimal()
+    ext_id = str(io["ext_id"])
+    return ext_id.isascii() and ext_id.isdecimal()
 
 
-def _io_live_requests(ios: Iterable[Mapping[str, Any]]) -> list[tuple[int, str]]:
-    """(extension id, IO id) of every IO whose live value to ask for: those on online extensions.
+def _io_live_requests(ios: Iterable[Mapping[str, Any]]) -> tuple[list[tuple[int, str]], set[str]]:
+    """(extension id, IO id) of every IO whose live value to ask for, and the IO ids left out as conflicting.
 
-    An offline extension cannot answer; its IOs keep their last known value. An IO whose
-    extension id is no integer is left out (logged by the coordinator, see
-    _track_ios_without_ext_id).
+    Only IOs on online extensions: an offline extension cannot answer, its IOs keep their last
+    known value. An IO whose extension id is no integer is left out (logged by the coordinator,
+    see _track_ios_without_ext_id). An IO id under two different extension ids (e.g. two IOs
+    without "Id", both "None") is left out entirely: aiocomexio refuses such a request as a
+    whole, which would cost every IO its live value (logged, see _track_conflicting_ios).
     """
-    return [(int(io["ext_id"]), io["id"]) for io in ios if not io.get("offline") and _has_usable_ext_id(io)]
+    candidates = [io for io in ios if not io.get("offline") and _has_usable_ext_id(io)]
+    ext_ids_by_io: dict[str, set[int]] = {}
+    for io in candidates:
+        ext_ids_by_io.setdefault(io["id"], set()).add(int(io["ext_id"]))
+    conflicting = {io_id for io_id, ext_ids in ext_ids_by_io.items() if len(ext_ids) > 1}
+    requests = [(int(io["ext_id"]), io["id"]) for io in candidates if io["id"] not in conflicting]
+    return requests, conflicting
 
 
 def _live_io_number(raw: Any) -> float | None:
@@ -363,10 +375,10 @@ def _apply_io_live_values(
     """Set each IO's value from its live value, else its last known one (#175); return the ids that got either.
 
     The config page carries no live IO value: parse_config's value is a placeholder (0 on a live
-    install), so it only stays for an IO with no real value yet — known_values holds real values
-    only (live answers and webhook pushes), never an earlier placeholder. live_values None means
-    the whole fetch failed — every IO keeps its last known value. The returned ids hold a real
-    value; every other IO kept the placeholder.
+    install), so an IO with no real value yet gets None ("unknown") — never the placeholder, a
+    false 0 must not reach the recorder. known_values holds real values only (live answers and
+    webhook pushes). live_values None means the whole fetch failed — every IO keeps its last
+    known value. The returned ids hold a real value; every other IO is None.
     """
     real_ids: set[str] = set()
     for io in ios:
@@ -377,6 +389,7 @@ def _apply_io_live_values(
         elif io_id in known_values:
             io["value"] = known_values[io_id]
         else:
+            io["value"] = None
             continue
         real_ids.add(io_id)
     return real_ids
@@ -413,7 +426,7 @@ def _leftovers_unknown(webio_class: WebioClass, trigger_sources: dict[int, Any] 
 def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[str, Any]:
     """The parsed config narrowed to the categories the user imports (import_* options)."""
     import_markers = conf.get("import_markers", True)
-    import_ios = conf.get("import_ios", True)
+    import_ios = conf.get(_IMPORT_IOS_KEY, True)
     import_knx = conf.get("import_knx", False)
     return {
         "markers": parsed_data["markers"] if import_markers else [],
@@ -686,15 +699,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.io_states: dict[str, Any] = {}
         # IO ids whose io_states value is a real reading — a live answer or a webhook push — and not
         # parse_config's placeholder (#175): only those count as "last known" when a live answer is
-        # missing, so a placeholder stored on a cold start is never frozen as a reading.
+        # missing; an IO without one shows "unknown" (None), never parse_config's placeholder.
         self._io_real_value_ids: set[str] = set()
         # The ids that got a real value in this poll's _async_apply_io_live_states, committed by
         # _merge_polled_states once their value lands in io_states.
         self._polled_io_real_ids: set[str] = set()
-        # Requested IOs without a usable live answer, and IOs left out of the request for an
-        # unusable extension id, as of the last poll — logged on change only.
+        # Requested IOs without a usable live answer, IOs left out of the request for an unusable
+        # extension id or a conflicting IO id, and whether the last IO live fetch failed as a
+        # whole, as of the last poll — logged on change only.
         self._unanswered_io_ids: set[str] = set()
         self._ios_without_ext_id: set[str] = set()
+        self._conflicting_io_ids: set[str] = set()
+        self._io_live_fetch_failing = False
         self.knx_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
         self._io_index: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1121,28 +1137,68 @@ class ComexioCoordinator(DataUpdateCoordinator):
             knx_dpt_catalog,
             run_state_mark=run_state_mark,
         )
-        await self._async_apply_io_live_states(parsed_data["io"])
+        if conf.get(_IMPORT_IOS_KEY, True):
+            await self._async_apply_io_live_states(parsed_data["io"])
+        else:
+            # IO import off: nobody shows these IOs, so no Comexio round-trip and no warnings for them.
+            self._reset_io_live_tracking()
         return raw_config, parsed_data, knx_live_states
+
+    def _reset_io_live_tracking(self) -> None:
+        """Forget what the IO live path logged, so a re-enabled IO import reports afresh."""
+        self._polled_io_real_ids = set()
+        self._unanswered_io_ids = set()
+        self._ios_without_ext_id = set()
+        self._conflicting_io_ids = set()
+        self._io_live_fetch_failing = False
 
     async def _async_apply_io_live_states(self, ios: list[dict[str, Any]]) -> None:
         """Live IO values from their own dashboard refresh, over parse_config's placeholder (#175)."""
+        if not ios:
+            # No IO scraped (no IOs at all, or a get_raw_config blip returned {}): nothing to ask
+            # for, and the trackers stay as they are — resetting them would repeat their warnings
+            # after the blip.
+            self._polled_io_real_ids = set()
+            return
         self._track_ios_without_ext_id(ios)
-        requests = _io_live_requests(ios)
+        requests, conflicting = _io_live_requests(ios)
+        self._track_conflicting_ios(ios, conflicting)
         io_live_states = await self.api.get_io_live_states(requests)
         # Read after the await: a webhook push during it is a real value as well (R1 keeps it anyway).
         known = {io_id: value for io_id, value in self.io_states.items() if io_id in self._io_real_value_ids}
         if io_live_states is None:
-            kept = sum(io["id"] in known for io in ios)
-            _LOGGER.warning(
-                "[%s] IO live states fetch failed; %s IOs keep their last known value, %s without one yet "
-                "show the config page value",
-                self.server_id,
-                kept,
-                len(ios) - kept,
-            )
+            self._log_io_live_fetch_failed(ios, known)
         else:
-            self._track_unanswered_ios(ios, requests, io_live_states)
+            if self._io_live_fetch_failing:
+                _LOGGER.info("[%s] IO live states fetch works again", self.server_id)
+                self._io_live_fetch_failing = False
+            # Only answers to what was asked count: a value for a conflicting id could belong to either IO.
+            requested = {io_id for _ext_id, io_id in requests}
+            io_live_states = {io_id: value for io_id, value in io_live_states.items() if io_id in requested}
+            self._track_unanswered_ios(ios, requested, io_live_states)
         self._polled_io_real_ids = _apply_io_live_values(ios, io_live_states, known)
+
+    def _log_io_live_fetch_failed(self, ios: list[dict[str, Any]], known: Mapping[str, Any]) -> None:
+        """WARNING on the first failed IO live fetch, DEBUG while it keeps failing (the cause: api.py, DEBUG)."""
+        kept = sum(io["id"] in known for io in ios)
+        _LOGGER.log(
+            logging.DEBUG if self._io_live_fetch_failing else logging.WARNING,
+            "[%s] IO live states fetch failed; %s IOs keep their last known value, %s without one yet show unknown",
+            self.server_id,
+            kept,
+            len(ios) - kept,
+        )
+        self._io_live_fetch_failing = True
+
+    def _track_conflicting_ios(self, ios: list[dict[str, Any]], conflicting: set[str]) -> None:
+        """Warn when IO ids appear that sit under two extensions and so get no live value; quiet while unchanged."""
+        if new := conflicting - self._conflicting_io_ids:
+            _LOGGER.warning(
+                "[%s] No live value requested for IOs %s: each IO id appears under several extensions",
+                self.server_id,
+                ", ".join(sorted(f"{_io_label(io)} (id {io['id']})" for io in ios if io["id"] in new)),
+            )
+        self._conflicting_io_ids = conflicting
 
     def _track_ios_without_ext_id(self, ios: list[dict[str, Any]]) -> None:
         """Warn once when IOs of an online extension get left out of the live request for a non-integer extension id.
@@ -1161,7 +1217,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._ios_without_ext_id = set(skipped)
 
     def _track_unanswered_ios(
-        self, ios: list[dict[str, Any]], requests: list[tuple[int, str]], live_values: Mapping[str, Any]
+        self, ios: list[dict[str, Any]], requested: set[str], live_values: Mapping[str, Any]
     ) -> None:
         """Log requested IOs that got no usable live value when new ones appear, and their recovery once.
 
@@ -1169,12 +1225,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         not reported as recovered.
         """
         ios_by_id = {io["id"]: io for io in ios}
-        requested = {io_id for _ext_id, io_id in requests}
         unanswered = {io_id for io_id in requested if _live_io_number(live_values.get(io_id)) is None}
         if new := unanswered - self._unanswered_io_ids:
             _LOGGER.warning(
                 "[%s] Comexio sent no live value for IOs %s; they keep their last known value "
-                "(the config page value if none is known yet)",
+                "(unknown if none is known yet)",
                 self.server_id,
                 _io_labels(ios_by_id, new),
             )
