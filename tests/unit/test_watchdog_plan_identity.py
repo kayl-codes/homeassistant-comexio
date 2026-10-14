@@ -11,6 +11,7 @@ from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     DOMAIN,
     parse_watchdog_user_plan_pick,
+    repointed_watchdog_user_plan_picks,
     watchdog_user_plan_pick,
 )
 from custom_components.comexio.options_flow import _watchdog_user_plan_field
@@ -25,6 +26,27 @@ def test_a_pick_round_trips_names_with_colons(name: str) -> None:
 @pytest.mark.parametrize(("value", "parsed"), [("19", (19, None)), ("x", None), ("x:y", None), (None, None)])
 def test_bare_and_unreadable_picks(value: object, parsed: tuple | None) -> None:
     assert parse_watchdog_user_plan_pick(value) == parsed
+
+
+@pytest.mark.parametrize(
+    ("picks", "expected"),
+    [
+        # (cm) a restore-as-new moves the pick to the plan's new ID, so the plan stays watched
+        (["47:Test4", "12:Other"], ["45:Test4", "12:Other"]),
+        # a bare-ID pick saved before names were can only mean this plan
+        (["47"], ["45:Test4"]),
+        # the new ID already picked: no duplicate
+        (["47:Test4", "45:Test4"], ["45:Test4"]),
+        # same ID under another name (ID reused), other plans, or no picks: nothing moves
+        (["47:Stranger"], None),
+        (["12:Other"], None),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_a_restore_as_new_repoints_the_watchdog_pick(picks: object, expected: list[str] | None) -> None:
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: picks}
+    assert repointed_watchdog_user_plan_picks(options, "Test4", 47, 45) == expected
 
 
 def test_user_plan_picks_carry_the_plan_name() -> None:

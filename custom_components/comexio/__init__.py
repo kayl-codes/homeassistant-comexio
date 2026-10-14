@@ -679,6 +679,8 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Unload and cleanup."""
+    if (running := hass.data[DOMAIN].get(entry.entry_id)) is not None and hasattr(running, "api"):
+        await running.async_wait_before_unload()
     if webhook_id := hass.data[DOMAIN].get(f"{entry.entry_id}_webhook"):
         webhook.async_unregister(hass, webhook_id)
 

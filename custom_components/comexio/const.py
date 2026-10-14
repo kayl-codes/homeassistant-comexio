@@ -728,6 +728,8 @@ LOGIN_ERROR_CONNECTION = "connection"
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
 # User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
 # (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
+# Longest an unload (HA's own reload) waits for a running function plan restore or edit.
+FUNCTION_PLAN_UNLOAD_WAIT_SEC = 120
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
 MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 
@@ -766,6 +768,29 @@ def parse_watchdog_user_plan_pick(value: object) -> tuple[int, str | None] | Non
     if not raw_id.isdigit():
         return None
     return int(raw_id), (name if separator else None)
+
+
+def repointed_watchdog_user_plan_picks(
+    options: Mapping[str, Any], plan_name: str, old_fub_id: int, new_fub_id: int
+) -> list[Any] | None:
+    """The watchdog's user-plan picks with plan_name's pick moved from old_fub_id to new_fub_id.
+
+    For a restore-as-new, which gives a plan a fresh ID: the watched plan stays watched. A bare-ID
+    pick (saved before names were) moves too, it can only mean this plan. None if no pick matched.
+    """
+    raw_picks = options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS)
+    if not isinstance(raw_picks, list):
+        return None
+    moved = False
+    picks: list[Any] = []
+    for value in raw_picks:
+        pick = parse_watchdog_user_plan_pick(value)
+        if pick is not None and pick[0] == old_fub_id and pick[1] in (None, plan_name):
+            value = watchdog_user_plan_pick(new_fub_id, plan_name)
+            moved = True
+        if value not in picks:
+            picks.append(value)
+    return picks if moved else None
 
 
 # Bus-Load-Watchdog: self-healing reaction to a sustained bus-load rise (observed root cause:

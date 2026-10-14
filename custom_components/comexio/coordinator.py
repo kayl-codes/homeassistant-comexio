@@ -110,6 +110,7 @@ from .const import (
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    FUNCTION_PLAN_UNLOAD_WAIT_SEC,
     FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
     FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC,
     ICON_ADD,
@@ -163,6 +164,7 @@ from .const import (
     io_column_rows,
     parse_watchdog_user_plan_pick,
     plan_watch_signal,
+    repointed_watchdog_user_plan_picks,
     snap_to_grid,
     source_audit_key,
     source_category,
@@ -595,6 +597,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_edits_running = 0
         self._plan_edits_done = asyncio.Event()
         self._plan_edits_done.set()
+        # Set while async_reload_entry holds the restores off (restores_held_off): its unload must not wait again.
+        self._restores_held_for_reload = False
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
@@ -1968,7 +1972,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.sync_progress_text = "Waiting for the running function plan restore before reloading…"
                 self.async_update_listeners()
         async with self._restore_lock:
-            yield
+            self._restores_held_for_reload = True
+            try:
+                yield
+            finally:
+                self._restores_held_for_reload = False
+
+    async def async_wait_before_unload(self) -> None:
+        """Let a running function plan restore and plan edits finish before the entry unloads.
+
+        For a reload that bypasses async_reload_entry — HA's own "Reload" in the UI, or an
+        options save by HA itself: unloading closes the API session, and a restore cut off there
+        leaves a half-built plan ("Session is closed", seen live 2026-10-14: an empty copy). A
+        reload through async_reload_entry already waited and holds the restores off, so it skips
+        this. Bounded by FUNCTION_PLAN_UNLOAD_WAIT_SEC: an unload that never ends would block HA.
+        """
+        if self._restores_held_for_reload:
+            return
+        try:
+            async with asyncio.timeout(FUNCTION_PLAN_UNLOAD_WAIT_SEC):
+                if self._restore_lock.locked():
+                    _LOGGER.info("[%s] Unload waits for the running function plan restore to finish", self.server_id)
+                    async with self._restore_lock:
+                        pass
+                await self.async_wait_for_plan_edits()
+        except TimeoutError:
+            _LOGGER.warning(
+                "[%s] Unloading although a function plan restore or edit still runs after %s s; it may be left "
+                "unfinished — check the plan in Comexio Studio",
+                self.server_id,
+                FUNCTION_PLAN_UNLOAD_WAIT_SEC,
+            )
 
     def _auto_backup_held_back(self, generation: int) -> bool:
         """Whether a restore runs now or ran since the backup cycle read `generation`."""
@@ -2387,6 +2421,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if str(new_options.get(CONF_FUNCTION_PLAN_FUB_ID)) == str(old_fub_id):
             new_options[CONF_FUNCTION_PLAN_FUB_ID] = new_fub_id
             updated.append(f"selected function plan → fub_id {new_fub_id}")
+        if (picks := repointed_watchdog_user_plan_picks(new_options, plan_name, old_fub_id, new_fub_id)) is not None:
+            new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = picks
+            updated.append(f"function plan watchdog pick '{plan_name}' → fub_id {new_fub_id}")
         if updated:
             self.request_options_update_without_reload(new_options)
         return updated

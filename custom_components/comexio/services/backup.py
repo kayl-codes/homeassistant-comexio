@@ -1862,7 +1862,8 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
 
     Only orphaned identities (fub_id/plan_name pairs whose plan was deleted directly in
     Comexio Studio) are ever touched, and only once their newest snapshot is older than
-    the configured retention (Options → Function Plan, default 6 months) — a live plan's
+    the configured retention (Options → Function Plan, default 6 months), or of any age with
+    include_recent — a live plan's
     backups are never purged, no matter how old, and neither are kept ones. The periodic
     backup cycle never deletes; it raises an orphaned_plan_backups repair per expired plan
     instead, so this service is the bulk "delete them all" shortcut. Local storage only, no
@@ -1887,20 +1888,23 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     retention_months = coordinator.config_entry.options.get(
         CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
     )
+    include_recent = bool(call.data.get("include_recent", False))
+    _LOGGER.info("Function Plan Purge Orphaned Backups: called (include_recent=%s)", include_recent)
     if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_PURGE_ORPHANED_BACKUPS_ERR):
         return
+    # include_recent: every orphan, however young — its newest snapshot is older than now.
+    cutoff = dt_util.utcnow() if include_recent else retention_cutoff(int(retention_months))
+    age = "of any age" if include_recent else f"older than {retention_months} month(s)"
     # No await since the check: a restore starting from here on refuses until the purge ends.
     with coordinator.plan_edit():
-        purged = await coordinator.function_plan_backup.async_purge_orphaned(
-            live_plans, cutoff=retention_cutoff(int(retention_months))
-        )
+        purged = await coordinator.function_plan_backup.async_purge_orphaned(live_plans, cutoff=cutoff)
     for plan in purged:
         delete_orphaned_backup_issue(hass, coordinator.server_id, plan["fub_id"], plan["plan_name"])
     total = sum(p["removed"] for p in purged)
     msg = (
-        f"Purged {total} snapshot(s) across {len(purged)} orphaned plan(s) (older than {retention_months} month(s))."
+        f"Purged {total} snapshot(s) across {len(purged)} orphaned plan(s) ({age})."
         if purged
-        else f"No orphaned plan backups older than {retention_months} month(s) found — nothing purged."
+        else f"No orphaned plan backups {age} found — nothing purged."
     )
 
     _LOGGER.info("Function Plan Purge Orphaned Backups: %s", msg)
