@@ -520,39 +520,47 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Standard UI-Press -> Full Sync."""
         await self.async_handle_press(action="full_sync")
 
-    async def async_handle_press(self, action: str = "full_sync") -> None:
-        """Execute the sync logic with mode selection."""
-        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
-        notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
-        notif_id = f"comexio_sync_{self.server_id}"
+    def _notify_sync_blocked(self, notify_enabled: bool, reason: str) -> None:
+        """Tell the user why a sync request was ignored (when notifications are enabled)."""
+        if not notify_enabled:
+            return
+        # Own notification_id — comexio_sync_<id> is the *in-progress* sync's live-progress
+        # notification, and reusing it here would clobber that progress display.
+        persistent_notification.async_create(
+            self.hass,
+            f"{ICON_WARNING} Sync request ignored — {reason}",
+            title=f"Comexio Sync ({self.server_id})",
+            notification_id=f"comexio_sync_blocked_{self.server_id}",
+        )
+
+    async def _async_acquire_sync_lock(self, notify_enabled: bool) -> bool:
+        """Take the sync lock for this press; False (lock not held, user told why) when the sync must not run."""
         # A restore rewrites function plans the sync writes into as well (sort, trigger pairs).
         if self.coordinator._sync_lock.locked() or self.coordinator._restore_lock.locked():
             _LOGGER.warning("[%s] Sync already in progress or a restore running, ignoring request", self.server_id)
-            if notify_enabled:
-                # Own notification_id — notif_id is the *in-progress* sync's live-progress
-                # notification, and reusing it here would clobber that progress display.
-                persistent_notification.async_create(
-                    self.hass,
-                    f"{ICON_WARNING} Sync request ignored — a sync, Web-IO range check or function plan "
-                    "restore is already running. Please try again shortly.",
-                    title=f"Comexio Sync ({self.server_id})",
-                    notification_id=f"comexio_sync_blocked_{self.server_id}",
-                )
-            return
+            self._notify_sync_blocked(
+                notify_enabled,
+                "a sync, Web-IO range check or function plan restore is already running. Please try again shortly.",
+            )
+            return False
         await self.coordinator._sync_lock.acquire()
         if self.hass.data[DOMAIN].get(self.coordinator.config_entry.entry_id) is not self.coordinator:
             # A reload (coordinator.async_reload_entry holds this lock through it) finished
             # while this press waited: this coordinator and its API session are torn down.
             self.coordinator._sync_lock.release()
             _LOGGER.warning("[%s] Sync request dropped — the integration was reloaded meanwhile", self.server_id)
-            if notify_enabled:
-                persistent_notification.async_create(
-                    self.hass,
-                    f"{ICON_WARNING} Sync request ignored — the integration was reloaded while it waited. "
-                    "Please start the sync again.",
-                    title=f"Comexio Sync ({self.server_id})",
-                    notification_id=f"comexio_sync_blocked_{self.server_id}",
-                )
+            self._notify_sync_blocked(
+                notify_enabled, "the integration was reloaded while it waited. Please start the sync again."
+            )
+            return False
+        return True
+
+    async def async_handle_press(self, action: str = "full_sync") -> None:
+        """Execute the sync logic with mode selection."""
+        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
+        notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
+        notif_id = f"comexio_sync_{self.server_id}"
+        if not await self._async_acquire_sync_lock(notify_enabled):
             return
         self.coordinator.in_sync = True
         self.coordinator.sync_error = False

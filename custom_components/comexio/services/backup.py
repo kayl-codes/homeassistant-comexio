@@ -434,6 +434,16 @@ def _restore_conflict_message(fub_id: int, snapshot_name: str, live_name: str | 
     )
 
 
+def _error_label(exc: BaseException) -> str:
+    """An error for a notification: its type only — the message can carry the request URL, the log has it."""
+    return f"{type(exc).__name__} — details in the Home Assistant log"
+
+
+def _status_after_promotion(status: str, promoted: bool | str | None) -> str:
+    """PARTIAL when the restored snapshot could not be marked restored (promoted is then the error's type)."""
+    return "PARTIAL" if isinstance(promoted, str) and status == "OK" else status
+
+
 async def _async_promote_restored(
     coordinator: ComexioCoordinator, kind: str, fub_id: int, plan_name: str, snapshot: dict
 ) -> bool | str:
@@ -516,6 +526,8 @@ async def _restore_plan_in_place(
         promoted: bool | str | None = None  # None: not attempted (see the gate below)
         if content_ok and not identity_was_mismatched:
             promoted = await _async_promote_restored(coordinator, kind, fub_id, plan_name, snapshot)
+        # The plan is restored, its backup history is not: not OK, the message names the failed step.
+        status = _status_after_promotion(status, promoted)
 
         msg = _restore_build_message(
             plan_name,
@@ -553,7 +565,7 @@ async def _restore_plan_in_place(
         _LOGGER.exception("Function Plan in-place restore failed for '%s' (ID %s)", plan_name, fub_id)
         persistent_notification.async_create(
             hass,
-            f"Restore of {kind}[{slot}] for plan '{plan_name}' (ID {fub_id}) failed: {exc}. "
+            f"Restore of {kind}[{slot}] for plan '{plan_name}' (ID {fub_id}) failed ({_error_label(exc)}). "
             "The plan may be left in a partially restored state — check it in Comexio Studio.",
             title=_TITLE_RESTORE_ERR,
             notification_id=notif_id,
@@ -1022,6 +1034,35 @@ async def _move_restored_plan_lineage(
     return purged, updated, backups_error, refs_error
 
 
+def _restored_references_line(old_fub_id: int, updated_consumers: list[str], refs_error: str | None) -> str:
+    """Result line of a restore as new plan: what happened to the references to the old ID."""
+    if refs_error:
+        return (
+            f"References: {ICON_WARNING} not updated — they still point at old ID {old_fub_id} "
+            f"({refs_error} — see log)."
+        )
+    if updated_consumers:
+        return f"Updated references: {', '.join(updated_consumers)}"
+    return "References: nothing pointed at the old ID (cluster plan map / plan selector) — nothing to update."
+
+
+def _restored_lineage_line(
+    plan_name: str, old_fub_id: int, new_fub_id: int, old_id_still_live: bool, purged: int, lineage_error: str | None
+) -> str:
+    """Result line of a restore as new plan: what happened to the plan's backups under the old ID."""
+    if lineage_error:
+        return (
+            f"Backup lineage: {ICON_WARNING} not moved from old ID {old_fub_id} to new ID {new_fub_id} "
+            f"({lineage_error} — see log)."
+        )
+    if old_id_still_live:
+        return (
+            f"Backup lineage: {purged} old snapshot(s) for '{plan_name}' removed from old ID {old_fub_id} "
+            f"(superseded — the plan now lives at {new_fub_id}; the old ID's OTHER plan is untouched)."
+        )
+    return f"Backup lineage: moved from old ID {old_fub_id} to new ID {new_fub_id}."
+
+
 async def _restore_plan_as_new(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -1083,7 +1124,7 @@ async def _restore_plan_as_new(
         persistent_notification.async_create(
             hass,
             f"Restore of {kind}[{slot}] for the former plan {old_fub_id} failed while building '{plan_name}' "
-            f"(new ID {new_fub_id}): {exc}. The new plan may be partially created — check Comexio Studio "
+            f"(new ID {new_fub_id}): {_error_label(exc)}. The new plan may be partially created — check Comexio Studio "
             "and delete it manually before restoring again.",
             title=_TITLE_RESTORE_ERR,
             notification_id=notif_id,
@@ -1110,27 +1151,8 @@ async def _restore_plan_as_new(
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
     activation_line = _new_plan_activation_line(run_ok, auto_start)
-    consumer_line = (
-        f"Updated references: {', '.join(updated_consumers)}"
-        if updated_consumers
-        else "References: nothing pointed at the old ID (cluster plan map / plan selector) — nothing to update."
-    )
-    lineage_line = (
-        f"Backup lineage: {purged} old snapshot(s) for '{plan_name}' removed from old ID {old_fub_id} "
-        f"(superseded — the plan now lives at {new_fub_id}; the old ID's OTHER plan is untouched)."
-        if old_id_still_live
-        else f"Backup lineage: moved from old ID {old_fub_id} to new ID {new_fub_id}."
-    )
-    if refs_error:
-        consumer_line = (
-            f"References: {ICON_WARNING} not updated — they still point at old ID {old_fub_id} "
-            f"({refs_error} — see log)."
-        )
-    if lineage_error:
-        lineage_line = (
-            f"Backup lineage: {ICON_WARNING} not moved from old ID {old_fub_id} to new ID {new_fub_id} "
-            f"({lineage_error} — see log)."
-        )
+    consumer_line = _restored_references_line(old_fub_id, updated_consumers, refs_error)
+    lineage_line = _restored_lineage_line(plan_name, old_fub_id, new_fub_id, old_id_still_live, purged, lineage_error)
 
     msg = (
         f"Plan '{plan_name}' restored as a NEW plan (old ID {old_fub_id} → new ID {new_fub_id})\n\n"
@@ -1225,7 +1247,8 @@ async def _restore_plan_as_copy(
         _LOGGER.exception("Function Plan copy-restore failed while building '%s'", new_plan_name)
         persistent_notification.async_create(
             hass,
-            f"Copy-restore of {kind}[{slot}] for '{source_name}' failed while building '{new_plan_name}': {exc}. "
+            f"Copy-restore of {kind}[{slot}] for '{source_name}' failed while building '{new_plan_name}': "
+            f"{_error_label(exc)}. "
             "The new plan may be partially created — check Comexio Studio and delete it manually if needed.",
             title=_TITLE_RESTORE_ERR,
             notification_id=notif_id,
@@ -1482,7 +1505,8 @@ async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, A
     try:
         page = await api.get_raw_config()
     except (aiohttp.ClientError, TimeoutError, ComexioConnectionError) as err:
-        error = f"Comexio is not reachable ({err!r}) — try again once it responds"
+        _LOGGER.warning("Function Plan Restore: the plan list could not be read: %r", err)
+        error = f"Comexio is not reachable ({_error_label(err)}) — try again once it responds"
     else:
         entry, error = _plan_list_entry(page, fub_id)
         if error is None:
@@ -1555,14 +1579,21 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         return
     coordinator, api, _unused_fub_id = ctx
 
-    # A sync and an uninstall cleanup write into function plans too, and a reload closes the API
-    # session: none may overlap a restore (they refuse to start while one runs, see restores_held_off).
-    if coordinator._restore_lock.locked() or coordinator._sync_lock.locked() or coordinator.in_sync:
-        _LOGGER.warning("Function Plan Restore not started — a restore, sync, cleanup or reload is running")
+    # A sync, an uninstall cleanup and a plan edit write into function plans too, and a reload closes
+    # the API session: none may overlap a restore (they refuse to start while one runs, see
+    # restores_held_off and refuse_while_restoring). From the check to the lock below runs no await.
+    if (
+        coordinator._restore_lock.locked()
+        or coordinator._sync_lock.locked()
+        or coordinator.in_sync
+        or coordinator.plan_edits_running
+    ):
+        _LOGGER.warning("Function Plan Restore not started — a restore, sync, cleanup, reload or plan edit is running")
         persistent_notification.async_create(
             hass,
-            "A restore, sync, Web-IO range check, uninstall cleanup or integration reload is running — please "
-            "wait for it to finish before starting a restore.",
+            "A restore, sync, Web-IO range check, uninstall cleanup, integration reload or function plan edit "
+            "(sort, stop, activate, connect, marker delete, bus-load cascade) is running — please wait for it "
+            "to finish before starting a restore.",
             title=_TITLE_RESTORE_ERR,
             # Not the running restore's own id: that would overwrite its progress notice.
             notification_id=f"comexio_function_plan_restore_blocked_{coordinator.server_id}",
@@ -1595,7 +1626,7 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
             _post_restore_aborted(
                 hass,
                 coordinator,
-                f"The restore failed unexpectedly ({type(exc).__name__} — details in the Home Assistant log)",
+                f"The restore failed unexpectedly ({_error_label(exc)})",
             )
             raise
         finally:

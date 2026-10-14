@@ -294,9 +294,10 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
             title=_TITLE_SORT_ERR,
         )
         return
-    await async_sort_function_plan(
-        hass, coordinator, api, fub_id, canvas_format=str(call.data.get("canvas_format", ""))
-    )
+    with coordinator.plan_edit():
+        await async_sort_function_plan(
+            hass, coordinator, api, fub_id, canvas_format=str(call.data.get("canvas_format", ""))
+        )
 
 
 async def async_sort_function_plan(
@@ -474,8 +475,9 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
-    async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STOPPING):
-        success = await api.function_plan_stop_fup(fub_id)
+    with coordinator.plan_edit():
+        async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STOPPING):
+            success = await api.function_plan_stop_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
         f"Plan '{plan_name}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
@@ -496,8 +498,9 @@ async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
-    async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING):
-        success = await api.function_plan_run_fup(fub_id)
+    with coordinator.plan_edit():
+        async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING):
+            success = await api.function_plan_run_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
         f"Plan '{plan_name}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"

@@ -589,6 +589,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Restores running now, and a counter bumped by each one: the auto backup holds back
         # while one runs or ran during its cycle (see pause_auto_backup).
         self._auto_backup_pauses = 0
+        # Plan-editing service calls (sort, stop, activate, connect, marker delete) and bus-load
+        # cascades running right now — a restore refuses to start meanwhile (see plan_edit).
+        self._plan_edits_running = 0
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
@@ -1861,12 +1864,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 await self._async_auto_backup_plans(plans, fub_data, plan_format, pause_generation)
             try:
                 # A restore since the format was read may have changed it: backfill next cycle.
-                if self._auto_backup_held_back(pause_generation):
-                    _LOGGER.debug(
-                        "[%s] Function Plan paper/DPI backfill skipped: a restore ran meanwhile", self.server_id
-                    )
-                else:
-                    await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
+                await self.function_plan_backup.async_backfill_paper_metadata(
+                    fub_data, plan_format, held_back=lambda: self._auto_backup_held_back(pause_generation)
+                )
             except Exception:
                 _LOGGER.exception("[%s] Function Plan paper/DPI backfill failed", self.server_id)
             try:
@@ -1916,6 +1916,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
             yield
         finally:
             self._auto_backup_pauses -= 1
+
+    @contextlib.contextmanager
+    def plan_edit(self) -> Iterator[None]:
+        """Mark a plan edit as running until it ends — a restore refuses to start meanwhile.
+
+        Entered right after the edit's last refuse_while_restoring check, with no await in
+        between: a restore starting after that check sees the mark, so the two never overlap.
+        """
+        self._plan_edits_running += 1
+        try:
+            yield
+        finally:
+            self._plan_edits_running -= 1
+
+    @property
+    def plan_edits_running(self) -> bool:
+        """Whether a plan edit (see plan_edit) is running."""
+        return self._plan_edits_running > 0
 
     @contextlib.asynccontextmanager
     async def restores_held_off(self) -> AsyncIterator[None]:
@@ -4578,19 +4596,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         each managed plan, checking after each one whether the bus load recovers).
         """
         async with self._watchdog_lock:
-            raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-            plan_map: dict[str, int] = {}
-            if isinstance(raw_map, dict):
-                for plan_name, fub_id in raw_map.items():
-                    try:
-                        plan_map[plan_name] = int(fub_id)
-                    except (TypeError, ValueError):
-                        _LOGGER.warning(
-                            "[%s] Bus-load watchdog: skipping non-numeric plan_map entry '%s' -> %r",
-                            self.server_id,
-                            plan_name,
-                            fub_id,
-                        )
+            plan_map = self._cascade_plan_map()
             if not plan_map:
                 _LOGGER.warning(
                     "[%s] Bus-load watchdog: rise detected but no managed cluster plans to restart",
@@ -4606,38 +4612,58 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 baseline,
                 len(plan_map),
             )
-            culprit: str | None = None
-            for plan_name, fub_id in reversed(list(plan_map.items())):
-                if self._restore_lock.locked():
-                    # The restore rewrites and restarts plans itself; a stop now could leave one stopped.
-                    _LOGGER.warning(
-                        "[%s] Bus-load watchdog: cascade stopped before plan '%s' — a function plan restore is running",
-                        self.server_id,
-                        plan_name,
-                    )
-                    break
-                if not await self.api.function_plan_stop_fup(fub_id):
-                    _LOGGER.warning(
-                        "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "
-                        "restarting it anyway, run_fup re-applies its state authoritatively",
-                        self.server_id,
-                        plan_name,
-                        fub_id,
-                    )
-                await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
-                if not await self.api.function_plan_run_fup(fub_id):
-                    _LOGGER.warning(
-                        "[%s] Bus-load watchdog: run_fup failed for plan '%s' (fub=%s) — it may now be left stopped",
-                        self.server_id,
-                        plan_name,
-                        fub_id,
-                    )
-                await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
-                if self.bus_workload is not None and baseline - self.bus_workload >= CASCADE_RECOVERY_DROP_PCT:
-                    culprit = plan_name
-                    break
-
+            if self._restore_lock.locked():
+                # The restore rewrites and restarts plans itself; a stop now could leave one stopped.
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: cascade not started — a function plan restore is running", self.server_id
+                )
+                return
+            # No await since the check: a restore starting from here on refuses until the cascade ends.
+            with self.plan_edit():
+                culprit = await self._async_cascade_plans(plan_map, baseline)
             await self._async_finish_watchdog_cascade(baseline, culprit, len(plan_map))
+
+    def _cascade_plan_map(self) -> dict[str, int]:
+        """The managed cluster plans (name -> fub_id) a bus-load cascade restarts; bad entries skipped."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        plan_map: dict[str, int] = {}
+        if not isinstance(raw_map, dict):
+            return plan_map
+        for plan_name, fub_id in raw_map.items():
+            try:
+                plan_map[plan_name] = int(fub_id)
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: skipping non-numeric plan_map entry '%s' -> %r",
+                    self.server_id,
+                    plan_name,
+                    fub_id,
+                )
+        return plan_map
+
+    async def _async_cascade_plans(self, plan_map: dict[str, int], baseline: float) -> str | None:
+        """Restart the plans back to front until the bus load recovers; returns the plan that did it."""
+        for plan_name, fub_id in reversed(list(plan_map.items())):
+            if not await self.api.function_plan_stop_fup(fub_id):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "
+                    "restarting it anyway, run_fup re-applies its state authoritatively",
+                    self.server_id,
+                    plan_name,
+                    fub_id,
+                )
+            await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
+            if not await self.api.function_plan_run_fup(fub_id):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: run_fup failed for plan '%s' (fub=%s) — it may now be left stopped",
+                    self.server_id,
+                    plan_name,
+                    fub_id,
+                )
+            await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
+            if self.bus_workload is not None and baseline - self.bus_workload >= CASCADE_RECOVERY_DROP_PCT:
+                return plan_name
+        return None
 
     async def _async_finish_watchdog_cascade(self, baseline: float, culprit: str | None, plan_count: int) -> None:
         """Notify + persist history for a finished cascade run, and start its cooldown."""

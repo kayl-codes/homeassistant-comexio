@@ -98,20 +98,39 @@ def _copy_keys(data: dict[str, Any], keys: tuple[str, ...]) -> dict[str, dict[st
     return {key: ({name: list(h) for name, h in data[key].items()} if key in data else None) for key in keys}
 
 
-async def _async_save_or_put_back(store: Any, data: dict[str, Any], before: dict[str, dict[str, Any] | None]) -> None:
-    """Save; on failure put the keys copied by _copy_keys back as they were, then raise.
+# (store, its data, the keys _copy_keys copied before the change)
+_StoreSave = tuple[Any, dict[str, Any], dict[str, dict[str, Any] | None]]
 
-    Each store is saved on its own: when the second fails, memory keeps what the first saved,
-    so memory and disk still agree and the next attempt starts from the saved state.
+
+def _put_back(data: dict[str, Any], before: dict[str, dict[str, Any] | None]) -> None:
+    """Put the keys copied by _copy_keys back as they were."""
+    for key, identities in before.items():
+        if identities is None:
+            data.pop(key, None)
+        else:
+            data[key] = identities
+
+
+async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
+    """Save every store, or none: on a failure put all keys back, re-save the stores already saved, raise.
+
+    A lineage move spans the auto and the change store: saved in one only, the plan's backups
+    would sit under two IDs. Re-saving the stores already written takes their change back on
+    disk too; when that fails as well it is logged — memory then holds the state before the move.
     """
+    saved: list[_StoreSave] = []
     try:
-        await store.async_save(data)
+        for save in saves:
+            await save[0].async_save(save[1])
+            saved.append(save)
     except Exception:
-        for key, identities in before.items():
-            if identities is None:
-                data.pop(key, None)
-            else:
-                data[key] = identities
+        for _store, data, before in saves:
+            _put_back(data, before)
+        for store, data, _before in saved:
+            try:
+                await store.async_save(data)
+            except Exception:
+                _LOGGER.exception("Function Plan backup: a store could not be put back after a failed lineage move")
         raise
 
 
@@ -679,6 +698,7 @@ class FunctionPlanBackupManager:
         self,
         fub_data: dict[str, Any],
         plan_format: dict[str, tuple[str, int, str]],
+        held_back: Callable[[], bool] | None = None,
     ) -> int:
         """Add paper/dpi/orientation to snapshots stored before this was tracked (idempotent).
 
@@ -690,9 +710,14 @@ class FunctionPlanBackupManager:
         later one (older names under its ID still get the fallback). Snapshots that
         already carry a "paper" key, or were taken while the format was unreadable
         (SNAPSHOT_PAPER_UNKNOWN), are left untouched, so this is safe to call on every backup
-        cycle. Returns the number of snapshots filled in.
+        cycle. held_back: asked after loading, right before the snapshots change; True fills in
+        nothing — a restore since plan_format was read may have changed the format (see
+        ComexioCoordinator.pause_auto_backup). Returns the number of snapshots filled in.
         """
         await self._async_ensure_loaded()
+        if held_back is not None and held_back():
+            _LOGGER.debug("[%s] Function Plan paper/DPI backfill skipped: a restore ran meanwhile", self._server_id)
+            return 0
         filled = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
             group_filled: list[dict[str, Any]] = []
@@ -768,6 +793,7 @@ class FunctionPlanBackupManager:
         await self._async_ensure_loaded()
         old_key, new_key = str(old_fub_id), str(new_fub_id)
         moved = 0
+        saves: list[_StoreSave] = []
         for data, store, limit in (
             (self._auto_data, self._auto_store, FUNCTION_PLAN_AUTO_BACKUP_SLOTS),
             (self._change_data, self._change_store, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS),
@@ -784,8 +810,9 @@ class FunctionPlanBackupManager:
             combined = new_identities.get(plan_name, []) + old_history
             combined.sort(key=lambda s: s.get("captured_at") or "", reverse=True)
             new_identities[plan_name] = combined[:limit]
-            await _async_save_or_put_back(store, data, before)
+            saves.append((store, data, before))
             moved += len(old_history)
+        await _async_save_all_or_put_back(saves)
         # The restored plan is live again under new_fub_id, so the keep decision is not carried over.
         await self._async_forget_kept_if_gone(old_fub_id, plan_name)
         if moved:
@@ -812,6 +839,7 @@ class FunctionPlanBackupManager:
         await self._async_ensure_loaded()
         key = str(fub_id)
         removed = 0
+        saves: list[_StoreSave] = []
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
             identities = data.get(key)
             if not identities or plan_name not in identities:
@@ -820,8 +848,9 @@ class FunctionPlanBackupManager:
             purged = identities.pop(plan_name)
             if not identities:
                 data.pop(key, None)
-            await _async_save_or_put_back(store, data, before)
+            saves.append((store, data, before))
             removed += len(purged)
+        await _async_save_all_or_put_back(saves)
         await self._async_forget_kept_if_gone(fub_id, plan_name)
         if removed:
             _LOGGER.info(

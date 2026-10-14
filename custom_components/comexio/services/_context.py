@@ -280,7 +280,11 @@ async def _ensure_comexio_login(hass: HomeAssistant, api, error_title: str) -> b
 async def _resolve_function_plan_context(
     hass: HomeAssistant, call: ServiceCall, error_title: str, *, edits_plan: bool = True
 ) -> tuple[Any, Any, int] | None:
-    """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in."""
+    """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in.
+
+    edits_plan: the caller must enter coordinator.plan_edit() right after this returns, with no
+    await in between — the last restore check runs here, the mark keeps a restore out after it.
+    """
     ctx = _resolve_function_plan(hass, call, error_title, edits_plan=edits_plan)
     if ctx is None:
         return None

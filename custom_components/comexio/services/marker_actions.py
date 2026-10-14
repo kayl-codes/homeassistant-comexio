@@ -204,7 +204,15 @@ async def handle_marker_delete(hass: HomeAssistant, call: ServiceCall) -> dict:
     coordinator, api, _fub_id = ctx
     if refuse_while_restoring(hass, coordinator, _TITLE_MARKER_DELETE_ERR):
         return _error_result(_RESTORE_RUNNING_RESULT, requested=marker_ids)
+    # No await since the check: a restore starting from here on refuses until the deletion ends.
+    with coordinator.plan_edit():
+        return await _async_delete_eligible_markers(hass, call, coordinator, api, raw_input, marker_ids)
 
+
+async def _async_delete_eligible_markers(
+    hass: HomeAssistant, call: ServiceCall, coordinator, api, raw_input: str, marker_ids: list[int]
+) -> dict:
+    """Delete the requested markers the eligibility check allows; the service response (see handle_marker_delete)."""
     force = call.data.get("force") is True
     requested = marker_ids
     marker_ids, protected, known_ids, gate_error = await api.get_marker_delete_eligibility(marker_ids, force=force)

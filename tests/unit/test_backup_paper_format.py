@@ -1,6 +1,8 @@
 """A plan's paper format/DPI/orientation: backed up on its own, shown in the diff and in a backup's preview."""
 
 import asyncio
+import copy
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -282,11 +284,31 @@ def test_the_backfill_waits_for_a_live_plans_format(stores: dict[str, Any], plan
     fub_data = {"1": {"Name": "Lights"}}
 
     async def run() -> int:
-        await manager.async_auto_backup({1: plan}, fub_data)
+        await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A4})
+        # (Review) a legacy snapshot: no format keys and no paper_unknown mark that skips it anyway.
+        for key in ("paper", "dpi", "orientation"):
+            del manager._auto_data["1"]["Lights"][0][key]
         return await manager.async_backfill_paper_metadata(fub_data, {})
 
     assert asyncio.run(run()) == 0
-    assert "paper" not in stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"][0]
+    snap = stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]["1"]["Lights"][0]
+    assert "paper" not in snap
+    assert backup_module.SNAPSHOT_PAPER_UNKNOWN not in snap
+
+
+def test_the_backfill_fills_nothing_once_a_restore_ran_meanwhile(stores: dict[str, Any], plan: dict[str, Any]) -> None:
+    """(Review) a restore since the format was read may have changed it: stamped, snapshots carry the old one."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}}
+
+    async def run() -> int:
+        await manager.async_auto_backup({1: plan}, fub_data, plan_format={"1": A4})
+        for key in ("paper", "dpi", "orientation"):
+            del manager._auto_data["1"]["Lights"][0][key]
+        return await manager.async_backfill_paper_metadata(fub_data, {"1": A5}, held_back=lambda: True)
+
+    assert asyncio.run(run()) == 0
+    assert "paper" not in manager._auto_data["1"]["Lights"][0]
 
 
 def test_older_names_under_a_live_id_get_the_fallback_while_its_format_is_unreadable(
@@ -584,20 +606,59 @@ def test_a_lineage_move_that_could_not_be_saved_is_put_back(
     """(Review) memory showed the backups moved while the store still had them under the old ID."""
     manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
 
+    move = (
+        partial(manager.async_purge_identity, 1, "Lights")
+        if old_id_still_live
+        else partial(manager.async_rekey_fub_id, 1, 5, "Lights")
+    )
+
     async def run() -> None:
         await manager.async_auto_backup({1: plan}, {"1": {"Name": "Lights"}}, plan_format={"1": A4})
         with (
             patch.object(manager._auto_store, "async_save", AsyncMock(side_effect=OSError("disk full"))),
             pytest.raises(OSError),
         ):
-            if old_id_still_live:
-                await manager.async_purge_identity(1, "Lights")
-            else:
-                await manager.async_rekey_fub_id(1, 5, "Lights")
+            await move()
 
     asyncio.run(run())
     assert len(manager._auto_data["1"]["Lights"]) == 1
     assert "5" not in manager._auto_data
+
+
+@pytest.mark.parametrize("old_id_still_live", [False, True])
+def test_a_lineage_move_the_second_store_could_not_save_is_taken_back_in_both(
+    stores: dict[str, Any], plan: dict[str, Any], old_id_still_live: bool
+) -> None:
+    """(Review) saved in the auto store only, the plan's backups sat under two IDs."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    move = (
+        partial(manager.async_purge_identity, 1, "Lights")
+        if old_id_still_live
+        else partial(manager.async_rekey_fub_id, 1, 5, "Lights")
+    )
+    auto_on_disk: list[dict[str, Any]] = []
+
+    async def record(data: dict[str, Any]) -> None:
+        auto_on_disk.append(copy.deepcopy(data))
+
+    async def run() -> None:
+        await manager.async_auto_backup({1: plan}, {"1": {"Name": "Lights"}}, plan_format={"1": A4})
+        await manager.async_change_backup(1, plan, "Lights", "edit", paper="A4", dpi=100, orientation="landscape")
+        with (
+            patch.object(manager._auto_store, "async_save", AsyncMock(side_effect=record)),
+            patch.object(manager._change_store, "async_save", AsyncMock(side_effect=OSError("disk full"))),
+            pytest.raises(OSError),
+        ):
+            await move()
+
+    asyncio.run(run())
+    for data in (manager._auto_data, manager._change_data):
+        assert len(data["1"]["Lights"]) == 1
+        assert "5" not in data
+    # Saved by the move, then saved again as it was before.
+    assert len(auto_on_disk) == 2
+    assert auto_on_disk[-1]["1"]["Lights"]
+    assert "5" not in auto_on_disk[-1]
 
 
 def test_a_restore_never_renames_a_plan_whose_live_paper_cannot_be_set() -> None:

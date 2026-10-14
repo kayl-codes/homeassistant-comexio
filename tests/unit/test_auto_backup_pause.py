@@ -147,6 +147,7 @@ def test_the_restore_service_pauses_the_auto_backup_for_every_restore_path(fails
     """In place, as a new plan and as a copy all run inside _run_function_plan_restore."""
     coordinator = _coordinator()
     coordinator._restore_lock = asyncio.Lock()
+    coordinator._plan_edits_running = 0
     coordinator._sync_lock = asyncio.Lock()
     coordinator.in_sync = False
     pauses_during_restore: list[int] = []
