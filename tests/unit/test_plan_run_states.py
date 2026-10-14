@@ -6,7 +6,7 @@ import logging
 import time
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioResponseError
 import pytest
@@ -29,6 +29,7 @@ from custom_components.comexio.const import (
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.plan_watchdog import ManagedPlanWatchdog, start_action_id
+from custom_components.comexio.services import _context
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
 
@@ -185,6 +186,10 @@ class _FakeCoordinator(SimpleNamespace):
     live_plan_list = ComexioCoordinator.live_plan_list
     _warn_unresolved_watch_picks = ComexioCoordinator._warn_unresolved_watch_picks
     managed_plan_start_blocked = ComexioCoordinator.managed_plan_start_blocked
+    _plan_watch_blocked = ComexioCoordinator._plan_watch_blocked
+    _async_start_plan_from_push = ComexioCoordinator._async_start_plan_from_push
+    plan_edit = ComexioCoordinator.plan_edit
+    plan_edits_running = ComexioCoordinator.plan_edits_running
     async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
     async_initial_plan_watch = ComexioCoordinator.async_initial_plan_watch
     plan_transition = ComexioCoordinator.plan_transition
@@ -227,6 +232,8 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         hass=None,
         async_update_listeners=MagicMock(),
         _watchdog_lock=asyncio.Lock(),
+        _plan_edits_running=0,
+        _plan_edits_done=asyncio.Event(),
         _plan_transitions={},
         _unresolved_watch_picks=frozenset(),
         _comexio_unreachable=False,
@@ -845,6 +852,117 @@ def test_watchdog_waits_while_a_cascade_or_sync_runs(api: ComexioAPI) -> None:
 
     asyncio.run(poll_during_cascade())
     coordinator.plan_watchdog.async_check.assert_not_called()
+
+
+def test_no_plan_is_started_while_a_plan_edit_runs(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(Review) an auto-start, repair or push start could run a plan a sort, connect or stop is changing."""
+    monkeypatch.setattr(api, "login", AsyncMock(return_value=True))
+    monkeypatch.setattr(api, "function_plan_run_fup_outcome", AsyncMock(return_value=True))
+    coordinator = _coordinator(api)
+
+    async def run() -> tuple[bool | None, bool | None]:
+        with coordinator.plan_edit():
+            return await coordinator._async_watchdog_start_plan(19), await coordinator.async_start_managed_plan(19)
+
+    assert asyncio.run(run()) == (None, None)
+    api.function_plan_run_fup_outcome.assert_not_awaited()
+    api.login.assert_not_awaited()
+
+
+def test_the_watchdog_still_judges_while_a_plan_edit_runs(api: ComexioAPI) -> None:
+    """Only the start waits for the edit: the verdict after HA's own start or stop is not delayed."""
+    coordinator = _coordinator(api)
+
+    async def run() -> None:
+        with coordinator.plan_edit():
+            await coordinator.async_watch_managed_plans()
+
+    asyncio.run(run())
+    coordinator.plan_watchdog.async_check.assert_awaited_once()
+    # The auto-start waits for the edit's end instead of logging "deferred" on every tick.
+    assert coordinator.plan_watchdog.async_check.await_args.kwargs["auto_start"] is False
+    asyncio.run(coordinator.async_watch_managed_plans())
+    assert coordinator.plan_watchdog.async_check.await_args.kwargs["auto_start"] is True
+
+
+def test_a_plan_edit_starting_during_the_login_stops_a_repair_or_push_start(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(Review) the login awaits Comexio: an edit starting then means "not sent", not "start failed"."""
+    coordinator = _coordinator(api)
+
+    async def login() -> bool:
+        coordinator._plan_edits_running = 1
+        return True
+
+    monkeypatch.setattr(api, "login", login)
+    monkeypatch.setattr(api, "function_plan_run_fup_outcome", AsyncMock(return_value=True))
+    assert asyncio.run(coordinator.async_start_managed_plan(19)) is None
+    api.function_plan_run_fup_outcome.assert_not_awaited()
+
+
+@pytest.mark.parametrize("busy", [True, False], ids=["plan-edit-runs", "free"])
+def test_a_push_start_during_a_plan_edit_is_reported_as_not_sent(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, busy: bool
+) -> None:
+    monkeypatch.setattr(api, "login", AsyncMock(return_value=True))
+    monkeypatch.setattr(api, "function_plan_run_fup_outcome", AsyncMock(return_value=False))
+    monkeypatch.setattr(api, "get_fub_active", MagicMock(return_value=False))
+    coordinator = _coordinator(
+        api,
+        plan_watchdog=SimpleNamespace(async_push_start_busy=AsyncMock(), async_push_start_failed=AsyncMock()),
+    )
+
+    async def run() -> None:
+        with coordinator.plan_edit() if busy else contextlib.nullcontext():
+            await coordinator._async_start_plan_from_push(19)
+
+    asyncio.run(run())
+    if busy:
+        api.function_plan_run_fup_outcome.assert_not_awaited()
+        coordinator.plan_watchdog.async_push_start_busy.assert_awaited_once()
+        coordinator.plan_watchdog.async_push_start_failed.assert_not_awaited()
+    else:  # sent and refused by Comexio: the failure push
+        api.function_plan_run_fup_outcome.assert_awaited_once_with(19)
+        coordinator.plan_watchdog.async_push_start_failed.assert_awaited_once()
+        coordinator.plan_watchdog.async_push_start_busy.assert_not_awaited()
+
+
+def test_a_plan_start_keeps_plan_edits_out_until_comexio_answers(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(Review) the start guard holds through the start request, not only at its check."""
+    coordinator = _coordinator(api)
+    seen: list[bool] = []
+
+    async def start(_fub_id: int) -> bool:
+        with patch.object(_context.persistent_notification, "async_create") as create:
+            seen.append(_context.refuse_while_plans_busy(coordinator.hass, coordinator, "T"))
+        assert create.call_args.args[1] == _context.PLAN_EDIT_RUNNING_MSG
+        return True
+
+    monkeypatch.setattr(api, "function_plan_run_fup_outcome", start)
+    assert asyncio.run(coordinator._async_watchdog_start_plan(19)) is True
+    assert seen == [True]
+    assert not coordinator.plan_edits_running
+    assert coordinator._plan_edits_done.is_set()
+
+
+@pytest.mark.parametrize(
+    "error", [ComexioConnectionError("down"), asyncio.CancelledError()], ids=["error", "cancelled"]
+)
+def test_a_failing_plan_start_releases_the_plan_edit_mark(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    """Otherwise every restore, sort and sync would refuse until HA restarts."""
+    monkeypatch.setattr(api, "function_plan_run_fup_outcome", AsyncMock(side_effect=error))
+    coordinator = _coordinator(api)
+    start = coordinator._async_watchdog_start_plan(19)
+    with pytest.raises(type(error)):
+        asyncio.run(start)
+    assert not coordinator.plan_edits_running
+    assert coordinator._plan_edits_done.is_set()
+    assert not coordinator._watchdog_lock.locked()
 
 
 def test_setup_judges_the_watched_plans_without_waiting_for_a_poll(api: ComexioAPI) -> None:

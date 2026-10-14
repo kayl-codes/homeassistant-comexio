@@ -14,7 +14,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
-from .function_plan_backup import format_backup_label
+from .function_plan_backup import format_backup_label, snapshot_paper_format
 from .function_plan_block_settings import snapshot_block_settings
 
 if TYPE_CHECKING:
@@ -93,6 +93,7 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
             f"snapshot:{kind}:{slot}",
             snapshot.get("labels"),
             snapshot_block_settings(snapshot),
+            snapshot_paper_format(snapshot),
         )
         return
 

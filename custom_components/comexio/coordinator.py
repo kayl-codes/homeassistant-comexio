@@ -170,7 +170,12 @@ from .const import (
     webio_class_label,
     webio_class_name,
 )
-from .function_plan_backup import FunctionPlanBackupManager, build_orphaned_backup_options, retention_cutoff
+from .function_plan_backup import (
+    FunctionPlanBackupManager,
+    build_orphaned_backup_options,
+    retention_cutoff,
+    snapshot_paper_format,
+)
 from .function_plan_block_settings import expand_autohide_blocks, snapshot_block_settings
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .ha_address import HaAddressResolver, webio_device_hint
@@ -584,6 +589,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Restores running now, and a counter bumped by each one: the auto backup holds back
         # while one runs or ran during its cycle (see pause_auto_backup).
         self._auto_backup_pauses = 0
+        # Plan-editing service calls (sort, stop, activate, connect, marker delete) and bus-load
+        # cascades running right now — a restore refuses to start meanwhile (see plan_edit); set
+        # while none runs, so a reload can wait for the last one (see async_wait_for_plan_edits).
+        self._plan_edits_running = 0
+        self._plan_edits_done = asyncio.Event()
+        self._plan_edits_done.set()
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
@@ -1855,7 +1866,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 await self._async_auto_backup_plans(plans, fub_data, plan_format, pause_generation)
             try:
-                await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
+                # A restore since the format was read may have changed it: backfill next cycle.
+                await self.function_plan_backup.async_backfill_paper_metadata(
+                    fub_data, plan_format, held_back=lambda: self._auto_backup_held_back(pause_generation)
+                )
             except Exception:
                 _LOGGER.exception("[%s] Function Plan paper/DPI backfill failed", self.server_id)
             try:
@@ -1905,6 +1919,56 @@ class ComexioCoordinator(DataUpdateCoordinator):
             yield
         finally:
             self._auto_backup_pauses -= 1
+
+    @contextlib.contextmanager
+    def plan_edit(self) -> Iterator[None]:
+        """Mark a plan edit as running until it ends — a restore, sync, uninstall cleanup, bus-load
+        cascade or another plan edit refuses to start meanwhile, and a reload waits for it.
+
+        Entered right after the edit's last refuse_while_plans_busy check, with no await in
+        between: one of those starting after that check sees the mark, so they never overlap.
+        """
+        self._plan_edits_running += 1
+        self._plan_edits_done.clear()
+        try:
+            yield
+        finally:
+            self._plan_edits_running -= 1
+            if not self._plan_edits_running:
+                self._plan_edits_done.set()
+
+    @property
+    def plan_edits_running(self) -> bool:
+        """Whether a plan edit (see plan_edit) is running."""
+        return self._plan_edits_running > 0
+
+    async def async_wait_for_plan_edits(self) -> None:
+        """Wait until no plan edit runs — a reload closes the API session under the edit's requests.
+
+        Awaited with _sync_lock held, so no plan edit or bus-load cascade starts meanwhile.
+        """
+        if self._plan_edits_running:
+            _LOGGER.info("[%s] Reload waits for the running function plan edit to finish", self.server_id)
+            await self._plan_edits_done.wait()
+
+    @contextlib.asynccontextmanager
+    async def restores_held_off(self) -> AsyncIterator[None]:
+        """Wait for a running function plan restore, then keep new ones out — around a reload.
+
+        A reload tears the coordinator down and closes the API session, so one landing mid-restore
+        kills the restore's remaining Comexio requests ("Session is closed", seen live 2026-10-13
+        when a sync finished during a copy-restore: the copy was left half built). A restore
+        started meanwhile is rejected as already running instead of starting against the
+        coordinator being torn down. Lock order: callers that hold _sync_lock take this after it;
+        a restore never waits for _sync_lock while it holds _restore_lock (see its reload).
+        """
+        if self._restore_lock.locked():
+            _LOGGER.info("[%s] Reload waits for the running function plan restore to finish", self.server_id)
+            if self.in_sync and not (self.sync_error or self.sync_failed_writes):
+                self.sync_progress_text = "Waiting for the running function plan restore before reloading…"
+                self.async_update_listeners()
+        async with self._restore_lock:
+            yield
 
     def _auto_backup_held_back(self, generation: int) -> bool:
         """Whether a restore runs now or ran since the backup cycle read `generation`."""
@@ -2019,15 +2083,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await refresh()
 
     def _current_plan_format(self, fub_data: dict) -> dict[str, tuple[str, int, str]]:
-        """Return {fub_id_str: (paper, dpi, orientation)} for every plan currently in fub_data."""
-        return {
-            key: (
-                self.api.get_fub_paper_format(int(key)),
-                self.api.get_fub_dpi(int(key)),
-                self.api.get_fub_orientation(int(key)),
-            )
-            for key in fub_data
-        }
+        """Return {fub_id_str: (paper, dpi, orientation)} for every plan in fub_data whose format is known.
+
+        A plan whose format was not readable (e.g. $Paper did not decode) is left out: the
+        backups then neither store a guessed format nor take the guess for a format change.
+        """
+        return {key: fmt for key in fub_data if (fmt := self.api.get_fub_known_format(int(key))) is not None}
 
     async def async_function_plan_change_backup(
         self, fub_id: int, operation: str, plan_data: dict | None = None
@@ -2041,9 +2102,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("[%s] Pre-change backup skipped: plan %s could not be loaded", self.server_id, fub_id)
                 return
             plan_name = self.api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-            paper = self.api.get_fub_paper_format(fub_id)
-            dpi = self.api.get_fub_dpi(fub_id)
-            orientation = self.api.get_fub_orientation(fub_id)
+            # Unknown stays unstored (None) rather than a guessed A4 a restore would then rebuild.
+            paper, dpi, orientation = self.api.get_fub_known_format(fub_id) or (None, None, None)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
             await self.function_plan_backup.async_change_backup(
                 fub_id,
@@ -2776,6 +2836,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         source: str,
         label_metadata: dict[str, dict[str, str]] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
+        paper_format: tuple[str, int, str] | None = None,
     ) -> str:
         """Render elements/connections (live plan or backup snapshot) to a preview SVG file.
 
@@ -2799,11 +2860,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         extended views the render shows; a live render always uses the last polled ones.
         Kept in the preview cache with the frozen elements, so a re-render never picks up
         another backup's settings after the slots rotated.
+
+        paper_format: a snapshot's stored (paper, dpi, orientation) (snapshot_paper_format), which
+        its title and canvas show; None for a live render, or for a snapshot captured without them,
+        which is sized like the live plan but names no format. Cached like block_settings.
         """
         cache_generation_before = self._preview_cache_generation
         markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(label_metadata)
         catalog = await self.function_plan_catalog.async_get_catalog()
-        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id)
+        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id, paper_format, source == "live")
         sun_times = _build_sun_times(self.hass)
         # A plan switch invalidates the previous plan's connection-id values BEFORE this
         # render — otherwise one frame could color wires from an unrelated plan whose
@@ -2852,7 +2917,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 kind, slot = _parse_snapshot_source(source)
                 self._update_snapshot_preview_cache(
-                    fub_id, plan_name, elements, connections, kind, slot, label_metadata, block_settings, live_id_map
+                    fub_id,
+                    plan_name,
+                    elements,
+                    connections,
+                    kind,
+                    slot,
+                    label_metadata,
+                    block_settings,
+                    live_id_map,
+                    paper_format,
                 )
         else:
             _LOGGER.debug(
@@ -2863,6 +2937,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # postponing the periodic poll, like the webhook pushes (see _async_publish_pushed_value).
         self.async_update_listeners()
         return url
+
+    def snapshot_paper_format_for_source(self, fub_id: int, plan_name: str, source: str) -> tuple[str, int, str] | None:
+        """The stored paper format of a 'snapshot:<kind>:<slot>' preview source; None for "live".
+
+        Same caveat as snapshot_block_settings_for_source: only right after reading that snapshot.
+        """
+        if source == "live":
+            return None
+        kind, slot = _parse_snapshot_source(source)
+        return self.function_plan_backup.paper_format_sync(kind, fub_id, plan_name, slot)
 
     def snapshot_block_settings_for_source(
         self, fub_id: int, plan_name: str, source: str
@@ -2990,6 +3074,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         render_elements, render_catalog = expand_autohide_blocks(
             snapshot.get("elements") or {}, catalog, snapshot_block_settings(snapshot)
         )
+        format_suffix, canvas = self._snapshot_format_title_and_canvas(fub_id, snapshot_paper_format(snapshot))
         svg_content = render_plan_svg(
             render_elements,
             snapshot.get("connections") or {},
@@ -2998,9 +3083,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             webio_by_id,
             ios_by_id,
             plan_name,
-            _ORPHANED_PREVIEW_TITLE_SUFFIX,
+            f"{_ORPHANED_PREVIEW_TITLE_SUFFIX} {format_suffix}".rstrip(),
             _build_sun_times(self.hass),
-            canvas=None,
+            canvas=canvas,
             connection_values=None,
             knx_by_id=self.function_plan_knx_label_map(),
             plan_id=str(fub_id),
@@ -3058,22 +3143,40 @@ class ComexioCoordinator(DataUpdateCoordinator):
             label_maps = snapshot_label_maps(label_metadata, *label_maps)
         return label_maps
 
-    def _build_preview_title_and_canvas(self, fub_id: int) -> tuple[str, Any]:
+    def _build_preview_title_and_canvas(
+        self, fub_id: int, paper_format: tuple[str, int, str] | None = None, live: bool = True
+    ) -> tuple[str, Any]:
         """Build the Studio-style title suffix (state + paper/DPI) and canvas bounds for a live plan.
 
         Title suffix carries the plan's live state + paper/DPI (Studio-style header info),
-        rendered at half the plan-name size. Read from the live fub data — for snapshots
-        of deleted plans it stays empty.
+        rendered at half the plan-name size. The state is read from the live fub data — a backup
+        of a plan that is gone shows only its stored format (nothing without one). paper_format:
+        a backup's own format, shown instead of the live one (the plan may have been switched to
+        another paper since). live=False without one: a backup whose format is not known — sized
+        like the live plan, but the title names no format it cannot vouch for.
         """
         if (active := self.api.get_fub_active(fub_id)) is None:
-            return "", None
-        paper = self.api.get_fub_paper_format(fub_id)
-        dpi = self.api.get_fub_dpi(fub_id)
-        title_suffix = f"[{'aktiv' if active else 'inaktiv'}] [{paper} | {dpi}dpi]"
+            return self._snapshot_format_title_and_canvas(fub_id, paper_format)
+        state = f"[{'aktiv' if active else 'inaktiv'}]"
+        if paper_format is not None:
+            format_suffix, canvas = self._snapshot_format_title_and_canvas(fub_id, paper_format)
+            return f"{state} {format_suffix}", canvas
         # Paper-sized viewBox: same relative element scale for every plan of this paper
         # format instead of blowing a nearly empty plan up to full card width.
         canvas = self.api.get_fub_canvas_bounds(fub_id)
-        return title_suffix, canvas
+        if not live:
+            return state, canvas
+        return f"{state} [{self.api.get_fub_paper_format(fub_id)} | {self.api.get_fub_dpi(fub_id)}dpi]", canvas
+
+    def _snapshot_format_title_and_canvas(
+        self, fub_id: int, paper_format: tuple[str, int, str] | None
+    ) -> tuple[str, Any]:
+        """Title suffix "[paper | dpi]" and canvas bounds of a backup's own format; ("", None) without one."""
+        if paper_format is None:
+            return "", None
+        paper, dpi, orientation = paper_format
+        canvas = self.api.get_fub_canvas_bounds(fub_id, paper_name=paper, orientation=orientation, resolution=dpi)
+        return f"[{paper} | {dpi}dpi]", canvas
 
     def _update_live_preview_cache(
         self,
@@ -3096,6 +3199,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "snapshot_source": None,
             "label_metadata": None,
             "block_settings": None,
+            "paper_format": None,
             "live_id_map": None,
         }
         self._preview_cache_generation += 1
@@ -3115,10 +3219,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         label_metadata: dict[str, dict[str, str]] | None,
         block_settings: Mapping[str, Mapping[str, str]] | None,
         live_id_map: dict[str, str] | None,
+        paper_format: tuple[str, int, str] | None = None,
     ) -> None:
         """Arm the preview cache for a frozen backup snapshot (wiring stays put, values stay live).
 
-        label_metadata / block_settings: the snapshot's own, frozen with its wiring.
+        label_metadata / block_settings / paper_format: the snapshot's own, frozen with its wiring.
 
         live_id_map: this snapshot's element-id -> live-plan element-id translation (see
         build_source_id_translation), reused as-is by subsequent refreshes of the SAME
@@ -3139,6 +3244,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "snapshot_source": source,
             "label_metadata": label_metadata,
             "block_settings": block_settings,
+            "paper_format": paper_format,
             "live_id_map": live_id_map,
         }
         self._preview_cache_generation += 1
@@ -3188,6 +3294,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 cache["snapshot_source"] or "live",
                 cache["label_metadata"],
                 cache["block_settings"],
+                cache["paper_format"],
             )
 
     async def _async_refresh_plan_preview(self, _now: Any) -> None:
@@ -3852,7 +3959,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         "skipped": 0|1} summary; shared by the nightly schedule and the manual force trigger.
         "skipped" is 1 (with the other counters left at 0) when no data is loaded yet, or while
         a sync is in progress — save_single_command would otherwise race the sync button's
-        delta/full-recreate writes against the same Web-IO devices (see _sync_lock / R4) — so
+        delta/full-recreate writes against the same Web-IO devices (see _sync_lock / R4) — or a
+        function plan restore (sync and restore exclude each other, the range check counts as a sync) — so
         callers can tell "skipped" apart from a genuine clean run that found nothing to fix.
         "excluded" counts commands that were never read at all because they couldn't be matched
         to a target (naming mismatch, stale command) or are missing an id/device — kept separate
@@ -3870,8 +3978,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not self.data:
             result[RANGE_CHECK_SKIPPED] = 1
             return result
-        if self._sync_lock.locked():
-            _LOGGER.warning("[%s] Sync in progress, skipping Web-IO range check", self.server_id)
+        if self._sync_lock.locked() or self._restore_lock.locked():
+            _LOGGER.warning(
+                "[%s] Sync or function plan restore in progress, skipping Web-IO range check", self.server_id
+            )
             result[RANGE_CHECK_SKIPPED] = 1
             return result
 
@@ -4118,14 +4228,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         return self.api.get_fub_active(fub_id)
 
+    def _plan_watch_blocked(self) -> bool:
+        """Whether a sync, repair, restore, full poll or bus-load cascade runs — the watchdog judges nothing."""
+        return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
+
     @property
     def managed_plan_start_blocked(self) -> bool:
-        """Whether a sync, repair, restore, full poll or bus-load cascade runs — no plan is started meanwhile."""
-        return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
+        """_plan_watch_blocked or a plan edit runs — no plan starts meanwhile.
+
+        A plan edit leaves the judgement alone (HA's own stop is excused by ha_stopped_within), only
+        an auto-start in it is deferred to the next check.
+        """
+        return self._plan_watch_blocked() or self.plan_edits_running
 
     async def async_watch_managed_plans(self) -> bool:
         """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
-        if self.managed_plan_start_blocked:
+        if self._plan_watch_blocked():
             return False
         if self.live_plan_list() is None:
             # Until a poll read the whole plan list, the cache holds only the plans HA created or looked
@@ -4147,7 +4265,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             {**user_plans, **self._managed_plan_names()},
             self._watchdog_grace_run_state if in_grace else self._watchdog_run_state,
             user_plans.keys(),
-            auto_start=not in_grace,
+            # During a plan edit the start would only be deferred, logged on every tick: it follows
+            # with the first check after the edit.
+            auto_start=not in_grace and not self.plan_edits_running,
         )
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
@@ -4229,11 +4349,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         True if started, False if Comexio refused it, None if not attempted (a sync, restore or poll
         runs) or not answered — the auto-start counts only a refusal as a failed attempt.
+        Marked as a plan edit with no await since the check: a sort, connect, restore or sync starting
+        meanwhile refuses until the start request is answered.
         """
         if self.managed_plan_start_blocked:
             return None
-        async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
-            return await self.api.function_plan_run_fup_outcome(fub_id)
+        with self.plan_edit():
+            async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
+                return await self.api.function_plan_run_fup_outcome(fub_id)
 
     async def _async_watchdog_auto_start_plan(self, fub_id: int) -> bool | None:
         """_async_watchdog_start_plan for the auto-start, which stays off in an outage and the boot grace after it.
@@ -4245,10 +4368,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         return await self._async_watchdog_start_plan(fub_id)
 
-    async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool:
-        """Start a stopped managed plan from its repair or push; False if Comexio did not confirm it."""
+    async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool | None:
+        """Start a stopped managed plan from its repair or push.
+
+        False if Comexio did not confirm it, None if not sent: a sync, restore, poll, plan edit or
+        cascade runs (checked again after the login, which awaits Comexio).
+        """
+        if self.managed_plan_start_blocked:
+            return None
         if not await self.api.login():
             return False
+        if self.managed_plan_start_blocked:
+            return None
         if not await self._async_watchdog_start_plan(fub_id):
             return False
         # Clear the stopped verdict before the verification fetch: a plan that stopped again
@@ -4295,10 +4426,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self.plan_watchdog.async_plan_started(fub_id, confirm=True)
             self.async_update_listeners()
             return
-        if not self.managed_plan_start_blocked and await self.async_start_managed_plan(fub_id, from_push=True):
+        started = await self.async_start_managed_plan(fub_id, from_push=True)
+        if started:
+            return
+        name = self.api.function_plan_name(fub_id)
+        if started is None:
+            _LOGGER.warning(
+                "[%s] Function plan %s not started from the watchdog push: a sync, restore, poll, function plan "
+                "edit or bus-load cascade is running",
+                self.server_id,
+                fub_id,
+            )
+            await self.plan_watchdog.async_push_start_busy(fub_id, name)
             return
         _LOGGER.warning("[%s] Function plan %s could not be started from the watchdog push", self.server_id, fub_id)
-        await self.plan_watchdog.async_push_start_failed(fub_id, self.api.function_plan_name(fub_id))
+        await self.plan_watchdog.async_push_start_failed(fub_id, name)
 
     def _apply_fetched_run_states(self, states: dict[int, bool], run_state_mark: int, cache_epoch: int) -> bool:
         """Write a run-state answer into the cache unless a newer plan list arrived meanwhile; True if changed.
@@ -4502,19 +4644,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         each managed plan, checking after each one whether the bus load recovers).
         """
         async with self._watchdog_lock:
-            raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-            plan_map: dict[str, int] = {}
-            if isinstance(raw_map, dict):
-                for plan_name, fub_id in raw_map.items():
-                    try:
-                        plan_map[plan_name] = int(fub_id)
-                    except (TypeError, ValueError):
-                        _LOGGER.warning(
-                            "[%s] Bus-load watchdog: skipping non-numeric plan_map entry '%s' -> %r",
-                            self.server_id,
-                            plan_name,
-                            fub_id,
-                        )
+            plan_map = self._cascade_plan_map()
             if not plan_map:
                 _LOGGER.warning(
                     "[%s] Bus-load watchdog: rise detected but no managed cluster plans to restart",
@@ -4530,30 +4660,61 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 baseline,
                 len(plan_map),
             )
-            culprit: str | None = None
-            for plan_name, fub_id in reversed(list(plan_map.items())):
-                if not await self.api.function_plan_stop_fup(fub_id):
-                    _LOGGER.warning(
-                        "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "
-                        "restarting it anyway, run_fup re-applies its state authoritatively",
-                        self.server_id,
-                        plan_name,
-                        fub_id,
-                    )
-                await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
-                if not await self.api.function_plan_run_fup(fub_id):
-                    _LOGGER.warning(
-                        "[%s] Bus-load watchdog: run_fup failed for plan '%s' (fub=%s) — it may now be left stopped",
-                        self.server_id,
-                        plan_name,
-                        fub_id,
-                    )
-                await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
-                if self.bus_workload is not None and baseline - self.bus_workload >= CASCADE_RECOVERY_DROP_PCT:
-                    culprit = plan_name
-                    break
-
+            if self._restore_lock.locked() or self._sync_lock.locked() or self.in_sync or self.plan_edits_running:
+                # A restore (or sync) rewrites and restarts plans itself, a plan edit stops and changes
+                # one — a stop or restart now could leave one stopped or mixed.
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: cascade not started — a function plan restore, edit, sync or reload "
+                    "is running",
+                    self.server_id,
+                )
+                return
+            # No await since the check: a restore starting from here on refuses until the cascade ends.
+            with self.plan_edit():
+                culprit = await self._async_cascade_plans(plan_map, baseline)
             await self._async_finish_watchdog_cascade(baseline, culprit, len(plan_map))
+
+    def _cascade_plan_map(self) -> dict[str, int]:
+        """The managed cluster plans (name -> fub_id) a bus-load cascade restarts; bad entries skipped."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        plan_map: dict[str, int] = {}
+        if not isinstance(raw_map, dict):
+            return plan_map
+        for plan_name, fub_id in raw_map.items():
+            try:
+                plan_map[plan_name] = int(fub_id)
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: skipping non-numeric plan_map entry '%s' -> %r",
+                    self.server_id,
+                    plan_name,
+                    fub_id,
+                )
+        return plan_map
+
+    async def _async_cascade_plans(self, plan_map: dict[str, int], baseline: float) -> str | None:
+        """Restart the plans back to front until the bus load recovers; returns the plan that did it."""
+        for plan_name, fub_id in reversed(list(plan_map.items())):
+            if not await self.api.function_plan_stop_fup(fub_id):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "
+                    "restarting it anyway, run_fup re-applies its state authoritatively",
+                    self.server_id,
+                    plan_name,
+                    fub_id,
+                )
+            await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
+            if not await self.api.function_plan_run_fup(fub_id):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: run_fup failed for plan '%s' (fub=%s) — it may now be left stopped",
+                    self.server_id,
+                    plan_name,
+                    fub_id,
+                )
+            await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
+            if self.bus_workload is not None and baseline - self.bus_workload >= CASCADE_RECOVERY_DROP_PCT:
+                return plan_name
+        return None
 
     async def _async_finish_watchdog_cascade(self, baseline: float, culprit: str | None, plan_count: int) -> None:
         """Notify + persist history for a finished cascade run, and start its cooldown."""
@@ -6330,7 +6491,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if renamed_count:
             self._schedule_knx_dpt_reload(renamed_count)
 
-    async def async_reload_entry(self, reason: str) -> None:
+    async def async_reload_entry(self, reason: str) -> bool:
         """Reload this config entry — unless a sync is running, whose closing reload covers it.
 
         A reload tears the coordinator down and detaches the API session (api.close()), so one
@@ -6340,11 +6501,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         whatever this reload was for — options written meanwhile included — so it is skipped
         here instead of queued. Outside a sync the reload runs under _sync_lock, so it cannot
         cut into a Web-IO range check, and a sync pressed meanwhile is rejected as concurrent
-        instead of running against the coordinator being torn down.
+        instead of running against the coordinator being torn down. It also waits for a running
+        function plan restore (restores_held_off) — so a caller holding _restore_lock must not
+        await this, but schedule it (see the restore's own reload in services/backup.py) — and for
+        running plan edits (async_wait_for_plan_edits), so a plan edit must not await it either.
 
         Checks the entry's *current* coordinator, not necessarily self: a caller that outlived
         an earlier reload (the uninstall cleanup task, the KNX auto-tag timer) still holds the
         torn-down instance, whose in_sync/_sync_lock say nothing about a sync on the new one.
+
+        Returns False when Home Assistant reports the reload as failed or the entry is not loaded
+        at all (an earlier reload failed); a reload skipped because another one covers it counts
+        as done. Only the restore's reload reports a False result (services/backup.py).
         """
         current = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         target = current if current is not None else self
@@ -6355,9 +6523,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
                 reason,
             )
-            return
-        async with target._sync_lock:
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return True
+        async with target._sync_lock, target.restores_held_off():
+            await target.async_wait_for_plan_edits()
+            # Re-checked under the locks: a sync or cleanup that held them may have reloaded meanwhile
+            # (a failed sync clears in_sync before its closing reload) — that reload covered this one,
+            # and a second one would cut into whatever runs on the new coordinator by now.
+            if (live := self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)) is not target:
+                if live is None:
+                    _LOGGER.warning(
+                        "[%s] Reload requested (%s) skipped — the integration is not loaded", self.server_id, reason
+                    )
+                    return False
+                _LOGGER.info(
+                    "[%s] Reload requested (%s) skipped — the integration was reloaded meanwhile",
+                    self.server_id,
+                    reason,
+                )
+                return True
+            return await self.hass.config_entries.async_reload(self.config_entry.entry_id)
 
     def _schedule_knx_dpt_reload(self, renamed_count: int) -> None:
         """Reload the integration shortly after _auto_suffix_unambiguous_knx renamed at least

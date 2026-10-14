@@ -37,6 +37,19 @@ NO_PLAN_SELECTED_MSG = (
 )
 _INSTANCE_NOT_FOUND_LOG = "Comexio instance %s not found in hass.data"
 _INSTANCE_NOT_FOUND_MSG = "Comexio instance `{}` not found (not loaded, or wrong `config_entry`)."
+RESTORE_RUNNING_MSG = (
+    "A function plan restore is running — please wait for it to finish. It rewrites the plan, so a change "
+    "made now could be lost or mixed into the restored plan."
+)
+SYNC_RUNNING_MSG = (
+    "A sync, Web-IO range check, uninstall cleanup or integration reload is running — please wait for it to "
+    "finish. It writes into the function plans too, so a change made now could be lost or mixed into its writes."
+)
+PLAN_EDIT_RUNNING_MSG = (
+    "Another function plan change (sort, connect, start/stop, marker deletion, backup deletion or a bus-load "
+    "restart) is running — please wait for it to finish. Changes run one at a time: two at once could load the "
+    "same plan, and the later save would undo the other change."
+)
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
@@ -222,14 +235,45 @@ def _parse_snapshot_field(raw: str) -> tuple[int, str, int, str | None] | None:
         return None
 
 
-def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: str) -> tuple[Any, Any, int] | None:
+def refuse_while_plans_busy(hass: HomeAssistant, coordinator: ComexioCoordinator, error_title: str) -> bool:
+    """Whether a restore, a sync / range check / uninstall cleanup / reload (they hold _sync_lock) or
+    another plan edit (see coordinator.plan_edit) runs.
+
+    Then notify and return True: the caller must not edit a plan. All of them rewrite function
+    plans, and a reload closes the API session.
+    """
+    # Sync first: a reload holds _restore_lock too (restores_held_off), and is no restore.
+    if coordinator._sync_lock.locked() or coordinator.in_sync:
+        msg = SYNC_RUNNING_MSG
+    elif coordinator._restore_lock.locked():
+        msg = RESTORE_RUNNING_MSG
+    elif coordinator.plan_edits_running:
+        msg = PLAN_EDIT_RUNNING_MSG
+    else:
+        return False
+    _LOGGER.warning(
+        "[%s] %s not started — a restore, sync, cleanup, reload or another function plan edit is running",
+        coordinator.server_id,
+        error_title,
+    )
+    persistent_notification.async_create(hass, msg, title=error_title)
+    return True
+
+
+def _resolve_function_plan(
+    hass: HomeAssistant, call: ServiceCall, error_title: str, *, edits_plan: bool = True
+) -> tuple[Any, Any, int] | None:
     """Resolve (coordinator, api, fub_id) for a function plan service call — without logging in.
 
     Handles config_entry auto-resolution (when only one Comexio instance exists) and fub_id
     resolution via `_resolve_fub_id`, notifying the user and returning None on any failure.
+    edits_plan (the default): refuse while a restore runs — it rewrites the plan this call would
+    change, and the two would mix or one would silently lose its change.
     """
     coordinator = _resolve_coordinator(hass, call, error_title)
     if coordinator is None:
+        return None
+    if edits_plan and refuse_while_plans_busy(hass, coordinator, error_title):
         return None
 
     api = coordinator.api
@@ -259,14 +303,21 @@ async def _ensure_comexio_login(hass: HomeAssistant, api, error_title: str) -> b
 
 
 async def _resolve_function_plan_context(
-    hass: HomeAssistant, call: ServiceCall, error_title: str
+    hass: HomeAssistant, call: ServiceCall, error_title: str, *, edits_plan: bool = True
 ) -> tuple[Any, Any, int] | None:
-    """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in."""
-    ctx = _resolve_function_plan(hass, call, error_title)
+    """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in.
+
+    edits_plan: the caller must enter coordinator.plan_edit() right after this returns, with no
+    await in between — the last restore check runs here, the mark keeps a restore out after it.
+    """
+    ctx = _resolve_function_plan(hass, call, error_title, edits_plan=edits_plan)
     if ctx is None:
         return None
-    _coordinator, api, _fub_id = ctx
+    coordinator, api, _fub_id = ctx
     if not await _ensure_comexio_login(hass, api, error_title):
+        return None
+    # Again after the login round-trip: a restore may have started meanwhile.
+    if edits_plan and refuse_while_plans_busy(hass, coordinator, error_title):
         return None
     return ctx
 

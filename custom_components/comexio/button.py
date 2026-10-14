@@ -520,38 +520,54 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Standard UI-Press -> Full Sync."""
         await self.async_handle_press(action="full_sync")
 
-    async def async_handle_press(self, action: str = "full_sync") -> None:
-        """Execute the sync logic with mode selection."""
-        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
-        notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
-        notif_id = f"comexio_sync_{self.server_id}"
-        if self.coordinator._sync_lock.locked():
-            _LOGGER.warning("[%s] Sync already in progress, ignoring concurrent request", self.server_id)
-            if notify_enabled:
-                # Own notification_id — notif_id is the *in-progress* sync's live-progress
-                # notification, and reusing it here would clobber that progress display.
-                persistent_notification.async_create(
-                    self.hass,
-                    f"{ICON_WARNING} Sync request ignored — a sync or Web-IO range check is already "
-                    "running. Please try again shortly.",
-                    title=f"Comexio Sync ({self.server_id})",
-                    notification_id=f"comexio_sync_blocked_{self.server_id}",
-                )
+    def _notify_sync_blocked(self, notify_enabled: bool, reason: str) -> None:
+        """Tell the user why a sync request was ignored (when notifications are enabled)."""
+        if not notify_enabled:
             return
+        # Own notification_id — comexio_sync_<id> is the *in-progress* sync's live-progress
+        # notification, and reusing it here would clobber that progress display.
+        persistent_notification.async_create(
+            self.hass,
+            f"{ICON_WARNING} Sync request ignored — {reason}",
+            title=f"Comexio Sync ({self.server_id})",
+            notification_id=f"comexio_sync_blocked_{self.server_id}",
+        )
+
+    async def _async_acquire_sync_lock(self, notify_enabled: bool) -> bool:
+        """Take the sync lock for this press; False (lock not held, user told why) when the sync must not run."""
+        # A restore or a plan edit (sort, connect, …) changes function plans the sync writes into as well.
+        if (
+            self.coordinator._sync_lock.locked()
+            or self.coordinator._restore_lock.locked()
+            or self.coordinator.plan_edits_running
+        ):
+            _LOGGER.warning(
+                "[%s] Sync already in progress or a restore / plan edit running, ignoring request", self.server_id
+            )
+            self._notify_sync_blocked(
+                notify_enabled,
+                "a sync, Web-IO range check, function plan restore or function plan edit is already running. "
+                "Please try again shortly.",
+            )
+            return False
         await self.coordinator._sync_lock.acquire()
         if self.hass.data[DOMAIN].get(self.coordinator.config_entry.entry_id) is not self.coordinator:
             # A reload (coordinator.async_reload_entry holds this lock through it) finished
             # while this press waited: this coordinator and its API session are torn down.
             self.coordinator._sync_lock.release()
             _LOGGER.warning("[%s] Sync request dropped — the integration was reloaded meanwhile", self.server_id)
-            if notify_enabled:
-                persistent_notification.async_create(
-                    self.hass,
-                    f"{ICON_WARNING} Sync request ignored — the integration was reloaded while it waited. "
-                    "Please start the sync again.",
-                    title=f"Comexio Sync ({self.server_id})",
-                    notification_id=f"comexio_sync_blocked_{self.server_id}",
-                )
+            self._notify_sync_blocked(
+                notify_enabled, "the integration was reloaded while it waited. Please start the sync again."
+            )
+            return False
+        return True
+
+    async def async_handle_press(self, action: str = "full_sync") -> None:
+        """Execute the sync logic with mode selection."""
+        conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
+        notify_enabled = conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS)
+        notif_id = f"comexio_sync_{self.server_id}"
+        if not await self._async_acquire_sync_lock(notify_enabled):
             return
         self.coordinator.in_sync = True
         self.coordinator.sync_error = False
@@ -1309,43 +1325,62 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # failing reset step can never skip the reload that covers every reload
         # coordinator.async_reload_entry skipped during this sync.
         try:
-            try:
-                # 1. Flag reset
-                self.coordinator.in_sync = False
-                self.coordinator.cancel_sync = False
-                # An aborted or partial run keeps its report as the sensor's progress_details.
-                if not (self.coordinator.sync_error or self.coordinator.sync_failed_writes):
-                    self.coordinator.sync_progress_text = "Idle"
-                self.coordinator.sync_progress_pct = None
-                self.coordinator.sync_current_step = None
-                self.coordinator.async_set_updated_data(self.coordinator.data)
-
-                # 2. Reset audit_ignored. Set the skip flag first so the update_listener
-                #    suppresses its reload — the explicit reload below is the single reload (R2).
-                new_options = dict(self.coordinator.config_entry.options)
-                new_options["audit_ignored"] = False
-                self.coordinator.request_options_update_without_reload(new_options)
-            except Exception:
-                _LOGGER.exception("[%s] Resetting the sync state failed — reloading anyway", self.server_id)
-
-            # 3. Give the Comexio server a moment to finish the write operation;
-            #    the update_listener task runs here, sees the skip flag, and returns. (R2)
-            await asyncio.sleep(0.5)
-
-            # 4. Reset UI button
-            try:
-                self.async_write_ha_state()
-            except Exception:
-                _LOGGER.exception("[%s] Could not reset the sync button state — reloading anyway", self.server_id)
-
-            # 5. Restart integration (necessary!)
-            _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
-            await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id)
+            # The reload below closes the API session: wait for a restore that runs now and keep
+            # new ones out until it is done. A sync and a restore refuse to start while the other
+            # runs, so this only guards the reload. in_sync stays True while waiting, so the
+            # restore's own reload request is skipped (async_reload_entry) — this reload covers it.
+            async with self.coordinator.restores_held_off():
+                await self._reset_sync_state_and_reload()
         finally:
             # 6. Release the (old) coordinator's lock — the reload built a new coordinator
             #    with its own lock; a press that waited on this one is dropped by
             #    async_handle_press' coordinator-identity check.
             self.coordinator._sync_lock.release()
+
+    async def _reset_sync_state_and_reload(self) -> None:
+        """Steps 1-5 of _finalize_sync: reset the sync state and the button, then reload the integration."""
+        try:
+            # 1. Flag reset
+            self.coordinator.in_sync = False
+            self.coordinator.cancel_sync = False
+            # An aborted or partial run keeps its report as the sensor's progress_details.
+            if not (self.coordinator.sync_error or self.coordinator.sync_failed_writes):
+                self.coordinator.sync_progress_text = "Idle"
+            self.coordinator.sync_progress_pct = None
+            self.coordinator.sync_current_step = None
+            self.coordinator.async_set_updated_data(self.coordinator.data)
+
+            # 2. Reset audit_ignored. Set the skip flag first so the update_listener
+            #    suppresses its reload — the explicit reload below is the single reload (R2).
+            new_options = dict(self.coordinator.config_entry.options)
+            new_options["audit_ignored"] = False
+            self.coordinator.request_options_update_without_reload(new_options)
+        except Exception:
+            _LOGGER.exception("[%s] Resetting the sync state failed — reloading anyway", self.server_id)
+
+        # 3. Give the Comexio server a moment to finish the write operation;
+        #    the update_listener task runs here, sees the skip flag, and returns. (R2)
+        await asyncio.sleep(0.5)
+
+        # 4. Reset UI button
+        try:
+            self.async_write_ha_state()
+        except Exception:
+            _LOGGER.exception("[%s] Could not reset the sync button state — reloading anyway", self.server_id)
+
+        # 5. Restart integration (necessary!)
+        _LOGGER.info("[%s] Forcing integration reload after sync...", self.server_id)
+        if not await self.hass.config_entries.async_reload(self.coordinator.config_entry.entry_id):
+            _LOGGER.error("[%s] The integration did not load again after the sync", self.server_id)
+            # Regardless of notify_enabled: without the reload the entities keep the pre-sync state.
+            persistent_notification.async_create(
+                self.hass,
+                "The sync finished, but the integration did not load again afterwards (see the log; Home "
+                "Assistant retries on its own when Comexio was not ready). If it stays unavailable, reload the "
+                "Comexio integration manually.",
+                title="Comexio: reload after sync failed",
+                notification_id=f"comexio_sync_reload_{self.server_id}",
+            )
 
     async def _decide_effective_action(
         self,
@@ -3145,8 +3180,8 @@ class ComexioWebioRangeCheckButton(CoordinatorEntity, ButtonEntity):
             if result[RANGE_CHECK_SKIPPED]:
                 icon = ICON_WARNING
                 msg = (
-                    f"{icon} Web-IO range check skipped — a sync is in progress or no data is "
-                    "loaded yet. Please try again shortly."
+                    f"{icon} Web-IO range check skipped — a sync or function plan restore is in "
+                    "progress, or no data is loaded yet. Please try again shortly."
                 )
             else:
                 has_problems = (

@@ -79,6 +79,7 @@ FUNCTION_PLAN_CONSTANT_TYPE = 16
 # Comexio's paper ids ($Fubs "Paper") per format aiocomexio accepts, for the plan cache after a settings save.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
 _PLAN_PAPER_FALLBACK = "A4"
+_PLAN_DPI_RANGE = range(45, 121)  # what Comexio accepts for a plan (aiocomexio raises outside it)
 # Comexio's answer (as quoted in aiocomexio's refusal message) for a plan that is not running.
 _PLAN_NOT_RUNNING_ANSWER = "0:not_found"
 # Comexio's editor action that stores block settings ($FubBaseConfig rows) of one element.
@@ -131,6 +132,11 @@ async def _attempt[T, F](
         notes = "".join(f" ({note})" for note in getattr(err, "__notes__", ()))
         _LOGGER.warning("%s failed: %s%s", what, err, notes, exc_info=isinstance(err, TypeError))
         return failed
+
+
+def plan_format_settable(paper_format: str, dpi: int) -> bool:
+    """Whether a plan can be set to this paper and DPI (_plan_paper_and_orientation replaces any other paper)."""
+    return paper_format.upper() in _PLAN_PAPER_IDS and dpi in _PLAN_DPI_RANGE
 
 
 def _plan_paper_and_orientation(paper_format: str, orientation: str) -> tuple[str, str]:
@@ -1284,35 +1290,62 @@ class ComexioAPI:
         fub = self._fub_data.get(str(fub_id), {})
         return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
 
+    def get_fub_known_format(self, fub_id: int) -> tuple[str, int, str] | None:
+        """(paper, dpi, orientation) as Comexio states them, None when any part is not known.
+
+        Unlike the getters above, no default stands in for a missing value: a backup compares
+        and stores this, and a default (an undecoded $Paper read as A4) would count as a change.
+        """
+        fub = self._fub_data.get(str(fub_id))
+        if fub is None or fub.get("Resolution") is None or fub.get("Orientation") is None:
+            return None
+        paper = self._paper_data.get(str(fub.get("Paper", "")), {}).get("Name")
+        if not paper:
+            return None
+        try:
+            dpi, orient_id = int(fub["Resolution"]), int(fub["Orientation"])
+        except (TypeError, ValueError):
+            return None
+        if orient_id not in (0, 1):
+            return None
+        return str(paper), dpi, "portrait" if orient_id == 1 else "landscape"
+
     def get_fub_active(self, fub_id: int) -> bool | None:
         """Return a function plan's active flag, or None if the plan is not known live."""
         fub = self._fub_data.get(str(fub_id))
         return None if fub is None else bool(int(fub.get("Active") or 0))
 
     def get_fub_canvas_bounds(
-        self, fub_id: int, paper_name: str | None = None, orientation: str | None = None
+        self,
+        fub_id: int,
+        paper_name: str | None = None,
+        orientation: str | None = None,
+        resolution: int | None = None,
     ) -> tuple[float, float]:
         """Return estimated (x_max, y_max) canvas bounds for a function plan.
 
         Scales proportionally from the A4-landscape-90-DPI reference (870×720).
-        DPI (Resolution) is always taken from $Fubs plan data.
-        paper_name overrides the format (A2/A3/A4/A5); None = read from $Fubs/$Paper.
+        resolution overrides the DPI (a backup's own); None = read from $Fubs.
+        paper_name overrides the format by name (a backup's): A2/A3/A4/A5 from the built-in table, any
+        other from the $Paper entry of that name, else the reference size; None = read from $Fubs/$Paper.
         orientation overrides as "landscape"/"portrait" — needed for a plan that was just
         created and is not in the cached $Fubs data yet; None = read from $Fubs, where
         0 = landscape (long side → X), 1 = portrait (long side → Y).
         """
         fub = self._fub_data.get(str(fub_id), {})
-        res = int(fub.get("Resolution", self._CANVAS_REF_RES))
+        res = int(fub.get("Resolution", self._CANVAS_REF_RES)) if resolution is None else resolution
         if orientation is None:
             orient_id = int(fub.get("Orientation", 0))
         else:
             orient_id = 1 if orientation.lower() == "portrait" else 0
 
+        named = next((p for p in self._paper_data.values() if p.get("Name") == paper_name), None)
         if paper_name and paper_name in self._PAPER_MM_BY_NAME:
             mm_long, mm_short = self._PAPER_MM_BY_NAME[paper_name]
         else:
-            paper_id = str(fub.get("Paper", ""))
-            paper = self._paper_data.get(paper_id, {})
+            # A backup's paper outside the table is sized from $Paper by name, never by the live plan's —
+            # not there either: the reference size.
+            paper = (named or {}) if paper_name else self._paper_data.get(str(fub.get("Paper", "")), {})
             mm_long = paper.get("MMX", self._CANVAS_REF_MM_LONG)
             mm_short = paper.get("MMY", self._CANVAS_REF_MM_SHORT)
 

@@ -169,7 +169,7 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
     (coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata),
     or None on any failure (a notification has already been posted).
     """
-    ctx = await _resolve_function_plan_context(hass, call, error_title)
+    ctx = await _resolve_function_plan_context(hass, call, error_title, edits_plan=False)
     if ctx is None:
         return None
     coordinator, api, fub_id = ctx
@@ -224,12 +224,13 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
 
     if fmt == "svg":
         block_settings = coordinator.snapshot_block_settings_for_source(fub_id, plan_name, source)
+        paper_format = coordinator.snapshot_paper_format_for_source(fub_id, plan_name, source)
         # In turn with the card's selection renders and re-renders (plan_preview), and as the newest
         # request it supersedes selection follows still queued, so none of them overwrites it.
         async with coordinator.preview_follow_lock:
             coordinator.preview_follow_generation += 1
             preview_url = await coordinator.async_generate_plan_preview(
-                fub_id, plan_name, elements, connections, source, label_metadata, block_settings
+                fub_id, plan_name, elements, connections, source, label_metadata, block_settings, paper_format
             )
         persistent_notification.async_create(
             hass,
@@ -293,9 +294,10 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
             title=_TITLE_SORT_ERR,
         )
         return
-    await async_sort_function_plan(
-        hass, coordinator, api, fub_id, canvas_format=str(call.data.get("canvas_format", ""))
-    )
+    with coordinator.plan_edit():
+        await async_sort_function_plan(
+            hass, coordinator, api, fub_id, canvas_format=str(call.data.get("canvas_format", ""))
+        )
 
 
 async def async_sort_function_plan(
@@ -473,8 +475,9 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
-    async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STOPPING):
-        success = await api.function_plan_stop_fup(fub_id)
+    with coordinator.plan_edit():
+        async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STOPPING):
+            success = await api.function_plan_stop_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
         f"Plan '{plan_name}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
@@ -495,8 +498,9 @@ async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
     _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, plan_name)
     t_start = time.monotonic()
-    async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING):
-        success = await api.function_plan_run_fup(fub_id)
+    with coordinator.plan_edit():
+        async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING):
+            success = await api.function_plan_run_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
         f"Plan '{plan_name}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"

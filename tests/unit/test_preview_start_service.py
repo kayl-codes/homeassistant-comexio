@@ -476,6 +476,7 @@ def _armed_cache(fub_id: int) -> dict:
         "snapshot_source": None,
         "label_metadata": None,
         "block_settings": None,
+        "paper_format": None,
     }
 
 
@@ -670,6 +671,7 @@ def test_the_svg_visualize_renders_under_the_selection_lock_and_supersedes_queue
 
     coordinator.async_generate_plan_preview = AsyncMock(side_effect=generate)
     coordinator.snapshot_block_settings_for_source = MagicMock(return_value=None)
+    coordinator.snapshot_paper_format_for_source = MagicMock(return_value=None)
     source = (coordinator, None, 3, "Plan", {}, {}, "live", None)
     call = SimpleNamespace(data={"format": "svg"}, return_response=True)
     with (
@@ -940,6 +942,7 @@ def test_a_follow_queued_before_a_visualize_never_renders_after_it() -> None:
 
     coordinator.async_generate_plan_preview = AsyncMock(side_effect=generate)
     coordinator.snapshot_block_settings_for_source = MagicMock(return_value=None)
+    coordinator.snapshot_paper_format_for_source = MagicMock(return_value=None)
     source = (coordinator, None, 3, "Plan", {}, {}, "live", None)
     call = SimpleNamespace(data={"format": "svg"}, return_response=True)
     asyncio.run(scenario())

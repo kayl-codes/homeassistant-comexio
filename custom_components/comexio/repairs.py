@@ -966,21 +966,26 @@ class ComexioRepairFlow(RepairsFlow):
         )
 
     def _cleanup_blocked_by_sync(self, coordinator, scope: str, notif_id: str, notify_enabled: bool) -> bool:
-        """Whether a sync, range check or reload holds _sync_lock, so the cleanup must not start.
+        """Whether a sync, range check or reload holds _sync_lock, or a restore runs, so the cleanup must not start.
 
         Covers a sync pressed between the dialog's submit and the cleanup task starting; reports
         it and re-raises the issue so the user can run the cleanup again afterwards. Split out of
         _async_run_cleanup to keep its cognitive complexity within SonarQube S3776's limit.
         """
-        if not coordinator._sync_lock.locked():
+        # A restore or a plan edit (sort, connect, …) changes function plans the cleanup deletes.
+        if not (
+            coordinator._sync_lock.locked() or coordinator._restore_lock.locked() or coordinator.plan_edits_running
+        ):
             return False
-        _LOGGER.warning("[%s] Uninstall cleanup not started — a sync is running", coordinator.server_id)
+        _LOGGER.warning(
+            "[%s] Uninstall cleanup not started — a sync, restore or plan edit is running", coordinator.server_id
+        )
         if notify_enabled:
             _post_result_notification(
                 self.hass,
                 notif_id,
-                "A sync, Web-IO range check or reload started before the cleanup could begin — nothing "
-                "was removed. Run the cleanup again once it has finished.",
+                "A sync, Web-IO range check, function plan restore, function plan edit or reload started before the "
+                "cleanup could begin — nothing was removed. Run the cleanup again once it has finished.",
                 f"Comexio Uninstall Cleanup ({coordinator.server_id})",
             )
         self._reraise_cleanup_issue(coordinator, scope)
@@ -1072,12 +1077,16 @@ class ComexioRepairFlow(RepairsFlow):
         await asyncio.sleep(0.5)
         _LOGGER.info("[%s] Reloading integration after uninstall cleanup...", coordinator.server_id)
         try:
-            await self.hass.config_entries.async_reload(entry.entry_id)
+            # The caller holds _sync_lock, which comes first in the lock order (restores_held_off).
+            async with coordinator.restores_held_off():
+                reloaded = await self.hass.config_entries.async_reload(entry.entry_id)
         except Exception:
             _LOGGER.exception(
                 "[%s] Reload after uninstall cleanup failed — reload the integration manually",
                 coordinator.server_id,
             )
+            reloaded = False
+        if not reloaded:
             # Posted regardless of notify_enabled: the flow has already closed, and without a
             # reload the entities keep reflecting the pre-cleanup state.
             persistent_notification.async_create(
@@ -1394,7 +1403,11 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_abort(reason="already_running", description_placeholders=placeholders)
         if coordinator.managed_plan_start_blocked:
             return self.async_abort(reason="busy")
-        if not await coordinator.async_start_managed_plan(fub_id):
+        started = await coordinator.async_start_managed_plan(fub_id)
+        if started is None:
+            # An edit, sync or restore started while the login awaited Comexio: nothing was sent.
+            return self.async_abort(reason="busy")
+        if not started:
             return self.async_abort(reason="start_failed", description_placeholders=placeholders)
         title = "Plan gestartet" if self.hass.config.language == "de" else "Plan started"
         return self.async_create_entry(title=title, data={})

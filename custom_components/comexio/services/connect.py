@@ -21,7 +21,13 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
     expand_ignored_marker_ids,
 )
-from ._context import _ensure_comexio_login, _get_canvas_grid_dims, _plan_activation_note, _resolve_function_plan
+from ._context import (
+    _ensure_comexio_login,
+    _get_canvas_grid_dims,
+    _plan_activation_note,
+    _resolve_function_plan,
+    refuse_while_plans_busy,
+)
 from ._grid import _find_first_free_grid_position, _get_occupied_grid_slots
 
 _LOGGER = logging.getLogger(__name__)
@@ -367,70 +373,75 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
 
     if not await _ensure_comexio_login(hass, api, error_title):
         return
+    # Again after the login round-trip: a restore may have started meanwhile.
+    if refuse_while_plans_busy(hass, coordinator, error_title):
+        return
 
-    plan_info = api.fub_data.get(str(fub_id), {})
-    was_active = bool(plan_info.get("Active", True))
-    await coordinator.async_function_plan_change_backup(fub_id, f"connect_poc {[f'M{m}' for m in marker_ids]}")
-    if was_active:
-        await api.function_plan_stop_fup(fub_id)
+    # No await since the check: a restore starting from here on refuses until the writes end.
+    with coordinator.plan_edit():
+        plan_info = api.fub_data.get(str(fub_id), {})
+        was_active = bool(plan_info.get("Active", True))
+        await coordinator.async_function_plan_change_backup(fub_id, f"connect_poc {[f'M{m}' for m in marker_ids]}")
+        if was_active:
+            await api.function_plan_stop_fup(fub_id)
 
-    # Canvas bounds and column layout — DPI+orientation always from plan data
-    canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
-    canvas_format, x_max, y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
-    _LOGGER.info(
-        "Function Plan Connect: Canvas %s %.0f×%.0f (Plan fub_id=%s)",
-        canvas_format,
-        x_max,
-        y_max,
-        fub_id,
-    )
-    _LOGGER.info(
-        "Function Plan Connect: Canvas %s (%.0f×%.0f) → %d rows/column, %d columns",
-        canvas_format,
-        x_max,
-        y_max,
-        rows_per_col,
-        max_cols,
-    )
-
-    # Load current plan state: existing elements + connections
-    existing_by_ref, connected_pairs, occupied_slots, plan_data = await _load_connect_poc_topology(
-        api, fub_id, rows_per_col, max_cols
-    )
-
-    _LOGGER.info("Function Plan Connect: fub_id=%s, %d markers to process: %s", fub_id, len(marker_ids), marker_ids)
-    t_start = time.monotonic()
-    results: list[str] = []
-    errors: list[str] = []
-    skipped: list[str] = []
-
-    for marker_id in marker_ids:
-        marker = markers_by_id.get(marker_id)
-        result, skip, error = await _connect_marker_to_webio(
-            api,
+        # Canvas bounds and column layout — DPI+orientation always from plan data
+        canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
+        canvas_format, x_max, y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
+        _LOGGER.info(
+            "Function Plan Connect: Canvas %s %.0f×%.0f (Plan fub_id=%s)",
+            canvas_format,
+            x_max,
+            y_max,
             fub_id,
-            marker_id,
-            marker,
-            webio_commands,
-            existing_by_ref,
-            connected_pairs,
-            occupied_slots,
+        )
+        _LOGGER.info(
+            "Function Plan Connect: Canvas %s (%.0f×%.0f) → %d rows/column, %d columns",
+            canvas_format,
+            x_max,
+            y_max,
             rows_per_col,
             max_cols,
-            canvas_format,
-            plan_data,
         )
-        if result:
-            results.append(result)
-        if skip:
-            skipped.append(skip)
-        if error:
-            errors.append(error)
 
-    duration = time.monotonic() - t_start
-    # Plan was stopped above whenever it was active, so it must always be resumed
-    # here regardless of `results` — otherwise a no-op run (e.g. all markers
-    # already connected) leaves a previously active plan stopped permanently.
-    activated = await api.function_plan_run_fup(fub_id) if was_active else False
-    msg, title = _build_connect_poc_summary(fub_id, results, skipped, errors, duration, was_active, activated)
-    persistent_notification.async_create(hass, msg, title=title)
+        # Load current plan state: existing elements + connections
+        existing_by_ref, connected_pairs, occupied_slots, plan_data = await _load_connect_poc_topology(
+            api, fub_id, rows_per_col, max_cols
+        )
+
+        _LOGGER.info("Function Plan Connect: fub_id=%s, %d markers to process: %s", fub_id, len(marker_ids), marker_ids)
+        t_start = time.monotonic()
+        results: list[str] = []
+        errors: list[str] = []
+        skipped: list[str] = []
+
+        for marker_id in marker_ids:
+            marker = markers_by_id.get(marker_id)
+            result, skip, error = await _connect_marker_to_webio(
+                api,
+                fub_id,
+                marker_id,
+                marker,
+                webio_commands,
+                existing_by_ref,
+                connected_pairs,
+                occupied_slots,
+                rows_per_col,
+                max_cols,
+                canvas_format,
+                plan_data,
+            )
+            if result:
+                results.append(result)
+            if skip:
+                skipped.append(skip)
+            if error:
+                errors.append(error)
+
+        duration = time.monotonic() - t_start
+        # Plan was stopped above whenever it was active, so it must always be resumed
+        # here regardless of `results` — otherwise a no-op run (e.g. all markers
+        # already connected) leaves a previously active plan stopped permanently.
+        activated = await api.function_plan_run_fup(fub_id) if was_active else False
+        msg, title = _build_connect_poc_summary(fub_id, results, skipped, errors, duration, was_active, activated)
+        persistent_notification.async_create(hass, msg, title=title)

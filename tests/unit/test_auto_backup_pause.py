@@ -147,6 +147,11 @@ def test_the_restore_service_pauses_the_auto_backup_for_every_restore_path(fails
     """In place, as a new plan and as a copy all run inside _run_function_plan_restore."""
     coordinator = _coordinator()
     coordinator._restore_lock = asyncio.Lock()
+    coordinator._plan_edits_running = 0
+    coordinator._plan_edits_done = asyncio.Event()
+    coordinator._plan_edits_done.set()
+    coordinator._sync_lock = asyncio.Lock()
+    coordinator.in_sync = False
     pauses_during_restore: list[int] = []
 
     async def restore(*_: object) -> None:
@@ -157,6 +162,7 @@ def test_the_restore_service_pauses_the_auto_backup_for_every_restore_path(fails
     with (
         patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
         patch.object(backup, "_run_function_plan_restore", AsyncMock(side_effect=restore)),
+        patch.object(backup, "_refresh_service_descriptions", AsyncMock()),
         pytest.raises(RuntimeError) if fails else contextlib.nullcontext(),
     ):
         asyncio.run(backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={})))

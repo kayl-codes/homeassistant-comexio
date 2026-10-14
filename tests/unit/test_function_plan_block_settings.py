@@ -406,6 +406,28 @@ def test_in_place_restore_status_counts_the_block_settings(block_settings: dict[
     assert "Block settings:" in message
 
 
+@pytest.mark.parametrize(
+    ("promoted", "expected"),
+    [
+        (True, "Backup slot: promoted auto[0] → auto[0]"),
+        (False, "Backup slot: auto[0] not found in the backup history"),
+        # (Review) an error's type name must never read as a successful promotion.
+        ("OSError", f"{backup_service.ICON_WARNING} auto[0] could not be marked restored (OSError — see log)"),
+        (None, None),
+    ],
+)
+def test_the_restore_result_names_the_promotion_outcome(promoted: bool | str | None, expected: str | None) -> None:
+    apply = _in_place_apply({"included": False, "written": 0, "failed": [], "unmapped": []})
+    message = backup_service._restore_build_message(
+        "Lights", 1, "auto", 0, {}, "OK", apply, _VERIFY, False, True, 1.0, promoted
+    )
+    if expected is None:
+        assert "Backup slot:" not in message
+    else:
+        assert expected in message
+        assert "promoted" not in message or promoted is True
+
+
 def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]) -> None:
     # run_fup reassigns the element ids on a force_override, so the match needs the plan after it.
     order: list[str] = []
@@ -420,7 +442,7 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
 
     api = _restore_api(plan)
     api.fub_data = {"1": {"Name": "Lights", "Active": True}}
-    api.get_fub_paper_format = api.get_fub_dpi = api.get_fub_orientation = MagicMock(return_value=None)
+    api.get_fub_known_format = MagicMock(return_value=None)
     api.function_plan_update_paper = AsyncMock(return_value=True)
     api.function_plan_stop_fup = AsyncMock(return_value=True)
     api.function_plan_save_elements_pos = AsyncMock(return_value=True)
