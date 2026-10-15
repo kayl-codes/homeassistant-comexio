@@ -51,7 +51,8 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   findings or in-flight guards of a vanished plan (the set of plans whose restore runs) to a plan by only one of
   the two — a guard keyed by name alone blocks a same-named other plan (#181). A live plan can be renamed while an
   operation on it runs, so the exclusion of operations on a live plan is a lock or the `plan_edit()` marker, never a
-  name-keyed set. A selection stored as a `fub_id` alone means the plan holding that id now: code that moves such a
+  name-keyed set. A plan recreated under the same `fub_id` and name counts as the same plan — its backups and
+  watches carry over on purpose; an accepted limit, do not flag it. A selection stored as a `fub_id` alone means the plan holding that id now: code that moves such a
   selection to another id (e.g. after a restore as new plan) leaves it in place while another live plan holds the
   old id (#181).
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
