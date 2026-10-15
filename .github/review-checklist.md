@@ -47,8 +47,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   last poll; `None` until the first full poll), never by a bulk-load snapshot — the bulk load may omit plans. Flag
   code that drops findings, backups or watches of a plan only because a snapshot lacks it.
 - **Plan identity:** a function plan is identified by its `fub_id` and its name together — Comexio reuses the
-  `fub_id` of a deleted plan, and plan names are not unique. Flag code that matches backups, snapshots, watches or
-  findings to a plan by only one of the two.
+  `fub_id` of a deleted plan, and plan names are not unique. Flag code that matches backups, snapshots, watches,
+  findings or in-flight guards of a vanished plan (the set of plans whose restore runs) to a plan by only one of
+  the two — a guard keyed by name alone blocks a same-named other plan (#181). A live plan can be renamed while an
+  operation on it runs, so the exclusion of operations on a live plan is a lock or the `plan_edit()` marker, never a
+  name-keyed set. A plan recreated under the same `fub_id` and name counts as the same plan — its backups and
+  watches carry over on purpose; an accepted limit, do not flag it. A selection stored as a `fub_id` alone means the plan holding that id now: code that moves such a
+  selection to another id (e.g. after a restore as new plan) leaves it in place while another live plan holds the
+  old id (#181).
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
@@ -61,7 +67,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Data read from Comexio:** an entry counts as missing from a list or mapping read from Comexio (e.g. `$Fubs`)
   only after the whole list passed a shape check — every entry has the expected type, its key is a canonical id
   string, and an `Id` the entry carries matches that key. An unreadable or malformed list means "unknown", never "deleted". Flag code that turns a
-  read or parse failure into "entry missing" and acts on it (#158).
+  read or parse failure into "entry missing" and acts on it (#158). A failed read is also no fresh reading: the
+  steps that do not depend on it still run, and steps that judge by elapsed time do not use the last known values
+  as if they were new. Flag an early return on a failed read that skips the independent steps (#181).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
@@ -77,6 +85,22 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Awaits inside the guard's `try`:** every `await` between setting a guard flag (`unloading = True`, a busy flag)
   and the `try/finally` that resets it sits inside the `try` — a raised or cancelled await otherwise leaves the flag
   set forever. Flag an `await` between the flag assignment and the `try` (#181).
+- **No await between reading and writing the options:** code that copies `entry.options`, changes the copy and
+  saves it with `async_update_entry` has no `await` in between — another save during that await (options flow,
+  watchdog, sync) is otherwise overwritten with the stale copy. Await follow-ups (push dismissal, notifications)
+  after the save. Flag an `await` between the read of `entry.options` and its write (#181).
+- **Unload waits for running work:** `async_unload_entry` calls `coordinator.async_wait_before_unload()` before it
+  unloads the platforms; the wait is bounded and polls — it never queues on a lock — for every operation that
+  writes Comexio, the options or the backup store: a restore, a sync, a vanished-plan restore, a plan edit, a
+  backup change from a service or repair. A new
+  long-running operation joins that wait and refuses to start while `coordinator.unloading` is set. Flag an
+  operation that can still run or start after the unload passed its wait (#181).
+- **Background tasks report the whole flow:** a task started with `async_create_background_task` (or
+  `hass.async_create_task`) wraps its whole flow — waits and lookups included, not only the main call — in one
+  error path that logs and reports the failure; otherwise an early exception vanishes in the task. A one-off flow
+  (a restore, a service) reports each failure to the user (notification, push); a recurring task reports by the
+  rule *Repeated calls stay quiet*. A follow-up after the success (repoint, confirmation push) gets its own `try`, so its failure does not
+  report the finished work as failed (#181).
 - **Report after the final status:** a result report (a "restored completely/OK" flag, a success push or note) is
   recorded only after the last status change — a later step (lineage move, reference repoint, warnings) can still
   turn OK into PARTIAL, and a report written earlier claims a success that did not happen (#181).
@@ -86,7 +110,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   after the awaited request it belongs to, not before — otherwise a slow Comexio shortens the interval.
 - **Repeated calls stay quiet:** paths the plan card or a timer repeats (keepalive, retries, periodic ticks) report
   failures at debug level, without a persistent notification or repair each time — e.g.
-  `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure.
+  `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure. A failed action that
+  is retried on each check waits a minimum interval between attempts, each kind of action with its own constant in
+  `const.py` — the plan card checks every few seconds (#181). An open-ended retry series warns only on the first
+  failure and logs the retries at debug level; a series capped by a give-up counter may warn on each counted
+  attempt. Automatic retries are not sent while Comexio is unreachable or its state could not be read; a start the
+  user triggers from a repair or push is not held back by this (it still needs a successful login).
 - **Repair flows read the current entry:** before a destructive action (cleanup, delete, reset), a repair flow
   step reads the current config entry state (`options`/`data`) again instead of relying on `issue_data` alone —
   the dialog may have been open while the user changed the options, so the issue data can be stale (#160).
