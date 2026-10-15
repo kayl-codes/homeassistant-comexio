@@ -110,13 +110,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Repeated calls stay quiet:** paths the plan card or a timer repeats (keepalive, retries, periodic ticks) report
   failures at debug level, without a persistent notification or repair each time — e.g.
   `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure. A failed action that
-  is retried on each check (an auto-start, an undelivered push) waits a minimum interval from `const.py` between
-  attempts — the plan card checks every few seconds (#181). An open-ended series (an unanswered start, an undelivered
-  push) warns only on the first failure and logs the retries at debug level; a series capped by a give-up counter
-  (a refused auto-start, `FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS`) may warn on each counted attempt. Automatic
-  retries are not sent while Comexio is unreachable or its state could not be read: the watchdog's
-  `_plan_watch_held()` and a failed run-state read, which starts nothing. This holds back the automatic retries only —
-  a start the user triggers from a repair or push is not held back by it (it still needs a successful login).
+  is retried on each check waits a minimum interval between attempts, each kind of action with its own constant in
+  `const.py` — the plan card checks every few seconds (#181). An open-ended retry series warns only on the first
+  failure and logs the retries at debug level; a series capped by a give-up counter may warn on each counted
+  attempt. Automatic retries are not sent while Comexio is unreachable or its state could not be read; a start the
+  user triggers from a repair or push is not held back by this (it still needs a successful login).
 - **Repair flows read the current entry:** before a destructive action (cleanup, delete, reset), a repair flow
   step reads the current config entry state (`options`/`data`) again instead of relying on `issue_data` alone —
   the dialog may have been open while the user changed the options, so the issue data can be stale (#160).
