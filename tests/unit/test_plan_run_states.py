@@ -198,6 +198,9 @@ class _FakeCoordinator(SimpleNamespace):
     plan_edit = ComexioCoordinator.plan_edit
     plan_edits_running = ComexioCoordinator.plan_edits_running
     async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
+    _async_watch_managed_plans = ComexioCoordinator._async_watch_managed_plans
+    _async_vanished_user_plans_named = ComexioCoordinator._async_vanished_user_plans_named
+    _notify_bare_pick_kept = ComexioCoordinator._notify_bare_pick_kept
     async_initial_plan_watch = ComexioCoordinator.async_initial_plan_watch
     plan_transition = ComexioCoordinator.plan_transition
     async_plan_transition = ComexioCoordinator.async_plan_transition
@@ -219,6 +222,10 @@ class _FakeCoordinator(SimpleNamespace):
     async_unwatch_user_plan = ComexioCoordinator.async_unwatch_user_plan
     _repoint_vanished_pick = ComexioCoordinator._repoint_vanished_pick
     _async_restore_vanished_from_backup = ComexioCoordinator._async_restore_vanished_from_backup
+    _async_restore_vanished_when_free = ComexioCoordinator._async_restore_vanished_when_free
+    _async_wait_for_restore_slot = ComexioCoordinator._async_wait_for_restore_slot
+    _vanished_pick_present = ComexioCoordinator._vanished_pick_present
+    _notify_vanished_restore_not_run = ComexioCoordinator._notify_vanished_restore_not_run
     note_plan_restored_as_new = ComexioCoordinator.note_plan_restored_as_new
     _backed_up_plan_name = ComexioCoordinator._backed_up_plan_name
     _async_report_vanished_restored = ComexioCoordinator._async_report_vanished_restored
@@ -250,6 +257,9 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_stop_unverified={},
         unloading=False,
         _vanished_restores=set(),
+        _vanished_restore_lock=asyncio.Lock(),
+        _plan_watch_check_lock=asyncio.Lock(),
+        _plan_watch_backups_unloadable=False,
         _restored_as_new={},
         function_plan_backup=SimpleNamespace(
             async_load=AsyncMock(), plan_names_for_fub_id_sync=MagicMock(return_value=set())
@@ -1468,6 +1478,20 @@ def _restore_coordinator(api: ComexioAPI, outcome: Any) -> _FakeCoordinator:
     return coordinator
 
 
+def test_a_restored_plan_whose_confirmation_push_fails_is_not_reported_as_not_restored(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(local review) The plan was back, yet the user heard "not restored: it failed" and got Restore again."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+    coordinator.plan_watchdog.async_push_restored.side_effect = RuntimeError("notify down")
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
+    coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
+    notifications.assert_not_called()
+    assert "was restored as ID 52, but updating its watchdog pick or push failed" in caplog.text
+
+
 def test_restoring_a_vanished_plan_runs_the_restore_action_as_a_new_started_plan(api: ComexioAPI) -> None:
     coordinator = _restore_coordinator(api, True)
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4")) is True
@@ -1488,7 +1512,11 @@ def test_restoring_a_vanished_plan_runs_the_restore_action_as_a_new_started_plan
 
 @pytest.mark.parametrize("from_push", [False, True])
 def test_a_vanished_plan_without_a_backup_is_not_restored(api: ComexioAPI, from_push: bool) -> None:
-    coordinator = _coordinator(api, function_plan_backup=_backups())
+    coordinator = _coordinator(
+        api,
+        function_plan_backup=_backups(),
+        config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4"]}),
+    )
     coordinator.plan_watchdog.async_push_no_backup = AsyncMock()
     coordinator.hass.services = SimpleNamespace(async_call=AsyncMock())
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=from_push)) is False
@@ -1527,6 +1555,35 @@ def test_stop_watching_drops_the_named_and_the_bare_pick(api: ComexioAPI) -> Non
     assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["19:Test1", "47:Other"]
     coordinator.config_entry.options = new_options
     assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is False
+
+
+def test_stop_watching_keeps_a_bare_pick_whose_id_another_plan_holds_again(api: ComexioAPI) -> None:
+    """(Sourcery) Comexio reused the ID since the last check: the bare pick watches that plan by now."""
+    api._fub_data["47"] = {"Id": 47, "Name": "Other", "Active": 1}
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4", "47", "19:Test1"]}
+    coordinator = _coordinator(
+        api, config_entry=SimpleNamespace(options=options), request_options_update_without_reload=MagicMock()
+    )
+    assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["47", "19:Test1"]
+
+
+def test_stop_watching_a_bare_pick_whose_id_another_plan_holds_says_why_it_stays(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(local review) The tap removed nothing and said nothing: the watchdog watched the other plan on."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    api._fub_data["47"] = {"Id": 47, "Name": "Other", "Active": 1}
+    coordinator = _coordinator(
+        api,
+        config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47", "19:Test1"]}),
+        request_options_update_without_reload=MagicMock(),
+    )
+    assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is False
+    coordinator.request_options_update_without_reload.assert_not_called()
+    assert "plan 'Other' holds that ID now" in notifications.call_args.args[1]
 
 
 def test_stop_watching_refreshes_the_watch_right_away(api: ComexioAPI) -> None:
@@ -1652,17 +1709,203 @@ def test_a_second_tap_during_the_backup_lookup_restores_nothing(api: ComexioAPI)
     assert coordinator._vanished_restores == set()
 
 
-def test_a_restore_tap_while_a_restore_runs_leaves_it_to_that_restore(api: ComexioAPI) -> None:
+@pytest.fixture
+def fast_restore_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("custom_components.comexio.coordinator.FUNCTION_PLAN_UNLOAD_POLL_SEC", 0.001)
+    monkeypatch.setattr("custom_components.comexio.coordinator.FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC", 2)
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_restore_tap_while_another_restore_runs_waits_for_it(api: ComexioAPI) -> None:
+    """(Sourcery) The running restore may be another plan's: this tap is not dropped, it follows."""
     coordinator = _restore_coordinator(api, True)
+
+    async def run() -> bool:
+        await coordinator._restore_lock.acquire()
+        tap = asyncio.create_task(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True))
+        for _ in range(5):
+            await asyncio.sleep(0.001)
+        coordinator.hass.services.async_call.assert_not_called()  # still waiting
+        coordinator._restore_lock.release()
+        return await tap
+
+    assert asyncio.run(run()) is True
+    coordinator.hass.services.async_call.assert_awaited_once()
+    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4", complete=True)
+
+
+def test_a_tap_whose_wait_runs_out_is_refused_by_the_restore_and_reported(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other restore outlasted the wait: the action refuses it (no second restore), the phone hears so."""
+    monkeypatch.setattr("custom_components.comexio.coordinator.FUNCTION_PLAN_UNLOAD_POLL_SEC", 0.001)
+    monkeypatch.setattr("custom_components.comexio.coordinator.FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC", 0.02)
+    coordinator = _restore_coordinator(api, False)  # the action, refused by the running restore, builds nothing
 
     async def run() -> bool:
         async with coordinator._restore_lock:
             return await coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)
 
     assert asyncio.run(run()) is False
+    coordinator.hass.services.async_call.assert_awaited_once()
+    coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4")
+    assert coordinator._vanished_restores == set()
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_plan_restored_while_its_tap_waited_is_not_restored_again(api: ComexioAPI) -> None:
+    coordinator = _restore_coordinator(api, True)
+
+    async def run() -> bool:
+        async with coordinator._restore_lock:  # the plan card restores it meanwhile: its pick moves
+            tap = asyncio.create_task(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True))
+            await asyncio.sleep(0.001)
+            coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["52:Test4"]}
+        return await tap
+
+    assert asyncio.run(run()) is False
     coordinator.hass.services.async_call.assert_not_called()
     coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
-    coordinator.plan_watchdog.async_push_restored.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_tap_whose_entry_unloaded_while_it_waited_is_reported(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+
+    async def run() -> bool:
+        async with coordinator._restore_lock:
+            tap = asyncio.create_task(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True))
+            await asyncio.sleep(0.001)
+            coordinator.unloading = True
+            return await tap
+
+    assert asyncio.run(run()) is False
+    coordinator.hass.services.async_call.assert_not_called()
+    coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4")
+    assert "the integration reloaded while it waited" in notifications.call_args.args[1]
+
+
+def test_a_failing_backup_lookup_is_reported_like_a_failed_restore(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery) The lookup ran outside the restore's error handling: the phone heard nothing."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+    coordinator.function_plan_backup.async_load.side_effect = OSError("disk")
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
+    coordinator.hass.services.async_call.assert_not_called()
+    coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4")
+    assert "it failed (OSError)" in notifications.call_args.args[1]
+    assert "Restore of function plan 'Test4' (ID 47) failed" in caplog.text
+
+
+def test_same_named_vanished_plans_do_not_block_each_others_restore(api: ComexioAPI) -> None:
+    """(Sourcery) The in-flight guard was keyed by name: the second plan's tap restored nothing."""
+    coordinator = _restore_coordinator(api, True)
+    coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4", "48:Test4"]}
+
+    async def restore(*_args: Any, **_kwargs: Any) -> None:
+        await asyncio.sleep(0)
+        coordinator.note_plan_restored_as_new("Test4", 52, complete=True)
+
+    coordinator.hass.services.async_call.side_effect = restore
+
+    async def run() -> list[bool]:
+        return list(
+            await asyncio.gather(
+                coordinator.async_restore_vanished_plan(47, "Test4"),
+                coordinator.async_restore_vanished_plan(48, "Test4"),
+            )
+        )
+
+    assert asyncio.run(run()) == [True, True]
+    assert coordinator.hass.services.async_call.await_count == 2
+    assert coordinator._vanished_restores == set()
+
+
+def test_a_running_vanished_restore_is_known_by_id_and_name(api: ComexioAPI) -> None:
+    coordinator = _restore_coordinator(api, True)
+    seen: list[tuple[bool, bool]] = []
+
+    async def restore(*_args: Any, **_kwargs: Any) -> None:
+        seen.append(
+            (
+                ComexioCoordinator.vanished_restore_running(coordinator, 47, "Test4"),
+                ComexioCoordinator.vanished_restore_running(coordinator, 47, "Other"),
+            )
+        )
+
+    coordinator.hass.services.async_call.side_effect = restore
+    asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4"))
+    assert seen == [(True, False)]
+    assert ComexioCoordinator.vanished_restore_running(coordinator, 47, "Test4") is False
+
+
+def test_watchdog_checks_run_one_at_a_time(api: ComexioAPI) -> None:
+    """(Sourcery) An older check resuming after a newer one synced its stale vanished plans again."""
+    coordinator = _coordinator(api)
+    gate = asyncio.Event()
+    running: list[int] = []
+    overlap: list[bool] = []
+
+    async def check(*_args: Any, **_kwargs: Any) -> bool:
+        overlap.append(bool(running))
+        running.append(1)
+        await gate.wait()
+        running.pop()
+        return False
+
+    coordinator.plan_watchdog.async_check = AsyncMock(side_effect=check)
+
+    async def run() -> None:
+        first = asyncio.create_task(coordinator.async_watch_managed_plans())
+        second = asyncio.create_task(coordinator.async_watch_managed_plans())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gate.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run())
+    assert overlap == [False, False]
+    assert coordinator.plan_watchdog.async_sync_vanished.await_count == 2
+
+
+def test_a_backup_store_that_fails_to_load_does_not_stop_the_watchdog_check(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery) The load error aborted the whole check: no plan was judged, no repair synced."""
+    coordinator = _coordinator(api)
+    coordinator.function_plan_backup.async_load.side_effect = OSError("disk")
+    asyncio.run(coordinator.async_watch_managed_plans())
+    coordinator.plan_watchdog.async_check.assert_awaited_once()
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once()
+    assert "could not load the backups" in caplog.text
+
+
+def test_a_backup_store_that_stays_unloadable_is_logged_once_and_keeps_the_plan_names(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(local review) Every check (5-60 s) logged it, and a bare pick fell back to "ID n": no backup found."""
+    coordinator = _coordinator(
+        api, config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47"]})
+    )
+    caplog.set_level(logging.INFO)
+    coordinator.plan_watchdog.vanished = {47: "Test4"}  # named from its backups by the last check
+    coordinator.function_plan_backup.async_load.side_effect = OSError("disk")
+    asyncio.run(coordinator.async_watch_managed_plans())
+    asyncio.run(coordinator.async_watch_managed_plans())
+    assert caplog.text.count("could not load the backups") == 1
+    for synced in coordinator.plan_watchdog.async_sync_vanished.await_args_list:
+        assert synced.args[0] == {47: "Test4"}
+    coordinator.function_plan_backup.async_load.side_effect = None
+    asyncio.run(coordinator.async_watch_managed_plans())
+    assert "loads the backups again" in caplog.text
+    assert coordinator.plan_watchdog.async_sync_vanished.await_args.args[0] == {47: "ID 47"}  # no backup names it
 
 
 def test_no_plan_starts_while_the_entry_unloads(api: ComexioAPI) -> None:

@@ -33,6 +33,7 @@ import voluptuous as vol
 from .const import (
     DOMAIN,
     FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS,
+    FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC,
     FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
 )
@@ -250,6 +251,9 @@ class ManagedPlanWatchdog:
         self.vanished: dict[int, str] | None = None
         # Vanished plans whose push was replaced by "restored": the plan dropping out of vanished keeps it.
         self._restored_pushes: set[int] = set()
+        # fub_id → time.monotonic() of a vanished alarm push no notify service took: sent again with a
+        # check at least FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC later; any push delivered for the plan drops it.
+        self._vanished_push_unsent: dict[int, float] = {}
         # Local time of the last check; shown in the repair dialogs and on the problem sensor.
         self.last_check: datetime | None = None
         self._checking = False
@@ -535,8 +539,13 @@ class ManagedPlanWatchdog:
         with_action: bool = False,
         actions: Collection[str] = (),
         alarm: bool = False,
-    ) -> None:
-        """One push for a plan; with_action adds the "Start plan" button, actions further buttons."""
+        quiet: bool = False,
+    ) -> bool:
+        """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
+
+        False when every notify service it went to failed (see _async_send). One delivered replaces
+        (same tag) a vanished alarm still waiting to be sent again, so that one is dropped.
+        """
         texts = self._texts()
         data: dict[str, Any] = {"tag": self._push_tag(fub_id), "group": f"{DOMAIN}_{self._server_id}"}
         buttons = [*([ACTION_START] if with_action else []), *actions]
@@ -547,15 +556,19 @@ class ManagedPlanWatchdog:
         if alarm:
             # Delivered at once and through Do Not Disturb focus (Android: ttl/priority, iOS: interruption-level).
             data |= {"ttl": 0, "priority": "high", "push": {"interruption-level": "time-sensitive"}}
-        await self._async_send(
+        delivered = await self._async_send(
             {
                 "title": texts[title_key],
                 "message": texts[message_key].format(
                     name=name, fub_id=fub_id, attempts=FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS
                 ),
                 "data": data,
-            }
+            },
+            quiet=quiet,
         )
+        if delivered:
+            self._vanished_push_unsent.pop(fub_id, None)
+        return delivered
 
     async def async_sync_vanished(self, vanished: Mapping[int, str]) -> None:
         """Repair per watched user plan Comexio no longer has; alarm push for a newly vanished one.
@@ -583,26 +596,44 @@ class ManagedPlanWatchdog:
         for issue_id in _own_issue_ids(self._hass, self._server_id, vanished=True):
             if issue_id not in wanted:
                 ir.async_delete_issue(self._hass, DOMAIN, issue_id)
-        for fub_id in sorted(vanished.keys() - previous.keys()):
-            _LOGGER.warning(
-                "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio",
-                self._server_id,
-                vanished[fub_id],
-                fub_id,
-            )
-            await self._async_push(
+        newly_vanished = vanished.keys() - previous.keys()
+        for fub_id in sorted(newly_vanished | self._vanished_push_retries_due(vanished)):
+            retry = fub_id not in newly_vanished
+            if not retry:
+                _LOGGER.warning(
+                    "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio",
+                    self._server_id,
+                    vanished[fub_id],
+                    fub_id,
+                )
+            delivered = await self._async_push(
                 fub_id,
                 vanished[fub_id],
                 "vanished_title",
                 "vanished",
                 actions=(ACTION_RESTORE, ACTION_UNWATCH),
                 alarm=True,
+                quiet=retry,  # its first failure was logged; a dead notify service must not flood the log
             )
+            if not delivered:
+                self._vanished_push_unsent[fub_id] = time.monotonic()  # the answer's time: the gap starts here
         for fub_id in sorted(previous.keys() - vanished.keys()):
             if fub_id in self._restored_pushes:
                 self._restored_pushes.discard(fub_id)
                 continue
             await self._async_clear_push(fub_id)
+
+    def _vanished_push_retries_due(self, vanished: Mapping[int, str]) -> set[int]:
+        """Undelivered vanished alarms due again; one of a plan back again (or unpicked) is dropped."""
+        self._vanished_push_unsent = {
+            fub_id: failed_at for fub_id, failed_at in self._vanished_push_unsent.items() if fub_id in vanished
+        }
+        now = time.monotonic()
+        return {
+            fub_id
+            for fub_id, failed_at in self._vanished_push_unsent.items()
+            if now - failed_at >= FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+        }
 
     async def async_push_no_backup(self, fub_id: int, name: str) -> None:
         """Tell the phone a vanished plan has no backup to restore it from; "Stop watching" stays."""
@@ -640,19 +671,30 @@ class ManagedPlanWatchdog:
             {"message": "clear_notification", "data": {"tag": self._push_tag(fub_id)}}, mobile_app_only=True
         )
 
-    async def _async_send(self, service_data: dict[str, Any], *, mobile_app_only: bool = False) -> None:
-        """Send to every configured notify service; a failing one is logged and does not stop the others."""
+    async def _async_send(
+        self, service_data: dict[str, Any], *, mobile_app_only: bool = False, quiet: bool = False
+    ) -> bool:
+        """Send to every configured notify service; a failing one is logged and does not stop the others.
+
+        False only when it went to at least one service and every one of them failed. quiet logs the
+        failures at debug level (a retry of a push whose first failure was logged).
+        """
+        log_failure = _LOGGER.debug if quiet else _LOGGER.warning
+        attempted = delivered = False
         for target in self._notify_targets():
             service = target.removeprefix(f"{NOTIFY_DOMAIN}.")
             if mobile_app_only and not service.startswith(MOBILE_APP_SERVICE_PREFIX):
                 continue
+            attempted = True
             try:
                 await self._hass.services.async_call(NOTIFY_DOMAIN, service, service_data, blocking=True)
+                delivered = True
             except (HomeAssistantError, vol.Invalid) as err:
-                _LOGGER.warning(
-                    "[%s] Function plan watchdog push to notify.%s failed: %s", self._server_id, service, err
-                )
+                log_failure("[%s] Function plan watchdog push to notify.%s failed: %s", self._server_id, service, err)
             except Exception:
                 # Third-party notify platforms raise their own errors (aiohttp, timeouts, ...); none of
                 # them may skip the remaining targets or the watchdog check that sends the push.
-                _LOGGER.exception("[%s] Function plan watchdog push to notify.%s failed", self._server_id, service)
+                log_failure(
+                    "[%s] Function plan watchdog push to notify.%s failed", self._server_id, service, exc_info=True
+                )
+        return delivered or not attempted

@@ -1525,6 +1525,28 @@ async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, A
     return None, error
 
 
+def _refuse_restore_over_returned_plan(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int, plan_name: str
+) -> bool:
+    """True (user told) when a deleted plan's Restore finds a plan of its name back under its ID.
+
+    That Restore (watchdog push or repair) builds a new plan; it never overwrites the plan back there.
+    """
+    if not coordinator.vanished_restore_running(fub_id, plan_name):
+        return False
+    _LOGGER.warning(
+        "Function Plan Restore of deleted plan '%s' (fub=%s) not run: a plan of that name is back under its ID",
+        plan_name,
+        fub_id,
+    )
+    persistent_notification.async_create(
+        hass,
+        f"'{plan_name}' (ID {fub_id}) is back in Comexio, so it was not restored over it. Nothing was changed.",
+        title=_TITLE_RESTORE_ERR,
+    )
+    return True
+
+
 async def _resolve_restore_conflict(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -1713,6 +1735,8 @@ async def _run_function_plan_restore(
     snapshot_name = snapshot.get("plan_name", str(fub_id))
     live_name = live_fub.get("Name") if live_fub else None
     conflict = live_fub is None or live_name != snapshot_name
+    if not conflict and _refuse_restore_over_returned_plan(hass, coordinator, fub_id, snapshot_name):
+        return
     # A conflict without confirm stops the restore (_resolve_restore_conflict) — no warning then.
     if confirm or not conflict:
         warn_firmware()

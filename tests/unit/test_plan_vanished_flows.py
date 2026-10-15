@@ -1,4 +1,4 @@
-"""A deleted watched plan's repair, HA's own unload waiting for a restore, purge of recent orphans, pick repointing."""
+"""A deleted watched plan's repair, HA's own unload waiting for a sync or restore, orphan purge, pick moves."""
 
 import asyncio
 import logging
@@ -13,6 +13,7 @@ from custom_components.comexio import (
     coordinator as coordinator_module,
     repairs,
 )
+from custom_components.comexio.button import ComexioSyncButton
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_FUB_ID,
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
@@ -36,6 +37,7 @@ def _coordinator() -> ComexioCoordinator:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.server_id = "cx1"
     coordinator.in_sync = False
+    coordinator._sync_lock = asyncio.Lock()
     coordinator._restore_lock = asyncio.Lock()
     coordinator._restores_held_for_reload = False
     coordinator._plan_edits_running = 0
@@ -64,7 +66,52 @@ def test_an_unload_waits_for_a_running_restore(caplog: pytest.LogCaptureFixture)
         await asyncio.wait_for(task, 1)
 
     asyncio.run(run())
-    assert "Unload waits for the running function plan restore" in caplog.text
+    assert "Unload waits for the running sync or function plan restore" in caplog.text
+
+
+@pytest.mark.parametrize("held_by", ["in_sync", "sync_lock"])
+def test_an_unload_waits_for_a_running_sync_until_its_closing_reload(held_by: str) -> None:
+    """(Sourcery) HA's own reload closed the API session under a running sync."""
+    coordinator = _coordinator()
+
+    async def run() -> None:
+        await coordinator._sync_lock.acquire()
+        coordinator.in_sync = held_by == "in_sync"
+        if held_by == "in_sync":
+            coordinator._sync_lock.release()
+        unload = asyncio.create_task(coordinator.async_wait_before_unload())
+        await _settle()
+        assert not unload.done()
+        async with coordinator.restores_held_off():  # the sync's closing reload
+            await asyncio.wait_for(unload, 1)
+
+    asyncio.run(run())
+
+
+def test_an_unload_after_the_sync_ended_goes_ahead() -> None:
+    coordinator = _coordinator()
+
+    async def run() -> None:
+        coordinator.in_sync = True
+        unload = asyncio.create_task(coordinator.async_wait_before_unload())
+        await _settle()
+        coordinator.in_sync = False
+        await asyncio.wait_for(unload, 1)
+
+    asyncio.run(run())
+
+
+def test_no_sync_starts_while_the_entry_unloads() -> None:
+    """A sync started after the unload's wait would lose the API session mid-way."""
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button.coordinator = SimpleNamespace(
+        _sync_lock=asyncio.Lock(), _restore_lock=asyncio.Lock(), plan_edits_running=False, unloading=True
+    )
+    button.server_id = "cx1"
+    button._notify_sync_blocked = MagicMock()  # type: ignore[method-assign]
+    assert asyncio.run(button._async_acquire_sync_lock(True)) is False
+    assert "the integration is reloading" in button._notify_sync_blocked.call_args.args[1]
+    assert not button.coordinator._sync_lock.locked()
 
 
 def test_an_unload_waits_for_a_running_plan_edit() -> None:
@@ -138,7 +185,7 @@ def test_an_unload_gives_up_waiting_after_the_limit(
             assert coordinator._restore_lock.locked()
 
     asyncio.run(run())
-    assert "Unloading although a function plan restore or edit still runs" in caplog.text
+    assert "Unloading although a sync, function plan restore or plan edit still runs" in caplog.text
 
 
 def test_unload_entry_waits_before_it_unloads_anything() -> None:
@@ -347,6 +394,40 @@ def test_a_restore_as_new_moves_the_watchdog_pick_in_the_options() -> None:
     coordinator.request_options_update_without_reload.reset_mock()
     assert asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 48, 52)) == []
     coordinator.request_options_update_without_reload.assert_not_called()
+
+
+def test_a_restore_as_new_writes_the_options_before_it_awaits_the_push_dismissal() -> None:
+    """(Sourcery) An options save during the await was overwritten by the snapshot taken before it."""
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.config_entry = SimpleNamespace(options={CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4"]})
+    order: list[str] = []
+    coordinator.request_options_update_without_reload = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda _options: order.append("options")
+    )
+
+    async def dismiss(_fub_id: int) -> None:
+        order.append("dismiss")
+
+    coordinator.plan_watchdog = SimpleNamespace(
+        vanished={47: "Test4"}, async_dismiss_push=AsyncMock(side_effect=dismiss)
+    )
+    asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 47, 52))
+    assert order == ["options", "dismiss"]
+
+
+def test_a_deleted_plans_restore_never_overwrites_a_plan_of_its_name_back_under_its_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(Sourcery) No conflict there, so the action restored in place over the plan that came back."""
+    notifications = MagicMock()
+    monkeypatch.setattr(backup.persistent_notification, "async_create", notifications)
+    running = {(47, "Test4")}
+    coordinator = SimpleNamespace(vanished_restore_running=lambda fub_id, name: (fub_id, name) in running)
+    assert backup._refuse_restore_over_returned_plan(MagicMock(), coordinator, 47, "Test4") is True
+    assert "is back in Comexio" in notifications.call_args.args[1]
+    notifications.reset_mock()
+    assert backup._refuse_restore_over_returned_plan(MagicMock(), coordinator, 48, "Test4") is False
+    notifications.assert_not_called()
 
 
 def test_the_backup_store_names_the_plans_kept_under_an_id() -> None:

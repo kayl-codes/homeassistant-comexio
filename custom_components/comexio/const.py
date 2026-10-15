@@ -714,6 +714,9 @@ FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC = 600
 # Minimum gap after a refused auto-start before the next attempt: a check can follow within seconds
 # (switch turned on, fast preview polling), which would use up both attempts on a short-lived refusal.
 FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC = 60
+# Minimum gap before a deleted plan's alarm push that reached no notify service is sent again: the
+# checks run every few seconds while a plan card is open, and a removed phone must not get a retry each.
+FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC = 300
 # After Comexio was unreachable (a poll or run-state fetch failed to connect, or HA's own emergency
 # reboot) the watchdog waits this long from the first successful read before judging the plans
 # again: a booting Comexio starts its plans itself, so a stopped plan then is no fault.
@@ -726,15 +729,17 @@ LOGIN_ERROR_CONNECTION = "connection"
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
-# User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
-# (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
 # Longest the watchdog holds back a newly stopped plan while the plan list is re-read to tell a deleted
 # plan from a stopped one (a full poll takes a few seconds; one that brings no plan list must not mute it).
 FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC = 120
-# Longest an unload (HA's own reload) waits for a running function plan restore or edit.
+# Longest an unload (HA's own reload) waits for a running sync, function plan restore or edit.
 FUNCTION_PLAN_UNLOAD_WAIT_SEC = 120
 # How often that unload looks whether the restore is over (it watches the lock, see async_wait_before_unload).
 FUNCTION_PLAN_UNLOAD_POLL_SEC = 0.5
+# Longest a deleted plan's Restore (watchdog push or repair) waits for a restore running elsewhere.
+FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC = 120
+# User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
+# (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
 MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 

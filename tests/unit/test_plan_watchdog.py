@@ -5,11 +5,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 
 from custom_components.comexio import api as api_module, plan_watchdog
 from custom_components.comexio.const import (
     DOMAIN,
+    FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC,
     FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
 )
@@ -323,8 +325,6 @@ def test_stop_pushes_an_alarm_with_a_start_action_and_recovery_clears_it(ir: Mag
 
 
 def test_failing_notify_service_does_not_stop_the_watchdog(ir: MagicMock) -> None:
-    from homeassistant.exceptions import HomeAssistantError
-
     watchdog, _ = _watchdog(targets=["mobile_app_gone", "mobile_app_phone"])
     watchdog._hass.services.async_call.side_effect = [HomeAssistantError("service not found"), None]
     assert asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True))) is True
@@ -450,6 +450,75 @@ def test_a_vanished_plan_gets_its_repair_and_one_alarm_push(ir: MagicMock) -> No
     asyncio.run(watchdog.async_sync_vanished({}))  # restored under a new ID, or unpicked
     assert (DOMAIN, issue_id) not in ir.async_get.return_value.issues
     assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_a_vanished_alarm_no_service_delivered_is_sent_again(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery) The plan counted as reported although the push failed: the phone never heard of it.
+
+    (local review) Not with every check (every few seconds with a plan card open), and only the
+    first failure warns: a removed phone must not flood the log.
+    """
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "notify.mobile_app_tablet"])
+    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("down"), TimeoutError("down")]
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    assert caplog.text.count("Function plan watchdog push to notify") == 2
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("still down")
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC - 1
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    assert len(_pushes(watchdog)) == 2  # too soon: no retry
+    clock[0] += 1
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    assert len(_pushes(watchdog)) == 4  # retried, failed again ...
+    assert caplog.text.count("Function plan watchdog push to notify") == 2  # ... quietly
+    watchdog._hass.services.async_call.side_effect = None
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    assert [data["message"] for *_, data in _pushes(watchdog)][-2:] == [
+        "Der überwachte Logikplan Test4 (ID 47) existiert in Comexio nicht mehr."
+    ] * 2
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))  # delivered now: no further push
+    assert len(_pushes(watchdog)) == 6
+
+
+def test_a_vanished_alarm_one_service_delivered_is_not_sent_again(ir: MagicMock, clock: list[float]) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "notify.mobile_app_tablet"])
+    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("down"), None]
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    assert len(_pushes(watchdog)) == 2  # one push to each service, no retry
+
+
+def test_a_later_push_delivered_for_the_plan_replaces_its_undelivered_alarm(ir: MagicMock, clock: list[float]) -> None:
+    """(local review) The retry would overwrite (same tag) e.g. the "restore failed" push the phone shows now."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_push_restore_failed(47, "Test4"))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    assert _pushes(watchdog)[-1][2]["title"] == watchdog._texts()["restore_failed_title"]
+
+
+def test_an_undelivered_alarm_of_a_plan_back_again_is_not_sent(ir: MagicMock, clock: list[float]) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    watchdog._hass.services.async_call.side_effect = None
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished({}))
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+    assert watchdog._vanished_push_unsent == {}
+
+
+def test_a_vanished_alarm_without_notify_service_is_not_retried(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog()
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    assert watchdog._vanished_push_unsent == {}
 
 
 def test_a_plan_vanished_before_setup_gets_its_repair_and_push(ir: MagicMock) -> None:
