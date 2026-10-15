@@ -57,6 +57,7 @@ from ._context import (
     _parse_snapshot_field,
     _resolve_backup_identity,
     _resolve_fub_id,
+    service_flag,
 )
 from ._yaml_sync import _refresh_service_descriptions
 
@@ -1698,11 +1699,11 @@ async def _run_function_plan_restore(
         return
 
     on_conflict = str(call.data.get("on_conflict", "new_id")).strip().lower()
-    confirm = bool(call.data.get("confirm", False))
-    as_copy = bool(call.data.get("as_copy", False))
+    confirm = service_flag(call, "confirm", False)
+    as_copy = service_flag(call, "as_copy", False)
     new_plan_name = str(call.data.get("new_plan_name", "")).strip()
-    auto_start = bool(call.data.get("auto_start", True))
-    accept_unverified = bool(call.data.get("accept_unverified_blocks", False))
+    auto_start = service_flag(call, "auto_start", True)
+    accept_unverified = service_flag(call, "accept_unverified_blocks", False)
     _LOGGER.info(
         "Function Plan Restore: fub_id=%s plan_name=%s kind=%s slot=%s on_conflict=%s confirm=%s "
         "as_copy=%s new_plan_name=%s auto_start=%s accept_unverified_blocks=%s",
@@ -1853,7 +1854,7 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
         return
     coordinator, _api, _unused_fub_id = ctx
 
-    if not bool(call.data.get("confirm", False)):
+    if not service_flag(call, "confirm", False):
         persistent_notification.async_create(
             hass, "Nothing deleted — 'confirm' must be enabled.", title=_TITLE_DELETE_BACKUPS_ERR
         )
@@ -1930,7 +1931,7 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
         return
     coordinator, _api, _unused_fub_id = ctx
 
-    if not bool(call.data.get("confirm", False)):
+    if not service_flag(call, "confirm", False):
         persistent_notification.async_create(
             hass, "Nothing purged — 'confirm' must be enabled.", title=_TITLE_PURGE_ORPHANED_BACKUPS_ERR
         )
@@ -1942,7 +1943,7 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     retention_months = coordinator.config_entry.options.get(
         CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
     )
-    include_recent = bool(call.data.get("include_recent", False))
+    include_recent = service_flag(call, "include_recent", False)
     _LOGGER.info("Function Plan Purge Orphaned Backups: called (include_recent=%s)", include_recent)
     if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_PURGE_ORPHANED_BACKUPS_ERR):
         return
@@ -2031,11 +2032,12 @@ async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceC
         )
         return
 
+    keep = service_flag(call, "keep", True)
     if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_KEEP_BACKUPS_ERR):
         return
     # No await since the check: a restore starting from here on refuses until the change ends.
     with coordinator.plan_edit():
-        msg = await _apply_keep_decision(hass, coordinator, fub_id, plan_name, bool(call.data.get("keep", True)))
+        msg = await _apply_keep_decision(hass, coordinator, fub_id, plan_name, keep)
 
     _LOGGER.info("Function Plan Keep Backups: %s", msg)
     coordinator.async_update_listeners()  # refresh the backup selector's orphaned-plans view
@@ -2070,8 +2072,8 @@ async def _handle_function_plan_list_backups(hass: HomeAssistant, call: ServiceC
     cutoff = _age_cutoff(call.data.get("max_age"))
     kind = call.data.get("kind", "all")
     order_by = call.data.get("order_by", "newest")
-    export_as_json = bool(call.data.get("export_as_json", False))
-    diff = bool(call.data.get("diff", False))
+    export_as_json = service_flag(call, "export_as_json", False)
+    diff = service_flag(call, "diff", False)
 
     backups = await coordinator.function_plan_backup.async_list_backups()
 

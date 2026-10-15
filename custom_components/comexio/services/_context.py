@@ -13,6 +13,9 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
+import homeassistant.helpers.config_validation as cv
+import voluptuous as vol
 
 from ..const import (
     DOMAIN,
@@ -52,6 +55,18 @@ PLAN_EDIT_RUNNING_MSG = (
 )
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
+
+
+def service_flag(call: ServiceCall, key: str, default: bool) -> bool:
+    """A boolean service field read as HA reads it ("false", "off", 0 → False); anything else is refused.
+
+    bool() would read the string "false" as True — for a deleting option that deletes what was spared.
+    """
+    value = call.data.get(key, default)
+    try:
+        return cv.boolean(value)
+    except vol.Invalid as err:
+        raise ServiceValidationError(f"'{key}' must be true or false, not {value!r}.") from err
 
 
 def format_plan_label(name: str, fub_id) -> str:

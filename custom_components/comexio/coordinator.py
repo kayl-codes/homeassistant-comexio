@@ -4381,17 +4381,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Only with a live plan list (see _unresolved_plan_identities). An ID now carrying another
         name is left to _warn_unresolved_watch_picks: renamed and deleted-then-reused look alike.
-        A bare-ID pick (saved before names were) takes the name its backups carry.
+        A bare-ID pick (saved before names were) takes the name its backups carry. A pick the plan_map
+        holds under the same ID and name is left out: that plan is HA's own. The ID alone proves nothing —
+        a stale entry of another plan on a reused ID must not hide a deleted user plan.
         """
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         if self.live_plan_list() is None or not isinstance(raw_picks, list):
             return {}
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(raw_map, dict):
+            raw_map = {}
         picks = [pick for value in raw_picks if (pick := parse_watchdog_user_plan_pick(value)) is not None]
         vanished: dict[int, str] = {}
         # Bare picks first: a named pick of the same ID overrides the name read from the backups.
         for fub_id, name in sorted(picks, key=lambda pick: pick[1] is not None):
-            if str(fub_id) not in self.api.fub_data:
-                vanished[fub_id] = name if name is not None else self._backed_up_plan_name(fub_id)
+            if str(fub_id) in self.api.fub_data:
+                continue
+            plan_name = name if name is not None else self._backed_up_plan_name(fub_id)
+            if str(raw_map.get(plan_name)) == str(fub_id):
+                vanished.pop(fub_id, None)  # HA's own plan: a bare pick read from the backups goes too
+            else:
+                vanished[fub_id] = plan_name
         return vanished
 
     def _backed_up_plan_name(self, fub_id: int) -> str:

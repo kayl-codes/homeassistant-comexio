@@ -284,6 +284,15 @@ def test_purge_cutoff_follows_include_recent(
     assert age in notify.call_args.args[1]
 
 
+def test_purge_reads_string_flags_as_ha_does() -> None:
+    """(Sourcery) bool("false") is True: "false" purged the young orphans, and an unconfirmed purge ran."""
+    manager, _notify = _purge({"confirm": "true", "include_recent": "false"}, [])
+    assert manager.async_purge_orphaned.await_args.kwargs == {"cutoff": "RETENTION"}
+    manager, notify = _purge({"confirm": "false", "include_recent": True}, [])
+    manager.async_purge_orphaned.assert_not_awaited()
+    assert "'confirm' must be enabled" in notify.call_args.args[1]
+
+
 # (cl) The repair of a watched user plan deleted in Comexio.
 
 ISSUE_DATA = {"entry_id": "e1", "plan_name": "Test4", "fub_id": "47"}

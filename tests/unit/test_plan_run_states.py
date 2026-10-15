@@ -1373,6 +1373,17 @@ def test_user_picks_gone_from_the_plan_list_are_vanished(api: ComexioAPI) -> Non
     assert coordinator._vanished_user_plans() == {}
 
 
+def test_a_user_pick_on_an_ha_managed_id_is_not_vanished(api: ComexioAPI) -> None:
+    """(Sourcery) A pick overlapping a plan_map ID raises no deleted-user-plan alert for HA's own plan."""
+    options = {
+        CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - Gone": 99, "HA - Old": 98},
+        CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["99:HA - Gone", "98:Gone"],
+    }
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    # 98: a stale plan_map entry of another plan on the reused ID does not hide the deleted user plan
+    assert coordinator._vanished_user_plans() == {98: "Gone"}
+
+
 def test_the_poll_hands_the_vanished_user_plans_to_the_watchdog(api: ComexioAPI) -> None:
     api.client.get_function_plan_run_states = AsyncMock(return_value={19: True, 43: True})
     options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4"]}
