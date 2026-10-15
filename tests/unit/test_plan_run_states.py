@@ -217,7 +217,6 @@ class _FakeCoordinator(SimpleNamespace):
     async_restore_vanished_plan = ComexioCoordinator.async_restore_vanished_plan
     async_newest_backup_field = ComexioCoordinator.async_newest_backup_field
     async_unwatch_user_plan = ComexioCoordinator.async_unwatch_user_plan
-    _live_plan_ids_named = ComexioCoordinator._live_plan_ids_named
     _repoint_vanished_pick = ComexioCoordinator._repoint_vanished_pick
     _async_restore_vanished_from_backup = ComexioCoordinator._async_restore_vanished_from_backup
     note_plan_restored_as_new = ComexioCoordinator.note_plan_restored_as_new
@@ -252,7 +251,9 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         unloading=False,
         _vanished_restores=set(),
         _restored_as_new={},
-        function_plan_backup=SimpleNamespace(plan_names_for_fub_id_sync=MagicMock(return_value=set())),
+        function_plan_backup=SimpleNamespace(
+            async_load=AsyncMock(), plan_names_for_fub_id_sync=MagicMock(return_value=set())
+        ),
         request_options_update_without_reload=MagicMock(),
         # Closes the scheduled coroutine (the existence check's full poll) instead of running it.
         hass=SimpleNamespace(async_create_background_task=MagicMock(side_effect=lambda coro, **_kw: coro.close())),
@@ -1392,6 +1393,7 @@ def test_a_vanished_plan_push_before_the_first_check_asks_to_try_again(
     action = plan_action_id(ACTION_RESTORE, "iosrv1", 47)
     coordinator.async_handle_notification_action(SimpleNamespace(data={"action": action}))
     assert _task_names(coordinator) == ["comexio_iosrv1_check_pending_push_47"]
+    coordinator.plan_watchdog.async_push_check_pending.assert_called_once_with(47)  # (Sourcery) not only its name
     assert "the plan list was not read yet" in caplog.text
 
 
@@ -1402,7 +1404,33 @@ def test_a_stale_vanished_plan_push_is_dismissed(api: ComexioAPI, caplog: pytest
     action = plan_action_id(ACTION_RESTORE, "iosrv1", 47)
     coordinator.async_handle_notification_action(SimpleNamespace(data={"action": action}))
     assert _task_names(coordinator) == ["comexio_iosrv1_dismiss_push_47"]
+    coordinator.plan_watchdog.async_dismiss_push.assert_called_once_with(47)
     assert "the plan is not missing" in caplog.text
+
+
+def test_a_refused_auto_start_re_reads_the_plan_list(api: ComexioAPI) -> None:
+    """(Sourcery) A plan judged stopped earlier and deleted since: its next start is refused."""
+    coordinator = _coordinator(api)
+    coordinator._async_watchdog_start_plan = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator._async_watchdog_auto_start_plan(47)) is False
+    assert _task_names(coordinator) == ["comexio_iosrv1_plan_existence_check"]
+    coordinator.hass.async_create_background_task.reset_mock()
+    coordinator._async_watchdog_start_plan = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator._async_watchdog_auto_start_plan(47)) is True
+    assert _task_names(coordinator) == []
+
+
+def test_the_last_plan_deleted_still_reaches_the_watchdog(api: ComexioAPI) -> None:
+    """(Sourcery) No plan left means no run state to fetch, but the deleted watched one is reported."""
+    api.client.get_function_plan_run_states = AsyncMock()
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    api._fub_data.clear()
+    coordinator.scraped_plan_ids = set()
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    api.client.get_function_plan_run_states.assert_not_awaited()
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with({47: "Test4"})
+    coordinator.function_plan_backup.async_load.assert_awaited()  # (Sourcery) before naming bare-ID picks
 
 
 def _backups(*entries: dict[str, Any]) -> SimpleNamespace:
@@ -1433,7 +1461,7 @@ def _restore_coordinator(api: ComexioAPI, outcome: Any) -> _FakeCoordinator:
             raise outcome
         if outcome:
             api._fub_data["52"] = {"Id": 52, "Name": "Test4", "Active": 1}
-            coordinator.note_plan_restored_as_new("Test4", 52)
+            coordinator.note_plan_restored_as_new("Test4", 52, complete=True)
             coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["52:Test4"]}
 
     coordinator.hass.services = SimpleNamespace(async_call=AsyncMock(side_effect=restore))
@@ -1471,7 +1499,7 @@ def test_a_vanished_plan_without_a_backup_is_not_restored(api: ComexioAPI, from_
 def test_a_restore_from_the_push_confirms_on_the_phone(api: ComexioAPI) -> None:
     coordinator = _restore_coordinator(api, True)
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
-    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4")
+    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4", complete=True)
     coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
 
 
@@ -1541,11 +1569,11 @@ def test_a_restore_that_built_the_plan_but_kept_the_pick_counts_as_restored(api:
 
     def built_without_moving_the_pick(*_args: Any, **_kwargs: Any) -> None:
         api._fub_data["52"] = {"Id": 52, "Name": "Test4", "Active": 1}
-        coordinator.note_plan_restored_as_new("Test4", 52)
+        coordinator.note_plan_restored_as_new("Test4", 52, complete=True)
 
     coordinator.hass.services.async_call.side_effect = built_without_moving_the_pick
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
-    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4")
+    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4", complete=True)
     (new_options,) = coordinator.request_options_update_without_reload.call_args.args
     assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["52:Test4"]
 
@@ -1561,24 +1589,44 @@ def test_a_restore_that_left_a_half_built_plan_is_reported_as_failed(api: Comexi
     coordinator.plan_watchdog.async_push_restored.assert_not_awaited()
 
 
-def test_a_second_restore_tap_does_not_restore_again(api: ComexioAPI) -> None:
+def test_a_live_plan_of_the_same_name_does_not_stop_the_restore(api: ComexioAPI) -> None:
+    """(Sourcery) Plan names are not unique, and a failed restore leaves a half-built plan of that name."""
     coordinator = _restore_coordinator(api, True)
-    api._fub_data["52"] = {"Id": 52, "Name": "Test4", "Active": 1}  # the first tap's plan
+    api._fub_data["50"] = {"Id": 50, "Name": "Test4", "Active": 0}  # an earlier, half-built restore
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
-    coordinator.hass.services.async_call.assert_not_called()
-    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4")
-    # (Sourcery) The pick still pointing at the deleted ID follows the plan back.
+    coordinator.hass.services.async_call.assert_awaited_once()
+    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4", complete=True)
+
+
+def test_a_partial_restore_is_reported_as_partial(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """(Sourcery) The plan is back, so its pick moves, but the phone hears it is incomplete."""
+    coordinator = _restore_coordinator(api, True)
+
+    def built_partially(*_args: Any, **_kwargs: Any) -> None:
+        coordinator.note_plan_restored_as_new("Test4", 52, complete=False)
+
+    coordinator.hass.services.async_call.side_effect = built_partially
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
+    coordinator.plan_watchdog.async_push_restored.assert_awaited_once_with(47, "Test4", complete=False)
+    coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
+    assert "was restored as ID 52, but not completely" in caplog.text
     (new_options,) = coordinator.request_options_update_without_reload.call_args.args
     assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["52:Test4"]
 
 
-def test_a_plan_back_under_two_ids_keeps_the_pick(api: ComexioAPI) -> None:
-    """Which of two same-named plans the user means is not known: the pick stays for the options."""
+def test_a_bare_pick_stays_with_the_plan_now_holding_the_old_id(api: ComexioAPI) -> None:
+    """(Sourcery) Comexio reused ID 47 for another plan meanwhile: the bare pick watches that one."""
     coordinator = _restore_coordinator(api, True)
-    api._fub_data["52"] = {"Id": 52, "Name": "Test4", "Active": 1}
-    api._fub_data["53"] = {"Id": 53, "Name": "Test4", "Active": 1}
+    coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47", "47:Test4"]}
+
+    def built_without_moving_the_pick(*_args: Any, **_kwargs: Any) -> None:
+        api._fub_data["47"] = {"Id": 47, "Name": "Other", "Active": 1}
+        coordinator.note_plan_restored_as_new("Test4", 52, complete=True)
+
+    coordinator.hass.services.async_call.side_effect = built_without_moving_the_pick
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4")) is True
-    coordinator.request_options_update_without_reload.assert_not_called()
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["47", "52:Test4"]
 
 
 def test_a_second_tap_during_the_backup_lookup_restores_nothing(api: ComexioAPI) -> None:

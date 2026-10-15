@@ -22,8 +22,9 @@ from custom_components.comexio.const import (
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
 from custom_components.comexio.plan_watchdog import vanished_plan_issue_id
-from custom_components.comexio.repairs import ComexioRepairFlow
+from custom_components.comexio.repairs import ACTION_RESTORE, ACTION_UNWATCH, ComexioRepairFlow
 from custom_components.comexio.services import backup
+from custom_components.comexio.services._context import SYNC_RUNNING_MSG, refuse_while_plans_busy
 
 
 @pytest.fixture(autouse=True)
@@ -153,15 +154,19 @@ def test_unload_entry_waits_before_it_unloads_anything() -> None:
     assert running.unloading is False  # the entry stays loaded: restores and plan edits start again
 
 
-def test_an_unload_that_raises_lets_restores_and_plan_edits_start_again() -> None:
+@pytest.mark.parametrize("raised_by", ["wait", "unload"])
+def test_an_unload_that_raises_lets_restores_and_plan_edits_start_again(raised_by: str) -> None:
     """(Review) The entry stays loaded: a stuck unloading flag would refuse every restore as "sync running"."""
     running = SimpleNamespace(api=object(), unloading=True, async_wait_before_unload=AsyncMock())
+    if raised_by == "wait":  # (Sourcery) e.g. the unload task cancelled while it waits
+        running.async_wait_before_unload.side_effect = RuntimeError("boom")
     hass = MagicMock()
     hass.data = {DOMAIN: {"e1": running}}
     hass.config_entries.async_unload_platforms = AsyncMock(side_effect=RuntimeError("boom"))
     with pytest.raises(RuntimeError):
         asyncio.run(async_unload_entry(hass, SimpleNamespace(entry_id="e1")))
     assert running.unloading is False
+    assert hass.config_entries.async_unload_platforms.await_count == int(raised_by == "unload")
 
 
 @pytest.mark.parametrize("held_for_reload", [False, True])
@@ -169,9 +174,15 @@ def test_an_unload_lets_no_restore_or_plan_edit_start_after_its_wait(held_for_re
     """(Sourcery) Work starting between the wait and the session's close would lose the session."""
     coordinator = _coordinator()
     coordinator.unloading = False
+    coordinator._sync_lock = asyncio.Lock()
     coordinator._restores_held_for_reload = held_for_reload
-    asyncio.run(coordinator.async_wait_before_unload())
-    assert coordinator.unloading is True
+    with patch("custom_components.comexio.services._context.persistent_notification.async_create") as create:
+        assert refuse_while_plans_busy(MagicMock(), coordinator, "T") is False
+        asyncio.run(coordinator.async_wait_before_unload())
+        assert coordinator.unloading is True
+        # (Sourcery) the entry points' own guard refuses now: plan edits, the restore service, plan starts
+        assert refuse_while_plans_busy(MagicMock(), coordinator, "T") is True
+    assert create.call_args.args[1] == SYNC_RUNNING_MSG
 
 
 def test_unload_entry_of_an_entry_that_never_set_up_does_not_wait() -> None:
@@ -259,6 +270,10 @@ def test_the_vanished_repair_offers_restore_and_unwatch() -> None:
     result, _ = _step(flow, None)
     assert result["step_id"] == "function_plan_vanished"
     assert result["description_placeholders"] == {"plan_name": "Test4", "fub_id": "47"}
+    # (Sourcery) both choices are offered, Restore preselected
+    (field,) = result["data_schema"].schema
+    assert field.default() == ACTION_RESTORE
+    assert result["data_schema"].schema[field].config["options"] == [ACTION_RESTORE, ACTION_UNWATCH]
 
 
 def test_the_vanished_repair_restores_in_the_background() -> None:
@@ -319,11 +334,14 @@ def test_a_restore_as_new_moves_the_watchdog_pick_in_the_options() -> None:
     options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4", "19:Other"], CONF_FUNCTION_PLAN_FUB_ID: "19"}
     coordinator.config_entry = SimpleNamespace(options=options)
     coordinator.request_options_update_without_reload = MagicMock()  # type: ignore[method-assign]
+    coordinator.plan_watchdog = SimpleNamespace(vanished={47: "Test4"}, async_dismiss_push=AsyncMock())
     updated = asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 47, 52))
     (new_options,) = coordinator.request_options_update_without_reload.call_args.args
     assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["52:Test4", "19:Other"]
     assert new_options[CONF_FUNCTION_PLAN_FUB_ID] == "19"
     assert updated == ["function plan watchdog pick 'Test4' → fub_id 52"]
+    # (Sourcery) The reload after the restore forgets the push: the old alarm goes now.
+    coordinator.plan_watchdog.async_dismiss_push.assert_awaited_once_with(47)
 
     coordinator.request_options_update_without_reload.reset_mock()
     assert asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 48, 52)) == []

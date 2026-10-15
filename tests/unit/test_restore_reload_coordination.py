@@ -348,8 +348,21 @@ def test_a_restore_as_new_tells_the_coordinator_it_built_the_plan() -> None:
     snapshot = {"plan_name": "Kitch", "elements": {}, "connections": {}}
     with patch.object(backup.persistent_notification, "async_create"):
         asyncio.run(backup._restore_plan_as_new(coordinator.hass, coordinator, api, 42, snapshot, "auto", 0))
-    assert coordinator._restored_as_new == {"Kitch": 50}
+    assert coordinator._restored_as_new == {"Kitch": (50, True)}
     coordinator.async_repoint_function_plan_fub_id.assert_awaited_once_with("Kitch", 42, 50, old_id_still_live=False)
+
+    # (Sourcery) built, but not completely: restored, and the push says so
+    api.function_plan_rebuild_plan_from_snapshot.return_value = ({}, 0, ["block 3 not recreated"])
+    with patch.object(backup.persistent_notification, "async_create"):
+        asyncio.run(backup._restore_plan_as_new(coordinator.hass, coordinator, api, 42, snapshot, "auto", 0))
+    assert coordinator._restored_as_new == {"Kitch": (50, False)}
+
+    # (Review) built completely, but its references did not move: PARTIAL as well
+    api.function_plan_rebuild_plan_from_snapshot.return_value = ({}, 0, [])
+    coordinator.async_repoint_function_plan_fub_id.side_effect = RuntimeError("options")
+    with patch.object(backup.persistent_notification, "async_create"):
+        asyncio.run(backup._restore_plan_as_new(coordinator.hass, coordinator, api, 42, snapshot, "auto", 0))
+    assert coordinator._restored_as_new == {"Kitch": (50, False)}
 
     coordinator._restored_as_new = {}
     api.function_plan_rebuild_plan_from_snapshot.side_effect = TimeoutError

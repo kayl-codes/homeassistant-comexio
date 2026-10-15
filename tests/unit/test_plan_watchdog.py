@@ -480,6 +480,14 @@ def test_the_restored_confirmation_stays_once_the_plan_is_back(ir: MagicMock) ->
     assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
 
 
+def test_a_partial_restore_says_so_on_the_phone(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_push_restored(47, "Test4", complete=False))
+    assert "nicht vollständig" in _pushes(watchdog)[-1][2]["message"]
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    assert "bleibt überwacht" in _pushes(watchdog)[-1][2]["message"]
+
+
 def test_a_restored_push_after_the_check_cleared_the_plan_leaves_no_stale_entry(ir: MagicMock) -> None:
     """(Review) A check clearing the plan before the "restored" push: a later loss still clears as usual."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])

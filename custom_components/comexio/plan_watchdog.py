@@ -91,6 +91,8 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "no_backup": "There is no backup of {name} (ID {fub_id}) to restore it from.",
         "restored_title": "Comexio: function plan restored",
         "restored": "{name} was restored from its newest backup as a new plan and stays monitored.",
+        "restored_partial": "{name} was restored as a new plan, but not completely; see the Home Assistant "
+        "notifications.",
         "restore_failed_title": "Comexio: restore failed",
         "restore_failed": "{name} (ID {fub_id}) was not restored; see the Home Assistant notifications.",
         "check_pending_title": "Comexio: plan list not read yet",
@@ -124,6 +126,8 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "no_backup": "Es gibt kein Backup von {name} (ID {fub_id}), aus dem er wiederhergestellt werden kann.",
         "restored_title": "Comexio: Logikplan wiederhergestellt",
         "restored": "{name} wurde aus seinem neuesten Backup als neuer Plan wiederhergestellt und bleibt überwacht.",
+        "restored_partial": "{name} wurde als neuer Plan wiederhergestellt, aber nicht vollständig, "
+        "siehe HA-Benachrichtigungen.",
         "restore_failed_title": "Comexio: Wiederherstellen fehlgeschlagen",
         "restore_failed": "{name} (ID {fub_id}) wurde nicht wiederhergestellt, siehe HA-Benachrichtigungen.",
         "check_pending_title": "Comexio: Planliste noch nicht gelesen",
@@ -604,11 +608,15 @@ class ManagedPlanWatchdog:
         """Tell the phone a vanished plan has no backup to restore it from; "Stop watching" stays."""
         await self._async_push(fub_id, name, "no_backup_title", "no_backup", actions=(ACTION_UNWATCH,))
 
-    async def async_push_restored(self, fub_id: int, name: str) -> None:
-        """Replace the vanished push with "restored" once its Restore action brought the plan back."""
+    async def async_push_restored(self, fub_id: int, name: str, *, complete: bool = True) -> None:
+        """Replace the vanished push with "restored" once its Restore action brought the plan back.
+
+        complete: False says the plan is back but missing parts (a PARTIAL restore).
+        """
         if fub_id in (self.vanished or {}):  # a check that already cleared it would leave the entry stale
             self._restored_pushes.add(fub_id)
-        await self._async_push(fub_id, name, "restored_title", "restored")
+        key = "restored" if complete else "restored_partial"
+        await self._async_push(fub_id, name, "restored_title", key)
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
         """Tell the phone a Restore from its push failed or was refused, with both actions again."""

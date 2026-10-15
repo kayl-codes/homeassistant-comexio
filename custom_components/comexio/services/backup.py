@@ -1133,8 +1133,6 @@ async def _restore_plan_as_new(
         )
         return
     duration = time.monotonic() - t_start
-    # Built: a Restore from a watchdog push judges its outcome by this, not by the plan's name.
-    coordinator.note_plan_restored_as_new(plan_name, new_fub_id)
 
     purged, updated_consumers, lineage_error, refs_error = await _move_restored_plan_lineage(
         coordinator, plan_name, old_fub_id, new_fub_id, old_id_still_live
@@ -1149,6 +1147,8 @@ async def _restore_plan_as_new(
     status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
     if (lineage_error or refs_error) and status == "OK":
         status = "PARTIAL"
+    # Built: a Restore from a watchdog push judges its outcome by this, not by the plan's name.
+    coordinator.note_plan_restored_as_new(plan_name, new_fub_id, complete=status == "OK")
 
     captured_raw = snapshot.get("captured_at")
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None

@@ -607,7 +607,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Names of the vanished plans whose Restore runs now (async_restore_vanished_plan).
         self._vanished_restores: set[str] = set()
         # plan name → new fub_id of each restore-as-new that built its plan (note_plan_restored_as_new).
-        self._restored_as_new: dict[str, int] = {}
+        self._restored_as_new: dict[str, tuple[int, bool]] = {}
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
@@ -2450,6 +2450,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ) is not None:
             new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = picks
             updated.append(f"function plan watchdog pick '{plan_name}' → fub_id {new_fub_id}")
+            if old_fub_id in (self.plan_watchdog.vanished or {}):
+                # The reload that follows forgets which pushes are out: the old alarm would stay on the phone.
+                await self.plan_watchdog.async_dismiss_push(old_fub_id)
         if updated:
             self.request_options_update_without_reload(new_options)
         return updated
@@ -4160,7 +4163,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         (plan_run_states_available). The endpoint's failure is logged once per outage, not per poll.
         """
         fub_ids = sorted(function_plan_ids(self.api.fub_data))
-        if not fub_ids or self._plan_run_state_fetching or self._plan_run_state_poll_blocked():
+        if self._plan_run_state_fetching or self._plan_run_state_poll_blocked():
+            return
+        if not fub_ids:
+            # No run state to fetch, but a watched plan deleted last still gets its vanished repair and push.
+            if await self.async_watch_managed_plans():
+                self.async_update_listeners()
             return
         self._plan_run_state_last_fetch = time.monotonic()
         run_state_mark = self.api.run_state_mark()
@@ -4382,6 +4390,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_stop_unverified = {
             fub_id: seen for fub_id, seen in self._plan_stop_unverified.items() if fub_id in watched
         }
+        await self.function_plan_backup.async_load()  # a bare-ID pick is named from its backups
         vanished = self._vanished_user_plans()
         # In an outage and the boot grace after it a plan seen running still clears its verdict,
         # but no plan is judged stopped anew or started: a booting Comexio starts its plans itself.
@@ -4493,7 +4502,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         if self._plan_watch_held():
             return None
-        return await self._async_watchdog_start_plan(fub_id)
+        result = await self._async_watchdog_start_plan(fub_id)
+        if result is False:
+            # A plan judged stopped earlier and deleted since refuses its start: the plan list tells.
+            self.hass.async_create_background_task(
+                self.async_request_refresh(), name=f"{DOMAIN}_{self.server_id}_plan_existence_check"
+            )
+        return result
 
     async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool | None:
         """Start a stopped managed plan from its repair or push.
@@ -4593,12 +4608,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Runs the function_plan_restore action like the plan card's restore of a deleted plan: its
         checks, locks, notifications and the move of the watchdog pick to the new ID (restore-as-new)
         all apply. The plan is started: it was watched, so it is meant to run. The action reports a
-        refusal or failure only as a notification, so the outcome is read afterwards: the plan is
-        back once a live plan carries its name (create_fup adds it to the plan cache), also when
-        moving the pick failed. The phone hears it either way (from_push), and the old alarm push
-        goes once the plan is back. A plan already back (a second tap, or rebuilt in Comexio Studio)
-        is only confirmed and its pick moved to it, and a tap while a restore runs is left to that
-        restore: both would otherwise build a duplicate.
+        refusal or failure only as a notification, so the outcome is what the restore itself
+        reports (note_plan_restored_as_new). The phone hears it either way (from_push), and the old
+        alarm push goes once the plan is back. A live plan of that name proves nothing: plan names
+        are not unique, and a failed restore leaves a half-built one. A tap while a restore runs is
+        left to that restore, and a restored plan's pick has moved, so a later tap is dismissed.
         """
         if name in self._vanished_restores or self._restore_lock.locked():
             _LOGGER.info(
@@ -4607,12 +4621,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 name,
             )
             return False
-        if live_ids := self._live_plan_ids_named(name):
-            _LOGGER.info("[%s] Function plan '%s' is back already; nothing to restore", self.server_id, name)
-            if len(live_ids) == 1:
-                self._repoint_vanished_pick(name, fub_id, live_ids[0])
-            await self._async_report_vanished_restored(fub_id, name, from_push=from_push)
-            return True
         # Marked before the first await: a second tap meanwhile sees it (no duplicate, no false "failed").
         self._vanished_restores.add(name)
         try:
@@ -4651,7 +4659,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         except Exception:
             # A background task: anything left uncaught would only surface as "never retrieved".
             _LOGGER.exception("[%s] Restore of function plan '%s' failed", self.server_id, name)
-        if (new_fub_id := self._restored_as_new.pop(name, None)) is None:
+        if (restored := self._restored_as_new.pop(name, None)) is None:
             _LOGGER.warning(
                 "[%s] Function plan '%s' (ID %s) was not restored; see the restore notification",
                 self.server_id,
@@ -4661,26 +4669,38 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if from_push:
                 await self.plan_watchdog.async_push_restore_failed(fub_id, name)
             return False
+        new_fub_id, complete = restored
+        if not complete:
+            _LOGGER.warning(
+                "[%s] Function plan '%s' was restored as ID %s, but not completely; see the restore notification",
+                self.server_id,
+                name,
+                new_fub_id,
+            )
         # Normally moved by the restore already; not when moving its references failed.
         self._repoint_vanished_pick(name, fub_id, new_fub_id)
-        await self._async_report_vanished_restored(fub_id, name, from_push=from_push)
+        await self._async_report_vanished_restored(fub_id, name, from_push=from_push, complete=complete)
         return True
 
-    def note_plan_restored_as_new(self, plan_name: str, new_fub_id: int) -> None:
-        """A restore-as-new built plan_name under new_fub_id (read by async_restore_vanished_plan)."""
-        self._restored_as_new[plan_name] = new_fub_id
+    def note_plan_restored_as_new(self, plan_name: str, new_fub_id: int, *, complete: bool) -> None:
+        """A restore-as-new built plan_name under new_fub_id (read by async_restore_vanished_plan).
 
-    def _live_plan_ids_named(self, name: str) -> list[int]:
-        """IDs of the cached plans of that name (a deleted plan's name is free until restored)."""
-        return sorted(
-            int(key)
-            for key, fub in self.api.fub_data.items()
-            if str(key).isdigit() and isinstance(fub, dict) and fub.get("Name") == name
-        )
+        complete: False for a PARTIAL restore (elements, connections or block settings missing).
+        """
+        self._restored_as_new[plan_name] = (new_fub_id, complete)
 
     def _repoint_vanished_pick(self, name: str, old_fub_id: int, new_fub_id: int) -> None:
-        """Move a vanished plan's watchdog pick to the plan now carrying its name; nothing if none points at it."""
-        picks = repointed_watchdog_user_plan_picks(self.config_entry.options, name, old_fub_id, new_fub_id)
+        """Move a vanished plan's watchdog pick to its restored plan; nothing if none points at it.
+
+        A bare-ID pick stays when another plan holds the old ID by now: it watches that plan.
+        """
+        picks = repointed_watchdog_user_plan_picks(
+            self.config_entry.options,
+            name,
+            old_fub_id,
+            new_fub_id,
+            old_id_still_live=str(old_fub_id) in self.api.fub_data,
+        )
         if picks is None:
             return
         _LOGGER.info(
@@ -4694,10 +4714,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: picks}
         )
 
-    async def _async_report_vanished_restored(self, fub_id: int, name: str, *, from_push: bool) -> None:
+    async def _async_report_vanished_restored(self, fub_id: int, name: str, *, from_push: bool, complete: bool) -> None:
         """Replace the vanished alarm push: "restored" for a Restore from the phone, else just remove it."""
         if from_push:
-            await self.plan_watchdog.async_push_restored(fub_id, name)
+            await self.plan_watchdog.async_push_restored(fub_id, name, complete=complete)
         else:
             await self.plan_watchdog.async_dismiss_push(fub_id)
 
