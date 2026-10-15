@@ -105,10 +105,13 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Repeated calls stay quiet:** paths the plan card or a timer repeats (keepalive, retries, periodic ticks) report
   failures at debug level, without a persistent notification or repair each time — e.g.
   `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure. A failed action that
-  is retried on each check (a refused auto-start, an undelivered push) waits a minimum interval from `const.py`
-  between attempts, warns only on the first failure and logs the retries at debug level — the plan card checks every
-  few seconds (#181). An action that got no answer is not sent while Comexio is unreachable (the watchdog's
-  `_plan_watch_held()`), so an outage sends no retries.
+  is retried on each check (an auto-start, an undelivered push) waits a minimum interval from `const.py` between
+  attempts — the plan card checks every few seconds (#181). An open-ended series (an unanswered start, an undelivered
+  push) warns only on the first failure and logs the retries at debug level; a series capped by a give-up counter
+  (a refused auto-start, `FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS`) may warn on each counted attempt. Automatic
+  retries are not sent while Comexio is unreachable or its state could not be read: the watchdog's
+  `_plan_watch_held()` and a failed run-state read, which starts nothing. This holds back the automatic retries only —
+  a start the user triggers from a repair or push is sent.
 - **Repair flows read the current entry:** before a destructive action (cleanup, delete, reset), a repair flow
   step reads the current config entry state (`options`/`data`) again instead of relying on `issue_data` alone —
   the dialog may have been open while the user changed the options, so the issue data can be stale (#160).
