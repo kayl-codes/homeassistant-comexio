@@ -22,7 +22,7 @@ from custom_components.comexio.const import (
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
-from custom_components.comexio.plan_watchdog import vanished_plan_issue_id
+from custom_components.comexio.plan_watchdog import unnamed_plan_label, vanished_plan_issue_id
 from custom_components.comexio.repairs import ACTION_RESTORE, ACTION_UNWATCH, ComexioRepairFlow
 from custom_components.comexio.services import backup
 from custom_components.comexio.services._context import SYNC_RUNNING_MSG, refuse_while_plans_busy
@@ -298,7 +298,12 @@ def test_purge_reads_string_flags_as_ha_does() -> None:
 ISSUE_DATA = {"entry_id": "e1", "plan_name": "Test4", "fub_id": "47"}
 
 
-def _vanished_flow(vanished: dict[int, str] | None, *, backup_field: str | None = "47:auto:0:Test4") -> tuple:
+def _vanished_flow(
+    vanished: set[tuple[int, str]] | None,
+    *,
+    backup_field: str | None = "47:auto:0:Test4",
+    issue_data: dict[str, str] = ISSUE_DATA,
+) -> tuple:
     coordinator = SimpleNamespace(
         server_id="cx1",
         plan_watchdog=SimpleNamespace(vanished=vanished),
@@ -306,7 +311,8 @@ def _vanished_flow(vanished: dict[int, str] | None, *, backup_field: str | None 
         async_newest_backup_field=AsyncMock(return_value=backup_field),
         async_restore_vanished_plan=MagicMock(return_value="restore-coroutine"),
     )
-    flow = ComexioRepairFlow(vanished_plan_issue_id("cx1", 47), dict(ISSUE_DATA))
+    issue_id = vanished_plan_issue_id("cx1", int(issue_data["fub_id"]), issue_data["plan_name"])
+    flow = ComexioRepairFlow(issue_id, dict(issue_data))
     flow.hass = SimpleNamespace(  # type: ignore[assignment]
         data={DOMAIN: {"e1": coordinator}},
         config=SimpleNamespace(language="en"),
@@ -324,7 +330,7 @@ def _step(flow: ComexioRepairFlow, user_input: dict[str, Any] | None) -> tuple[d
 
 
 def test_the_vanished_repair_offers_restore_and_unwatch() -> None:
-    flow, _ = _vanished_flow({47: "Test4"})
+    flow, _ = _vanished_flow({(47, "Test4")})
     result, _ = _step(flow, None)
     assert result["step_id"] == "function_plan_vanished"
     assert result["description_placeholders"] == {"plan_name": "Test4", "fub_id": "47"}
@@ -335,7 +341,7 @@ def test_the_vanished_repair_offers_restore_and_unwatch() -> None:
 
 
 def test_the_vanished_repair_restores_in_the_background() -> None:
-    flow, coordinator = _vanished_flow({47: "Test4"})
+    flow, coordinator = _vanished_flow({(47, "Test4")})
     result, delete_issue = _step(flow, {"action": "restore"})
     assert result["type"] == "create_entry"
     coordinator.async_restore_vanished_plan.assert_called_once_with(47, "Test4")
@@ -345,7 +351,7 @@ def test_the_vanished_repair_restores_in_the_background() -> None:
 
 
 def test_the_vanished_repair_without_a_backup_restores_nothing() -> None:
-    flow, coordinator = _vanished_flow({47: "Test4"}, backup_field=None)
+    flow, coordinator = _vanished_flow({(47, "Test4")}, backup_field=None)
     result, _ = _step(flow, {"action": "restore"})
     assert result["reason"] == "no_backup"
     coordinator.async_restore_vanished_plan.assert_not_called()
@@ -353,19 +359,39 @@ def test_the_vanished_repair_without_a_backup_restores_nothing() -> None:
 
 
 def test_the_vanished_repair_can_stop_watching() -> None:
-    flow, coordinator = _vanished_flow({47: "Test4"})
+    flow, coordinator = _vanished_flow({(47, "Test4")})
     result, _ = _step(flow, {"action": "unwatch"})
     assert result["type"] == "create_entry"
     coordinator.async_unwatch_user_plan.assert_awaited_once_with(47, "Test4")
 
 
 def test_a_vanished_repair_whose_plan_is_back_is_removed() -> None:
-    flow, coordinator = _vanished_flow({})
+    flow, coordinator = _vanished_flow({(47, "Other")})  # another deleted plan on its ID is not it
     result, delete_issue = _step(flow, {"action": "restore"})
     assert result["reason"] == "plan_not_missing"
-    delete_issue.assert_called_once_with(flow.hass, DOMAIN, vanished_plan_issue_id("cx1", 47))
+    delete_issue.assert_called_once_with(flow.hass, DOMAIN, vanished_plan_issue_id("cx1", 47, "Test4"))
     coordinator.async_unwatch_user_plan.assert_not_awaited()
     coordinator.async_restore_vanished_plan.assert_not_called()
+
+
+def test_the_repair_of_a_plan_without_a_backup_identity_offers_only_unwatch() -> None:
+    """(Sourcery) A bare-ID pick whose backups name several plans: Restore could not pick one."""
+    unnamed = unnamed_plan_label(47)
+    flow, _ = _vanished_flow({(47, unnamed)}, issue_data={"entry_id": "e1", "plan_name": unnamed, "fub_id": "47"})
+    result, _ = _step(flow, None)
+    (field,) = result["data_schema"].schema
+    assert field.default() == ACTION_UNWATCH
+    assert result["data_schema"].schema[field].config["options"] == [ACTION_UNWATCH]
+
+
+def test_the_vanished_repair_survives_a_failing_backup_lookup(caplog: pytest.LogCaptureFixture) -> None:
+    """(Sourcery) The lookup raising aborted the flow with an error; the restore reports a missing backup itself."""
+    flow, coordinator = _vanished_flow({(47, "Test4")})
+    coordinator.async_newest_backup_field.side_effect = OSError("store unreadable")
+    result, _ = _step(flow, {"action": "restore"})
+    assert result["type"] == "create_entry"
+    coordinator.async_restore_vanished_plan.assert_called_once_with(47, "Test4")
+    assert "store unreadable" in caplog.text
 
 
 def test_a_vanished_repair_before_the_first_check_stays() -> None:
@@ -378,7 +404,7 @@ def test_a_vanished_repair_before_the_first_check_stays() -> None:
 
 
 def test_a_vanished_repair_of_a_removed_entry_aborts() -> None:
-    flow, _ = _vanished_flow({47: "Test4"})
+    flow, _ = _vanished_flow({(47, "Test4")})
     flow.hass.data = {DOMAIN: {}}
     result, _ = _step(flow, {"action": "restore"})
     assert result["reason"] == "entry_not_found"
@@ -392,14 +418,14 @@ def test_a_restore_as_new_moves_the_watchdog_pick_in_the_options() -> None:
     options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4", "19:Other"], CONF_FUNCTION_PLAN_FUB_ID: "19"}
     coordinator.config_entry = SimpleNamespace(options=options)
     coordinator.request_options_update_without_reload = MagicMock()  # type: ignore[method-assign]
-    coordinator.plan_watchdog = SimpleNamespace(vanished={47: "Test4"}, async_dismiss_push=AsyncMock())
+    coordinator.plan_watchdog = SimpleNamespace(vanished={(47, "Test4")}, async_dismiss_push=AsyncMock())
     updated = asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 47, 52))
     (new_options,) = coordinator.request_options_update_without_reload.call_args.args
     assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["52:Test4", "19:Other"]
     assert new_options[CONF_FUNCTION_PLAN_FUB_ID] == "19"
     assert updated == ["function plan watchdog pick 'Test4' → fub_id 52"]
     # (Sourcery) The reload after the restore forgets the push: the old alarm goes now.
-    coordinator.plan_watchdog.async_dismiss_push.assert_awaited_once_with(47)
+    coordinator.plan_watchdog.async_dismiss_push.assert_awaited_once_with(47, "Test4")
 
     coordinator.request_options_update_without_reload.reset_mock()
     assert asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 48, 52)) == []
@@ -414,7 +440,7 @@ def test_a_restore_as_new_leaves_the_selected_plan_with_the_plan_now_holding_the
     coordinator.server_id = "cx1"
     coordinator.config_entry = SimpleNamespace(options={CONF_FUNCTION_PLAN_FUB_ID: "47"})
     coordinator.request_options_update_without_reload = MagicMock()  # type: ignore[method-assign]
-    coordinator.plan_watchdog = SimpleNamespace(vanished={}, async_dismiss_push=AsyncMock())
+    coordinator.plan_watchdog = SimpleNamespace(vanished=set(), async_dismiss_push=AsyncMock())
     with caplog.at_level(logging.INFO):
         updated = asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 47, 52, old_id_still_live=True))
     assert updated == []
@@ -448,11 +474,11 @@ def test_a_restore_as_new_writes_the_options_before_it_awaits_the_push_dismissal
         side_effect=lambda _options: order.append("options")
     )
 
-    async def dismiss(_fub_id: int) -> None:
+    async def dismiss(_fub_id: int, _name: str | None = None) -> None:
         order.append("dismiss")
 
     coordinator.plan_watchdog = SimpleNamespace(
-        vanished={47: "Test4"}, async_dismiss_push=AsyncMock(side_effect=dismiss)
+        vanished={(47, "Test4")}, async_dismiss_push=AsyncMock(side_effect=dismiss)
     )
     asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 47, 52))
     assert order == ["options", "dismiss"]
@@ -465,9 +491,14 @@ def test_a_deleted_plans_restore_never_overwrites_a_plan_of_its_name_back_under_
     notifications = MagicMock()
     monkeypatch.setattr(backup.persistent_notification, "async_create", notifications)
     running = {(47, "Test4")}
-    coordinator = SimpleNamespace(vanished_restore_running=lambda fub_id, name: (fub_id, name) in running)
+    coordinator = SimpleNamespace(
+        vanished_restore_running=lambda fub_id, name: (fub_id, name) in running,
+        note_vanished_plan_back=MagicMock(),
+    )
     assert backup._refuse_restore_over_returned_plan(MagicMock(), coordinator, 47, "Test4") is True
     assert "is back in Comexio" in notifications.call_args.args[1]
+    # (Sourcery) The Restore that ran this learns the plan is back: no "restore failed" for it.
+    coordinator.note_vanished_plan_back.assert_called_once_with(47, "Test4")
     notifications.reset_mock()
     assert backup._refuse_restore_over_returned_plan(MagicMock(), coordinator, 48, "Test4") is False
     notifications.assert_not_called()

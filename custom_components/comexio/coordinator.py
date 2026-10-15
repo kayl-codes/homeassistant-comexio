@@ -190,7 +190,14 @@ from .orphaned_statistics import (
     legacy_statistic_prefixes,
     stable_statistic_id_pattern,
 )
-from .plan_watchdog import ACTION_RESTORE, ACTION_START, ManagedPlanWatchdog, parse_plan_action
+from .plan_watchdog import (
+    ACTION_RESTORE,
+    ACTION_START,
+    ManagedPlanWatchdog,
+    parse_plan_action,
+    unnamed_plan_label,
+    vanished_plan_token,
+)
 from .reference_monitor import ReferenceCatalogMonitor
 
 _LOGGER = logging.getLogger(__name__)
@@ -565,6 +572,12 @@ def _append_cleanup_outcome(outcome: dict[str, Any], result: dict, fub_id: int) 
             outcome[key].append(value)
 
 
+def _previous_vanished_name(previous: set[tuple[int, str]], fub_id: int) -> str:
+    """The name the last check gave a bare-ID pick's deleted plan; unnamed_plan_label unless just one."""
+    names = {name for vanished_id, name in previous if vanished_id == fub_id}
+    return next(iter(names)) if len(names) == 1 else unnamed_plan_label(fub_id)
+
+
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
@@ -615,6 +628,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._vanished_restore_lock = asyncio.Lock()
         # (old fub_id, plan name) → new fub_id of each restore-as-new that built its plan (note_plan_restored_as_new).
         self._restored_as_new: dict[tuple[int, str], tuple[int, bool]] = {}
+        # (old fub_id, plan name) of a vanished-plan Restore the restore action refused: the plan is back.
+        self._vanished_plans_back: set[tuple[int, str]] = set()
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
@@ -2481,13 +2496,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ) is not None:
             new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = picks
             updated.append(f"function plan watchdog pick '{plan_name}' → fub_id {new_fub_id}")
-            dismiss_alarm = old_fub_id in (self.plan_watchdog.vanished or {})
+            dismiss_alarm = (old_fub_id, plan_name) in (self.plan_watchdog.vanished or ())
         if updated:
             # Written before any await: options saved meanwhile would be overwritten by this snapshot.
             self.request_options_update_without_reload(new_options)
         if dismiss_alarm:
             # The reload that follows forgets which pushes are out: the old alarm would stay on the phone.
-            await self.plan_watchdog.async_dismiss_push(old_fub_id)
+            await self.plan_watchdog.async_dismiss_push(old_fub_id, plan_name)
         return updated
 
     def _parsed_webio_devices(self) -> dict[str, Any]:
@@ -4376,38 +4391,38 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         return None
 
-    def _vanished_user_plans(self) -> dict[int, str]:
-        """fub_id → name of the user picks whose ID Comexio no longer has at all (deleted).
+    def _vanished_user_plans(self) -> set[tuple[int, str]]:
+        """(fub_id, name) of the user picks whose ID Comexio no longer has at all (deleted).
 
-        Only with a live plan list (see _unresolved_plan_identities). An ID now carrying another
-        name is left to _warn_unresolved_watch_picks: renamed and deleted-then-reused look alike.
-        A bare-ID pick (saved before names were) takes the name its backups carry. A pick the plan_map
-        holds under the same ID and name is left out: that plan is HA's own. The ID alone proves nothing —
-        a stale entry of another plan on a reused ID must not hide a deleted user plan.
+        By ID and name: a reused ID can belong to two deleted picks ("47:X", "47:Y"). Only with a
+        live plan list (see _unresolved_plan_identities). An ID now carrying another name is left to
+        _warn_unresolved_watch_picks: renamed and deleted-then-reused look alike. A bare-ID pick
+        (saved before names were) takes the name its backups carry, unless a named pick of the same
+        ID names it. A pick the plan_map holds under the same ID and name is left out: that plan is
+        HA's own. The ID alone proves nothing — a stale entry of another plan on a reused ID must not
+        hide a deleted user plan.
         """
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         if self.live_plan_list() is None or not isinstance(raw_picks, list):
-            return {}
+            return set()
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         if not isinstance(raw_map, dict):
             raw_map = {}
         picks = [pick for value in raw_picks if (pick := parse_watchdog_user_plan_pick(value)) is not None]
-        vanished: dict[int, str] = {}
-        # Bare picks first: a named pick of the same ID overrides the name read from the backups.
-        for fub_id, name in sorted(picks, key=lambda pick: pick[1] is not None):
-            if str(fub_id) in self.api.fub_data:
+        named_ids = {fub_id for fub_id, name in picks if name is not None}
+        vanished: set[tuple[int, str]] = set()
+        for fub_id, name in picks:
+            if str(fub_id) in self.api.fub_data or (name is None and fub_id in named_ids):
                 continue
             plan_name = name if name is not None else self._backed_up_plan_name(fub_id)
-            if str(raw_map.get(plan_name)) == str(fub_id):
-                vanished.pop(fub_id, None)  # HA's own plan: a bare pick read from the backups goes too
-            else:
-                vanished[fub_id] = plan_name
+            if str(raw_map.get(plan_name)) != str(fub_id):  # else HA's own plan
+                vanished.add((fub_id, plan_name))
         return vanished
 
     def _backed_up_plan_name(self, fub_id: int) -> str:
-        """The one plan name the backups of fub_id carry; "ID <fub_id>" for none or several (no restore then)."""
+        """The one plan name the backups of fub_id carry; unnamed_plan_label for none or several (no restore then)."""
         names = self.function_plan_backup.plan_names_for_fub_id_sync(fub_id)
-        return next(iter(names)) if len(names) == 1 else f"ID {fub_id}"
+        return next(iter(names)) if len(names) == 1 else unnamed_plan_label(fub_id)
 
     def _plan_watch_blocked(self) -> bool:
         """Whether a sync, repair, restore, full poll or bus-load cascade runs — the watchdog judges nothing."""
@@ -4467,15 +4482,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # During a plan edit the start would only be deferred, logged on every tick: it follows
             # with the first check after the edit.
             auto_start=run_states_read and not in_grace and not self.plan_edits_running,
-            # Their "stopped" push is replaced by the vanished one below (same tag), not cleared first.
-            keep_push=vanished.keys(),
         )
         await self.plan_watchdog.async_sync_vanished(vanished)
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
         return stopped_changed
 
-    async def _async_vanished_user_plans_named(self) -> dict[int, str]:
+    async def _async_vanished_user_plans_named(self) -> set[tuple[int, str]]:
         """_vanished_user_plans after loading the backups a bare-ID pick takes its name from.
 
         The check goes on when they fail to load: such a pick keeps the name the last check gave it
@@ -4487,10 +4500,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if not self._plan_watch_backups_unloadable:
                 _LOGGER.warning("[%s] Function plan watchdog could not load the backups: %r", self.server_id, err)
                 self._plan_watch_backups_unloadable = True
-            previous = self.plan_watchdog.vanished or {}
+            previous = self.plan_watchdog.vanished or set()
             return {
-                fub_id: previous.get(fub_id, name) if name == f"ID {fub_id}" else name
-                for fub_id, name in self._vanished_user_plans().items()
+                (fub_id, _previous_vanished_name(previous, fub_id) if name == unnamed_plan_label(fub_id) else name)
+                for fub_id, name in self._vanished_user_plans()
             }
         if self._plan_watch_backups_unloadable:
             _LOGGER.info("[%s] Function plan watchdog loads the backups again", self.server_id)
@@ -4640,9 +4653,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         parsed = parse_plan_action(self.server_id, event.data.get("action"))
         if parsed is None:
             return
-        kind, fub_id = parsed
-        if kind != ACTION_START:
-            self._handle_vanished_plan_action(kind, fub_id)
+        kind, fub_id, token = parsed
+        if kind != ACTION_START and token is not None:
+            self._handle_vanished_plan_action(kind, fub_id, token)
             return
         if self.is_watched_plan(fub_id):
             self.hass.async_create_background_task(
@@ -4660,8 +4673,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.plan_watchdog.async_dismiss_push(fub_id), name=f"{DOMAIN}_{self.server_id}_dismiss_push_{fub_id}"
         )
 
-    def _handle_vanished_plan_action(self, kind: str, fub_id: int) -> None:
-        """ "Restore" or "Stop watching" from the push of a watched user plan Comexio no longer has."""
+    def _handle_vanished_plan_action(self, kind: str, fub_id: int, token: str) -> None:
+        """ "Restore" or "Stop watching" from the push of a watched user plan Comexio no longer has.
+
+        token (vanished_plan_token) names the deleted plan by ID and name: two can share an ID.
+        """
         if self.plan_watchdog.vanished is None:
             # Not checked since setup (no plan list read yet): unknown, not "no longer missing".
             _LOGGER.warning(
@@ -4670,11 +4686,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 fub_id,
             )
             self.hass.async_create_background_task(
-                self.plan_watchdog.async_push_check_pending(fub_id),
+                self.plan_watchdog.async_push_check_pending(fub_id, token),
                 name=f"{DOMAIN}_{self.server_id}_check_pending_push_{fub_id}",
             )
             return
-        name = self.plan_watchdog.vanished.get(fub_id)
+        name = self.plan_watchdog.vanished_name(token)
         if name is None:
             # Restored, unpicked or back meanwhile: the push is stale.
             _LOGGER.warning(
@@ -4683,7 +4699,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 fub_id,
             )
             self.hass.async_create_background_task(
-                self.plan_watchdog.async_dismiss_push(fub_id), name=f"{DOMAIN}_{self.server_id}_dismiss_push_{fub_id}"
+                self.plan_watchdog.async_dismiss_vanished_push(fub_id, token),
+                name=f"{DOMAIN}_{self.server_id}_dismiss_push_{token}",
             )
             return
         if kind == ACTION_RESTORE:
@@ -4779,7 +4796,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.hass,
             f"Function plan '{name}' (ID {fub_id}) was not restored: {reason}. Choose Restore again.",
             title=f"Comexio Function Plan Restore ({self.server_id})",
-            notification_id=f"comexio_vanished_restore_{self.server_id}_{fub_id}",
+            notification_id=f"comexio_vanished_restore_{self.server_id}_{vanished_plan_token(fub_id, name)}",
         )
 
     async def _async_restore_vanished_from_backup(self, fub_id: int, name: str, *, from_push: bool) -> bool:
@@ -4797,6 +4814,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         _LOGGER.info("[%s] Restoring deleted function plan '%s' from backup %s", self.server_id, name, snapshot)
         self._restored_as_new.pop((fub_id, name), None)
+        self._vanished_plans_back.discard((fub_id, name))
         try:
             await self.hass.services.async_call(
                 DOMAIN,
@@ -4813,6 +4831,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         except Exception:
             # The action's own errors; it notifies only those it catches itself.
             _LOGGER.exception("[%s] Restore of function plan '%s' failed", self.server_id, name)
+        if (fub_id, name) in self._vanished_plans_back:
+            self._vanished_plans_back.discard((fub_id, name))
+            # Back under its ID and name (the restore action told the user): no "failed" push, the alarm goes.
+            _LOGGER.info(
+                "[%s] Function plan '%s' (ID %s) is back in Comexio; it was not restored", self.server_id, name, fub_id
+            )
+            await self.plan_watchdog.async_dismiss_push(fub_id, name)
+            return False
         if (restored := self._restored_as_new.pop((fub_id, name), None)) is None:
             _LOGGER.warning(
                 "[%s] Function plan '%s' (ID %s) was not restored; see the restore notification",
@@ -4854,6 +4880,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         self._restored_as_new[(old_fub_id, plan_name)] = (new_fub_id, complete)
 
+    def note_vanished_plan_back(self, fub_id: int, plan_name: str) -> None:
+        """The restore action refused a vanished-plan Restore: plan_name is back under fub_id; read by that Restore."""
+        self._vanished_plans_back.add((fub_id, plan_name))
+
     def _repoint_vanished_pick(self, name: str, old_fub_id: int, new_fub_id: int) -> None:
         """Move a vanished plan's watchdog pick to its restored plan; nothing if none points at it.
 
@@ -4884,7 +4914,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if from_push:
             await self.plan_watchdog.async_push_restored(fub_id, name, complete=complete)
         else:
-            await self.plan_watchdog.async_dismiss_push(fub_id)
+            await self.plan_watchdog.async_dismiss_push(fub_id, name)
 
     async def async_newest_backup_field(self, fub_id: int, name: str) -> str | None:
         """The restore action's 'snapshot' value of a plan identity's newest backup (auto or change)."""

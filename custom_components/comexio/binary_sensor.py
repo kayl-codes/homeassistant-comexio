@@ -190,9 +190,7 @@ class ComexioManagedPlansProblemSensor(ComexioStableEntityIdMixin, CoordinatorEn
         stopped = watchdog.stopped or {}
         return {
             "last_check": watchdog.last_check,
-            "vanished_plans": [
-                {"fub_id": fub_id, "name": name} for fub_id, name in sorted((watchdog.vanished or {}).items())
-            ],
+            "vanished_plans": [{"fub_id": fub_id, "name": name} for fub_id, name in sorted(watchdog.vanished or ())],
             "stopped_plans": [
                 {
                     "fub_id": fub_id,

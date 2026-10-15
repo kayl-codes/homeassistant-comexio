@@ -952,10 +952,30 @@ def _new_plan_status(
     return "OK" if structurally_complete and not warnings and _block_settings_ok(block_settings) else "PARTIAL"
 
 
-def _new_plan_activation_line(run_ok: bool | None, auto_start: bool) -> str:
+async def _start_new_plan(api, new_fub_id: int, plan_name: str, auto_start: bool) -> tuple[bool | None, str | None]:
+    """run_fup of a plan a restore built: (run_ok, start error label).
+
+    run_ok is None with auto_start off (create_fup leaves it inactive). A start that raises does
+    not undo the build: the plan stays restored, only not started — not reported as a failed
+    restore, whose retry would build it a second time. Its error label names it in the result.
+    """
+    if not auto_start:
+        return None, None
+    try:
+        return await api.function_plan_run_fup(new_fub_id), None
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        _LOGGER.warning(
+            "Restored function plan '%s' (ID %s) was built, but starting it failed: %r", plan_name, new_fub_id, exc
+        )
+        return False, _error_label(exc)
+
+
+def _new_plan_activation_line(run_ok: bool | None, auto_start: bool, start_error: str | None = None) -> str:
     """Activation line of a restore that built a new plan (as new ID or as copy)."""
     if not auto_start:
         return f"Activation: {ICON_INACTIVE} not started (auto-start disabled for this restore)"
+    if start_error is not None:
+        return f"Activation: {ICON_WARNING} starting it failed ({start_error}) — start it in Comexio Studio"
     if run_ok:
         return f"Activation: {ICON_SUCCESS} active"
     return (
@@ -1125,12 +1145,6 @@ async def _restore_plan_as_new(
         elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
             api, new_fub_id, snapshot
         )
-        # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
-        # therefore routinely reports result=False even though the data payload IS applied — the
-        # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
-        # criterion here; the recreated/expected element+connection counts are. The structure is
-        # already built by the calls above, so auto_start=False can skip run_fup altogether.
-        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
     except (aiohttp.ClientError, TimeoutError) as exc:
         # Same gap as the copy-restore path closes: without this the "in progress" notification
         # above would stay forever. The backup lineage stays at the old ID — nothing was rekeyed.
@@ -1144,6 +1158,11 @@ async def _restore_plan_as_new(
             notification_id=notif_id,
         )
         return
+    # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
+    # therefore routinely reports result=False even though the data payload IS applied — the
+    # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
+    # criterion here; the recreated/expected element+connection counts are.
+    run_ok, start_error = await _start_new_plan(api, new_fub_id, plan_name, auto_start)
     duration = time.monotonic() - t_start
 
     purged, updated_consumers, lineage_error, refs_error = await _move_restored_plan_lineage(
@@ -1166,7 +1185,7 @@ async def _restore_plan_as_new(
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    activation_line = _new_plan_activation_line(run_ok, auto_start)
+    activation_line = _new_plan_activation_line(run_ok, auto_start, start_error)
     consumer_line = _restored_references_line(old_fub_id, updated_consumers, refs_error, old_id_still_live)
     lineage_line = _restored_lineage_line(plan_name, old_fub_id, new_fub_id, old_id_still_live, purged, lineage_error)
 
@@ -1252,10 +1271,6 @@ async def _restore_plan_as_copy(
         elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
             api, new_fub_id, snapshot
         )
-        # create_fup always creates plans inactive — auto_start=False just leaves that default
-        # alone instead of calling run_fup at all (no plan_data payload here: the structure was
-        # already built above via individual element/connection calls, not via run_fup).
-        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
     except (aiohttp.ClientError, TimeoutError) as exc:
         # Without this, a connection drop mid-restore leaves the "in progress" notification
         # above stuck forever — the exception propagates past the persistent_notification calls
@@ -1270,6 +1285,9 @@ async def _restore_plan_as_copy(
             notification_id=notif_id,
         )
         return
+    # No plan_data payload here: the structure was already built above via individual
+    # element/connection calls, not via run_fup.
+    run_ok, start_error = await _start_new_plan(api, new_fub_id, new_plan_name, auto_start)
     duration = time.monotonic() - t_start
 
     elem_count = len(snapshot.get("elements", {}))
@@ -1280,7 +1298,7 @@ async def _restore_plan_as_copy(
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    activation_line = _new_plan_activation_line(run_ok, auto_start)
+    activation_line = _new_plan_activation_line(run_ok, auto_start, start_error)
 
     msg = (
         f"Plan '{new_plan_name}' created as a COPY of '{source_name}' "
@@ -1546,6 +1564,8 @@ def _refuse_restore_over_returned_plan(
     """
     if not coordinator.vanished_restore_running(fub_id, plan_name):
         return False
+    # The Restore that runs this judges its outcome by it: the plan is back, not "restore failed".
+    coordinator.note_vanished_plan_back(fub_id, plan_name)
     _LOGGER.warning(
         "Function Plan Restore of deleted plan '%s' (fub=%s) not run: a plan of that name is back under its ID",
         plan_name,

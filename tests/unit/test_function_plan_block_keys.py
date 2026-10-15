@@ -609,7 +609,11 @@ def _run_restore(
         patch.object(backup_service, "_restore_plan_as_new", AsyncMock()) as as_new,
         patch.object(backup_service, "_refresh_service_descriptions", AsyncMock()),
     ):
-        coordinator = SimpleNamespace(server_id="iosrv1", vanished_restore_running=lambda *_: vanished_running)
+        coordinator = SimpleNamespace(
+            server_id="iosrv1",
+            vanished_restore_running=lambda *_: vanished_running,
+            note_vanished_plan_back=MagicMock(),
+        )
         asyncio.run(backup_service._run_function_plan_restore(MagicMock(), call, coordinator, api, plan_hash))
     api.restore_as_copy, api.restore_in_place, api.restore_as_new = as_copy, in_place, as_new
     return api, notify

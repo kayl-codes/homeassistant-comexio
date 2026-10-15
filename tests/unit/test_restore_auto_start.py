@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from custom_components.comexio.services import backup
@@ -11,11 +12,11 @@ from custom_components.comexio.services import backup
 SNAPSHOT = {"plan_name": "Kitch", "elements": {}, "connections": {}}
 
 
-def _run(auto_start: bool) -> tuple[AsyncMock, MagicMock]:
+def _run(auto_start: bool, run_fup: AsyncMock | None = None) -> tuple[AsyncMock, MagicMock, SimpleNamespace]:
     api = SimpleNamespace(
         create_fup=AsyncMock(return_value=50),
         function_plan_rebuild_plan_from_snapshot=AsyncMock(return_value=({}, 0, [])),
-        function_plan_run_fup=AsyncMock(return_value=True),
+        function_plan_run_fup=run_fup or AsyncMock(return_value=True),
     )
     coordinator = SimpleNamespace(
         server_id="iosrv1",
@@ -27,19 +28,49 @@ def _run(auto_start: bool) -> tuple[AsyncMock, MagicMock]:
         asyncio.run(
             backup._restore_plan_as_new(MagicMock(), coordinator, api, 42, SNAPSHOT, "auto", 0, auto_start=auto_start)
         )
-    return api.function_plan_run_fup, notify
+    return api.function_plan_run_fup, notify, coordinator
 
 
 @pytest.mark.parametrize(
     ("auto_start", "started", "activation"), [(True, True, "active"), (False, False, "not started")]
 )
 def test_restore_as_new_starts_the_plan_only_with_auto_start(auto_start: bool, started: bool, activation: str) -> None:
-    run_fup, notify = _run(auto_start)
+    run_fup, notify, _coordinator = _run(auto_start)
     assert run_fup.await_count == int(started)
     assert (
         f"Activation: {backup.ICON_SUCCESS if started else backup.ICON_INACTIVE} {activation}"
         in (notify.call_args.args[1])
     )
+
+
+START_FAILED = f"Activation: {backup.ICON_WARNING} starting it failed (TimeoutError"
+
+
+def test_a_restore_as_new_whose_start_fails_still_counts_as_restored() -> None:
+    """(Sourcery) A start timing out after the build was reported as a failed restore: a retry built it twice."""
+    _run_fup, notify, coordinator = _run(True, AsyncMock(side_effect=TimeoutError))
+    coordinator.note_plan_restored_as_new.assert_called_once_with(42, "Kitch", 50, complete=True)
+    coordinator.function_plan_backup.async_rekey_fub_id.assert_awaited_once()  # the lineage moved to the new ID
+    # (local review) Named as a failed start, not as Comexio's routine "created inactive".
+    assert START_FAILED in notify.call_args.args[1]
+    assert notify.call_args.kwargs["title"] != backup._TITLE_RESTORE_ERR
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), aiohttp.ClientError("gone")])
+def test_a_restore_as_copy_whose_start_fails_keeps_the_copy(error: Exception) -> None:
+    api = SimpleNamespace(
+        create_fup=AsyncMock(return_value=50),
+        function_plan_rebuild_plan_from_snapshot=AsyncMock(return_value=({}, 0, [])),
+        function_plan_run_fup=AsyncMock(side_effect=error),
+    )
+    with patch.object(backup.persistent_notification, "async_create") as notify:
+        asyncio.run(
+            backup._restore_plan_as_copy(
+                MagicMock(), SimpleNamespace(server_id="iosrv1"), api, 42, SNAPSHOT, "auto", 0, "Kitch copy", True
+            )
+        )
+    assert notify.call_args.kwargs["title"] != backup._TITLE_RESTORE_ERR
+    assert f"Activation: {backup.ICON_WARNING} starting it failed ({type(error).__name__}" in notify.call_args.args[1]
 
 
 @pytest.mark.parametrize("auto_start", [True, False])

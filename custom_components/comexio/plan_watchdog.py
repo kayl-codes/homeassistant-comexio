@@ -22,6 +22,7 @@ import logging
 import re
 import time
 from typing import Any
+import zlib
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
@@ -151,19 +152,47 @@ def stopped_plan_issue_id(server_id: str, fub_id: int) -> str:
     return f"{_issue_prefix(server_id)}{fub_id}"
 
 
-def vanished_plan_issue_id(server_id: str, fub_id: int) -> str:
+def vanished_plan_token(fub_id: int, name: str) -> str:
+    """A deleted plan's identity in its repair id, push tag and push actions: its ID and a checksum of its name.
+
+    The ID alone is not one: an ID can be reused, so two deleted watched plans may share it (picks
+    "47:X" and "47:Y"). The name itself cannot go into an action id (any character), its checksum can.
+    """
+    return f"{fub_id}_{zlib.crc32(name.encode()):08x}"
+
+
+# vanished_plan_token: the plan id (group) and the name checksum.
+_TOKEN_PATTERN = r"(\d+)_[0-9a-f]{8}"
+
+
+def unnamed_plan_label(fub_id: int) -> str:
+    """Name of a bare-ID pick whose backups carry no single plan name: no backup identity to restore."""
+    return f"ID {fub_id}"
+
+
+def vanished_plan_restorable(fub_id: int, name: str) -> bool:
+    """Whether a deleted plan has a backup identity to restore by; not a bare-ID pick its backups name ambiguously."""
+    return name != unnamed_plan_label(fub_id)
+
+
+def _vanished_actions(fub_id: int, name: str) -> tuple[str, ...]:
+    """A deleted plan's push buttons: "Restore" only where vanished_plan_restorable."""
+    return (ACTION_RESTORE, ACTION_UNWATCH) if vanished_plan_restorable(fub_id, name) else (ACTION_UNWATCH,)
+
+
+def vanished_plan_issue_id(server_id: str, fub_id: int, name: str) -> str:
     """Repair issue id for one watched user plan Comexio no longer has."""
-    return f"{_vanished_issue_prefix(server_id)}{fub_id}"
+    return f"{_vanished_issue_prefix(server_id)}{vanished_plan_token(fub_id, name)}"
 
 
 def _own_issue_ids(hass: HomeAssistant, server_id: str, *, vanished: bool = False) -> list[str]:
     """Ids of this instance's stopped-plan (or vanished-plan) repairs.
 
     The prefix alone is not enough: for server "home" it also matches the repairs of a
-    server "home_2", so the rest of the id must be exactly the plan id.
+    server "home_2", so the rest of the id must be exactly the plan id (or vanished-plan token).
     """
     prefix = _vanished_issue_prefix(server_id) if vanished else _issue_prefix(server_id)
-    own = re.compile(rf"{re.escape(prefix)}\d+")
+    own = re.compile(re.escape(prefix) + (_TOKEN_PATTERN if vanished else r"\d+"))
     return [issue_id for domain, issue_id in ir.async_get(hass).issues if domain == DOMAIN and own.fullmatch(issue_id)]
 
 
@@ -172,21 +201,25 @@ def start_action_id(server_id: str, fub_id: int) -> str:
     return f"{START_ACTION_PREFIX}{server_id}_{fub_id}"
 
 
-def plan_action_id(kind: str, server_id: str, fub_id: int) -> str:
-    """Action id of a push button: ACTION_START, ACTION_RESTORE or ACTION_UNWATCH."""
-    return f"{_ACTION_PREFIXES[kind]}{server_id}_{fub_id}"
+def plan_action_id(kind: str, server_id: str, fub_id: int, token: str | None = None) -> str:
+    """Action id of a push button: ACTION_START (by plan id), ACTION_RESTORE or ACTION_UNWATCH (by vanished token)."""
+    return f"{_ACTION_PREFIXES[kind]}{server_id}_{fub_id if kind == ACTION_START else token}"
 
 
-def parse_plan_action(server_id: str, action: Any) -> tuple[str, int] | None:
-    """(kind, plan id) of one of this instance's push actions, None for any other action.
+def parse_plan_action(server_id: str, action: Any) -> tuple[str, int, str | None] | None:
+    """(kind, plan id, vanished token) of one of this instance's push actions, None for any other action.
 
-    fullmatch on digits, so server "home" does not pick up the actions of server "home_2".
+    The token is None for "Start plan". fullmatch, so server "home" does not pick up the actions
+    of server "home_2".
     """
     if not isinstance(action, str):
         return None
     for kind, prefix in _ACTION_PREFIXES.items():
-        if match := re.fullmatch(rf"{re.escape(prefix + server_id)}_(\d+)", action):
-            return kind, int(match[1])
+        pattern = r"(\d+)" if kind == ACTION_START else f"(?P<token>{_TOKEN_PATTERN})"
+        if match := re.fullmatch(rf"{re.escape(prefix + server_id)}_{pattern}", action):
+            if kind == ACTION_START:
+                return kind, int(match[1]), None
+            return kind, int(match[2]), match["token"]
     return None
 
 
@@ -250,13 +283,15 @@ class ManagedPlanWatchdog:
         # fub_id → time.monotonic() of its last auto-start not sent or not answered (no failed attempt, but
         # retried no sooner than FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC either).
         self._deferred_at: dict[int, float] = {}
-        # fub_id → name of the watched user plans Comexio no longer has (deleted); None until the first check.
-        self.vanished: dict[int, str] | None = None
-        # Vanished plans whose push was replaced by "restored": the plan dropping out of vanished keeps it.
-        self._restored_pushes: set[int] = set()
-        # fub_id → time.monotonic() of a vanished alarm push no notify service took: sent again with a
+        # (fub_id, name) of the watched user plans Comexio no longer has (deleted); None until the first check.
+        # By ID and name: a reused ID can belong to two deleted watched plans.
+        self.vanished: set[tuple[int, str]] | None = None
+        # Tokens (vanished_plan_token) of vanished plans whose push was replaced by "restored": the plan
+        # dropping out of vanished keeps it.
+        self._restored_pushes: set[str] = set()
+        # token → time.monotonic() of a vanished alarm push no notify service took: sent again with a
         # check at least FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC later; any push delivered for the plan drops it.
-        self._vanished_push_unsent: dict[int, float] = {}
+        self._vanished_push_unsent: dict[str, float] = {}
         # Local time of the last check; shown in the repair dialogs and on the problem sensor.
         self.last_check: datetime | None = None
         self._checking = False
@@ -268,15 +303,12 @@ class ManagedPlanWatchdog:
         user_plans: Collection[int] = (),
         *,
         auto_start: bool = True,
-        keep_push: Collection[int] = (),
     ) -> bool:
         """Judge the watched plans; True if the set of stopped plans changed.
 
         managed holds every watched plan; user_plans names the ones that are user plans, which
         follow the user-plan auto-start switch instead of the HA-plan one. auto_start=False
-        starts nothing, whatever the switches say. keep_push names plans whose push is replaced
-        right after (vanished): clearing it first could reach the phone after the new one and
-        remove it, as two pushes have no guaranteed order.
+        starts nothing, whatever the switches say.
         """
         if self._checking:
             return False
@@ -299,9 +331,7 @@ class ManagedPlanWatchdog:
             self._sync_issues(stopped)
             changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
-            await self._async_push_transitions(
-                previous, stopped, auto_started, self.suspended - suspended_before, keep_push
-            )
+            await self._async_push_transitions(previous, stopped, auto_started, self.suspended - suspended_before)
             return changed
         finally:
             self._checking = False
@@ -528,10 +558,9 @@ class ManagedPlanWatchdog:
         stopped: Mapping[int, str],
         auto_started: Mapping[int, str],
         newly_suspended: Collection[int],
-        keep_push: Collection[int] = (),
     ) -> None:
         """Alarm push for a newly stopped plan or one Auto-Start gave up on; the push of a plan running
-        again is replaced or removed."""
+        again (or deleted: its vanished push has a tag of its own) is replaced or removed."""
         for fub_id in sorted(stopped.keys() - previous.keys() - set(newly_suspended)):
             await self._async_push(fub_id, stopped[fub_id], "stopped_title", "stopped", with_action=True, alarm=True)
         for fub_id in sorted(set(newly_suspended) & stopped.keys()):
@@ -540,15 +569,19 @@ class ManagedPlanWatchdog:
             )
         for fub_id, name in sorted(auto_started.items()):
             await self._async_push(fub_id, name, "started_title", "auto_started")
-        for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys() - set(keep_push)):
+        for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys()):
             await self._async_clear_push(fub_id)
 
     def _texts(self) -> dict[str, str]:
         return PUSH_TEXTS.get(self._hass.config.language, PUSH_TEXTS["en"])
 
-    def _push_tag(self, fub_id: int) -> str:
-        """One push per plan: a newer one with the same tag replaces it on the phone."""
-        return f"{DOMAIN}_{self._server_id}_plan_{fub_id}"
+    def _push_tag(self, fub_id: int, token: str | None = None) -> str:
+        """One push per plan: a newer one with the same tag replaces it on the phone.
+
+        A deleted plan's pushes (token: vanished_plan_token) have their own tag: two deleted plans
+        can share an ID, and the plan's last "stopped" push is removed, not replaced.
+        """
+        return f"{DOMAIN}_{self._server_id}_" + (f"plan_{fub_id}" if token is None else f"vanished_{token}")
 
     async def _async_push(
         self,
@@ -557,6 +590,7 @@ class ManagedPlanWatchdog:
         title_key: str,
         message_key: str,
         *,
+        token: str | None = None,
         with_action: bool = False,
         actions: Collection[str] = (),
         alarm: bool = False,
@@ -564,15 +598,17 @@ class ManagedPlanWatchdog:
     ) -> bool:
         """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
 
-        False when every notify service it went to failed (see _async_send). One delivered replaces
-        (same tag) a vanished alarm still waiting to be sent again, so that one is dropped.
+        token: a deleted plan's push (vanished_plan_token), with its own tag and actions. False
+        when every notify service it went to failed (see _async_send). One delivered replaces (same
+        tag) a vanished alarm still waiting to be sent again, so that one is dropped.
         """
         texts = self._texts()
-        data: dict[str, Any] = {"tag": self._push_tag(fub_id), "group": f"{DOMAIN}_{self._server_id}"}
+        data: dict[str, Any] = {"tag": self._push_tag(fub_id, token), "group": f"{DOMAIN}_{self._server_id}"}
         buttons = [*([ACTION_START] if with_action else []), *actions]
         if buttons:
             data["actions"] = [
-                {"action": plan_action_id(kind, self._server_id, fub_id), "title": texts[kind]} for kind in buttons
+                {"action": plan_action_id(kind, self._server_id, fub_id, token), "title": texts[kind]}
+                for kind in buttons
             ]
         if alarm:
             # Delivered at once and through Do Not Disturb focus (Android: ttl/priority, iOS: interruption-level).
@@ -587,109 +623,147 @@ class ManagedPlanWatchdog:
             },
             quiet=quiet,
         )
-        if delivered:
-            self._vanished_push_unsent.pop(fub_id, None)
+        if delivered and token is not None:
+            self._vanished_push_unsent.pop(token, None)
         return delivered
 
-    async def async_sync_vanished(self, vanished: Mapping[int, str]) -> None:
-        """Repair per watched user plan Comexio no longer has; alarm push for a newly vanished one.
+    async def async_sync_vanished(self, vanished: Collection[tuple[int, str]]) -> None:
+        """Repair per watched user plan Comexio no longer has, by (fub_id, name); alarm push for a newly vanished one.
 
         The first call after setup pushes every vanished plan, as the stopped-plan check does: a
-        plan deleted while HA was down is reported, and a stale "stopped" push with its Start
-        action is replaced. A plan back again (restored under a new ID) or unpicked loses its
-        repair and push, except a "restored" confirmation, which stays on the phone.
+        plan deleted while HA was down is reported. A plan back again (restored under a new ID) or
+        unpicked loses its repair and push, except a "restored" confirmation, which stays on the phone.
         """
-        previous = self.vanished or {}
-        self.vanished = dict(vanished)
-        for fub_id, name in vanished.items():
+        previous = self.vanished or set()
+        self.vanished = set(vanished)
+        self._sync_vanished_issues(self.vanished)
+        newly_vanished = self.vanished - previous
+        for fub_id, name in sorted(newly_vanished | self._vanished_push_retries_due(self.vanished)):
+            await self._async_push_vanished(fub_id, name, retry=(fub_id, name) not in newly_vanished)
+        for fub_id, name in sorted(previous - self.vanished):
+            token = vanished_plan_token(fub_id, name)
+            if token in self._restored_pushes:
+                self._restored_pushes.discard(token)
+                continue
+            await self._async_clear_push(fub_id, token)
+
+    def _sync_vanished_issues(self, vanished: Collection[tuple[int, str]]) -> None:
+        for fub_id, name in vanished:
             details = {"plan_name": name, "fub_id": str(fub_id)}
             ir.async_create_issue(
                 self._hass,
                 DOMAIN,
-                vanished_plan_issue_id(self._server_id, fub_id),
+                vanished_plan_issue_id(self._server_id, fub_id, name),
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key=ISSUE_FUNCTION_PLAN_VANISHED,
                 translation_placeholders=details,
                 data={"entry_id": self._entry_id, **details},
             )
-        wanted = {vanished_plan_issue_id(self._server_id, fub_id) for fub_id in vanished}
+        wanted = {vanished_plan_issue_id(self._server_id, fub_id, name) for fub_id, name in vanished}
         for issue_id in _own_issue_ids(self._hass, self._server_id, vanished=True):
             if issue_id not in wanted:
                 ir.async_delete_issue(self._hass, DOMAIN, issue_id)
-        newly_vanished = vanished.keys() - previous.keys()
-        for fub_id in sorted(newly_vanished | self._vanished_push_retries_due(vanished)):
-            retry = fub_id not in newly_vanished
-            if not retry:
-                _LOGGER.warning(
-                    "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio",
-                    self._server_id,
-                    vanished[fub_id],
-                    fub_id,
-                )
-            delivered = await self._async_push(
-                fub_id,
-                vanished[fub_id],
-                "vanished_title",
-                "vanished",
-                actions=(ACTION_RESTORE, ACTION_UNWATCH),
-                alarm=True,
-                quiet=retry,  # its first failure was logged; a dead notify service must not flood the log
-            )
-            if not delivered:
-                self._vanished_push_unsent[fub_id] = time.monotonic()  # the answer's time: the gap starts here
-        for fub_id in sorted(previous.keys() - vanished.keys()):
-            if fub_id in self._restored_pushes:
-                self._restored_pushes.discard(fub_id)
-                continue
-            await self._async_clear_push(fub_id)
 
-    def _vanished_push_retries_due(self, vanished: Mapping[int, str]) -> set[int]:
+    async def _async_push_vanished(self, fub_id: int, name: str, *, retry: bool) -> None:
+        """The alarm push of a deleted plan; "Restore" only for a plan its backups can be found by."""
+        if not retry:
+            _LOGGER.warning(
+                "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio", self._server_id, name, fub_id
+            )
+        token = vanished_plan_token(fub_id, name)
+        delivered = await self._async_push(
+            fub_id,
+            name,
+            "vanished_title",
+            "vanished",
+            token=token,
+            actions=_vanished_actions(fub_id, name),
+            alarm=True,
+            quiet=retry,  # its first failure was logged; a dead notify service must not flood the log
+        )
+        if not delivered:
+            self._vanished_push_unsent[token] = time.monotonic()  # the answer's time: the gap starts here
+
+    def _vanished_push_retries_due(self, vanished: Collection[tuple[int, str]]) -> set[tuple[int, str]]:
         """Undelivered vanished alarms due again; one of a plan back again (or unpicked) is dropped."""
+        by_token = {vanished_plan_token(fub_id, name): (fub_id, name) for fub_id, name in vanished}
         self._vanished_push_unsent = {
-            fub_id: failed_at for fub_id, failed_at in self._vanished_push_unsent.items() if fub_id in vanished
+            token: failed_at for token, failed_at in self._vanished_push_unsent.items() if token in by_token
         }
         now = time.monotonic()
         return {
-            fub_id
-            for fub_id, failed_at in self._vanished_push_unsent.items()
+            by_token[token]
+            for token, failed_at in self._vanished_push_unsent.items()
             if now - failed_at >= FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
         }
 
+    def vanished_name(self, token: str) -> str | None:
+        """The name of the vanished plan a push action's token (vanished_plan_token) names; None if none is."""
+        return next(
+            (name for fub_id, name in self.vanished or () if vanished_plan_token(fub_id, name) == token),
+            None,
+        )
+
     async def async_push_no_backup(self, fub_id: int, name: str) -> None:
         """Tell the phone a vanished plan has no backup to restore it from; "Stop watching" stays."""
-        await self._async_push(fub_id, name, "no_backup_title", "no_backup", actions=(ACTION_UNWATCH,))
+        await self._async_push(
+            fub_id,
+            name,
+            "no_backup_title",
+            "no_backup",
+            token=vanished_plan_token(fub_id, name),
+            actions=(ACTION_UNWATCH,),
+        )
 
     async def async_push_restored(self, fub_id: int, name: str, *, complete: bool = True) -> None:
         """Replace the vanished push with "restored" once its Restore action brought the plan back.
 
         complete: False says the plan is back but missing parts (a PARTIAL restore).
         """
-        if fub_id in (self.vanished or {}):  # a check that already cleared it would leave the entry stale
-            self._restored_pushes.add(fub_id)
+        token = vanished_plan_token(fub_id, name)
+        if (fub_id, name) in (self.vanished or ()):  # a check that already cleared it would leave the entry stale
+            self._restored_pushes.add(token)
         key = "restored" if complete else "restored_partial"
-        await self._async_push(fub_id, name, "restored_title", key)
+        await self._async_push(fub_id, name, "restored_title", key, token=token)
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
         """Tell the phone a Restore from its push failed or was refused, with both actions again."""
         await self._async_push(
-            fub_id, name, "restore_failed_title", "restore_failed", actions=(ACTION_RESTORE, ACTION_UNWATCH)
+            fub_id,
+            name,
+            "restore_failed_title",
+            "restore_failed",
+            token=vanished_plan_token(fub_id, name),
+            actions=_vanished_actions(fub_id, name),
         )
 
-    async def async_push_check_pending(self, fub_id: int) -> None:
+    async def async_push_check_pending(self, fub_id: int, token: str) -> None:
         """A push action arrived before the first check after setup: nothing is known yet, try again."""
         await self._async_push(
-            fub_id, "", "check_pending_title", "check_pending", actions=(ACTION_RESTORE, ACTION_UNWATCH)
+            fub_id,
+            "",
+            "check_pending_title",
+            "check_pending",
+            token=token,
+            actions=(ACTION_RESTORE, ACTION_UNWATCH),
         )
 
-    async def async_dismiss_push(self, fub_id: int) -> None:
-        """Remove a plan's push from the phones, e.g. one whose "Start plan" action is no longer honoured."""
-        await self._async_clear_push(fub_id)
+    async def async_dismiss_push(self, fub_id: int, name: str | None = None) -> None:
+        """Remove a plan's push from the phones: its "stopped" one, or with name its deleted-plan one.
 
-    async def _async_clear_push(self, fub_id: int) -> None:
+        E.g. one whose "Start plan" action is no longer honoured, or the alarm of a plan restored meanwhile.
+        """
+        await self._async_clear_push(fub_id, None if name is None else vanished_plan_token(fub_id, name))
+
+    async def async_dismiss_vanished_push(self, fub_id: int, token: str) -> None:
+        """Remove a deleted plan's push by the token its action carried (the name may be unknown by now)."""
+        await self._async_clear_push(fub_id, token)
+
+    async def _async_clear_push(self, fub_id: int, token: str | None = None) -> None:
         # A companion-app command: any other notify service would deliver it as the text "clear_notification".
         await self._async_send(
-            {"message": "clear_notification", "data": {"tag": self._push_tag(fub_id)}}, mobile_app_only=True
+            {"message": "clear_notification", "data": {"tag": self._push_tag(fub_id, token)}}, mobile_app_only=True
         )
 
     async def _async_send(

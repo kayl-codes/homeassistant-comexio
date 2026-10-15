@@ -8,7 +8,7 @@ import pytest
 from custom_components.comexio.binary_sensor import ComexioManagedPlansProblemSensor
 
 
-def _sensor(stopped: dict[int, str] | None, vanished: dict[int, str] | None) -> ComexioManagedPlansProblemSensor:
+def _sensor(stopped: dict[int, str] | None, vanished: set[tuple[int, str]] | None) -> ComexioManagedPlansProblemSensor:
     sensor = object.__new__(ComexioManagedPlansProblemSensor)
     watchdog = SimpleNamespace(
         stopped=stopped,
@@ -26,18 +26,19 @@ def _sensor(stopped: dict[int, str] | None, vanished: dict[int, str] | None) -> 
     [
         (None, None, None),  # nothing checked yet
         ({}, None, False),
-        ({}, {}, False),
-        ({19: "Test1"}, {}, True),
-        ({}, {47: "Test4"}, True),  # (Sourcery) a deleted watched plan left the sensor off
+        ({}, set(), False),
+        ({19: "Test1"}, set(), True),
+        ({}, {(47, "Test4")}, True),  # (Sourcery) a deleted watched plan left the sensor off
     ],
 )
 def test_the_problem_sensor_counts_deleted_plans(
-    stopped: dict[int, str] | None, vanished: dict[int, str] | None, expected: bool | None
+    stopped: dict[int, str] | None, vanished: set[tuple[int, str]] | None, expected: bool | None
 ) -> None:
     assert _sensor(stopped, vanished).is_on is expected
 
 
 def test_the_problem_sensor_lists_deleted_plans() -> None:
-    attrs: dict[str, Any] = _sensor({}, {47: "Test4"}).extra_state_attributes
-    assert attrs["vanished_plans"] == [{"fub_id": 47, "name": "Test4"}]
+    attrs: dict[str, Any] = _sensor({}, {(47, "Test4"), (47, "Other")}).extra_state_attributes
+    # (Sourcery) An ID can be reused: two deleted plans on one ID are listed both.
+    assert attrs["vanished_plans"] == [{"fub_id": 47, "name": "Other"}, {"fub_id": 47, "name": "Test4"}]
     assert attrs["stopped_plans"] == []
