@@ -388,7 +388,8 @@
           "plan_exists_again": "Ce plan existe de nouveau dans Comexio, ses sauvegardes ne sont donc plus orphelines. Rien n'a été modifié.",
           "already_deleted": "Ces sauvegardes ont déjà été supprimées. Rien n'a été modifié.",
           "loaded_in_preview": "La sauvegarde la plus récente du plan est maintenant affichée dans la carte du plan (Plan → Orphaned plans). Cette réparation reste ouverte jusqu'à ce que vous conserviez ou supprimiez les sauvegardes.",
-          "preview_failed": "Les sauvegardes n'ont pas pu être chargées dans l'aperçu du plan — elles ont peut-être été supprimées entre-temps, ou les sélecteurs de plan sont désactivés. Les sauvegardes n'ont pas été modifiées."
+          "preview_failed": "Les sauvegardes n'ont pas pu être chargées dans l'aperçu du plan — elles ont peut-être été supprimées entre-temps, ou les sélecteurs de plan sont désactivés. Les sauvegardes n'ont pas été modifiées.",
+          "backups_busy": "Une restauration de plan de fonctions est en cours, ou l'intégration est en train de se recharger — elle déplace et marque des sauvegardes. Les sauvegardes n'ont pas été modifiées — réessayez une fois l'opération terminée."
         }
       }
     },

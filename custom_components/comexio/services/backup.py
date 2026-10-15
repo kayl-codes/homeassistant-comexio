@@ -1036,13 +1036,24 @@ async def _move_restored_plan_lineage(
     return purged, updated, backups_error, refs_error
 
 
-def _restored_references_line(old_fub_id: int, updated_consumers: list[str], refs_error: str | None) -> str:
+def _restored_references_line(
+    old_fub_id: int, updated_consumers: list[str], refs_error: str | None, old_id_still_live: bool
+) -> str:
     """Result line of a restore as new plan: what happened to the references to the old ID."""
     if refs_error:
         return (
             f"References: {ICON_WARNING} not updated — they still point at old ID {old_fub_id} "
             f"({refs_error} — see log)."
         )
+    if old_id_still_live:
+        # A selection by the ID alone (plan selector, unnamed watchdog pick) means the plan holding it now.
+        kept = (
+            f"another plan holds old ID {old_fub_id} now, so a selection by that ID alone "
+            "(plan selector, unnamed watchdog pick) stays with that plan."
+        )
+        if updated_consumers:
+            return f"Updated references: {', '.join(updated_consumers)}; {kept}"
+        return f"References: none moved — {kept}"
     if updated_consumers:
         return f"Updated references: {', '.join(updated_consumers)}"
     return "References: nothing pointed at the old ID (cluster plan map / plan selector) — nothing to update."
@@ -1155,7 +1166,7 @@ async def _restore_plan_as_new(
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
     activation_line = _new_plan_activation_line(run_ok, auto_start)
-    consumer_line = _restored_references_line(old_fub_id, updated_consumers, refs_error)
+    consumer_line = _restored_references_line(old_fub_id, updated_consumers, refs_error, old_id_still_live)
     lineage_line = _restored_lineage_line(plan_name, old_fub_id, new_fub_id, old_id_still_live, purged, lineage_error)
 
     msg = (
@@ -1858,9 +1869,9 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
 def _refuse_backup_change_while_restoring(hass: HomeAssistant, coordinator: ComexioCoordinator, title: str) -> bool:
     """Whether a restore runs or the entry unloads — then notify and return True.
 
-    A restore moves and marks backups, and a deletion meanwhile could be undone on disk. Once the
-    unload has waited for the running plan edits (async_wait_before_unload), a deletion starting
-    after it would still write the backup store while the entry is torn down.
+    A restore moves and marks backups, and a deletion or keep decision meanwhile could be undone on
+    disk. Once the unload has waited for the running plan edits (async_wait_before_unload), a change
+    starting after it would still write the backup store while the entry is torn down.
     """
     if coordinator.unloading:
         reason = "the integration is reloading or unloading"
@@ -1949,6 +1960,27 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     persistent_notification.async_create(hass, msg, title="Function Plan Purge Orphaned Backups")
 
 
+async def _apply_keep_decision(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int, plan_name: str, keep: bool
+) -> str:
+    """Keep (or stop keeping) a deleted plan's backups; returns the result message."""
+    manager = coordinator.function_plan_backup
+    if keep:
+        newly_kept = await manager.async_keep_orphaned(fub_id, plan_name)
+        delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
+        return (
+            f"Keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — they are no longer purged."
+            if newly_kept
+            else f"The backups of deleted plan '{plan_name}' (fub {fub_id}) are kept already — nothing changed."
+        )
+    if await manager.async_unkeep_orphaned(fub_id, plan_name):
+        return (
+            f"No longer keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — you are asked "
+            "about them again once the retention period has passed."
+        )
+    return f"The backups of deleted plan '{plan_name}' (fub {fub_id}) were not kept — nothing changed."
+
+
 async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceCall):
     """Keep (or stop keeping) the backups of a deleted function plan.
 
@@ -1992,21 +2024,11 @@ async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceC
         )
         return
 
-    if bool(call.data.get("keep", True)):
-        newly_kept = await manager.async_keep_orphaned(fub_id, plan_name)
-        delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
-        msg = (
-            f"Keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — they are no longer purged."
-            if newly_kept
-            else f"The backups of deleted plan '{plan_name}' (fub {fub_id}) are kept already — nothing changed."
-        )
-    elif await manager.async_unkeep_orphaned(fub_id, plan_name):
-        msg = (
-            f"No longer keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — you are asked "
-            "about them again once the retention period has passed."
-        )
-    else:
-        msg = f"The backups of deleted plan '{plan_name}' (fub {fub_id}) were not kept — nothing changed."
+    if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_KEEP_BACKUPS_ERR):
+        return
+    # No await since the check: a restore starting from here on refuses until the change ends.
+    with coordinator.plan_edit():
+        msg = await _apply_keep_decision(hass, coordinator, fub_id, plan_name, bool(call.data.get("keep", True)))
 
     _LOGGER.info("Function Plan Keep Backups: %s", msg)
     coordinator.async_update_listeners()  # refresh the backup selector's orphaned-plans view

@@ -1372,7 +1372,12 @@ class ComexioRepairFlow(RepairsFlow):
             # would delete it).
             loaded = await coordinator.async_load_orphaned_plan_into_preview(fub_id, plan_name)
             return self.async_abort(reason="loaded_in_preview" if loaded else "preview_failed")
-        title = await self._async_apply_orphaned_backups_action(manager, user_input["action"], fub_id, plan_name)
+        if coordinator.unloading or coordinator._restore_lock.locked():
+            # A restore moves and marks backups; after the unload's wait a write would hit a torn-down entry.
+            return self.async_abort(reason="backups_busy")
+        # No await since the check: a restore starting from here on refuses until the change ends.
+        with coordinator.plan_edit():
+            title = await self._async_apply_orphaned_backups_action(manager, user_input["action"], fub_id, plan_name)
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
         if title is None:
             return self.async_abort(reason="already_deleted")

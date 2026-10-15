@@ -2457,8 +2457,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
             new_options[CONF_FUNCTION_PLAN_PLAN_MAP] = {**plan_map, plan_name: new_fub_id}
             updated.append(f"cluster plan map entry '{plan_name}' → fub_id {new_fub_id}")
         if str(new_options.get(CONF_FUNCTION_PLAN_FUB_ID)) == str(old_fub_id):
-            new_options[CONF_FUNCTION_PLAN_FUB_ID] = new_fub_id
-            updated.append(f"selected function plan → fub_id {new_fub_id}")
+            if old_id_still_live:
+                # A bare-ID selection whose ID another plan holds now stays with that plan, like a bare-ID pick.
+                _LOGGER.info(
+                    "[%s] Selected function plan stays on fub_id %s: another plan holds it now, '%s' is fub_id %s",
+                    self.server_id,
+                    old_fub_id,
+                    plan_name,
+                    new_fub_id,
+                )
+            else:
+                new_options[CONF_FUNCTION_PLAN_FUB_ID] = new_fub_id
+                updated.append(f"selected function plan → fub_id {new_fub_id}")
         dismiss_alarm = False
         if (
             picks := repointed_watchdog_user_plan_picks(

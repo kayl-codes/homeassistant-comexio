@@ -397,6 +397,39 @@ def test_a_restore_as_new_moves_the_watchdog_pick_in_the_options() -> None:
     coordinator.request_options_update_without_reload.assert_not_called()
 
 
+def test_a_restore_as_new_leaves_the_selected_plan_with_the_plan_now_holding_the_old_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(Sourcery) The selector stored only the ID; once another plan holds it, it means that plan."""
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = "cx1"
+    coordinator.config_entry = SimpleNamespace(options={CONF_FUNCTION_PLAN_FUB_ID: "47"})
+    coordinator.request_options_update_without_reload = MagicMock()  # type: ignore[method-assign]
+    coordinator.plan_watchdog = SimpleNamespace(vanished={}, async_dismiss_push=AsyncMock())
+    with caplog.at_level(logging.INFO):
+        updated = asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 47, 52, old_id_still_live=True))
+    assert updated == []
+    coordinator.request_options_update_without_reload.assert_not_called()
+    assert "Selected function plan stays on fub_id 47" in caplog.text
+
+    updated = asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 47, 52))
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_FUB_ID] == 52
+    assert updated == ["selected function plan → fub_id 52"]
+
+
+@pytest.mark.parametrize("updated", [[], ["cluster plan map entry 'Test4' → fub_id 52"]])
+def test_the_restore_report_names_the_selections_staying_with_the_plan_now_holding_the_old_id(
+    updated: list[str],
+) -> None:
+    """(Review) "nothing pointed at the old ID" was false while the plan selector still held it."""
+    line = backup._restored_references_line(47, updated, None, True)
+    assert "nothing pointed" not in line
+    assert "another plan holds old ID 47 now" in line
+    assert "plan selector" in line
+    assert all(entry in line for entry in updated)
+
+
 def test_a_restore_as_new_writes_the_options_before_it_awaits_the_push_dismissal() -> None:
     """(Sourcery) An options save during the await was overwritten by the snapshot taken before it."""
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
