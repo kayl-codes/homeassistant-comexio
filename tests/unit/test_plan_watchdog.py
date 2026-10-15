@@ -627,11 +627,11 @@ def test_vanished_and_stopped_repairs_do_not_clean_up_each_other(ir: MagicMock) 
     ("action", "parsed"),
     [
         ("COMEXIO_START_PLAN_cx1_47", (ACTION_START, 47, None)),
-        ("COMEXIO_RESTORE_PLAN_cx1_47_3b190769", (ACTION_RESTORE, 47, "47_3b190769")),
-        ("COMEXIO_UNWATCH_PLAN_cx1_47_3b190769", (ACTION_UNWATCH, 47, "47_3b190769")),
-        ("COMEXIO_RESTORE_PLAN_cx1_47", None),  # a deleted plan's action carries its name checksum
-        ("COMEXIO_START_PLAN_cx1_47_3b190769", None),
-        ("COMEXIO_RESTORE_PLAN_cx1_2_47_3b190769", None),  # another server's ("cx1_2")
+        ("COMEXIO_RESTORE_PLAN_cx1_47_0123456789abcdef", (ACTION_RESTORE, 47, "47_0123456789abcdef")),
+        ("COMEXIO_UNWATCH_PLAN_cx1_47_0123456789abcdef", (ACTION_UNWATCH, 47, "47_0123456789abcdef")),
+        ("COMEXIO_RESTORE_PLAN_cx1_47", None),  # a deleted plan's action carries its name digest
+        ("COMEXIO_START_PLAN_cx1_47_0123456789abcdef", None),
+        ("COMEXIO_RESTORE_PLAN_cx1_2_47_0123456789abcdef", None),  # another server's ("cx1_2")
         ("COMEXIO_RESTORE_PLAN_cx1_x", None),
         (None, None),
     ],
@@ -675,7 +675,7 @@ def test_two_deleted_plans_on_one_id_get_a_repair_and_push_each(ir: MagicMock) -
 
 
 def test_a_server_does_not_clean_up_the_deleted_plan_repairs_of_another(ir: MagicMock) -> None:
-    """Server "cx1" must not take "cx1_2"'s repairs ("..._cx1_2_47_<crc>") for its own."""
+    """Server "cx1" must not take "cx1_2"'s repairs ("..._cx1_2_47_<digest>") for its own."""
     other, _ = _watchdog(server_id="cx1_2")
     asyncio.run(other.async_sync_vanished(TEST4))
     watchdog, _ = _watchdog()

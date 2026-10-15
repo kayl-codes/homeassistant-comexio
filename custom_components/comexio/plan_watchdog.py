@@ -18,11 +18,11 @@ watched plan as newly stopped.
 
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from datetime import datetime
+import hashlib
 import logging
 import re
 import time
 from typing import Any
-import zlib
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
@@ -153,16 +153,17 @@ def stopped_plan_issue_id(server_id: str, fub_id: int) -> str:
 
 
 def vanished_plan_token(fub_id: int, name: str) -> str:
-    """A deleted plan's identity in its repair id, push tag and push actions: its ID and a checksum of its name.
+    """A deleted plan's identity in its repair id, push tag and push actions: its ID and a digest of its name.
 
     The ID alone is not one: an ID can be reused, so two deleted watched plans may share it (picks
-    "47:X" and "47:Y"). The name itself cannot go into an action id (any character), its checksum can.
+    "47:X" and "47:Y"). The name itself cannot go into an action id (any character), its digest can:
+    64 bits of SHA-256, so two names of one ID do not collide (CRC32's 32 bits could).
     """
-    return f"{fub_id}_{zlib.crc32(name.encode()):08x}"
+    return f"{fub_id}_{hashlib.sha256(name.encode()).hexdigest()[:16]}"
 
 
-# vanished_plan_token: the plan id (group) and the name checksum.
-_TOKEN_PATTERN = r"(\d+)_[0-9a-f]{8}"
+# vanished_plan_token: the plan id (group) and the name digest.
+_VANISHED_ID_PATTERN = r"(\d+)_[0-9a-f]{16}"
 
 
 def unnamed_plan_label(fub_id: int) -> str:
@@ -192,7 +193,7 @@ def _own_issue_ids(hass: HomeAssistant, server_id: str, *, vanished: bool = Fals
     server "home_2", so the rest of the id must be exactly the plan id (or vanished-plan token).
     """
     prefix = _vanished_issue_prefix(server_id) if vanished else _issue_prefix(server_id)
-    own = re.compile(re.escape(prefix) + (_TOKEN_PATTERN if vanished else r"\d+"))
+    own = re.compile(re.escape(prefix) + (_VANISHED_ID_PATTERN if vanished else r"\d+"))
     return [issue_id for domain, issue_id in ir.async_get(hass).issues if domain == DOMAIN and own.fullmatch(issue_id)]
 
 
@@ -215,7 +216,7 @@ def parse_plan_action(server_id: str, action: Any) -> tuple[str, int, str | None
     if not isinstance(action, str):
         return None
     for kind, prefix in _ACTION_PREFIXES.items():
-        pattern = r"(\d+)" if kind == ACTION_START else f"(?P<token>{_TOKEN_PATTERN})"
+        pattern = r"(\d+)" if kind == ACTION_START else f"(?P<token>{_VANISHED_ID_PATTERN})"
         if match := re.fullmatch(rf"{re.escape(prefix + server_id)}_{pattern}", action):
             if kind == ACTION_START:
                 return kind, int(match[1]), None

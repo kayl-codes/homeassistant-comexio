@@ -955,9 +955,10 @@ def _new_plan_status(
 async def _start_new_plan(api, new_fub_id: int, plan_name: str, auto_start: bool) -> tuple[bool | None, str | None]:
     """run_fup of a plan a restore built: (run_ok, start error label).
 
-    run_ok is None with auto_start off (create_fup leaves it inactive). A start that raises does
-    not undo the build: the plan stays restored, only not started — not reported as a failed
-    restore, whose retry would build it a second time. Its error label names it in the result.
+    run_ok is None with auto_start off (create_fup leaves it inactive). A start that raises —
+    whatever the error — does not undo the build: the plan stays restored, only not started — not
+    reported as a failed restore, whose retry would build it a second time. Its error label names
+    it in the result; an unexpected error is logged with its traceback.
     """
     if not auto_start:
         return None, None
@@ -966,6 +967,11 @@ async def _start_new_plan(api, new_fub_id: int, plan_name: str, auto_start: bool
     except (aiohttp.ClientError, TimeoutError) as exc:
         _LOGGER.warning(
             "Restored function plan '%s' (ID %s) was built, but starting it failed: %r", plan_name, new_fub_id, exc
+        )
+        return False, _error_label(exc)
+    except Exception as exc:  # the plan exists: any start error must leave it restored
+        _LOGGER.exception(
+            "Restored function plan '%s' (ID %s) was built, but starting it failed", plan_name, new_fub_id
         )
         return False, _error_label(exc)
 

@@ -43,20 +43,24 @@ def test_restore_as_new_starts_the_plan_only_with_auto_start(auto_start: bool, s
     )
 
 
-START_FAILED = f"Activation: {backup.ICON_WARNING} starting it failed (TimeoutError"
+START_FAILED = f"Activation: {backup.ICON_WARNING} starting it failed ("
 
 
-def test_a_restore_as_new_whose_start_fails_still_counts_as_restored() -> None:
-    """(Sourcery) A start timing out after the build was reported as a failed restore: a retry built it twice."""
-    _run_fup, notify, coordinator = _run(True, AsyncMock(side_effect=TimeoutError))
+@pytest.mark.parametrize("error", [TimeoutError(), RuntimeError("odd reply")])
+def test_a_restore_as_new_whose_start_fails_still_counts_as_restored(error: Exception) -> None:
+    """(Sourcery) A start failing after the build was reported as a failed restore: a retry built it twice.
+
+    Any error, not only the network ones: the plan exists either way.
+    """
+    _run_fup, notify, coordinator = _run(True, AsyncMock(side_effect=error))
     coordinator.note_plan_restored_as_new.assert_called_once_with(42, "Kitch", 50, complete=True)
     coordinator.function_plan_backup.async_rekey_fub_id.assert_awaited_once()  # the lineage moved to the new ID
     # (local review) Named as a failed start, not as Comexio's routine "created inactive".
-    assert START_FAILED in notify.call_args.args[1]
+    assert f"{START_FAILED}{type(error).__name__}" in notify.call_args.args[1]
     assert notify.call_args.kwargs["title"] != backup._TITLE_RESTORE_ERR
 
 
-@pytest.mark.parametrize("error", [TimeoutError(), aiohttp.ClientError("gone")])
+@pytest.mark.parametrize("error", [TimeoutError(), aiohttp.ClientError("gone"), RuntimeError("odd reply")])
 def test_a_restore_as_copy_whose_start_fails_keeps_the_copy(error: Exception) -> None:
     api = SimpleNamespace(
         create_fup=AsyncMock(return_value=50),
