@@ -198,6 +198,8 @@ class _FakeCoordinator(SimpleNamespace):
     plan_edit = ComexioCoordinator.plan_edit
     plan_edits_running = ComexioCoordinator.plan_edits_running
     async_watch_managed_plans = ComexioCoordinator.async_watch_managed_plans
+    _async_watch_plans_and_refresh = ComexioCoordinator._async_watch_plans_and_refresh
+    _watchdog_run_state_for = ComexioCoordinator._watchdog_run_state_for
     _async_watch_managed_plans = ComexioCoordinator._async_watch_managed_plans
     _async_vanished_user_plans_named = ComexioCoordinator._async_vanished_user_plans_named
     _notify_bare_pick_kept = ComexioCoordinator._notify_bare_pick_kept
@@ -457,6 +459,21 @@ def test_failures_keep_the_state_then_turn_the_sensors_unavailable(api: ComexioA
     asyncio.run(coordinator._async_refresh_plan_run_states())
     assert _available(coordinator) is True
     assert coordinator.async_update_listeners.call_count == 2  # back available, without a state change
+
+
+def test_a_failed_fetch_still_syncs_the_vanished_plans(api: ComexioAPI) -> None:
+    """(Review, #181) a failing run-state endpoint left a deleted watched plan without its repair and push."""
+    api.client.get_function_plan_run_states = AsyncMock(return_value={})  # format changed: no plan classifiable
+    coordinator = _coordinator(api)
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once()
+    assert coordinator._plan_run_state_fail_streak == 1
+    assert coordinator._plan_run_state_fetching is False
+    # (Review) No verdict and no start on the last known states: the clock-based steps would take them as new.
+    _managed, run_state, _user_plans = coordinator.plan_watchdog.async_check.call_args.args
+    assert api.get_fub_active(43) is True  # the cache still holds a state …
+    assert run_state(43) is None  # … the watchdog does not judge it
+    assert coordinator.plan_watchdog.async_check.call_args.kwargs["auto_start"] is False
 
 
 def test_full_poll_freshens_the_state_but_keeps_the_outage_count(

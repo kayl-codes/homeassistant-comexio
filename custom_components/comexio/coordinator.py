@@ -252,6 +252,10 @@ _SUN_ATTR_BY_FREQ = {
 }
 
 
+def _unknown_run_state(_fub_id: int) -> None:
+    """A watchdog run-state reader for a check without a fresh read: every plan's state is unknown."""
+
+
 def _build_sun_times(hass: HomeAssistant) -> dict[str, str]:
     """Pre-format sun.sun's next-occurrence attributes for the plan-preview tooltip.
 
@@ -4196,13 +4200,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         if not fub_ids:
             # No run state to fetch, but a watched plan deleted last still gets its vanished repair and push.
-            if await self.async_watch_managed_plans():
-                self.async_update_listeners()
+            await self._async_watch_plans_and_refresh()
             return
         self._plan_run_state_last_fetch = time.monotonic()
         run_state_mark = self.api.run_state_mark()
         cache_epoch = self.api.fub_cache_epoch()
         self._plan_run_state_fetching = True
+        fetch_failed = False
         try:
             states = await self.api.get_function_plan_run_states(fub_ids, session=session)
             if not states:
@@ -4213,9 +4217,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if isinstance(err, UNREACHABLE_ERRORS):
                 self.note_comexio_unreachable()
             await self._async_plan_run_state_fetch_failed(err, session)
-            return
+            fetch_failed = True
         finally:
             self._plan_run_state_fetching = False
+        if fetch_failed:
+            # The full polls may still read the plan list: a watched plan deleted meanwhile gets its vanished
+            # repair and push. No plan is judged on the last known run states: the clock-based steps (existence
+            # check, retry gap, boot grace) would run on an old reading as if it were new.
+            await self._async_watch_plans_and_refresh(run_states_read=False)
+            return
         # Only the fetch's own outage recovers here; an unread plan list ends with the next full poll.
         was_unavailable = self._plan_run_state_stale_count >= FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
         if self._plan_run_state_fail_streak:
@@ -4232,6 +4242,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         missed_out = self.api.fub_cache_epoch() == cache_epoch and self._count_missed_plan_run_states(fub_ids, states)
         changed = state_changed or was_unavailable or missed_out
         if await self.async_watch_managed_plans() or changed:
+            self.async_update_listeners()
+
+    async def _async_watch_plans_and_refresh(self, *, run_states_read: bool = True) -> None:
+        """Run a watchdog check and refresh the entities when its stopped set changed."""
+        if await self.async_watch_managed_plans(run_states_read=run_states_read):
             self.async_update_listeners()
 
     def _existing_plan_names(self, raw_ids: Iterable[Any]) -> dict[int, str]:
@@ -4397,20 +4412,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         return self._plan_watch_blocked() or self.plan_edits_running or self.unloading
 
-    async def async_watch_managed_plans(self) -> bool:
+    async def async_watch_managed_plans(self, *, run_states_read: bool = True) -> bool:
         """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed.
 
         One check at a time: a check started meanwhile (e.g. by Stop watching) waits and then judges
         the picks and plan list as they are by then, after the older one has synced its view.
+        run_states_read=False (the run-state fetch failed): every run state counts as unknown, so the
+        check only syncs the vanished plans and keeps every verdict.
         """
         if self._plan_watch_blocked():
             return False
         async with self._plan_watch_check_lock:
             if self._plan_watch_blocked():
                 return False
-            return await self._async_watch_managed_plans()
+            return await self._async_watch_managed_plans(run_states_read)
 
-    async def _async_watch_managed_plans(self) -> bool:
+    async def _async_watch_managed_plans(self, run_states_read: bool = True) -> bool:
         """async_watch_managed_plans' check, run under _plan_watch_check_lock."""
         if self.live_plan_list() is None:
             # Until a poll read the whole plan list, the cache holds only the plans HA created or looked
@@ -4435,11 +4452,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # but no plan is judged stopped anew or started: a booting Comexio starts its plans itself.
         stopped_changed = await self.plan_watchdog.async_check(
             watched,
-            self._watchdog_grace_run_state if in_grace else self._watchdog_verified_run_state,
+            self._watchdog_run_state_for(in_grace, run_states_read),
             user_plans.keys(),
             # During a plan edit the start would only be deferred, logged on every tick: it follows
             # with the first check after the edit.
-            auto_start=not in_grace and not self.plan_edits_running,
+            auto_start=run_states_read and not in_grace and not self.plan_edits_running,
             # Their "stopped" push is replaced by the vanished one below (same tag), not cleared first.
             keep_push=vanished.keys(),
         )
@@ -4505,6 +4522,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _plan_watch_held(self) -> bool:
         """Whether Comexio is unreachable or the boot grace after it runs: no plan is judged stopped or started."""
         return self._comexio_unreachable or self._in_plan_watch_boot_grace()
+
+    def _watchdog_run_state_for(self, in_grace: bool, run_states_read: bool) -> Callable[[int], bool | None]:
+        """The run-state reader of a watchdog check: all unknown without a fresh read, only "running" in the grace."""
+        if not run_states_read:
+            return _unknown_run_state
+        return self._watchdog_grace_run_state if in_grace else self._watchdog_verified_run_state
 
     def _watchdog_grace_run_state(self, fub_id: int) -> bool | None:
         """_watchdog_run_state in the boot grace: only "running" counts, anything else keeps the last verdict."""
