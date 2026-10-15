@@ -50,9 +50,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   `fub_id` of a deleted plan, and plan names are not unique. Flag code that matches backups, snapshots, watches or
   findings to a plan by only one of the two.
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
-  plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. Check success by what
-  the operation itself reports (the returned `fub_id`); persisted data still matches a plan by `fub_id` and name
-  together (see *Plan identity*). The one valid name lookup recovers the id after Comexio confirmed a create without
+  plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
+  only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
+  succeeded only by its final status (see *Report after the final status*). Persisted data still matches a plan by
+  `fub_id` and name together (see *Plan identity*). The one valid name lookup recovers the id after Comexio confirmed a create without
   returning one, and accepts only exactly one plan with that name whose id was unknown before the create
   (`_find_created_plan`). Flag any other name lookup used as a success check or as the plan's identity.
 - **Data read from Comexio:** an entry counts as missing from a list or mapping read from Comexio (e.g. `$Fubs`)
