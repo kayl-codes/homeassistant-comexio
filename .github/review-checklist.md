@@ -51,7 +51,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   findings or in-flight guards of a vanished plan (the set of plans whose restore runs) to a plan by only one of
   the two — a guard keyed by name alone blocks a same-named other plan (#181). A live plan can be renamed while an
   operation on it runs, so the exclusion of operations on a live plan is a lock or the `plan_edit()` marker, never a
-  name-keyed set.
+  name-keyed set. A selection stored as a `fub_id` alone means the plan holding that id now: code that moves such a
+  selection to another id (e.g. after a restore as new plan) leaves it in place while another live plan holds the
+  old id (#181).
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
@@ -64,7 +66,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Data read from Comexio:** an entry counts as missing from a list or mapping read from Comexio (e.g. `$Fubs`)
   only after the whole list passed a shape check — every entry has the expected type, its key is a canonical id
   string, and an `Id` the entry carries matches that key. An unreadable or malformed list means "unknown", never "deleted". Flag code that turns a
-  read or parse failure into "entry missing" and acts on it (#158).
+  read or parse failure into "entry missing" and acts on it (#158). A failed read is also no fresh reading: the
+  steps that do not depend on it still run, and steps that judge by elapsed time do not use the last known values
+  as if they were new. Flag an early return on a failed read that skips the independent steps (#181).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
@@ -86,7 +90,8 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   after the save. Flag an `await` between the read of `entry.options` and its write (#181).
 - **Unload waits for running work:** `async_unload_entry` calls `coordinator.async_wait_before_unload()` before it
   unloads the platforms; the wait is bounded and polls — it never queues on a lock — for every operation that
-  writes Comexio or the options: a restore, a sync, a vanished-plan restore, a plan edit. A new
+  writes Comexio, the options or the backup store: a restore, a sync, a vanished-plan restore, a plan edit, a
+  backup change from a service or repair. A new
   long-running operation joins that wait and refuses to start while `coordinator.unloading` is set. Flag an
   operation that can still run or start after the unload passed its wait (#181).
 - **Background tasks report the whole flow:** a task started with `async_create_background_task` (or
@@ -111,7 +116,7 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   (a refused auto-start, `FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS`) may warn on each counted attempt. Automatic
   retries are not sent while Comexio is unreachable or its state could not be read: the watchdog's
   `_plan_watch_held()` and a failed run-state read, which starts nothing. This holds back the automatic retries only —
-  a start the user triggers from a repair or push is sent.
+  a start the user triggers from a repair or push is not held back by it (it still needs a successful login).
 - **Repair flows read the current entry:** before a destructive action (cleanup, delete, reset), a repair flow
   step reads the current config entry state (`options`/`data`) again instead of relying on `issue_data` alone —
   the dialog may have been open while the user changed the options, so the issue data can be stale (#160).
