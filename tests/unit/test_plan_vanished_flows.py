@@ -163,8 +163,9 @@ def test_an_unload_that_raises_lets_restores_and_plan_edits_start_again(raised_b
     hass = MagicMock()
     hass.data = {DOMAIN: {"e1": running}}
     hass.config_entries.async_unload_platforms = AsyncMock(side_effect=RuntimeError("boom"))
+    unload = async_unload_entry(hass, SimpleNamespace(entry_id="e1"))
     with pytest.raises(RuntimeError):
-        asyncio.run(async_unload_entry(hass, SimpleNamespace(entry_id="e1")))
+        asyncio.run(unload)
     assert running.unloading is False
     assert hass.config_entries.async_unload_platforms.await_count == int(raised_by == "unload")
 
