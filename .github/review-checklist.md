@@ -55,7 +55,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   succeeded only by its final status (see *Report after the final status*). Persisted data still matches a plan by
   `fub_id` and name together (see *Plan identity*). The one valid name lookup recovers the id after Comexio confirmed a create without
   returning one, and accepts only exactly one plan with that name whose id was unknown before the create
-  (`_find_created_plan`). Flag any other name lookup used as a success check or as the plan's identity.
+  (`_find_created_plan`). It cannot tell that plan from a same-named plan created in Comexio Studio at the same
+  moment — an accepted limit, concurrent Studio edits are out of scope; do not flag it. Flag any other name lookup
+  used as a success check or as the plan's identity.
 - **Data read from Comexio:** an entry counts as missing from a list or mapping read from Comexio (e.g. `$Fubs`)
   only after the whole list passed a shape check — every entry has the expected type, its key is a canonical id
   string, and an `Id` the entry carries matches that key. An unreadable or malformed list means "unknown", never "deleted". Flag code that turns a
