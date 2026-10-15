@@ -247,6 +247,9 @@ class ManagedPlanWatchdog:
         self._gave_up_at: dict[int, str] = {}
         # fub_id → time.monotonic() of its last refused auto-start (FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC).
         self._refused_at: dict[int, float] = {}
+        # fub_id → time.monotonic() of its last auto-start not sent or not answered (no failed attempt, but
+        # retried no sooner than FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC either).
+        self._deferred_at: dict[int, float] = {}
         # fub_id → name of the watched user plans Comexio no longer has (deleted); None until the first check.
         self.vanished: dict[int, str] | None = None
         # Vanished plans whose push was replaced by "restored": the plan dropping out of vanished keeps it.
@@ -381,6 +384,11 @@ class ManagedPlanWatchdog:
                 fub_id,
             )
         self.suspended -= lifted
+        self._deferred_at = {
+            fub_id: at
+            for fub_id, at in self._deferred_at.items()
+            if fub_id in managed and run_state(fub_id) is not True
+        }
         for fub_id in lifted:
             self._gave_up_at.pop(fub_id, None)
         for fub_id in lifted | healthy:
@@ -427,7 +435,7 @@ class ManagedPlanWatchdog:
                 continue
             if self._retry_too_soon(fub_id, now):
                 _LOGGER.debug(
-                    "[%s] Auto-start of monitored function plan '%s' (ID %s) waits until %s s after its refusal",
+                    "[%s] Auto-start of monitored function plan '%s' (ID %s) waits until %s s after its last attempt",
                     self._server_id,
                     name,
                     fub_id,
@@ -436,6 +444,7 @@ class ManagedPlanWatchdog:
                 continue
             result = await self._start_plan(fub_id)
             now = time.monotonic()  # the answer's time: the stopped-again window and the retry gap start here
+            deferred_before = self._deferred_at.pop(fub_id, None) is not None
             if result:
                 self._auto_started_at[fub_id] = now
                 self._notify_auto_started(fub_id, name)
@@ -444,18 +453,30 @@ class ManagedPlanWatchdog:
                 self._refused_at[fub_id] = now
                 self._count_failed_start(fub_id, name, "start refused by Comexio")
             else:
-                # Blocked by a running sync/restore, or no answer: says nothing about the plan, retried next poll.
-                _LOGGER.info(
-                    "[%s] Auto-start of monitored function plan '%s' (ID %s) deferred to the next check",
-                    self._server_id,
-                    name,
-                    fub_id,
-                )
+                self._defer_start(fub_id, name, now, logged_before=deferred_before)
         return started
 
+    def _defer_start(self, fub_id: int, name: str, now: float, *, logged_before: bool) -> None:
+        """A start not sent (a sync/restore runs) or not answered: no failed attempt, but the retry gap applies.
+
+        Without the gap an unanswered start would be sent again with every check; logged at info once
+        per series, the retries at debug.
+        """
+        self._deferred_at[fub_id] = now
+        _LOGGER.log(
+            logging.DEBUG if logged_before else logging.INFO,
+            "[%s] Auto-start of monitored function plan '%s' (ID %s) not sent or not answered; retried in %s s",
+            self._server_id,
+            name,
+            fub_id,
+            FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+        )
+
     def _retry_too_soon(self, fub_id: int, now: float) -> bool:
-        refused_at = self._refused_at.get(fub_id)
-        return refused_at is not None and now - refused_at < FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC
+        return any(
+            (last := attempts.get(fub_id)) is not None and now - last < FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC
+            for attempts in (self._refused_at, self._deferred_at)
+        )
 
     def _notify_auto_started(self, fub_id: int, name: str) -> None:
         _LOGGER.warning("[%s] Auto-started monitored function plan '%s' (ID %s)", self._server_id, name, fub_id)

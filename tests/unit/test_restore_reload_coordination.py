@@ -685,6 +685,35 @@ def test_backups_are_not_deleted_while_a_restore_runs(handler: Any, data: dict[s
     assert "restore is running" in create.call_args.args[1]
 
 
+@pytest.mark.parametrize(
+    ("handler", "data"),
+    [
+        (backup._handle_function_plan_delete_backups, {"confirm": True}),
+        (backup._handle_function_plan_purge_orphaned_backups, {"confirm": True}),
+    ],
+)
+def test_backups_are_not_deleted_once_the_entry_unloads(handler: Any, data: dict[str, Any]) -> None:
+    """(Review, #181) a deletion starting after the unload's wait would write the store during the teardown."""
+    coordinator = _coordinator()
+    coordinator.function_plan_backup = SimpleNamespace(
+        async_delete_all_backups=AsyncMock(), async_purge_orphaned=AsyncMock()
+    )
+    coordinator.config_entry = SimpleNamespace(entry_id="e1", data={}, options={})
+    coordinator.live_plan_list = MagicMock(return_value={1: "A"})  # type: ignore[method-assign]
+    coordinator.unloading = True  # no restore runs: only the unload refuses
+
+    with (
+        patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+        patch.object(backup.persistent_notification, "async_create") as create,
+    ):
+        asyncio.run(handler(coordinator.hass, SimpleNamespace(data=data)))
+
+    coordinator.function_plan_backup.async_delete_all_backups.assert_not_awaited()
+    coordinator.function_plan_backup.async_purge_orphaned.assert_not_awaited()
+    assert "reloading or unloading" in create.call_args.args[1]
+    assert not coordinator.plan_edits_running
+
+
 def test_a_backup_deletion_runs_as_a_marked_plan_edit() -> None:
     coordinator = _coordinator()
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]

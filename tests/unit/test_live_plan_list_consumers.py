@@ -63,6 +63,7 @@ def _service_coordinator(live_plans: dict | None, manager: SimpleNamespace) -> S
         config_entry=SimpleNamespace(options={}),
         async_update_listeners=MagicMock(),
         _restore_lock=asyncio.Lock(),
+        unloading=False,
         plan_edit=MagicMock(),  # a context manager, like coordinator.plan_edit()
     )
 

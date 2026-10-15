@@ -1,6 +1,7 @@
 """Watchdog of the HA-managed function plans (plan_watchdog.py)."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -266,15 +267,56 @@ def test_last_check_is_kept_for_the_repair_dialog(ir: MagicMock, monkeypatch: py
     assert watchdog.last_check_text() == "03.10.2026 08:14:34"  # HA language "de"
 
 
-def test_blocked_or_unanswered_start_is_not_a_failed_attempt(ir: MagicMock) -> None:
-    """None (sync/restore running, connection lost) says nothing about the plan: retried, never counted."""
+def test_blocked_or_unanswered_start_is_not_a_failed_attempt(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """None (sync/restore running, no answer) says nothing about the plan: never counted, but retried only
+    after the retry gap — an unanswered start must not be sent again with every check (#181)."""
     watchdog, started = _watchdog([None, None, None])
     watchdog.auto_restart = True
-    for _ in range(3):
+    caplog.set_level(logging.DEBUG, logger=plan_watchdog.__name__)
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC - 1
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34]  # inside the gap: not sent again
+    for _ in range(2):
+        clock[0] += FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC
         asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
     assert started == [34, 34, 34]
     assert watchdog.suspended == set()
+    assert watchdog._failed_starts == {}
     assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED
+    deferred = [r.levelno for r in caplog.records if "not sent or not answered" in r.getMessage()]
+    assert deferred == [logging.INFO, logging.DEBUG, logging.DEBUG]  # info once per series
+
+
+def test_an_answered_start_ends_the_deferral_series(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refusal between two unanswered starts ends the series: the next deferral is logged at info again."""
+    watchdog, started = _watchdog([None, False, None])
+    watchdog.auto_restart = True
+    caplog.set_level(logging.DEBUG, logger=plan_watchdog.__name__)
+    deferral_after: list[dict[int, float]] = []
+    for _ in range(3):
+        asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+        deferral_after.append(dict(watchdog._deferred_at))
+        clock[0] += FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC
+    assert started == [34, 34, 34]
+    assert deferral_after[1] == {}  # the refused (answered) start cleared the deferral
+    deferred = [r.levelno for r in caplog.records if "not sent or not answered" in r.getMessage()]
+    assert deferred == [logging.INFO, logging.INFO]
+
+
+def test_a_deferred_start_of_a_plan_seen_running_is_forgotten(ir: MagicMock, clock: list[float]) -> None:
+    """A plan running again starts its next stop with a fresh attempt, not inside an old retry gap."""
+    watchdog, started = _watchdog([None, True])
+    watchdog.auto_restart = True
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert watchdog._deferred_at == {}
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34, 34]
 
 
 def test_plan_started_by_the_repair_clears_it_at_once(ir: MagicMock) -> None:

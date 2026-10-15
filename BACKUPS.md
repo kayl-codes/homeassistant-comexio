@@ -101,7 +101,9 @@ To delete backups without waiting for a repair:
 - **Function Plan Delete Backups** deletes one snapshot, all snapshots of one plan, or
   every stored backup (requires `confirm`). Kept plans can be deleted this way too.
 - **Function Plan Purge Orphaned Backups** deletes the backups of every deleted plan past
-  the retention period at once, except the ones you kept (requires `confirm`).
+  the retention period at once, except the ones you kept (requires `confirm`). With
+  `include_recent` (default off) it also deletes the backups of deleted plans still inside
+  the retention period; kept plans and live plans stay untouched either way.
 
 ## 5. Related actions and entities
 
@@ -111,7 +113,7 @@ To delete backups without waiting for a repair:
 | `comexio.function_plan_list_backups` | List snapshots as a service response, filterable and sortable, optionally with a diff. |
 | `comexio.function_plan_visualize` | Render a live plan or a snapshot as SVG or text. |
 | `comexio.function_plan_delete_backups` | Delete one snapshot, one plan's snapshots, or all. |
-| `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans. |
+| `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans (`include_recent: true`: of any age). |
 | `comexio.function_plan_keep_backups` | Keep a deleted plan's backups for good, or take that back (`keep: false`). |
 | `sensor` **Backups** (diagnostic) | Number of stored snapshots, details per plan as attributes. |
 | `sensor` **Backups (deleted plans)** (diagnostic) | Number of snapshots of deleted or renamed plans, the plans as attributes. |
@@ -231,7 +233,9 @@ Backups löschen, ohne auf eine Meldung zu warten:
 - **Function Plan Delete Backups** löscht einen Snapshot, alle Snapshots eines Plans oder
   sämtliche Backups (erfordert `confirm`). Auch behaltene Pläne lassen sich so löschen.
 - **Function Plan Purge Orphaned Backups** löscht auf einmal die Backups aller gelöschten
-  Pläne, deren Frist abgelaufen ist, außer den behaltenen (erfordert `confirm`).
+  Pläne, deren Frist abgelaufen ist, außer den behaltenen (erfordert `confirm`). Mit
+  `include_recent` (standardmäßig aus) löscht sie auch die Backups gelöschter Pläne, deren
+  Frist noch läuft; behaltene und noch vorhandene Pläne bleiben in jedem Fall unberührt.
 
 ## 5. Zugehörige Aktionen und Entitäten
 
@@ -241,7 +245,7 @@ Backups löschen, ohne auf eine Meldung zu warten:
 | `comexio.function_plan_list_backups` | Snapshots als Service-Response auflisten, filter- und sortierbar, optional mit Diff. |
 | `comexio.function_plan_visualize` | Live-Plan oder Snapshot als SVG oder Text darstellen. |
 | `comexio.function_plan_delete_backups` | Einen Snapshot, die Snapshots eines Plans oder alle löschen. |
-| `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen. |
+| `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen (`include_recent: true`: jeden Alters). |
 | `comexio.function_plan_keep_backups` | Die Backups eines gelöschten Plans dauerhaft behalten oder das zurücknehmen (`keep: false`). |
 | `sensor` **Backups** (Diagnose) | Anzahl gespeicherter Snapshots, Details je Plan als Attribute. |
 | `sensor` **Backups (gelöschter Pläne)** (Diagnose) | Anzahl der Snapshots gelöschter oder umbenannter Pläne, die Pläne als Attribute. |

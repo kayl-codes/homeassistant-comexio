@@ -252,6 +252,7 @@ def _purge(data: dict[str, Any], purged: list[dict[str, Any]]) -> tuple[SimpleNa
         config_entry=SimpleNamespace(options={}),
         async_update_listeners=MagicMock(),
         _restore_lock=asyncio.Lock(),
+        unloading=False,
         plan_edit=MagicMock(),
     )
     with (

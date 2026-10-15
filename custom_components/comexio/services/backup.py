@@ -1856,15 +1856,22 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
 
 
 def _refuse_backup_change_while_restoring(hass: HomeAssistant, coordinator: ComexioCoordinator, title: str) -> bool:
-    """Whether a restore runs — it moves and marks backups, and a deletion meanwhile could be undone on disk."""
-    if not coordinator._restore_lock.locked():
+    """Whether a restore runs or the entry unloads — then notify and return True.
+
+    A restore moves and marks backups, and a deletion meanwhile could be undone on disk. Once the
+    unload has waited for the running plan edits (async_wait_before_unload), a deletion starting
+    after it would still write the backup store while the entry is torn down.
+    """
+    if coordinator.unloading:
+        reason = "the integration is reloading or unloading"
+        msg = "The Comexio integration is reloading or unloading. Please try again once it has finished."
+    elif coordinator._restore_lock.locked():
+        reason = "a function plan restore is running"
+        msg = "A function plan restore is running — it moves and marks backups. Please try again once it has finished."
+    else:
         return False
-    _LOGGER.warning("[%s] %s not started — a function plan restore is running", coordinator.server_id, title)
-    persistent_notification.async_create(
-        hass,
-        "A function plan restore is running — it moves and marks backups. Please try again once it has finished.",
-        title=title,
-    )
+    _LOGGER.warning("[%s] %s not started — %s", coordinator.server_id, title, reason)
+    persistent_notification.async_create(hass, msg, title=title)
     return True
 
 
