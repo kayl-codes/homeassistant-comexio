@@ -178,8 +178,11 @@ class ComexioManagedPlansProblemSensor(ComexioStableEntityIdMixin, CoordinatorEn
 
     @property
     def is_on(self) -> bool | None:
-        stopped = self.coordinator.plan_watchdog.stopped
-        return None if stopped is None else bool(stopped)
+        watchdog = self.coordinator.plan_watchdog
+        if watchdog.stopped is None:
+            return None
+        # A watched plan deleted in Comexio is a problem too: it has its own repair and push.
+        return bool(watchdog.stopped) or bool(watchdog.vanished)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -187,6 +190,9 @@ class ComexioManagedPlansProblemSensor(ComexioStableEntityIdMixin, CoordinatorEn
         stopped = watchdog.stopped or {}
         return {
             "last_check": watchdog.last_check,
+            "vanished_plans": [
+                {"fub_id": fub_id, "name": name} for fub_id, name in sorted((watchdog.vanished or {}).items())
+            ],
             "stopped_plans": [
                 {
                     "fub_id": fub_id,

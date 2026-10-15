@@ -613,8 +613,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._vanished_restores: set[tuple[int, str]] = set()
         # One vanished-plan Restore at a time: each reads the outcome its own restore noted (_restored_as_new).
         self._vanished_restore_lock = asyncio.Lock()
-        # plan name → new fub_id of each restore-as-new that built its plan (note_plan_restored_as_new).
-        self._restored_as_new: dict[str, tuple[int, bool]] = {}
+        # (old fub_id, plan name) → new fub_id of each restore-as-new that built its plan (note_plan_restored_as_new).
+        self._restored_as_new: dict[tuple[int, str], tuple[int, bool]] = {}
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
@@ -4796,7 +4796,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 await self.plan_watchdog.async_push_no_backup(fub_id, name)
             return False
         _LOGGER.info("[%s] Restoring deleted function plan '%s' from backup %s", self.server_id, name, snapshot)
-        self._restored_as_new.pop(name, None)
+        self._restored_as_new.pop((fub_id, name), None)
         try:
             await self.hass.services.async_call(
                 DOMAIN,
@@ -4813,7 +4813,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         except Exception:
             # The action's own errors; it notifies only those it catches itself.
             _LOGGER.exception("[%s] Restore of function plan '%s' failed", self.server_id, name)
-        if (restored := self._restored_as_new.pop(name, None)) is None:
+        if (restored := self._restored_as_new.pop((fub_id, name), None)) is None:
             _LOGGER.warning(
                 "[%s] Function plan '%s' (ID %s) was not restored; see the restore notification",
                 self.server_id,
@@ -4845,12 +4845,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         return True
 
-    def note_plan_restored_as_new(self, plan_name: str, new_fub_id: int, *, complete: bool) -> None:
-        """A restore-as-new built plan_name under new_fub_id (read by async_restore_vanished_plan).
+    def note_plan_restored_as_new(self, old_fub_id: int, plan_name: str, new_fub_id: int, *, complete: bool) -> None:
+        """A restore-as-new rebuilt plan_name (formerly old_fub_id) as new_fub_id; read by async_restore_vanished_plan.
 
-        complete: False for a PARTIAL restore (elements, connections or block settings missing).
+        Keyed by the old ID too: a restore of another deleted plan of the same name must not hand
+        its new ID to this plan's Restore. complete: False for a PARTIAL restore (elements,
+        connections or block settings missing).
         """
-        self._restored_as_new[plan_name] = (new_fub_id, complete)
+        self._restored_as_new[(old_fub_id, plan_name)] = (new_fub_id, complete)
 
     def _repoint_vanished_pick(self, name: str, old_fub_id: int, new_fub_id: int) -> None:
         """Move a vanished plan's watchdog pick to its restored plan; nothing if none points at it.

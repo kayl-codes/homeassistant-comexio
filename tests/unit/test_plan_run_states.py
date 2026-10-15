@@ -1499,7 +1499,7 @@ def _restore_coordinator(api: ComexioAPI, outcome: Any) -> _FakeCoordinator:
             raise outcome
         if outcome:
             api._fub_data["52"] = {"Id": 52, "Name": "Test4", "Active": 1}
-            coordinator.note_plan_restored_as_new("Test4", 52, complete=True)
+            coordinator.note_plan_restored_as_new(47, "Test4", 52, complete=True)
             coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["52:Test4"]}
 
     coordinator.hass.services = SimpleNamespace(async_call=AsyncMock(side_effect=restore))
@@ -1654,7 +1654,7 @@ def test_a_restore_that_built_the_plan_but_kept_the_pick_counts_as_restored(api:
 
     def built_without_moving_the_pick(*_args: Any, **_kwargs: Any) -> None:
         api._fub_data["52"] = {"Id": 52, "Name": "Test4", "Active": 1}
-        coordinator.note_plan_restored_as_new("Test4", 52, complete=True)
+        coordinator.note_plan_restored_as_new(47, "Test4", 52, complete=True)
 
     coordinator.hass.services.async_call.side_effect = built_without_moving_the_pick
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
@@ -1688,7 +1688,7 @@ def test_a_partial_restore_is_reported_as_partial(api: ComexioAPI, caplog: pytes
     coordinator = _restore_coordinator(api, True)
 
     def built_partially(*_args: Any, **_kwargs: Any) -> None:
-        coordinator.note_plan_restored_as_new("Test4", 52, complete=False)
+        coordinator.note_plan_restored_as_new(47, "Test4", 52, complete=False)
 
     coordinator.hass.services.async_call.side_effect = built_partially
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is True
@@ -1706,7 +1706,7 @@ def test_a_bare_pick_stays_with_the_plan_now_holding_the_old_id(api: ComexioAPI)
 
     def built_without_moving_the_pick(*_args: Any, **_kwargs: Any) -> None:
         api._fub_data["47"] = {"Id": 47, "Name": "Other", "Active": 1}
-        coordinator.note_plan_restored_as_new("Test4", 52, complete=True)
+        coordinator.note_plan_restored_as_new(47, "Test4", 52, complete=True)
 
     coordinator.hass.services.async_call.side_effect = built_without_moving_the_pick
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4")) is True
@@ -1837,9 +1837,12 @@ def test_same_named_vanished_plans_do_not_block_each_others_restore(api: Comexio
     coordinator = _restore_coordinator(api, True)
     coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4", "48:Test4"]}
 
-    async def restore(*_args: Any, **_kwargs: Any) -> None:
+    new_ids = {47: 52, 48: 53}
+
+    async def restore(_domain: str, _service: str, data: dict[str, Any], **_kwargs: Any) -> None:
         await asyncio.sleep(0)
-        coordinator.note_plan_restored_as_new("Test4", 52, complete=True)
+        old_fub_id = int(data["snapshot"].split(":")[0])
+        coordinator.note_plan_restored_as_new(old_fub_id, "Test4", new_ids[old_fub_id], complete=True)
 
     coordinator.hass.services.async_call.side_effect = restore
 
@@ -1853,6 +1856,18 @@ def test_same_named_vanished_plans_do_not_block_each_others_restore(api: Comexio
 
     assert asyncio.run(run()) == [True, True]
     assert coordinator.hass.services.async_call.await_count == 2
+
+
+def test_a_same_named_restore_outcome_is_not_taken_by_another_deleted_plan(api: ComexioAPI) -> None:
+    """(Sourcery) Keyed by name alone, plan 47's Restore took the new ID of plan 48's restore."""
+    coordinator = _restore_coordinator(api, True)
+
+    async def restore(*_args: Any, **_kwargs: Any) -> None:
+        coordinator.note_plan_restored_as_new(48, "Test4", 53, complete=True)  # another plan's restore finished
+
+    coordinator.hass.services.async_call.side_effect = restore
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4")) is False
+    assert coordinator._restored_as_new == {(48, "Test4"): (53, True)}
     assert coordinator._vanished_restores == set()
 
 
