@@ -49,6 +49,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Plan identity:** a function plan is identified by its `fub_id` and its name together — Comexio reuses the
   `fub_id` of a deleted plan, and plan names are not unique. Flag code that matches backups, snapshots, watches or
   findings to a plan by only one of the two.
+- **Names are no proof:** never treat "a plan with that name exists" as proof that a restore or create succeeded, or
+  as the identity of the plan — a half-built earlier restore or an unrelated plan with the same name matches too.
+  Identify the plan by its ID or by what the operation itself reports. Flag a name lookup used as a success check.
 - **Data read from Comexio:** an entry counts as missing from a list or mapping read from Comexio (e.g. `$Fubs`)
   only after the whole list passed a shape check — every entry has the expected type, its key is a canonical id
   string, and an `Id` the entry carries matches that key. An unreadable or malformed list means "unknown", never "deleted". Flag code that turns a
@@ -65,6 +68,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   check followed by writes without either, and a new operation that writes function plans or backups without
   joining the mutual exclusion (`refuse_while_plans_busy`, `_async_acquire_sync_lock`, `_cleanup_blocked_by_sync`,
   the restore refusal) (#176).
+- **Awaits inside the guard's `try`:** every `await` between setting a guard flag (`unloading = True`, a busy flag)
+  and the `try/finally` that resets it sits inside the `try` — a raised or cancelled await otherwise leaves the flag
+  set forever. Flag an `await` between the flag assignment and the `try` (#181).
+- **Report after the final status:** a result report (a "restored completely/OK" flag, a success push or note) is
+  recorded only after the last status change — a later step (lineage move, reference repoint, warnings) can still
+  turn OK into PARTIAL, and a report written earlier claims a success that did not happen (#181).
 - **Early returns:** a coordinator cycle that changes state an entity shows and then returns early still calls
   `async_update_listeners()`, otherwise the entity shows the old state until the next poll.
 - **Timestamps:** a timestamp that starts a cooldown or retry interval, or records the last attempt, is taken
