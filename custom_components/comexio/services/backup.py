@@ -1674,6 +1674,15 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
     await _refresh_service_descriptions(hass)
 
 
+def _restore_identity_conflict(
+    snapshot: dict[str, Any], fub_id: int, live_fub: dict[str, Any] | None
+) -> tuple[bool, str, str | None]:
+    """Whether the plan at fub_id is gone or carries another name than the snapshot's, plus both names."""
+    snapshot_name = snapshot.get("plan_name", str(fub_id))
+    live_name = live_fub.get("Name") if live_fub else None
+    return live_fub is None or live_name != snapshot_name, snapshot_name, live_name
+
+
 async def _run_function_plan_restore(
     hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator, api, plan_hash
 ) -> None:
@@ -1743,9 +1752,7 @@ async def _run_function_plan_restore(
 
     if live_fub is not None:
         api.update_fub_cache_entry(fub_id, live_fub)  # keep the cache fresh for _restore_plan_in_place's reads
-    snapshot_name = snapshot.get("plan_name", str(fub_id))
-    live_name = live_fub.get("Name") if live_fub else None
-    conflict = live_fub is None or live_name != snapshot_name
+    conflict, snapshot_name, live_name = _restore_identity_conflict(snapshot, fub_id, live_fub)
     if not conflict and _refuse_restore_over_returned_plan(hass, coordinator, fub_id, snapshot_name):
         return
     # A conflict without confirm stops the restore (_resolve_restore_conflict) — no warning then.
