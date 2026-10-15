@@ -243,7 +243,7 @@ def refuse_while_plans_busy(hass: HomeAssistant, coordinator: ComexioCoordinator
     plans, and a reload closes the API session.
     """
     # Sync first: a reload holds _restore_lock too (restores_held_off), and is no restore.
-    if coordinator._sync_lock.locked() or coordinator.in_sync:
+    if coordinator._sync_lock.locked() or coordinator.in_sync or coordinator.unloading:
         msg = SYNC_RUNNING_MSG
     elif coordinator._restore_lock.locked():
         msg = RESTORE_RUNNING_MSG

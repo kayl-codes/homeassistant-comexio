@@ -20,6 +20,7 @@ from custom_components.comexio.const import (
     DOMAIN,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
 from custom_components.comexio.plan_watchdog import vanished_plan_issue_id
 from custom_components.comexio.repairs import ComexioRepairFlow
 from custom_components.comexio.services import backup
@@ -142,13 +143,35 @@ def test_an_unload_gives_up_waiting_after_the_limit(
 def test_unload_entry_waits_before_it_unloads_anything() -> None:
     order: list[str] = []
     running = SimpleNamespace(
-        api=object(), async_wait_before_unload=AsyncMock(side_effect=lambda: order.append("wait"))
+        api=object(), unloading=True, async_wait_before_unload=AsyncMock(side_effect=lambda: order.append("wait"))
     )
     hass = MagicMock()
     hass.data = {DOMAIN: {"e1": running}}
     hass.config_entries.async_unload_platforms = AsyncMock(side_effect=lambda *_: order.append("unload") or False)
     assert asyncio.run(async_unload_entry(hass, SimpleNamespace(entry_id="e1"))) is False
     assert order == ["wait", "unload"]
+    assert running.unloading is False  # the entry stays loaded: restores and plan edits start again
+
+
+def test_an_unload_that_raises_lets_restores_and_plan_edits_start_again() -> None:
+    """(Review) The entry stays loaded: a stuck unloading flag would refuse every restore as "sync running"."""
+    running = SimpleNamespace(api=object(), unloading=True, async_wait_before_unload=AsyncMock())
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"e1": running}}
+    hass.config_entries.async_unload_platforms = AsyncMock(side_effect=RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        asyncio.run(async_unload_entry(hass, SimpleNamespace(entry_id="e1")))
+    assert running.unloading is False
+
+
+@pytest.mark.parametrize("held_for_reload", [False, True])
+def test_an_unload_lets_no_restore_or_plan_edit_start_after_its_wait(held_for_reload: bool) -> None:
+    """(Sourcery) Work starting between the wait and the session's close would lose the session."""
+    coordinator = _coordinator()
+    coordinator.unloading = False
+    coordinator._restores_held_for_reload = held_for_reload
+    asyncio.run(coordinator.async_wait_before_unload())
+    assert coordinator.unloading is True
 
 
 def test_unload_entry_of_an_entry_that_never_set_up_does_not_wait() -> None:
@@ -305,3 +328,13 @@ def test_a_restore_as_new_moves_the_watchdog_pick_in_the_options() -> None:
     coordinator.request_options_update_without_reload.reset_mock()
     assert asyncio.run(coordinator.async_repoint_function_plan_fub_id("Test4", 48, 52)) == []
     coordinator.request_options_update_without_reload.assert_not_called()
+
+
+def test_the_backup_store_names_the_plans_kept_under_an_id() -> None:
+    """A bare-ID watchdog pick of a deleted plan takes the name its backups carry."""
+    manager = FunctionPlanBackupManager.__new__(FunctionPlanBackupManager)
+    manager._auto_data = {"47": {"Test4": [{}]}, "12": {"A": [{}]}}
+    manager._change_data = {"47": {"Test4": [{}], "Old": [{}]}}
+    assert manager.plan_names_for_fub_id_sync(47) == {"Test4", "Old"}
+    assert manager.plan_names_for_fub_id_sync(12) == {"A"}
+    assert manager.plan_names_for_fub_id_sync(99) == set()

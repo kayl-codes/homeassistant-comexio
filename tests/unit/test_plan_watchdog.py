@@ -452,12 +452,43 @@ def test_a_vanished_plan_gets_its_repair_and_one_alarm_push(ir: MagicMock) -> No
     assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
 
 
-def test_a_plan_vanished_before_setup_gets_its_repair_but_no_push(ir: MagicMock) -> None:
-    """A restart must not repeat the alarm of a plan deleted long ago."""
+def test_a_plan_vanished_before_setup_gets_its_repair_and_push(ir: MagicMock) -> None:
+    """(Sourcery) Deleted while HA was down: reported, and a stale "stopped" push (Start action) replaced."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
     asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
     assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47)) in ir.async_get.return_value.issues
-    assert _pushes(watchdog) == []
+    ((_domain, _service, data),) = _pushes(watchdog)
+    assert data["data"]["tag"] == watchdog._push_tag(47)
+    assert [action["action"] for action in data["data"]["actions"]] == [
+        plan_action_id(ACTION_RESTORE, SERVER_ID, 47),
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47),
+    ]
+
+
+def test_the_restored_confirmation_stays_once_the_plan_is_back(ir: MagicMock) -> None:
+    """(Sourcery) The plan dropping out of vanished must not clear the "restored" push (same tag)."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    asyncio.run(watchdog.async_sync_vanished({}))
+    messages = [data["message"] for *_, data in _pushes(watchdog)]
+    assert "clear_notification" not in messages
+    assert len(messages) == 2
+    # Vanished again later: a new alarm, and leaving vanished then clears it as usual.
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    asyncio.run(watchdog.async_sync_vanished({}))
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_a_restored_push_after_the_check_cleared_the_plan_leaves_no_stale_entry(ir: MagicMock) -> None:
+    """(Review) A check clearing the plan before the "restored" push: a later loss still clears as usual."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    asyncio.run(watchdog.async_sync_vanished({}))
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    asyncio.run(watchdog.async_sync_vanished({47: "Test4"}))
+    asyncio.run(watchdog.async_sync_vanished({}))
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
 
 
 def test_vanished_and_stopped_repairs_do_not_clean_up_each_other(ir: MagicMock) -> None:
@@ -491,9 +522,9 @@ def test_a_stopped_plan_whose_push_is_replaced_keeps_it(ir: MagicMock) -> None:
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
     asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False), [47]))
     asyncio.run(watchdog.async_check({}, _states(), keep_push={47}))
-    assert [data["message"] for *_, data in _pushes(watchdog)] != [] and all(
-        data["message"] != "clear_notification" for *_, data in _pushes(watchdog)
-    )
+    messages = [data["message"] for *_, data in _pushes(watchdog)]
+    assert messages
+    assert "clear_notification" not in messages
     asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False), [47]))
     asyncio.run(watchdog.async_check({}, _states()))
     assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
@@ -515,7 +546,8 @@ def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[
     assert [action["action"] for action in data["data"].get("actions", [])] == [
         plan_action_id(kind, SERVER_ID, 47) for kind in actions
     ]
-    assert "{" not in data["message"] and "{" not in data["title"]
+    assert "{" not in data["message"]
+    assert "{" not in data["title"]
     assert data["data"]["tag"] == watchdog._push_tag(47)  # replaces the plan's alarm push
 
 

@@ -21,6 +21,7 @@ def _run(auto_start: bool) -> tuple[AsyncMock, MagicMock]:
         server_id="iosrv1",
         function_plan_backup=SimpleNamespace(async_rekey_fub_id=AsyncMock()),
         async_repoint_function_plan_fub_id=AsyncMock(return_value=[]),
+        note_plan_restored_as_new=MagicMock(),
     )
     with patch.object(backup.persistent_notification, "async_create") as notify:
         asyncio.run(

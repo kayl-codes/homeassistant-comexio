@@ -246,6 +246,7 @@ def _restore_as_new(api: SimpleNamespace, snapshot: dict[str, Any]) -> tuple[str
         server_id=SERVER_ID,
         function_plan_backup=SimpleNamespace(async_rekey_fub_id=AsyncMock()),
         async_repoint_function_plan_fub_id=AsyncMock(return_value=[]),
+        note_plan_restored_as_new=MagicMock(),
     )
     with patch.object(backup_service.persistent_notification, "async_create") as notify:
         asyncio.run(backup_service._restore_plan_as_new(MagicMock(), coordinator, api, 1, snapshot, "auto", 0))

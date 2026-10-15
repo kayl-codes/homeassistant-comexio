@@ -29,6 +29,8 @@ def _coordinator() -> ComexioCoordinator:
     coordinator._plan_edits_running = 0
     coordinator._plan_edits_done = asyncio.Event()
     coordinator._plan_edits_done.set()
+    coordinator.unloading = False
+    coordinator._restored_as_new = {}
     coordinator.config_entry = SimpleNamespace(entry_id="e1")
     coordinator.hass = MagicMock()
     coordinator.hass.data = {DOMAIN: {"e1": coordinator}}
@@ -317,6 +319,45 @@ def test_the_real_resolver_lets_a_read_only_call_through_while_a_restore_runs() 
     create.assert_not_called()
 
 
+def test_no_restore_or_plan_edit_starts_while_the_entry_unloads() -> None:
+    """(Sourcery) One starting after the unload's wait would lose the API session mid-way."""
+    coordinator = _coordinator()
+    coordinator.unloading = True
+    run_restore = AsyncMock()
+    with (
+        patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
+        patch.object(backup, "_run_function_plan_restore", run_restore),
+        patch.object(backup.persistent_notification, "async_create") as create,
+    ):
+        asyncio.run(backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={})))
+        run_restore.assert_not_awaited()
+        assert _context.refuse_while_plans_busy(coordinator.hass, coordinator, "T") is True
+    assert create.call_args.args[1] == _context.SYNC_RUNNING_MSG
+
+
+def test_a_restore_as_new_tells_the_coordinator_it_built_the_plan() -> None:
+    """A Restore from a watchdog push judges its outcome by this, not by a plan of that name."""
+    coordinator = _coordinator()
+    coordinator.function_plan_backup = SimpleNamespace(async_rekey_fub_id=AsyncMock())
+    coordinator.async_repoint_function_plan_fub_id = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    api = SimpleNamespace(
+        create_fup=AsyncMock(return_value=50),
+        function_plan_rebuild_plan_from_snapshot=AsyncMock(return_value=({}, 0, [])),
+        function_plan_run_fup=AsyncMock(return_value=True),
+    )
+    snapshot = {"plan_name": "Kitch", "elements": {}, "connections": {}}
+    with patch.object(backup.persistent_notification, "async_create"):
+        asyncio.run(backup._restore_plan_as_new(coordinator.hass, coordinator, api, 42, snapshot, "auto", 0))
+    assert coordinator._restored_as_new == {"Kitch": 50}
+    coordinator.async_repoint_function_plan_fub_id.assert_awaited_once_with("Kitch", 42, 50, old_id_still_live=False)
+
+    coordinator._restored_as_new = {}
+    api.function_plan_rebuild_plan_from_snapshot.side_effect = TimeoutError
+    with patch.object(backup.persistent_notification, "async_create"):
+        asyncio.run(backup._restore_plan_as_new(coordinator.hass, coordinator, api, 42, snapshot, "auto", 0))
+    assert coordinator._restored_as_new == {}  # half built: not restored
+
+
 def test_a_restore_does_not_start_while_a_plan_edit_runs() -> None:
     """(Review) checked only before its writes, an edit could still run into a restore started meanwhile."""
     coordinator = _coordinator()
@@ -526,7 +567,7 @@ def test_an_uninstall_cleanup_does_not_start_while_a_plan_edit_runs() -> None:
     assert "function plan edit" in post.call_args.args[2]
 
 
-@pytest.mark.parametrize("busy", ["sync", "plan_edit"])
+@pytest.mark.parametrize("busy", ["sync", "plan_edit", "unloading"])
 def test_the_bus_load_cascade_stops_while_a_sync_or_plan_edit_runs(busy: str) -> None:
     """(Review) a cascade stopping a plan a sort or connect is changing leaves it stopped or mixed."""
     coordinator = _coordinator()
@@ -539,6 +580,8 @@ def test_the_bus_load_cascade_stops_while_a_sync_or_plan_edit_runs(busy: str) ->
         async with contextlib.AsyncExitStack() as stack:
             if busy == "sync":
                 await stack.enter_async_context(coordinator._sync_lock)
+            elif busy == "unloading":
+                coordinator.unloading = True  # the unload closes the session the cascade would stop plans through
             else:
                 stack.enter_context(coordinator.plan_edit())
             await coordinator._async_bus_load_cascade_restart(50.0)

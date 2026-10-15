@@ -1243,6 +1243,11 @@ class FunctionPlanBackupManager:
                         referenced.add(str(ref.get("ref_id")))
         return referenced
 
+    def plan_names_for_fub_id_sync(self, fub_id: int) -> set[str]:
+        """The plan names the auto and change snapshots of fub_id are kept under (cache-only)."""
+        key = str(fub_id)
+        return {name for data in (self._auto_data, self._change_data) for name in (data or {}).get(key, {})}
+
     def plan_backups_for_identity_sync(self, fub_id: int, plan_name: str) -> list[dict[str, Any]]:
         """Return auto+change snapshot metadata for one plan identity, newest first per kind.
 

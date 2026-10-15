@@ -776,13 +776,16 @@ def parse_watchdog_user_plan_pick(value: object) -> tuple[int, str | None] | Non
 
 
 def repointed_watchdog_user_plan_picks(
-    options: Mapping[str, Any], plan_name: str, old_fub_id: int, new_fub_id: int
+    options: Mapping[str, Any], plan_name: str, old_fub_id: int, new_fub_id: int, *, old_id_still_live: bool = False
 ) -> list[Any] | None:
     """The watchdog's user-plan picks with plan_name's pick moved from old_fub_id to new_fub_id.
 
     For a restore-as-new, which gives a plan a fresh ID: the watched plan stays watched. A bare-ID
-    pick (saved before names were) moves too, it can only mean this plan. None if no pick matched.
+    pick (saved before names were) moves too when old_fub_id is free, as it can only mean this
+    plan; while another plan holds old_fub_id (old_id_still_live) it watches that one and stays.
+    None if no pick matched.
     """
+    movable_names = (plan_name,) if old_id_still_live else (None, plan_name)
     raw_picks = options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS)
     if not isinstance(raw_picks, list):
         return None
@@ -790,7 +793,7 @@ def repointed_watchdog_user_plan_picks(
     picks: list[Any] = []
     for value in raw_picks:
         pick = parse_watchdog_user_plan_pick(value)
-        if pick is not None and pick[0] == old_fub_id and pick[1] in (None, plan_name):
+        if pick is not None and pick[0] == old_fub_id and pick[1] in movable_names:
             value = watchdog_user_plan_pick(new_fub_id, plan_name)
             moved = True
         if value not in picks:

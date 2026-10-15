@@ -49,6 +49,14 @@ def test_a_restore_as_new_repoints_the_watchdog_pick(picks: object, expected: li
     assert repointed_watchdog_user_plan_picks(options, "Test4", 47, 45) == expected
 
 
+def test_a_bare_pick_of_an_id_another_plan_holds_stays_with_that_plan() -> None:
+    """(Sourcery) on_conflict new_id: the bare pick watches the live plan at the old ID, not the restored one."""
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47", "47:Test4"]}
+    assert repointed_watchdog_user_plan_picks(options, "Test4", 47, 45, old_id_still_live=True) == ["47", "45:Test4"]
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47"]}
+    assert repointed_watchdog_user_plan_picks(options, "Test4", 47, 45, old_id_still_live=True) is None
+
+
 def test_user_plan_picks_carry_the_plan_name() -> None:
     """Review (Copilot, #132): a pick of only the ID would pass to the plan Comexio gives that ID next."""
     coordinator = SimpleNamespace(watchdog_user_plan_candidates=lambda: {43: "Licht", 50: "Rollo"})

@@ -1027,7 +1027,9 @@ async def _move_restored_plan_lineage(
     updated: list[str] = []
     refs_error = None
     try:
-        updated = await coordinator.async_repoint_function_plan_fub_id(plan_name, old_fub_id, new_fub_id)
+        updated = await coordinator.async_repoint_function_plan_fub_id(
+            plan_name, old_fub_id, new_fub_id, old_id_still_live=old_id_still_live
+        )
     except Exception as exc:
         _LOGGER.exception("Function Plan restore as new plan: references to '%s' not updated", plan_name)
         refs_error = type(exc).__name__
@@ -1131,6 +1133,8 @@ async def _restore_plan_as_new(
         )
         return
     duration = time.monotonic() - t_start
+    # Built: a Restore from a watchdog push judges its outcome by this, not by the plan's name.
+    coordinator.note_plan_restored_as_new(plan_name, new_fub_id)
 
     purged, updated_consumers, lineage_error, refs_error = await _move_restored_plan_lineage(
         coordinator, plan_name, old_fub_id, new_fub_id, old_id_still_live
@@ -1587,6 +1591,7 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         or coordinator._sync_lock.locked()
         or coordinator.in_sync
         or coordinator.plan_edits_running
+        or coordinator.unloading
     ):
         _LOGGER.warning("Function Plan Restore not started — a restore, sync, cleanup, reload or plan edit is running")
         persistent_notification.async_create(

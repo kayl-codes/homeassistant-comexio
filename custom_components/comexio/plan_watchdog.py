@@ -244,6 +244,8 @@ class ManagedPlanWatchdog:
         self._refused_at: dict[int, float] = {}
         # fub_id → name of the watched user plans Comexio no longer has (deleted); None until the first check.
         self.vanished: dict[int, str] | None = None
+        # Vanished plans whose push was replaced by "restored": the plan dropping out of vanished keeps it.
+        self._restored_pushes: set[int] = set()
         # Local time of the last check; shown in the repair dialogs and on the problem sensor.
         self.last_check: datetime | None = None
         self._checking = False
@@ -554,11 +556,12 @@ class ManagedPlanWatchdog:
     async def async_sync_vanished(self, vanished: Mapping[int, str]) -> None:
         """Repair per watched user plan Comexio no longer has; alarm push for a newly vanished one.
 
-        The first call after setup pushes nothing: a plan deleted before HA started was reported
-        then already, and a push on every restart would only repeat it. A plan back again (restored
-        under a new ID) or unpicked loses its repair and push.
+        The first call after setup pushes every vanished plan, as the stopped-plan check does: a
+        plan deleted while HA was down is reported, and a stale "stopped" push with its Start
+        action is replaced. A plan back again (restored under a new ID) or unpicked loses its
+        repair and push, except a "restored" confirmation, which stays on the phone.
         """
-        previous = self.vanished
+        previous = self.vanished or {}
         self.vanished = dict(vanished)
         for fub_id, name in vanished.items():
             details = {"plan_name": name, "fub_id": str(fub_id)}
@@ -576,8 +579,6 @@ class ManagedPlanWatchdog:
         for issue_id in _own_issue_ids(self._hass, self._server_id, vanished=True):
             if issue_id not in wanted:
                 ir.async_delete_issue(self._hass, DOMAIN, issue_id)
-        if previous is None:
-            return
         for fub_id in sorted(vanished.keys() - previous.keys()):
             _LOGGER.warning(
                 "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio",
@@ -594,6 +595,9 @@ class ManagedPlanWatchdog:
                 alarm=True,
             )
         for fub_id in sorted(previous.keys() - vanished.keys()):
+            if fub_id in self._restored_pushes:
+                self._restored_pushes.discard(fub_id)
+                continue
             await self._async_clear_push(fub_id)
 
     async def async_push_no_backup(self, fub_id: int, name: str) -> None:
@@ -602,6 +606,8 @@ class ManagedPlanWatchdog:
 
     async def async_push_restored(self, fub_id: int, name: str) -> None:
         """Replace the vanished push with "restored" once its Restore action brought the plan back."""
+        if fub_id in (self.vanished or {}):  # a check that already cleared it would leave the entry stale
+            self._restored_pushes.add(fub_id)
         await self._async_push(fub_id, name, "restored_title", "restored")
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
