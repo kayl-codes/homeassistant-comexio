@@ -59,9 +59,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   watches carry over on purpose; an accepted limit, do not flag it. A selection stored as a `fub_id` alone means the plan holding that id now: code that moves such a
   selection to another id (e.g. after a restore as new plan) leaves it in place while another live plan holds the
   old id (#181). The same goes for ids derived from a plan — repair issue ids, push tags, push action ids,
-  notification ids: they carry the `fub_id` and a digest of the name (`vanished_plan_token`), never the `fub_id`
-  alone, and the digest is at least 64 bits wide — a 32-bit checksum such as CRC32 lets two names of one `fub_id`
-  share an id (#181).
+  notification ids. An id of a plan Comexio no longer has (a vanished watched plan, an orphaned backup) carries the
+  `fub_id` and a digest of the name (`vanished_plan_token`, `orphaned_backup_issue_id`), never the `fub_id` alone:
+  two gone plans can share an id. The digest is a cut SHA-256 of at least 48 bits — a 32-bit checksum such as
+  CRC32 lets two names of one `fub_id` share an id. An id of a live plan may be the `fub_id` alone only if its
+  handler checks the full identity before acting (`is_watched_plan`: the id's plan still carries the watched name),
+  so an old push or repair cannot act on another plan that reuses the id (#181).
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
