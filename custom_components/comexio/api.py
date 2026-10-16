@@ -2608,8 +2608,8 @@ class ComexioAPI:
             return {}
         try:
             plans = await self.function_plan_load_all_plans(strict=strict, raise_errors=fail_on_bulk_error)
-        except ComexioError as err:
-            _LOGGER.error("_load_all_plans_verified: bulk plan load failed (%s) — placement unknown", err)
+        except ComexioError:
+            _LOGGER.exception("_load_all_plans_verified: bulk plan load failed — placement unknown")
             return None
         for fid in sorted(fub_ids - set(plans)):
             data = await self.function_plan_load_elements(fid, strict=strict)
