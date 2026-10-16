@@ -80,6 +80,7 @@ ACTION_DELETE = "delete"
 ACTION_PREVIEW = "preview"
 ACTION_RESTORE = "restore"
 ACTION_UNWATCH = "unwatch"
+ACTION_START_PLAN = "start"
 ACTION_CLEANUP = "cleanup"
 ACTION_ENABLE = "enable"
 
@@ -332,6 +333,17 @@ def count_referencing_automations_and_scripts(hass: HomeAssistant, entity_ids: l
         referencing.update(automations_with_entity(hass, entity_id))
         referencing.update(scripts_with_entity(hass, entity_id))
     return str(len(referencing))
+
+
+def _action_schema(actions: list[str], translation_key: str) -> vol.Schema:
+    """A repair dialog's choice of actions, the first one preselected."""
+    return vol.Schema(
+        {
+            vol.Required("action", default=actions[0]): SelectSelector(
+                SelectSelectorConfig(options=actions, mode=SelectSelectorMode.LIST, translation_key=translation_key)
+            )
+        }
+    )
 
 
 class ComexioRepairFlow(RepairsFlow):
@@ -1386,7 +1398,7 @@ class ComexioRepairFlow(RepairsFlow):
         return self.async_create_entry(title=title, data={})
 
     async def async_step_function_plan_stopped(self, user_input=None):
-        """Start a stopped HA-managed function plan again."""
+        """Start a stopped watched function plan again, ignore its repair, or stop watching it (user plans)."""
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
         if coordinator is None:
             return self.async_abort(reason="entry_not_found")
@@ -1395,22 +1407,45 @@ class ComexioRepairFlow(RepairsFlow):
         }
         # Read when the dialog opens, so it is current without rewriting the issue on every check.
         placeholders["last_check"] = coordinator.plan_watchdog.last_check_text()
-        if user_input is None:
-            return self.async_show_form(
-                step_id="function_plan_stopped", description_placeholders=placeholders, data_schema=vol.Schema({})
-            )
         fub_id = int(self.issue_data["fub_id"])
+        if user_input is None:
+            actions = [ACTION_START_PLAN, ACTION_IGNORE]
+            if coordinator.plan_watchdog.is_user_plan(fub_id):
+                # HA's own plans are always watched: only a user plan can be taken off the list.
+                actions.append(ACTION_UNWATCH)
+            return self.async_show_form(
+                step_id="function_plan_stopped",
+                description_placeholders=placeholders,
+                data_schema=_action_schema(actions, "function_plan_stopped_action"),
+            )
         if not coordinator.watches_plan_raised_for(fub_id, lambda name: name == self.issue_data.get("plan_name")):
             # Unselected, deleted or its ID reused while the dialog was open — also by another watched
             # plan, so the name is compared, not only whether the ID is watched: not this repair's plan to start.
             # The issue goes too, also while a sync keeps the watchdog's own clean-up waiting.
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             return self.async_abort(reason="plan_not_watched", description_placeholders=placeholders)
+        action = user_input.get("action", ACTION_START_PLAN)
+        if action == ACTION_UNWATCH:
+            if not await coordinator.async_unwatch_user_plan(fub_id, str(self.issue_data["plan_name"])):
+                # Its pick names only the ID, which another plan holds now (a notification says so): the
+                # repair stays, as the plan stays watched.
+                return self.async_abort(reason="still_watched", description_placeholders=placeholders)
+            is_de = self.hass.config.language == "de"
+            return self.async_create_entry(title="Nicht mehr überwacht" if is_de else "No longer watched", data={})
         if coordinator.api.get_fub_active(fub_id):
             # Started meanwhile (in Comexio, by the auto-start or another repair).
             await coordinator.plan_watchdog.async_plan_started(fub_id)
             coordinator.async_update_listeners()
             return self.async_abort(reason="already_running", description_placeholders=placeholders)
+        if action == ACTION_IGNORE:
+            # An abort, not an entry: a finished repair flow deletes its issue, and with it the ignore.
+            if not await coordinator.plan_watchdog.async_ignore_stopped(fub_id):
+                # Its repair was cleared meanwhile: the plan ran again since the dialog opened.
+                return self.async_abort(reason="already_running", description_placeholders=placeholders)
+            return self.async_abort(reason="ignored", description_placeholders=placeholders)
+        return await self._async_start_stopped_plan(coordinator, fub_id, placeholders)
+
+    async def _async_start_stopped_plan(self, coordinator, fub_id: int, placeholders: dict[str, str]):
         if coordinator.managed_plan_start_blocked:
             return self.async_abort(reason="busy")
         started = await coordinator.async_start_managed_plan(fub_id)
@@ -1433,17 +1468,7 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_show_form(
                 step_id="function_plan_vanished",
                 description_placeholders=placeholders,
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("action", default=actions[0]): SelectSelector(
-                            SelectSelectorConfig(
-                                options=actions,
-                                mode=SelectSelectorMode.LIST,
-                                translation_key="function_plan_vanished_action",
-                            )
-                        )
-                    }
-                ),
+                data_schema=_action_schema(actions, "function_plan_vanished_action"),
             )
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
         if coordinator is None:

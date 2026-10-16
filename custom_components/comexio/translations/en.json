@@ -107,6 +107,13 @@
         "enable": "🔁 Switch the import on again"
       }
     },
+    "function_plan_stopped_action": {
+      "options": {
+        "start": "▶️ Start the plan now",
+        "ignore": "🔕 Ignore (until the plan has run again)",
+        "unwatch": "🚫 Stop watching this plan"
+      }
+    },
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Restore from the newest backup",
@@ -399,7 +406,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Managed function plan stopped",
-            "description": "The function plan **{plan_name}** (ID {fub_id}) is managed by Home Assistant, but it is not running in Comexio. The markers, IOs, KNX objects or triggers it connects do not reach Home Assistant until it runs again.\n\nLast check: {last_check}.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (HA plans)** switch on the function plan device."
+            "description": "The function plan **{plan_name}** (ID {fub_id}) is managed by Home Assistant, but it is not running in Comexio. The markers, IOs, KNX objects or triggers it connects do not reach Home Assistant until it runs again.\n\nLast check: {last_check}.\n\n**Start the plan** starts it now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (HA plans)** switch on the function plan device.\n**Ignore** hides this repair and its push; the plan stays watched, and its next stop after it has run again raises them anew."
           }
         },
         "abort": {
@@ -407,7 +414,9 @@
           "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
           "plan_not_watched": "The plan {plan_name} (ID {fub_id}) is no longer watched (unselected, deleted or its ID reused). Nothing was started.",
           "busy": "A sync, restore, poll, function plan edit or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
-          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open.",
+          "ignored": "The repair for {plan_name} (ID {fub_id}) is ignored and its push was removed. The plan stays watched: once it has run again, its next stop raises a new repair. Ignored repairs are listed in the menu (⋮) of the Repairs page.",
+          "still_watched": "The plan {plan_name} (ID {fub_id}) stays watched: its pick in the options names only the ID, which another plan holds now. Remove the pick in the integration options to stop watching it."
         }
       }
     },
@@ -417,7 +426,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Watched user plan stopped",
-            "description": "The user plan **{plan_name}** (ID {fub_id}) is watched by the function plan watchdog, but it is not running in Comexio.\n\nLast check: {last_check}.\n\n**Submit** starts the plan now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (user plans)** switch on the function plan device. To stop watching it, remove it from the integration options."
+            "description": "The user plan **{plan_name}** (ID {fub_id}) is watched by the function plan watchdog, but it is not running in Comexio.\n\nLast check: {last_check}.\n\n**Start the plan** starts it now. To have the integration start such a plan on its own, turn on the **Plan Auto-Start (user plans)** switch on the function plan device.\n**Ignore** hides this repair and its push; the plan stays watched, and its next stop after it has run again raises them anew.\n**Stop watching** removes it from the watched user plans."
           }
         },
         "abort": {
@@ -425,7 +434,9 @@
           "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
           "plan_not_watched": "The plan {plan_name} (ID {fub_id}) is no longer watched (unselected, deleted or its ID reused). Nothing was started.",
           "busy": "A sync, restore, poll, function plan edit or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
-          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open.",
+          "ignored": "The repair for {plan_name} (ID {fub_id}) is ignored and its push was removed. The plan stays watched: once it has run again, its next stop raises a new repair. Ignored repairs are listed in the menu (⋮) of the Repairs page.",
+          "still_watched": "The plan {plan_name} (ID {fub_id}) stays watched: its pick in the options names only the ID, which another plan holds now. Remove the pick in the integration options to stop watching it."
         }
       }
     },
@@ -435,7 +446,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Function plan keeps stopping",
-            "description": "Plan Auto-Start started the function plan **{plan_name}** (ID {fub_id}) {attempts} times, but it was refused or stopped again shortly after each time. The plan most likely has an error, so Auto-Start stops trying for this plan.\n\nLast failed attempt: {gave_up_at}. Last check: {last_check}.\n\nCheck the plan in Comexio Studio. Auto-Start resumes on its own once the plan is seen running again.\n\n**Submit** starts the plan once now."
+            "description": "Plan Auto-Start started the function plan **{plan_name}** (ID {fub_id}) {attempts} times, but it was refused or stopped again shortly after each time. The plan most likely has an error, so Auto-Start stops trying for this plan.\n\nLast failed attempt: {gave_up_at}. Last check: {last_check}.\n\nCheck the plan in Comexio Studio. Auto-Start resumes on its own once the plan is seen running again.\n\n**Start the plan** starts it once now. **Ignore** hides this repair and its push until the plan has run again. For a user plan, **Stop watching** removes it from the watched user plans."
           }
         },
         "abort": {
@@ -443,7 +454,9 @@
           "already_running": "The plan {plan_name} (ID {fub_id}) is running again. Nothing was changed.",
           "plan_not_watched": "The plan {plan_name} (ID {fub_id}) is no longer watched (unselected, deleted or its ID reused). Nothing was started.",
           "busy": "A sync, restore, poll, function plan edit or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
-          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+          "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open.",
+          "ignored": "The repair for {plan_name} (ID {fub_id}) is ignored and its push was removed. The plan stays watched: once it has run again, its next stop raises a new repair. Ignored repairs are listed in the menu (⋮) of the Repairs page.",
+          "still_watched": "The plan {plan_name} (ID {fub_id}) stays watched: its pick in the options names only the ID, which another plan holds now. Remove the pick in the integration options to stop watching it."
         }
       }
     },

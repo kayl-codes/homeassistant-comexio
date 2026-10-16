@@ -61,13 +61,30 @@ def test_next_stopped_plans(states: dict[str, bool | None], previous: dict[int, 
 
 @pytest.fixture
 def ir(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Issue registry stand-in that remembers created issues, so the clean-up sees them."""
+    """Issue registry stand-in that remembers created issues, so the clean-up sees them.
+
+    Like HA's: creating an existing issue again keeps its ignore (dismissed_version); deleting it drops it.
+    """
     registry = MagicMock()
     issues: dict[tuple[str, str], Any] = {}
     registry.async_get.return_value.issues = issues
-    registry.async_create_issue.side_effect = lambda _hass, domain, issue_id, **_kw: issues.update(
-        {(domain, issue_id): True}
+    registry.async_get.return_value.async_get_issue.side_effect = lambda domain, issue_id: issues.get(
+        (domain, issue_id)
     )
+
+    def create(_hass: Any, domain: str, issue_id: str, **kwargs: Any) -> None:
+        old = issues.get((domain, issue_id))
+        issues[(domain, issue_id)] = SimpleNamespace(
+            dismissed_version=getattr(old, "dismissed_version", None),
+            translation_placeholders=kwargs.get("translation_placeholders"),
+            translation_key=kwargs.get("translation_key"),
+        )
+
+    def ignore(_hass: Any, domain: str, issue_id: str, ignored: bool) -> None:
+        issues[(domain, issue_id)].dismissed_version = "2026.10.0" if ignored else None
+
+    registry.async_create_issue.side_effect = create
+    registry.async_ignore_issue.side_effect = ignore
     registry.async_delete_issue.side_effect = lambda _hass, domain, issue_id: issues.pop((domain, issue_id), None)
     monkeypatch.setattr(plan_watchdog, "ir", registry)
     monkeypatch.setattr(plan_watchdog, "persistent_notification", MagicMock())
@@ -751,6 +768,104 @@ def test_a_retry_to_a_target_no_longer_configured_is_dropped(ir: MagicMock, cloc
     asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
     assert len(_pushes(watchdog)) == 1
     assert watchdog._stopped_push_unsent == {}
+
+
+def _alarms(watchdog: ManagedPlanWatchdog) -> list[dict[str, Any]]:
+    return [data for _d, _s, data in _pushes(watchdog) if data["message"] != "clear_notification"]
+
+
+def test_an_ignored_stopped_repair_stays_hidden_without_alarm_until_the_plan_ran_again(
+    ir: MagicMock, clock: list[float]
+) -> None:
+    """(cs) Ignore: repair and push go, the plan stays watched; its next stop after a run alarms again."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert len(_alarms(watchdog)) == 1
+    asyncio.run(watchdog.async_ignore_stopped(34))
+    assert ir.async_get.return_value.issues[issue].dismissed_version is not None
+    tag = f"{DOMAIN}_{SERVER_ID}_plan_34"
+    assert _pushes(watchdog)[-1][2] == {"message": "clear_notification", "data": {"tag": tag}}
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert len(_alarms(watchdog)) == 1  # still stopped: no new alarm
+    assert ir.async_get.return_value.issues[issue].dismissed_version is not None  # and the repair stays ignored
+    assert watchdog.stopped == {34: "HA - Marker 1"}  # the problem sensor still sees it
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert issue not in ir.async_get.return_value.issues  # ran again: repair and ignore gone
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert ir.async_get.return_value.issues[issue].dismissed_version is None
+    assert len(_alarms(watchdog)) == 2
+
+
+def test_an_ignored_repair_sends_no_alarm_retry(ir: MagicMock, clock: list[float]) -> None:
+    """An alarm a target failed to take is not sent again once its repair is ignored."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert 34 in watchdog._stopped_push_unsent
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_ignore_stopped(34))
+    assert watchdog._stopped_push_unsent == {}
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    sent = len(_alarms(watchdog))
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert len(_alarms(watchdog)) == sent
+
+
+def test_an_ignore_read_back_after_a_restart_sends_no_alarm(ir: MagicMock) -> None:
+    """HA keeps the ignore of a non-persistent issue across a restart, without its placeholders."""
+    issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
+    ir.async_get.return_value.issues[issue] = SimpleNamespace(
+        dismissed_version="2026.10.0", translation_placeholders=None
+    )
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert _alarms(watchdog) == []
+    assert ir.async_get.return_value.issues[issue].dismissed_version is not None
+
+
+def test_the_ignore_of_the_plan_that_held_the_id_before_does_not_hide_another(ir: MagicMock) -> None:
+    """Renamed or the ID reused: the plan holding the ID now gets its own repair and alarm."""
+    issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
+    ir.async_get.return_value.issues[issue] = SimpleNamespace(
+        dismissed_version="2026.10.0", translation_placeholders={"plan_name": "Old"}
+    )
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert ir.async_get.return_value.issues[issue].dismissed_version is None
+    assert len(_alarms(watchdog)) == 1
+
+
+def test_auto_start_giving_up_lifts_the_ignore(ir: MagicMock, clock: list[float]) -> None:
+    """(cs) The ignored stop does not hide the more severe "Auto-Start gave up"; nor does it hold Auto-Start back."""
+    watchdog, started = _watchdog([False, False], targets=["notify.mobile_app_phone"])
+    watchdog.auto_restart = True
+    issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # refused: failure 1, repair
+    assert started == [34]
+    assert asyncio.run(watchdog.async_ignore_stopped(34)) is True
+    alarms = len(_alarms(watchdog))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # refused again: gives up
+    assert started == [34, 34]
+    assert watchdog.suspended == {34}
+    entry = ir.async_get.return_value.issues[issue]
+    assert (entry.translation_key, entry.dismissed_version) == (ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED, None)
+    assert len(_alarms(watchdog)) == alarms + 1
+    # Ignoring the "gave up" repair itself holds.
+    asyncio.run(watchdog.async_ignore_stopped(34))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert ir.async_get.return_value.issues[issue].dismissed_version is not None
+    assert len(_alarms(watchdog)) == alarms + 1
+
+
+def test_ignoring_a_repair_cleared_meanwhile_does_nothing(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    assert asyncio.run(watchdog.async_ignore_stopped(34)) is False
+    ir.async_ignore_issue.assert_not_called()
+    assert _pushes(watchdog) == []
 
 
 def test_a_reused_id_does_not_inherit_the_auto_start_state(ir: MagicMock) -> None:
