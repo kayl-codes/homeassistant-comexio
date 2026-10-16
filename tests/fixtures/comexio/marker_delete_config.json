@@ -1,0 +1,37 @@
+{
+  "_comment": "Synthetic marker_delete scenario: M1 factory, M3 Studio untitled + unplaced, M4 Studio untitled placed in Test4, M300 API-created unplaced, M359 plan-editor marker (CategoryId 1) placed in Test4, M360 API-created placed in Test4 and Lights.",
+  "config": {
+    "FubModules": {
+      "2": {
+        "1": {"Id": 1, "ShortName": "M1", "Name": "System rebooted", "CategoryId": 0, "Type": 1},
+        "3": {"Id": 3, "ShortName": "M3", "Name": "", "CategoryId": 0, "Type": 1},
+        "4": {"Id": 4, "ShortName": "M4", "Name": "", "CategoryId": 0, "Type": 1},
+        "300": {"Id": 300, "ShortName": "M300", "Name": "1.001 Switch [K1]", "CategoryId": 1, "Type": 1},
+        "359": {"Id": 359, "ShortName": "M359", "Name": "Foo", "CategoryId": 1, "Type": 1},
+        "360": {"Id": 360, "ShortName": "M360", "Name": "Bar", "CategoryId": 1, "Type": 2}
+      }
+    },
+    "Fubs": {
+      "1": {"Id": 1, "Name": "Test4"},
+      "2": {"Id": 2, "Name": "Lights"}
+    }
+  },
+  "plans": {
+    "1": {
+      "elements": {
+        "10": {"name": "AND", "reference": null},
+        "11": {"reference": {"type": 2, "ref_id": "359"}},
+        "12": {"reference": {"type": 2, "ref_id": 4}},
+        "13": {"reference": {"type": 2, "ref_id": "360"}},
+        "14": {"reference": {"type": 1, "ref_id": 300}}
+      },
+      "connections": {}
+    },
+    "2": {
+      "elements": {
+        "20": {"reference": {"type": 2, "ref_id": 360}}
+      },
+      "connections": {}
+    }
+  }
+}

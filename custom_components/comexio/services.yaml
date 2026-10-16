@@ -684,18 +684,20 @@ function_plan_preview_stop:
 marker_delete:
   name: Marker Delete
   description: >
-    Permanently deletes one or more Markers directly on the Comexio server (not just from
-    a function plan's canvas — the Marker itself, including any wiring to it). Only markers
-    this integration created itself (e.g. KNX bridge markers) are deleted — factory and
-    Studio-created markers are protected: they are skipped and listed as "protected", the
-    remaining ids are still deleted. With "force", protected markers are deleted too if they
-    have no name and are not placed in any function plan. A marker id that does not (or no
-    longer) exist is silently skipped, not reported as an error — a genuine request failure
-    (e.g. session drop) is still reported, never mistaken for that. Limited to 200 markers
-    per call. Requires "confirm" — without it, nothing is deleted. The response lists the ids
-    per outcome (deleted/skipped/protected/failed); "protected_reason" says why ids were
-    protected, and "error" is only set when the call failed or the check ran stricter than
-    requested (e.g. force ignored because not every function plan could be verified).
+    Permanently deletes one or more Markers directly on the Comexio server (from Comexio's
+    marker list, not a function plan element). Markers placed in a function plan are never
+    deleted — remove them from the plan first; every function plan is loaded before each call,
+    and if one cannot be read, nothing is deleted. Of the unplaced markers, those created via
+    the admin API (e.g. KNX bridge markers) are deleted; factory and Studio-created markers
+    are protected. Protected markers are skipped and listed as "protected" with their reason,
+    the remaining ids are still deleted. With "force", unplaced factory/Studio markers are
+    deleted too if they have no name. A marker id that does not (or no longer) exist is
+    silently skipped, not reported as an error — a genuine request failure (e.g. session
+    drop) is still reported, never mistaken for that. Limited to 200 markers per call.
+    Requires "confirm" — without it, nothing is deleted. The response lists the ids per
+    outcome (deleted/skipped/protected/failed); "protected_reasons" says per id why it was
+    protected ("protected_reason" in one line), and "error" is only set when the call failed
+    or the check could not run (config or a function plan unreadable — every id refused).
   fields:
     config_entry:
       name: Comexio instance
@@ -719,7 +721,7 @@ marker_delete:
         boolean:
     force:
       name: Force (untitled, unplaced markers)
-      description: "Also delete factory/Studio-created markers — but only those without a name that are not placed in any function plan."
+      description: "Also delete factory/Studio-created markers — but only those without a name. Markers placed in a function plan stay protected even with force."
       required: false
       default: false
       selector:
