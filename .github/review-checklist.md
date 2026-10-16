@@ -35,6 +35,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Translations:** `translations/strings.json` is authoritative; every new key must also exist in `en.json`,
   `de.json`, `fr.json` and `es.json`. `persistent_notification` texts are English.
 - **Services:** every service logs its parameters and reports its duration.
+- **Descriptions follow the behaviour:** a change in what an option, service, switch or repair does updates its
+  description in the same PR — `services.yaml`, the option and field descriptions in `strings.json` and all
+  translation files, and the README/CONFIGURATION sections that describe it. Flag a behaviour change whose
+  descriptions still state the old behaviour (#181).
 - **Concurrency:** Web-IO syncs run under the coordinator's `_sync_lock`; webhook values arriving during a config
   fetch must win over the stale API snapshot (guard R1). Flag changes that weaken these guards.
 - **Poll timer:** `async_set_updated_data` cancels and reschedules the coordinator's periodic poll. Code that runs
@@ -54,7 +58,20 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   name-keyed set. A plan recreated under the same `fub_id` and name counts as the same plan — its backups and
   watches carry over on purpose; an accepted limit, do not flag it. A selection stored as a `fub_id` alone means the plan holding that id now: code that moves such a
   selection to another id (e.g. after a restore as new plan) leaves it in place while another live plan holds the
-  old id (#181).
+  old id (#181). The same goes for ids derived from a plan — repair issue ids, push tags, push action ids,
+  notification ids. An id of a plan Comexio no longer has (a vanished watched plan, an orphaned backup) carries the
+  `fub_id` and a digest of the name (`vanished_plan_token`, `orphaned_backup_issue_id`), never the `fub_id` alone:
+  two gone plans can share an id. The digest is a cut SHA-256 of at least 48 bits — a 32-bit checksum such as
+  CRC32 lets two names of one `fub_id` share an id. A new id picks its length once; an existing id keeps its digest
+  length: it is persisted, and its clean-up pattern matches exactly that length (`orphaned_backup_issue_id`: 12 hex
+  digits, `vanished_plan_token`: 16) — lengthening it orphans the ids already raised. A push or repair that acts on
+  a live plan checks before acting that the plan it was raised for is still the one under the id — the `fub_id`
+  and the name it was raised for (the "Start plan" action carries `vanished_plan_token`, the stopped-plan repair
+  its `plan_name`; `watches_plan_raised_for`), not only that the id is watched: Comexio may have given the id to
+  another watched plan since (#185). A legacy pick stored as a bare `fub_id` (no name) means the user plan holding
+  that id now, like any selection stored as a `fub_id` alone — acting on that plan, renamed or not, is intended, do
+  not flag it. The exception covers only that bare-ID watch: an HA-managed plan that holds the id is matched by
+  name, and a "Start plan" action sent before it carried the token (no name) starts only a bare-ID pick.
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
@@ -104,6 +121,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Report after the final status:** a result report (a "restored completely/OK" flag, a success push or note) is
   recorded only after the last status change — a later step (lineage move, reference repoint, warnings) can still
   turn OK into PARTIAL, and a report written earlier claims a success that did not happen (#181).
+- **A finished write stays reported:** once a step wrote Comexio in a way the operation cannot take back (a plan
+  was built, a command saved), a later step's error — any exception, not only network errors or timeouts — does not
+  report the whole operation as failed: the result keeps the finished write and names the failed step. A "failed"
+  result invites a retry that writes it a second time (e.g. a restored plan whose start failed, built twice).
+  Flag an `except` after such a write that is narrower than the errors the later step can raise, or that reports
+  the operation as failed (#181).
 - **Early returns:** a coordinator cycle that changes state an entity shows and then returns early still calls
   `async_update_listeners()`, otherwise the entity shows the old state until the next poll.
 - **Timestamps:** a timestamp that starts a cooldown or retry interval, or records the last attempt, is taken
