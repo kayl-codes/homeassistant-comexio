@@ -78,7 +78,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   push or a `clear_notification` under that tag replaces or removes whatever the phone shows there — also the
   current alarm of another plan that holds the ID now. A push whose action is ignored as stale is taken off the
   phone or replaced, never left with a button that does nothing. Before clearing a `plan_{fub_id}` push, check that
-  the ID's plan is not stopped: while it is, its own alarm holds the tag (`async_dismiss_push` keeps it). A deleted
+  the ID's plan is not stopped: while it is, its own alarm holds the tag (`async_dismiss_push` keeps it) — that
+  alarm, pushed on the stop and sent again to a target that did not take it, is what replaced the stale push, so
+  keeping the tag is not leaving the stale push in place. Clears and replacements reach the notify targets
+  configured now; a phone whose target was removed is out of HA's reach and not a finding. A deleted
   plan's push has its own `vanished_{token}` tag and is removed by that token, not by the `fub_id`.
   `clear_notification` goes to mobile_app notify services only (`mobile_app_only=True`); any other service shows it
   as text. Flag a clear or replacement under a shared tag without that check, and a stale push left in place (#185).
