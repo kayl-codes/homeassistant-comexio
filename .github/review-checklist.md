@@ -68,8 +68,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   a live plan checks before acting that the plan it was raised for is still the one under the id — the `fub_id`
   and the name it was raised for (the "Start plan" action carries `vanished_plan_token`, the stopped-plan repair
   its `plan_name`; `watches_plan_raised_for`), not only that the id is watched: Comexio may have given the id to
-  another watched plan since (#185). A legacy pick stored as a bare `fub_id` (no name) means the plan holding that id now,
-  like any selection stored as a `fub_id` alone — acting on that plan, renamed or not, is intended, do not flag it.
+  another watched plan since (#185). A legacy pick stored as a bare `fub_id` (no name) means the user plan holding
+  that id now, like any selection stored as a `fub_id` alone — acting on that plan, renamed or not, is intended, do
+  not flag it. The exception covers only that bare-ID watch: an HA-managed plan that holds the id is matched by
+  name, and a "Start plan" action sent before it carried the token (no name) starts only a bare-ID pick.
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
