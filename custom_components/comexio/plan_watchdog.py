@@ -80,6 +80,11 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
             "{name} (ID {fub_id}) was not started: a sync, restore, poll, function plan edit or bus-load "
             "watchdog run is in progress. Try again in a moment."
         ),
+        "outdated_title": "Comexio: push outdated",
+        "outdated": (
+            "That push was sent before an update and did not name its plan, so nothing was started. ID {fub_id} "
+            "now holds {name}: tap Start plan to start it."
+        ),
         "suspended_title": "Comexio: check function plan",
         "suspended": (
             "Plan Auto-Start could not keep {name} (ID {fub_id}) running after {attempts} attempts and "
@@ -114,6 +119,11 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "busy": (
             "{name} (ID {fub_id}) wurde nicht gestartet: Gerade läuft ein Sync, eine Wiederherstellung, ein "
             "Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Versuche es gleich noch einmal."
+        ),
+        "outdated_title": "Comexio: Push veraltet",
+        "outdated": (
+            "Diese Push-Nachricht stammt von vor einem Update und nannte ihren Plan nicht, daher wurde nichts "
+            "gestartet. ID {fub_id} gehört jetzt zu {name}: Plan starten startet ihn."
         ),
         "suspended_title": "Comexio: Logikplan prüfen",
         "suspended": (
@@ -376,6 +386,13 @@ class ManagedPlanWatchdog:
     async def async_push_start_busy(self, fub_id: int, name: str) -> None:
         """Tell the phone a start from its push was not sent (something else runs), with the action again."""
         await self._async_push(fub_id, name, "busy_title", "busy", with_action=True)
+
+    async def async_push_start_outdated(self, fub_id: int, name: str) -> None:
+        """Replace a "Start plan" push that names no plan (sent before the update) with one naming the ID's plan.
+
+        The alarm is pushed on the stop only, so the old push would otherwise keep a button that starts nothing.
+        """
+        await self._async_push(fub_id, name, "outdated_title", "outdated", with_action=True)
 
     def _log_transitions(
         self, previous: Mapping[int, str], stopped: Mapping[int, str], managed: Mapping[int, str]

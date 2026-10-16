@@ -4682,10 +4682,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if kind != ACTION_START and token is not None:
             self._handle_vanished_plan_action(kind, fub_id, token)
             return
-        # A "Start plan" sent before the action carried the name digest (token None) names the plan by ID only.
-        if self.watches_plan_raised_for(fub_id, lambda name: token in (None, vanished_plan_token(fub_id, name))):
+        # A "Start plan" sent before the action carried the name digest (token None) names no plan:
+        # only a bare-ID pick, which watches whichever plan holds the ID, still starts from it.
+        if self.watches_plan_raised_for(fub_id, lambda name: token == vanished_plan_token(fub_id, name)):
             self.hass.async_create_background_task(
                 self._async_start_plan_from_push(fub_id), name=f"{DOMAIN}_{self.server_id}_start_plan_{fub_id}"
+            )
+            return
+        if token is None and (name := self.watched_plan_name(fub_id)) is not None:
+            # The alarm is pushed on the stop only: replaced (same tag) by one naming the ID's plan now.
+            _LOGGER.warning(
+                "[%s] Watchdog push action for function plan %s ignored: the push was sent before the update and "
+                "does not name the plan; it is replaced by one for %s",
+                self.server_id,
+                fub_id,
+                name,
+            )
+            self.hass.async_create_background_task(
+                self.plan_watchdog.async_push_start_outdated(fub_id, name),
+                name=f"{DOMAIN}_{self.server_id}_outdated_push_{fub_id}",
             )
             return
         if self.is_watched_plan(fub_id):

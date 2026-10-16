@@ -346,7 +346,7 @@ def _pushes(watchdog: ManagedPlanWatchdog) -> list[tuple[str, str, dict[str, Any
     return [call.args[:3] for call in watchdog._hass.services.async_call.call_args_list]
 
 
-@pytest.mark.parametrize("push", ["async_push_start_failed", "async_push_start_busy"])
+@pytest.mark.parametrize("push", ["async_push_start_failed", "async_push_start_busy", "async_push_start_outdated"])
 def test_a_repeated_start_action_names_the_plan_it_was_pushed_for(ir: MagicMock, push: str) -> None:
     """(#184) the "Start plan" of the failed/busy push carries the plan name it is sent with, as the alarm's."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])

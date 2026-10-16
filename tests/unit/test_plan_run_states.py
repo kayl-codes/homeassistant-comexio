@@ -1115,26 +1115,62 @@ def test_push_action_starts_only_a_watched_plan(api: ComexioAPI, caplog: pytest.
         ({CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["19:Test1"]}, start_action_id("iosrv1", 19, "Old"), "ignore"),
         # a bare-ID pick watches whichever plan holds the ID: one renamed since the push still starts
         ({CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["19"]}, start_action_id("iosrv1", 19, "Old"), "start"),
-        # sent before the action carried the name digest: the plan holding the ID, as before
-        ({CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}, "COMEXIO_START_PLAN_iosrv1_19", "start"),
+        # sent before the action carried the name digest: it names no plan, only a bare-ID pick starts from it
+        ({CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}, "COMEXIO_START_PLAN_iosrv1_19", "legacy"),
+        ({CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["19:Test1"]}, "COMEXIO_START_PLAN_iosrv1_19", "legacy"),
+        ({CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["19"]}, "COMEXIO_START_PLAN_iosrv1_19", "start"),
+        ({}, "COMEXIO_START_PLAN_iosrv1_19", "dismiss"),
+        # an HA-managed plan holds its name even next to a bare pick of its ID
+        (
+            {CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["19"]},
+            "COMEXIO_START_PLAN_iosrv1_19",
+            "legacy",
+        ),
+        (
+            {CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["19"]},
+            start_action_id("iosrv1", 19, "Old"),
+            "ignore",
+        ),
         ({}, start_action_id("iosrv1", 19, "Test1"), "dismiss"),
     ],
-    ids=["same-plan", "id-reused-managed", "id-reused-named-pick", "bare-pick-renamed", "legacy-action", "unwatched"],
+    ids=[
+        "same-plan",
+        "id-reused-managed",
+        "id-reused-named-pick",
+        "bare-pick-renamed",
+        "legacy-action-managed",
+        "legacy-action-named-pick",
+        "legacy-action-bare-pick",
+        "legacy-action-unwatched",
+        "legacy-action-managed-and-bare-pick",
+        "id-reused-managed-and-bare-pick",
+        "unwatched",
+    ],
 )
 def test_push_action_starts_only_the_plan_it_was_sent_for(
     api: ComexioAPI, caplog: pytest.LogCaptureFixture, options: dict, action: str, outcome: str
 ) -> None:
-    """(Sourcery, #184) a watched ID is not enough: the push names the plan by ID and name digest."""
+    """(Sourcery, #184/#185) a watched ID is not enough: the push names the plan by ID and name digest."""
+    hass = MagicMock()
     coordinator = _coordinator(
         api,
-        hass=MagicMock(),
+        hass=hass,
         config_entry=SimpleNamespace(options=options),
-        plan_watchdog=SimpleNamespace(async_dismiss_push=MagicMock(return_value="dismiss")),
+        plan_watchdog=SimpleNamespace(
+            async_dismiss_push=MagicMock(return_value="dismiss"),
+            async_push_start_outdated=MagicMock(return_value="outdated"),
+        ),
         _async_start_plan_from_push=MagicMock(return_value="start"),
     )
     with caplog.at_level(logging.WARNING):
         coordinator.async_handle_notification_action(SimpleNamespace(data={"action": action}))
-    assert coordinator._async_start_plan_from_push.call_count == (outcome == "start")
+    scheduled = {"start": ["start"], "dismiss": ["dismiss"], "legacy": ["outdated"], "ignore": []}[outcome]
+    assert [c.args[0] for c in hass.async_create_background_task.call_args_list] == scheduled
+    if outcome == "start":
+        coordinator._async_start_plan_from_push.assert_called_once_with(19)
+        assert "ignored" not in caplog.text
+    else:
+        coordinator._async_start_plan_from_push.assert_not_called()
     # The ID's current plan has its own push under the same tag: a stale one of another plan is not cleared.
     if outcome == "dismiss":
         coordinator.plan_watchdog.async_dismiss_push.assert_called_once_with(19)
@@ -1142,6 +1178,17 @@ def test_push_action_starts_only_the_plan_it_was_sent_for(
         coordinator.plan_watchdog.async_dismiss_push.assert_not_called()
     if outcome == "ignore":
         assert "belongs to another watched plan now (Test1)" in caplog.text
+        assert "sent before the update" not in caplog.text
+    if outcome == "dismiss":
+        assert "no longer watched" in caplog.text
+        assert "sent before the update" not in caplog.text
+    # The alarm is pushed on the stop only: the old push is replaced by one naming the ID's plan now.
+    if outcome == "legacy":
+        coordinator.plan_watchdog.async_push_start_outdated.assert_called_once_with(19, "Test1")
+        assert "sent before the update" in caplog.text
+        assert "belongs to another watched plan" not in caplog.text
+    else:
+        coordinator.plan_watchdog.async_push_start_outdated.assert_not_called()
 
 
 @pytest.mark.parametrize(
