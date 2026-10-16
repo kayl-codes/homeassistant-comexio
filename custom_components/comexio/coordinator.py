@@ -4704,8 +4704,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             return
         if self.is_watched_plan(fub_id):
-            # Comexio gave the ID to another watched plan since: its own push shares the tag, so the
-            # stale one is left alone (the newer push replaced it on the phone anyway).
+            # Comexio gave the ID to another watched plan since. A stopped one has its own alarm under the
+            # tag (sent again if undelivered), which must stay; for one running, the clear of the stale
+            # push may have failed, so it is taken off the phone.
             _LOGGER.warning(
                 "[%s] Watchdog push action for function plan %s ignored: the ID belongs to another watched plan "
                 "now (%s)",
@@ -4713,6 +4714,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 fub_id,
                 self.watched_plan_name(fub_id),
             )
+            if fub_id not in (self.plan_watchdog.stopped or {}):
+                self.hass.async_create_background_task(
+                    self.plan_watchdog.async_dismiss_push(fub_id),
+                    name=f"{DOMAIN}_{self.server_id}_dismiss_push_{fub_id}",
+                )
             return
         # A push from before the plan was unselected or deleted in Comexio: starting it is no longer
         # the watchdog's call, so the stale push is taken off the phone instead.

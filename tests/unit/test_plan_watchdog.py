@@ -550,13 +550,16 @@ def test_a_vanished_alarm_no_service_delivered_is_sent_again(
     assert len(_pushes(watchdog)) == 6
 
 
-def test_a_vanished_alarm_one_service_delivered_is_not_sent_again(ir: MagicMock, clock: list[float]) -> None:
+def test_a_vanished_alarm_is_sent_again_only_to_the_service_that_failed(ir: MagicMock, clock: list[float]) -> None:
+    """(Sourcery, #185) Another service taking it is no delivery for the failed one's phone."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "notify.mobile_app_tablet"])
-    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("down"), None]
+    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("down"), None, None]
     asyncio.run(watchdog.async_sync_vanished(TEST4))
     clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
     asyncio.run(watchdog.async_sync_vanished(TEST4))
-    assert len(_pushes(watchdog)) == 2  # one push to each service, no retry
+    services = [service for _d, service, _s in _pushes(watchdog)]
+    assert services == ["mobile_app_phone", "mobile_app_tablet", "mobile_app_phone"]
+    assert watchdog._vanished_push_unsent == {}
 
 
 def test_a_later_push_delivered_for_the_plan_replaces_its_undelivered_alarm(ir: MagicMock, clock: list[float]) -> None:
@@ -676,6 +679,78 @@ def test_a_reused_id_stopped_under_another_name_gets_its_own_alarm(ir: MagicMock
     assert alarm["data"]["tag"] == watchdog._push_tag(47)
     assert "Other" in alarm["message"]
     assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Other")
+
+
+def test_an_alarm_one_notify_target_failed_to_take_is_sent_again_to_it_only(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery, #185) Another target taking it is no delivery for the failed one's phone."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
+
+    async def tablet_down(_domain: str, service: str, *_args: Any, **_kwargs: Any) -> None:
+        if service == "mobile_app_tablet":
+            raise HomeAssistantError("down")
+
+    watchdog._hass.services.async_call.side_effect = tablet_down
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert watchdog._stopped_push_unsent[47][1] == {"mobile_app_tablet"}
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))  # retried in vain
+    assert caplog.text == ""  # its failure was logged already
+    assert [service for _d, service, _s in _pushes(watchdog)] == ["mobile_app_phone", "mobile_app_tablet"] + [
+        "mobile_app_tablet"
+    ]
+    watchdog._hass.services.async_call.side_effect = None
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    (*_, (_d, service, alarm)) = _pushes(watchdog)
+    assert service == "mobile_app_tablet"
+    assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Test4")
+    assert watchdog._stopped_push_unsent == {}
+    # A push the target took since replaces the alarm waiting there: no retry left for it.
+    watchdog._hass.services.async_call.side_effect = tablet_down
+    asyncio.run(watchdog.async_check({47: "Other"}, _states(p47=False)))
+    assert set(watchdog._stopped_push_unsent) == {47}
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_push_start_failed(47, "Other"))
+    assert watchdog._stopped_push_unsent == {}
+
+
+def test_a_fresh_alarm_goes_to_every_target_while_a_retry_waits(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """(local review) The retry's narrowed targets must not win over a new alarm for the ID; its failure warns."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
+
+    async def tablet_down(_domain: str, service: str, *_args: Any, **_kwargs: Any) -> None:
+        if service == "mobile_app_tablet":
+            raise HomeAssistantError("down")
+
+    watchdog._hass.services.async_call.side_effect = tablet_down
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC  # the retry is due
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(watchdog.async_check({47: "Other"}, _states(p47=False)))  # another plan holds the ID now
+    (_d1, phone, alarm), (_d2, tablet, _a) = _pushes(watchdog)[2:]
+    assert (phone, tablet) == ("mobile_app_phone", "mobile_app_tablet")  # sent once, to both
+    assert "Other" in alarm["message"]
+    assert "notify.mobile_app_tablet failed" in caplog.text
+    assert watchdog._stopped_push_unsent[47] == (clock[0], {"mobile_app_tablet"})
+
+
+def test_a_retry_to_a_target_no_longer_configured_is_dropped(ir: MagicMock, clock: list[float]) -> None:
+    """(local review) Else the entry stays and is "retried" at every check, reaching no one."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._stopped_push_unsent[47] = (clock[0], frozenset({"mobile_app_tablet"}))  # removed from the options
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))  # the alarm, to the phone
+    assert set(watchdog._stopped_push_unsent) == {47}
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert len(_pushes(watchdog)) == 1
+    assert watchdog._stopped_push_unsent == {}
 
 
 def test_a_reused_id_does_not_inherit_the_auto_start_state(ir: MagicMock) -> None:

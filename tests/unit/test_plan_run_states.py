@@ -1159,6 +1159,7 @@ def test_push_action_starts_only_the_plan_it_was_sent_for(
         plan_watchdog=SimpleNamespace(
             async_dismiss_push=MagicMock(return_value="dismiss"),
             async_push_start_outdated=MagicMock(return_value="outdated"),
+            stopped={19: "Test1"},  # the ID's plan is stopped: its own alarm holds the tag
         ),
         _async_start_plan_from_push=MagicMock(return_value="start"),
     )
@@ -1189,6 +1190,29 @@ def test_push_action_starts_only_the_plan_it_was_sent_for(
         assert "belongs to another watched plan" not in caplog.text
     else:
         coordinator.plan_watchdog.async_push_start_outdated.assert_not_called()
+
+
+@pytest.mark.parametrize("stopped", [{}, None], ids=["running", "before-the-first-check"])
+def test_a_stale_push_of_an_id_whose_plan_runs_now_is_taken_off_the_phone(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture, stopped: dict | None
+) -> None:
+    """(Sourcery, #185) No alarm of the ID's plan replaced it, and its clear may have failed: dismissed."""
+    hass = MagicMock()
+    coordinator = _coordinator(
+        api,
+        hass=hass,
+        config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}),
+        plan_watchdog=SimpleNamespace(async_dismiss_push=MagicMock(return_value="dismiss"), stopped=stopped),
+        _async_start_plan_from_push=MagicMock(return_value="start"),
+    )
+    with caplog.at_level(logging.WARNING):
+        coordinator.async_handle_notification_action(
+            SimpleNamespace(data={"action": start_action_id("iosrv1", 19, "Old")})
+        )
+    assert [c.args[0] for c in hass.async_create_background_task.call_args_list] == ["dismiss"]
+    coordinator.plan_watchdog.async_dismiss_push.assert_called_once_with(19)
+    coordinator._async_start_plan_from_push.assert_not_called()
+    assert "belongs to another watched plan now (Test1)" in caplog.text
 
 
 @pytest.mark.parametrize(
