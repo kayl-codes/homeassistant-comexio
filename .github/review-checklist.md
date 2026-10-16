@@ -64,7 +64,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   two gone plans can share an id. The digest is a cut SHA-256 of at least 48 bits — a 32-bit checksum such as
   CRC32 lets two names of one `fub_id` share an id. An id of a live plan may be the `fub_id` alone only if its
   handler checks the full identity before acting (`is_watched_plan`: the id's plan still carries the watched name),
-  so an old push or repair cannot act on another plan that reuses the id (#181).
+  so an old push or repair cannot act on another plan that reuses the id (#181). A legacy pick stored as a bare
+  `fub_id` (no name) means the plan holding that id now, like any selection stored as a `fub_id` alone — acting on
+  that plan is intended, do not flag it.
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
