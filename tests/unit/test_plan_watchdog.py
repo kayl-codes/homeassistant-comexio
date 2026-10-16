@@ -358,6 +358,12 @@ def test_a_repeated_start_action_names_the_plan_it_was_pushed_for(ir: MagicMock,
     assert [action["action"] for action in actions] == [start_action_id(SERVER_ID, 34, "HA - Marker 1")]
 
 
+def test_the_start_action_carries_the_plan_name_digest() -> None:
+    """(#185) Pinned literally: the tests comparing pushes against start_action_id rely on it naming the plan."""
+    assert start_action_id(SERVER_ID, 34, "HA - Marker 1") == "COMEXIO_START_PLAN_cx1_34_cbb7f0cecb5509a8"
+    assert start_action_id(SERVER_ID, 34, "Other") != start_action_id(SERVER_ID, 34, "HA - Marker 1")
+
+
 def test_stop_pushes_an_alarm_with_a_start_action_and_recovery_clears_it(ir: MagicMock) -> None:
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
