@@ -218,7 +218,7 @@ def _reference_type(ref: Any) -> int | None:
     """An element reference's integer type (int or numeric string), or None if unreadable.
 
     A missing or malformed type must not pass as "not a marker" — the reference could still
-    point at a marker, which the force gate would then treat as unplaced.
+    point at a marker, which the placement check would then treat as unplaced.
     """
     if not isinstance(ref, dict):
         return None
@@ -236,13 +236,17 @@ def _reference_type(ref: Any) -> int | None:
 
 
 def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
-    """Marker ids referenced in one plan, or None if any element/reference is unreadable."""
+    """Marker ids referenced in one plan, or None if any element/reference is unreadable.
+
+    loadelements sends "reference" with every element; only an explicit null means "none". A
+    missing key is unreadable — it could hide a marker placement.
+    """
     elements = plan_data.get("elements") if isinstance(plan_data, dict) else None
     if not isinstance(elements, dict):
         return None
     refs: set[int] = set()
     for elem in elements.values():
-        ref = elem.get("reference") if isinstance(elem, dict) else "malformed"
+        ref = elem.get("reference", "missing") if isinstance(elem, dict) else "malformed"
         if ref is None:
             continue
         ref_type = _reference_type(ref)
@@ -258,10 +262,11 @@ def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
 
 
 def _placed_marker_ids_strict(all_plans: dict[int, dict], ignored: Iterable[int] = ()) -> set[int] | None:
-    """Fail-closed variant of _placed_marker_ids for marker_delete's force gate.
+    """Fail-closed variant of _placed_marker_ids for the KNX bridge marker reset.
 
     _placed_marker_ids silently skips unreadable references — fine for picking free ids, but
-    here a skipped reference would make a placed marker look unplaced and deletable. Any
+    here a skipped reference would make a placed marker look unused and blank it (marker_delete
+    reads plans the same way via _marker_plan_placements_strict). Any
     unreadable plan, element or marker reference returns None (placement unknown) instead.
     Plans in `ignored` are still read strictly, only their placements are not counted: an
     unreadable reference there may be a pair their own cleanup skipped and left in place.
@@ -277,8 +282,40 @@ def _placed_marker_ids_strict(all_plans: dict[int, dict], ignored: Iterable[int]
     return placed
 
 
+def _marker_plan_placements_strict(
+    all_plans: dict[int, dict], plan_names: dict[int, str]
+) -> dict[int, list[str]] | None:
+    """{marker id: names of the plans it is placed in} for marker_delete, or None if any plan is unreadable.
+
+    Same fail-closed reading as _placed_marker_ids_strict: a skipped reference would make a
+    placed marker look unplaced and deletable. The names are for the notification only — plan
+    names are not unique, so two plans of the same name are both listed.
+    """
+    placements: dict[int, list[str]] = {}
+    for fub_id in sorted(all_plans):
+        refs = _plan_marker_refs_strict(all_plans[fub_id])
+        if refs is None:
+            return None
+        for marker_id in refs:
+            placements.setdefault(marker_id, []).append(plan_names.get(fub_id) or f"#{fub_id}")
+    return placements
+
+
+def _plan_display_name(entry: Any) -> str | None:
+    """A $Fubs entry's plan name on one line, or None if it has none.
+
+    Control characters (newlines included) become spaces and runs of whitespace collapse — the
+    name goes into marker_delete's log line, notification and response, where a newline in a
+    name set in Comexio would forge extra lines.
+    """
+    name = entry.get("Name") if isinstance(entry, dict) else None
+    if not isinstance(name, str):
+        return None
+    return " ".join("".join(c if c.isprintable() else " " for c in name).split()) or None
+
+
 _MARKER_CONFIG_UNREADABLE = "Comexio marker config could not be fetched or parsed — every id refused (see log)."
-_FORCE_IGNORED = "force ignored: not every function plan could be loaded and verified (see log)."
+_PLACEMENT_UNKNOWN = "not every function plan could be loaded and verified — every id refused (see log)."
 
 
 def _marker_category_is(record: dict[str, Any], expected: int) -> bool:
@@ -293,14 +330,14 @@ def _marker_category_is(record: dict[str, Any], expected: int) -> bool:
 
 
 def _is_api_created_marker(record: dict[str, Any]) -> bool:
-    """True if the marker record carries CategoryId==1 (created via the admin API, not Studio)."""
+    """True if the marker record carries CategoryId==1 (admin API, or the plan editor's "new marker")."""
     return _marker_category_is(record, 1)
 
 
 def _is_studio_marker(record: dict[str, Any]) -> bool:
-    """True if the marker record carries CategoryId==0 (factory or Studio-created).
+    """True if the marker record carries CategoryId==0 (factory-provisioned or from Studio's marker list).
 
-    marker_delete's force path only applies to this known category — an unknown or malformed
+    marker_delete's force option only applies to this known category — an unknown or malformed
     CategoryId stays protected even when the marker is untitled and unplaced.
     """
     return _marker_category_is(record, 0)
@@ -318,38 +355,47 @@ def _marker_has_title(record: dict[str, Any]) -> bool:
     return not isinstance(name, str) or bool(name.strip())
 
 
-def _classify_marker_delete_ids(
-    marker_ids: list[int], records: dict[int, dict[str, Any]], placed_ids: set[int] | None
-) -> tuple[list[int], list[int]]:
-    """Split marker_ids into (deletable, protected) for the marker_delete service.
+def _marker_delete_block_reason(
+    marker_id: int, record: dict[str, Any] | None, placements: dict[int, list[str]], force: bool
+) -> str | None:
+    """Why marker_delete must not delete marker_id, or None if it may.
 
+    Placement comes first and holds for every CategoryId, force or not: deleting a placed
+    marker would leave its plan with a dangling element — and the Studio plan editor's
+    "new marker" seems to create CategoryId==1 markers just like the admin API (2026-10-16).
+    """
+    if plans := placements.get(marker_id):
+        return f"placed in function plan{'s' if len(plans) > 1 else ''} {', '.join(plans)}"
+    if record is None or _is_api_created_marker(record):
+        return None
+    if not _is_studio_marker(record):
+        return f"unknown CategoryId {record.get('CategoryId')!r}"
+    if _marker_has_title(record):
+        return "CategoryId 0 marker with a title"
+    return None if force else "CategoryId 0 marker — enable 'force' for untitled ones"
+
+
+def _classify_marker_delete_ids(
+    marker_ids: list[int], records: dict[int, dict[str, Any]], placements: dict[int, list[str]], force: bool
+) -> tuple[list[int], dict[int, str]]:
+    """Split marker_ids into (deletable, {protected id: reason}) for the marker_delete service.
+
+    - Placed in any function plan (placements, from a fresh load of every plan): protected.
     - Absent from records (already deleted / never existed): deletable — delete_marker then
       reports it as the harmless "already absent" case.
-    - CategoryId==1 (created by this integration via the API): deletable.
-    - CategoryId==0 (factory or Studio-created): protected, unless force is active
-      (placed_ids is not None) AND the marker has no title AND it is not placed in any
-      function plan.
+    - CategoryId==1 (created via the admin API — this integration, or the plan editor): deletable.
+    - CategoryId==0 (factory-provisioned or from Studio's marker list): protected, unless force is on AND the marker
+      has no title.
     - Anything else (unknown/malformed CategoryId): always protected, force or not.
-    placed_ids=None means force is off — or the plans couldn't all be
-      loaded, in which case placement is unknown and nothing may pass on that basis.
     """
     deletable: list[int] = []
-    protected: list[int] = []
+    protected: dict[int, str] = {}
     for mid in marker_ids:
-        record = records.get(mid)
-        if (
-            record is None
-            or _is_api_created_marker(record)
-            or (
-                placed_ids is not None
-                and _is_studio_marker(record)
-                and not _marker_has_title(record)
-                and mid not in placed_ids
-            )
-        ):
+        reason = _marker_delete_block_reason(mid, records.get(mid), placements, force)
+        if reason is None:
             deletable.append(mid)
         else:
-            protected.append(mid)
+            protected[mid] = reason
     return deletable, protected
 
 
@@ -1903,63 +1949,69 @@ class ComexioAPI:
 
     async def get_marker_delete_eligibility(
         self, marker_ids: list[int], force: bool = False
-    ) -> tuple[list[int], list[int], set[int], str | None]:
-        """Split marker_ids into (deletable, protected, known_ids, gate_error) via a fresh config lookup.
+    ) -> tuple[list[int], dict[int, str], dict[int, Any], str | None]:
+        """Split marker_ids into (deletable, protected, categories, gate_error) via a fresh config lookup.
 
-        Safety gate for marker_delete: by default only markers this integration created itself
-        via the API carry CategoryId==1 and may be deleted. CategoryId==0 covers both
-        factory-provisioned markers (M1 "System rebooted", M2 "TRUE", M3 "FALSE") and anything
-        a human created via Comexio Studio — protected. With force=True a CategoryId==0 marker
-        becomes deletable too, but only if it has no title AND is not placed in any function
-        plan (checked against freshly loaded plans — see _classify_marker_delete_ids). If not
-        every plan can be loaded, force grants nothing: placement would be unknown.
+        Safety gate for marker_delete. Every plan is loaded first, force or not: a marker placed
+        in any function plan is never deleted. Of the unplaced ones, markers created via the
+        admin API or with the plan editor's "new marker" carry CategoryId==1 and may be deleted.
+        CategoryId==0 covers both factory-provisioned markers (M1 "System rebooted", M2 "TRUE",
+        M3 "FALSE") and markers from Comexio Studio's marker list — protected; force=True opens
+        them only when they have no title. See _classify_marker_delete_ids.
 
         Protected ids no longer abort the batch — the caller deletes the deletable ones and
-        reports the protected ones. A marker_id absent from the current config entirely is
-        deletable (delete_marker then reports it as "already absent").
+        reports the protected ones, `protected` maps each to its reason. A marker_id absent from
+        the current config entirely is deletable (delete_marker then reports it as "already absent").
 
-        A config fetch or parse failure (see _parse_marker_records) refuses every requested id
-        rather than defaulting them all to deletable — a blind failure must never silently open
-        this gate for an irreversible action.
+        A config fetch or parse failure (see _parse_marker_records), or a plan that cannot be
+        loaded and read, refuses every requested id rather than defaulting them to deletable — a
+        blind failure must never silently open this gate for an irreversible action.
 
-        The third return value, `known_ids`, is the set of ids actually found in this lookup —
-        the caller uses it to tell a delete_marker "False" result for a confirmed-absent id
-        (harmless) apart from one for an id we just saw present (suspicious). The fourth,
-        `gate_error`, names a load failure that made the gate stricter than requested (config
-        unreadable, or force ignored because the plans couldn't be verified) — None otherwise,
-        so the caller can tell that apart from genuine protection.
+        `categories` maps every id found in this lookup to its raw CategoryId — the caller logs
+        it and uses its keys to tell a delete_marker "False" result for a confirmed-absent id
+        (harmless) apart from one for an id we just saw present (suspicious). `gate_error` names
+        the load failure that refused every id — None otherwise, so the caller can tell that
+        apart from genuine protection.
         """
         try:
             conf = await self.get_raw_config()
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, TimeoutError, ComexioConnectionError):
+            # get_raw_config re-raises a ComexioConnectionError itself when its cause is neither
+            # of the other two — it must refuse every id here too, not escape the gate.
             _LOGGER.exception("get_marker_delete_eligibility: config fetch failed — refusing all ids")
-            return [], list(marker_ids), set(), _MARKER_CONFIG_UNREADABLE
+            return [], dict.fromkeys(marker_ids, _MARKER_CONFIG_UNREADABLE), {}, _MARKER_CONFIG_UNREADABLE
         records = self._parse_marker_records(conf)
         if records is None:
-            return [], list(marker_ids), set(), _MARKER_CONFIG_UNREADABLE
-        placed_ids = await self._placed_marker_ids_for_force(conf) if force else None
-        gate_error = _FORCE_IGNORED if force and placed_ids is None else None
-        deletable, protected = _classify_marker_delete_ids(marker_ids, records, placed_ids)
-        return deletable, protected, set(records), gate_error
+            return [], dict.fromkeys(marker_ids, _MARKER_CONFIG_UNREADABLE), {}, _MARKER_CONFIG_UNREADABLE
+        categories = {mid: record.get("CategoryId") for mid, record in records.items()}
+        placements = await self._marker_plan_placements(conf)
+        if placements is None:
+            return [], dict.fromkeys(marker_ids, _PLACEMENT_UNKNOWN), categories, _PLACEMENT_UNKNOWN
+        deletable, protected = _classify_marker_delete_ids(marker_ids, records, placements, force)
+        return deletable, protected, categories, None
 
-    async def _placed_marker_ids_for_force(self, conf: dict) -> set[int] | None:
-        """Marker ids placed in any function plan, from a fresh load of EVERY plan, or None.
+    async def _marker_plan_placements(self, conf: dict) -> dict[int, list[str]] | None:
+        """{marker id: plan names} from a fresh load of EVERY plan, or None (refuse every id).
 
-        None (force grants nothing) whenever the plan list or any single plan can't be loaded —
-        a missing plan would make the markers placed in it look unplaced.
+        None whenever the plan list or any single plan can't be loaded or read — a missing plan
+        would make the markers placed in it look unplaced.
         """
         fubs = conf.get("Fubs")
         if not isinstance(fubs, dict):
-            _LOGGER.error("get_marker_delete_eligibility: no plan list in config — force ignored")
+            _LOGGER.error("get_marker_delete_eligibility: no plan list in config — refusing all ids")
             return None
-        all_plans = await self._load_all_plans_verified(fubs, strict=True)
+        all_plans = await self._load_all_plans_verified(fubs, strict=True, fail_on_bulk_error=True)
         if all_plans is None:
-            _LOGGER.error("get_marker_delete_eligibility: not every plan could be loaded — force ignored")
+            _LOGGER.error("get_marker_delete_eligibility: not every plan could be loaded — refusing all ids")
             return None
-        placed = _placed_marker_ids_strict(all_plans)
-        if placed is None:
-            _LOGGER.error("get_marker_delete_eligibility: unreadable marker reference in a plan — force ignored")
-        return placed
+        names = {
+            fid: _plan_display_name(fubs.get(str(fid))) or _plan_display_name(self._fub_data.get(str(fid)))
+            for fid in all_plans
+        }
+        placements = _marker_plan_placements_strict(all_plans, {fid: n for fid, n in names.items() if n})
+        if placements is None:
+            _LOGGER.error("get_marker_delete_eligibility: unreadable marker reference in a plan — refusing all ids")
+        return placements
 
     @staticmethod
     def _marker_group_items(group: Any) -> list[Any] | None:
@@ -2536,7 +2588,9 @@ class ComexioAPI:
         placed_ids = _placed_marker_ids(all_plans, ref_type)
         return sorted(candidate_ids - placed_ids)
 
-    async def _load_all_plans_verified(self, fubs: dict[str, Any], strict: bool = False) -> dict[int, dict] | None:
+    async def _load_all_plans_verified(
+        self, fubs: dict[str, Any], strict: bool = False, fail_on_bulk_error: bool = False
+    ) -> dict[int, dict] | None:
         """Elements/connections of EVERY plan in fubs (a fresh $Fubs), or None if any is missing.
 
         Placement checks that decide whether a bridge marker may be renamed or blanked need
@@ -2549,6 +2603,9 @@ class ComexioAPI:
         are no plans at all. strict is passed on to both loaders (see function_plan_load_elements).
         A non-numeric plan id also returns None — checked in fubs before the cache is replaced,
         so a malformed $Fubs neither crashes the caller nor ends up in self._fub_data.
+        fail_on_bulk_error=True returns None as soon as the bulk request fails, instead of loading
+        every plan one by one — for a caller that refuses anyway when a plan is missing, so a
+        Comexio outage does not hold it through one timeout per plan.
         """
         if (fub_ids := _verified_plan_ids(fubs, "$Fubs")) is None:
             return None
@@ -2558,7 +2615,11 @@ class ComexioAPI:
         fub_ids |= cached_ids
         if not fub_ids:
             return {}
-        plans = await self.function_plan_load_all_plans(strict=strict)
+        try:
+            plans = await self.function_plan_load_all_plans(strict=strict, raise_errors=fail_on_bulk_error)
+        except ComexioError:
+            _LOGGER.exception("_load_all_plans_verified: bulk plan load failed — placement unknown")
+            return None
         for fid in sorted(fub_ids - set(plans)):
             data = await self.function_plan_load_elements(fid, strict=strict)
             if data is None:
@@ -2586,7 +2647,7 @@ class ComexioAPI:
         plans deleted moments ago). Returns (blanked ids, normalized ids, failed ids, in-use
         ids left alone because their values were unreadable, error) — error is set, and nothing
         is touched, when the config, any plan or any marker reference in a plan cannot be read
-        (fail closed, as marker_delete's force gate): a marker wired into it would look unused
+        (fail closed, as marker_delete's placement check): a marker wired into it would look unused
         and lose its default value and store flag along with its title.
         progress_cb(done, total) is called after every marker (one HTTP round trip each).
         """

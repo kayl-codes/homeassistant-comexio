@@ -430,7 +430,7 @@ def test_a_marker_delete_writes_as_a_marked_plan_edit() -> None:
         raise _WriteSeen
 
     api = SimpleNamespace(
-        get_marker_delete_eligibility=AsyncMock(return_value=([5], [], {5}, None)), delete_marker=delete_marker
+        get_marker_delete_eligibility=AsyncMock(return_value=([5], {}, {5: 1}, None)), delete_marker=delete_marker
     )
     call = SimpleNamespace(data={"marker_id": "5", "confirm": True})
     delete = marker_actions.handle_marker_delete(coordinator.hass, call)

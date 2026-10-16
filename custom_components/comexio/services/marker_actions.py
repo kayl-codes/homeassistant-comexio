@@ -5,15 +5,17 @@ Kept as its own module rather than folded into misc.py's grab-bag: unlike the ot
 handlers there, this one is destructive (permanently removes Markers from Comexio) and
 needs its own id-list parsing + confirm-gate + per-id result bookkeeping.
 
-Scope is deliberately narrow: by default only markers this integration itself created via
-the API (CategoryId==1) are deletable — see api.get_marker_delete_eligibility. Factory and
-Studio-created markers (CategoryId==0) are protected; 'force' only opens that for markers
-without a title that are not placed in any function plan. Protected ids are skipped and
-reported, they no longer abort the whole call.
+Scope is deliberately narrow — see api.get_marker_delete_eligibility: a marker placed in any
+function plan is never deleted, force or not. Of the unplaced ones, markers created via the
+admin API or the plan editor (CategoryId==1) are deletable; factory markers and those from
+Studio's marker list (CategoryId==0) are protected, 'force' only opens that for markers without
+a title. Protected ids are skipped and reported with their reason, they no longer abort the
+whole call.
 """
 
 import logging
 import time
+from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -74,7 +76,8 @@ def _error_result(error: str, requested: list[int] | None = None) -> dict:
     "expected a dictionary, but got NoneType", masking the actual reason. So every exit path
     returns a dict. "error" is reserved for failures of the call itself or of the gate (it is
     None when the gate ran as requested); per-id outcomes are always in
-    deleted/skipped/protected/failed, and why ids were protected is in "protected_reason".
+    deleted/skipped/protected/failed, and why ids were protected is in "protected_reasons"
+    (per id) and "protected_reason" (one line for all).
     """
     return {
         "requested": requested or [],
@@ -82,6 +85,7 @@ def _error_result(error: str, requested: list[int] | None = None) -> dict:
         "skipped": [],
         "protected": [],
         "protected_reason": None,
+        "protected_reasons": {},
         "failed": [],
         "duration": 0.0,
         "error": error,
@@ -117,22 +121,28 @@ def _fail(hass: HomeAssistant, error: str, requested: list[int] | None = None) -
     return _error_result(error, requested)
 
 
-def _protected_reason(force: bool, gate_error: str | None) -> str:
-    """Why ids were protected (CategoryId gate, force's title/placement check, or a load failure)."""
+def _marker_ids(marker_ids: list[int]) -> str:
+    """'M3, M5' — marker ids as the notification lists them."""
+    return ", ".join(f"M{mid}" for mid in marker_ids)
+
+
+def _protected_reason(protected: dict[int, str], gate_error: str | None) -> str | None:
+    """One line for the response's "protected_reason": the gate error, or each id with its reason."""
+    if not protected:
+        return None
     if gate_error:
         return gate_error
-    if force:
-        return (
-            "not created by this integration and either titled or placed in a function plan "
-            "(force only deletes untitled, unplaced markers)"
-        )
-    return "not created by this integration (Studio-created/factory markers; enable 'force' for untitled ones)"
+    return "; ".join(f"M{mid}: {reason}" for mid, reason in protected.items())
 
 
-def _protected_message(protected: list[int], reason: str) -> str:
-    """Notification line listing the protected ids and why they were not deleted."""
-    ids = ", ".join(f"M{mid}" for mid in protected)
-    return f"Protected, not deleted: {ids} — {reason}"
+def _protected_message(protected: dict[int, str], gate_error: str | None) -> str | None:
+    """Notification lines listing the protected ids and why each was not deleted."""
+    if not protected:
+        return None
+    if gate_error:
+        return f"Protected, not deleted: {_marker_ids(list(protected))} — {gate_error}"
+    lines = "\n".join(f"- M{mid}: {reason}" for mid, reason in protected.items())
+    return f"Protected, not deleted:\n{lines}"
 
 
 def _result_message(
@@ -140,26 +150,46 @@ def _result_message(
 ) -> str:
     """Notification body summarizing one marker_delete run."""
     msg = f"Deleted {len(deleted)} of {len(requested)} requested marker(s)."
+    if deleted:
+        msg += f"\nDeleted: {_marker_ids(deleted)}"
     if skipped:
-        msg += f"\nNot deleted (already absent): {', '.join(str(mid) for mid in skipped)}."
+        msg += f"\nNot deleted (already absent): {_marker_ids(skipped)}"
     if protected_msg:
-        msg += f"\n{protected_msg}."
+        msg += f"\n{protected_msg}"
     if failed:
         msg += (
             "\nFAILED (request error or server rejected the delete despite accepting the marker as "
-            f"eligible — marker may still exist, see log): {', '.join(str(mid) for mid in failed)}."
+            f"eligible — marker may still exist, see log): {_marker_ids(failed)}"
         )
     return msg
 
 
-def _result_title(deleted: list[int], requested: list[int], protected: list[int], failed: list[int]) -> str:
-    """Notification title — flags protected and failed ids so a partial run is visible at a glance."""
+def _result_title(
+    deleted: list[int], requested: list[int], protected: dict[int, str], failed: list[int], gate_error: str | None
+) -> str:
+    """Notification title — flags protected and failed ids and a failed check so a partial run is visible."""
     title = f"Marker Delete — {len(deleted)}/{len(requested)} OK"
     if protected:
         title += f", {len(protected)} protected"
-    if failed:
+    if failed or gate_error:
         title += " (errors)"
     return title
+
+
+def _with_categories(marker_ids: list[int], categories: dict[int, Any]) -> str:
+    """'M359 (CategoryId 1), M7 (absent)' — for the log line, so a marker's origin is visible there.
+
+    categories is only empty when the marker config could not be read (a parsed one never is):
+    the ids were not checked then, not found absent.
+    """
+    missing = "absent" if categories else "unchecked"
+    return (
+        ", ".join(
+            f"M{mid} (CategoryId {categories[mid]!r})" if mid in categories else f"M{mid} ({missing})"
+            for mid in marker_ids
+        )
+        or "none"
+    )
 
 
 async def handle_marker_delete(hass: HomeAssistant, call: ServiceCall) -> dict:
@@ -172,19 +202,20 @@ async def handle_marker_delete(hass: HomeAssistant, call: ServiceCall) -> dict:
     stray non-empty string as "confirmed". 'force' is checked the same strict way.
 
     After login, api.get_marker_delete_eligibility classifies every id against a fresh config
-    lookup: protected ids are skipped and reported (response key "protected"), the rest is
-    deleted. Its third return value, known_ids, is the set of ids that lookup actually found on
-    the server — used below to sanity-check delete_marker's False results.
+    lookup: protected ids are skipped and reported with their reason (response keys "protected",
+    "protected_reasons"), the rest is deleted. Its third return value, categories, maps the ids
+    that lookup actually found on the server to their CategoryId — logged, and used below to
+    sanity-check delete_marker's False results.
 
     api.delete_marker returns a tri-state per id: True (deleted), False (server reported
     nothing changed), or None (the request itself failed — always a real failure). A False is
-    only reported as the harmless "already absent" case when the id wasn't in known_ids either;
+    only reported as the harmless "already absent" case when the id wasn't in categories either;
     a False for an id that WAS present is treated as a failure.
 
     Always returns a dict (never None): the service supports responses and Developer Tools /
     MCP callers always request one — see _error_result. "error" carries gate_error when the
-    config couldn't be read or force was ignored, so a caller can tell that from real protection;
-    "protected_reason" carries the reason for the ids in "protected" in both cases.
+    config or a function plan couldn't be read (every id refused), so a caller can tell that from
+    real protection; "protected_reason(s)" carry the reason for the ids in "protected" in both cases.
     """
     raw_input = str(call.data.get("marker_id", "")).strip()
     marker_ids, error = _validate_marker_delete_request(call, raw_input)
@@ -215,25 +246,14 @@ async def _async_delete_eligible_markers(
     """Delete the requested markers the eligibility check allows; the service response (see handle_marker_delete)."""
     force = call.data.get("force") is True
     requested = marker_ids
-    marker_ids, protected, known_ids, gate_error = await api.get_marker_delete_eligibility(marker_ids, force=force)
-    protected_reason = _protected_reason(force, gate_error) if protected else None
-    protected_msg = _protected_message(protected, protected_reason) if protected_reason else None
-    if not marker_ids:
-        result = _fail(hass, f"{protected_msg}. Nothing deleted.", requested=requested)
-        # Protection alone is not a failure — keep "error" to gate_error here too, so "5" and
-        # "5,6" (M5 protected, M6 deletable) report M5 the same way.
-        result["protected"] = protected
-        result["protected_reason"] = protected_reason
-        result["error"] = gate_error
-        return result
-
+    marker_ids, protected, categories, gate_error = await api.get_marker_delete_eligibility(marker_ids, force=force)
     _LOGGER.info(
-        "Marker Delete: marker_id='%s' force=%s -> deleting %d marker(s): %s (protected: %s)",
+        "Marker Delete: marker_id='%s' force=%s -> deleting %d marker(s): %s; protected: %s",
         raw_input,
         force,
         len(marker_ids),
-        marker_ids,
-        protected,
+        _with_categories(marker_ids, categories),
+        "; ".join(f"{_with_categories([mid], categories)}: {reason}" for mid, reason in protected.items()) or "none",
     )
     t_start = time.monotonic()
     deleted: list[int] = []
@@ -243,7 +263,7 @@ async def _async_delete_eligible_markers(
         result = await api.delete_marker(marker_id)
         if result is True:
             deleted.append(marker_id)
-        elif result is False and marker_id not in known_ids:
+        elif result is False and marker_id not in categories:
             skipped.append(marker_id)
         else:
             failed.append(marker_id)
@@ -252,15 +272,17 @@ async def _async_delete_eligible_markers(
     if deleted:
         await coordinator.async_request_refresh()
 
-    msg = _result_message(requested, deleted, skipped, failed, protected_msg)
+    msg = _result_message(requested, deleted, skipped, failed, _protected_message(protected, gate_error))
     msg += f"\nDuration: {duration:.1f}s"
-    persistent_notification.async_create(hass, msg, title=_result_title(deleted, requested, protected, failed))
+    title = _result_title(deleted, requested, protected, failed, gate_error)
+    persistent_notification.async_create(hass, msg, title=title)
     return {
         "requested": requested,
         "deleted": deleted,
         "skipped": skipped,
-        "protected": protected,
-        "protected_reason": protected_reason,
+        "protected": list(protected),
+        "protected_reason": _protected_reason(protected, gate_error),
+        "protected_reasons": protected,
         "failed": failed,
         "duration": round(duration, 1),
         "error": gate_error,
