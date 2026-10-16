@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioError
 import pytest
 
 from custom_components.comexio.api import _MARKER_CONFIG_UNREADABLE, _PLACEMENT_UNKNOWN, ComexioAPI
@@ -84,6 +85,14 @@ def test_an_unreadable_reference_in_a_loaded_plan_refuses_every_id(comexio_api: 
     plans = api.function_plan_load_all_plans.return_value
     plans[2]["elements"]["21"] = {"reference": {"type": "x", "ref_id": 300}}
     assert _eligibility(api, [300]) == ([], {300: _PLACEMENT_UNKNOWN}, _categories(), _PLACEMENT_UNKNOWN)
+
+
+def test_a_failed_bulk_load_refuses_at_once(comexio_api: ComexioAPI) -> None:
+    """Regression (Sourcery, PR #186): a bulk failure loaded every plan one by one before refusing."""
+    api = _scenario(comexio_api)
+    api.function_plan_load_all_plans = AsyncMock(side_effect=ComexioError("timeout"))  # type: ignore[method-assign]
+    assert _eligibility(api, [300]) == ([], {300: _PLACEMENT_UNKNOWN}, _categories(), _PLACEMENT_UNKNOWN)
+    api.function_plan_load_elements.assert_not_awaited()
 
 
 @pytest.mark.parametrize("config", [{}, {"FubModules": {"2": {}}}])

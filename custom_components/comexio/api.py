@@ -236,13 +236,17 @@ def _reference_type(ref: Any) -> int | None:
 
 
 def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
-    """Marker ids referenced in one plan, or None if any element/reference is unreadable."""
+    """Marker ids referenced in one plan, or None if any element/reference is unreadable.
+
+    loadelements sends "reference" with every element; only an explicit null means "none". A
+    missing key is unreadable — it could hide a marker placement.
+    """
     elements = plan_data.get("elements") if isinstance(plan_data, dict) else None
     if not isinstance(elements, dict):
         return None
     refs: set[int] = set()
     for elem in elements.values():
-        ref = elem.get("reference") if isinstance(elem, dict) else "malformed"
+        ref = elem.get("reference", "missing") if isinstance(elem, dict) else "malformed"
         if ref is None:
             continue
         ref_type = _reference_type(ref)
@@ -1987,7 +1991,7 @@ class ComexioAPI:
         if not isinstance(fubs, dict):
             _LOGGER.error("get_marker_delete_eligibility: no plan list in config — refusing all ids")
             return None
-        all_plans = await self._load_all_plans_verified(fubs, strict=True)
+        all_plans = await self._load_all_plans_verified(fubs, strict=True, fail_on_bulk_error=True)
         if all_plans is None:
             _LOGGER.error("get_marker_delete_eligibility: not every plan could be loaded — refusing all ids")
             return None
@@ -2575,7 +2579,9 @@ class ComexioAPI:
         placed_ids = _placed_marker_ids(all_plans, ref_type)
         return sorted(candidate_ids - placed_ids)
 
-    async def _load_all_plans_verified(self, fubs: dict[str, Any], strict: bool = False) -> dict[int, dict] | None:
+    async def _load_all_plans_verified(
+        self, fubs: dict[str, Any], strict: bool = False, fail_on_bulk_error: bool = False
+    ) -> dict[int, dict] | None:
         """Elements/connections of EVERY plan in fubs (a fresh $Fubs), or None if any is missing.
 
         Placement checks that decide whether a bridge marker may be renamed or blanked need
@@ -2588,6 +2594,9 @@ class ComexioAPI:
         are no plans at all. strict is passed on to both loaders (see function_plan_load_elements).
         A non-numeric plan id also returns None — checked in fubs before the cache is replaced,
         so a malformed $Fubs neither crashes the caller nor ends up in self._fub_data.
+        fail_on_bulk_error=True returns None as soon as the bulk request fails, instead of loading
+        every plan one by one — for a caller that refuses anyway when a plan is missing, so a
+        Comexio outage does not hold it through one timeout per plan.
         """
         if (fub_ids := _verified_plan_ids(fubs, "$Fubs")) is None:
             return None
@@ -2597,7 +2606,11 @@ class ComexioAPI:
         fub_ids |= cached_ids
         if not fub_ids:
             return {}
-        plans = await self.function_plan_load_all_plans(strict=strict)
+        try:
+            plans = await self.function_plan_load_all_plans(strict=strict, raise_errors=fail_on_bulk_error)
+        except ComexioError as err:
+            _LOGGER.error("_load_all_plans_verified: bulk plan load failed (%s) — placement unknown", err)
+            return None
         for fid in sorted(fub_ids - set(plans)):
             data = await self.function_plan_load_elements(fid, strict=strict)
             if data is None:

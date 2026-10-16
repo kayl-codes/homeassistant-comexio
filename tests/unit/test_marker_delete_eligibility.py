@@ -125,7 +125,7 @@ def _ref(ref_type: Any, ref_id: Any) -> dict[str, Any]:
 
 
 def test_placed_marker_ids_strict_collects_marker_refs() -> None:
-    plans = {1: _plan(_ref(2, "4"), _ref(1, 3), {"name": "AND"}), 2: _plan(_ref("2", 8)), 3: _plan()}
+    plans = {1: _plan(_ref(2, "4"), _ref(1, 3), {"name": "AND", "reference": None}), 2: _plan(_ref("2", 8)), 3: _plan()}
     assert _placed_marker_ids_strict(plans) == {4, 8}
 
 
@@ -138,6 +138,8 @@ def test_placed_marker_ids_strict_collects_marker_refs() -> None:
         _plan(_ref(2, None)),
         _plan("malformed element"),
         _plan({"reference": "malformed"}),
+        # Regression (Sourcery, PR #186): a missing "reference" key read as "no reference".
+        _plan({"name": "AND"}),
         # Regression (Sourcery, PR #94): a reference without a readable type used to be skipped
         # as "not a marker", so a placed marker behind it looked unplaced.
         _plan({"reference": {"ref_id": 4}}),
