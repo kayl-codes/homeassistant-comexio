@@ -1400,8 +1400,9 @@ class ComexioRepairFlow(RepairsFlow):
                 step_id="function_plan_stopped", description_placeholders=placeholders, data_schema=vol.Schema({})
             )
         fub_id = int(self.issue_data["fub_id"])
-        if not coordinator.is_watched_plan(fub_id):
-            # Unselected, deleted or its ID reused while the dialog was open: not the watchdog's plan to start.
+        if not coordinator.watches_plan_raised_for(fub_id, lambda name: name == self.issue_data.get("plan_name")):
+            # Unselected, deleted or its ID reused while the dialog was open — also by another watched
+            # plan, so the name is compared, not only whether the ID is watched: not this repair's plan to start.
             # The issue goes too, also while a sync keeps the watchdog's own clean-up waiting.
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             return self.async_abort(reason="plan_not_watched", description_placeholders=placeholders)

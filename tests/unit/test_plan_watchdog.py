@@ -12,6 +12,7 @@ import pytest
 from custom_components.comexio import api as api_module, plan_watchdog
 from custom_components.comexio.const import (
     DOMAIN,
+    FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS,
     FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC,
     FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
@@ -44,15 +45,17 @@ def _states(**by_id: bool | None) -> Any:
 @pytest.mark.parametrize(
     ("states", "previous", "expected"),
     [
-        ({"p34": True, "p42": True}, set(), {}),
-        ({"p34": False, "p42": True}, set(), {34: "HA - Marker 1"}),
+        ({"p34": True, "p42": True}, {}, {}),
+        ({"p34": False, "p42": True}, {}, {34: "HA - Marker 1"}),
         # Unknown (unreadable or just stopped by HA) keeps the previous verdict either way.
-        ({"p34": None, "p42": True}, {34}, {34: "HA - Marker 1"}),
-        ({"p34": None, "p42": True}, set(), {}),
-        ({"p34": True, "p42": False}, {34}, {42: "HA - TRIGGER"}),
+        ({"p34": None, "p42": True}, {34: "HA - Marker 1"}, {34: "HA - Marker 1"}),
+        ({"p34": None, "p42": True}, {}, {}),
+        # (#185) ... of the plan, not of the ID: one holding another plan now keeps none.
+        ({"p34": None, "p42": True}, {34: "Old"}, {}),
+        ({"p34": True, "p42": False}, {34: "HA - Marker 1"}, {42: "HA - TRIGGER"}),
     ],
 )
-def test_next_stopped_plans(states: dict[str, bool | None], previous: set[int], expected: dict[int, str]) -> None:
+def test_next_stopped_plans(states: dict[str, bool | None], previous: dict[int, str], expected: dict[int, str]) -> None:
     assert next_stopped_plans(MANAGED, _states(**states), previous) == expected
 
 
@@ -346,6 +349,21 @@ def _pushes(watchdog: ManagedPlanWatchdog) -> list[tuple[str, str, dict[str, Any
     return [call.args[:3] for call in watchdog._hass.services.async_call.call_args_list]
 
 
+@pytest.mark.parametrize("push", ["async_push_start_failed", "async_push_start_busy", "async_push_start_outdated"])
+def test_a_repeated_start_action_names_the_plan_it_was_pushed_for(ir: MagicMock, push: str) -> None:
+    """(#184) the "Start plan" of the failed/busy push carries the plan name it is sent with, as the alarm's."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(getattr(watchdog, push)(34, "HA - Marker 1"))
+    actions = _pushes(watchdog)[0][2]["data"]["actions"]
+    assert [action["action"] for action in actions] == [start_action_id(SERVER_ID, 34, "HA - Marker 1")]
+
+
+def test_the_start_action_carries_the_plan_name_digest() -> None:
+    """(#185) Pinned literally: the tests comparing pushes against start_action_id rely on it naming the plan."""
+    assert start_action_id(SERVER_ID, 34, "HA - Marker 1") == "COMEXIO_START_PLAN_cx1_34_cbb7f0cecb5509a8"
+    assert start_action_id(SERVER_ID, 34, "Other") != start_action_id(SERVER_ID, 34, "HA - Marker 1")
+
+
 def test_stop_pushes_an_alarm_with_a_start_action_and_recovery_clears_it(ir: MagicMock) -> None:
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
@@ -356,7 +374,9 @@ def test_stop_pushes_an_alarm_with_a_start_action_and_recovery_clears_it(ir: Mag
     ]
     alarm = pushes[0][2]
     assert "HA - Marker 1" in alarm["message"]
-    assert alarm["data"]["actions"] == [{"action": start_action_id(SERVER_ID, 34), "title": "Plan starten"}]
+    assert alarm["data"]["actions"] == [
+        {"action": start_action_id(SERVER_ID, 34, "HA - Marker 1"), "title": "Plan starten"}
+    ]
     tag = alarm["data"]["tag"]
 
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
@@ -447,8 +467,10 @@ def test_deleted_watched_plan_is_not_logged_as_running_again(ir: MagicMock, capl
 @pytest.mark.parametrize(
     ("action", "expected"),
     [
-        (start_action_id(SERVER_ID, 34), 34),
-        (start_action_id(f"{SERVER_ID}_2", 34), None),  # another server's action
+        (start_action_id(SERVER_ID, 34, "HA - Marker 1"), 34),
+        ("COMEXIO_START_PLAN_cx1_34", 34),  # sent before the action carried the name digest
+        (start_action_id(f"{SERVER_ID}_2", 34, "HA - Marker 1"), None),  # another server's action
+        ("COMEXIO_START_PLAN_cx1_2_34", None),
         ("SOME_OTHER_ACTION", None),
         (None, None),
     ],
@@ -485,8 +507,8 @@ def test_a_vanished_plan_gets_its_repair_and_one_alarm_push(ir: MagicMock) -> No
     assert service == "mobile_app_phone"
     assert data["message"] == "Der überwachte Logikplan Test4 (ID 47) existiert in Comexio nicht mehr."
     assert [action["action"] for action in data["data"]["actions"]] == [
-        plan_action_id(ACTION_RESTORE, SERVER_ID, 47, TOKEN),
-        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, TOKEN),
+        plan_action_id(ACTION_RESTORE, SERVER_ID, TOKEN),
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, TOKEN),
     ]
     assert data["data"]["priority"] == "high"  # an alarm
 
@@ -528,13 +550,16 @@ def test_a_vanished_alarm_no_service_delivered_is_sent_again(
     assert len(_pushes(watchdog)) == 6
 
 
-def test_a_vanished_alarm_one_service_delivered_is_not_sent_again(ir: MagicMock, clock: list[float]) -> None:
+def test_a_vanished_alarm_is_sent_again_only_to_the_service_that_failed(ir: MagicMock, clock: list[float]) -> None:
+    """(Sourcery, #185) Another service taking it is no delivery for the failed one's phone."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "notify.mobile_app_tablet"])
-    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("down"), None]
+    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("down"), None, None]
     asyncio.run(watchdog.async_sync_vanished(TEST4))
     clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
     asyncio.run(watchdog.async_sync_vanished(TEST4))
-    assert len(_pushes(watchdog)) == 2  # one push to each service, no retry
+    services = [service for _d, service, _s in _pushes(watchdog)]
+    assert services == ["mobile_app_phone", "mobile_app_tablet", "mobile_app_phone"]
+    assert watchdog._vanished_push_unsent == {}
 
 
 def test_a_later_push_delivered_for_the_plan_replaces_its_undelivered_alarm(ir: MagicMock, clock: list[float]) -> None:
@@ -574,8 +599,8 @@ def test_a_plan_vanished_before_setup_gets_its_repair_and_push(ir: MagicMock) ->
     ((_domain, _service, data),) = _pushes(watchdog)
     assert data["data"]["tag"] == watchdog._push_tag(47, TOKEN)
     assert [action["action"] for action in data["data"]["actions"]] == [
-        plan_action_id(ACTION_RESTORE, SERVER_ID, 47, TOKEN),
-        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, TOKEN),
+        plan_action_id(ACTION_RESTORE, SERVER_ID, TOKEN),
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, TOKEN),
     ]
 
 
@@ -626,12 +651,13 @@ def test_vanished_and_stopped_repairs_do_not_clean_up_each_other(ir: MagicMock) 
 @pytest.mark.parametrize(
     ("action", "parsed"),
     [
-        ("COMEXIO_START_PLAN_cx1_47", (ACTION_START, 47, None)),
+        ("COMEXIO_START_PLAN_cx1_47_0123456789abcdef", (ACTION_START, 47, "47_0123456789abcdef")),
+        ("COMEXIO_START_PLAN_cx1_47", (ACTION_START, 47, None)),  # sent before it carried the name digest
         ("COMEXIO_RESTORE_PLAN_cx1_47_0123456789abcdef", (ACTION_RESTORE, 47, "47_0123456789abcdef")),
         ("COMEXIO_UNWATCH_PLAN_cx1_47_0123456789abcdef", (ACTION_UNWATCH, 47, "47_0123456789abcdef")),
         ("COMEXIO_RESTORE_PLAN_cx1_47", None),  # a deleted plan's action carries its name digest
-        ("COMEXIO_START_PLAN_cx1_47_0123456789abcdef", None),
         ("COMEXIO_RESTORE_PLAN_cx1_2_47_0123456789abcdef", None),  # another server's ("cx1_2")
+        ("COMEXIO_START_PLAN_cx1_2_47_0123456789abcdef", None),
         ("COMEXIO_RESTORE_PLAN_cx1_x", None),
         (None, None),
     ],
@@ -639,6 +665,191 @@ def test_vanished_and_stopped_repairs_do_not_clean_up_each_other(ir: MagicMock) 
 def test_parse_plan_action(action: object, parsed: tuple[str, int, str | None] | None) -> None:
     assert plan_watchdog.parse_plan_action(SERVER_ID, action) == parsed
     assert parse_start_action(SERVER_ID, action) == (parsed[1] if parsed and parsed[0] == ACTION_START else None)
+
+
+def test_a_reused_id_stopped_under_another_name_gets_its_own_alarm(ir: MagicMock) -> None:
+    """(Sourcery, #185) the old plan's push names it, so its Start action starts nothing for the new one."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert len(_pushes(watchdog)) == 1  # still stopped: no second alarm
+    asyncio.run(watchdog.async_check({47: "Other"}, _states(p47=False)))
+    (*_, (_d, _s, alarm)) = _pushes(watchdog)
+    assert len(_pushes(watchdog)) == 2
+    assert alarm["data"]["tag"] == watchdog._push_tag(47)
+    assert "Other" in alarm["message"]
+    assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Other")
+
+
+def test_an_alarm_one_notify_target_failed_to_take_is_sent_again_to_it_only(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery, #185) Another target taking it is no delivery for the failed one's phone."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
+
+    async def tablet_down(_domain: str, service: str, *_args: Any, **_kwargs: Any) -> None:
+        if service == "mobile_app_tablet":
+            raise HomeAssistantError("down")
+
+    watchdog._hass.services.async_call.side_effect = tablet_down
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert watchdog._stopped_push_unsent[47][1] == {"mobile_app_tablet"}
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))  # retried in vain
+    assert caplog.text == ""  # its failure was logged already
+    assert [service for _d, service, _s in _pushes(watchdog)] == ["mobile_app_phone", "mobile_app_tablet"] + [
+        "mobile_app_tablet"
+    ]
+    watchdog._hass.services.async_call.side_effect = None
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    (*_, (_d, service, alarm)) = _pushes(watchdog)
+    assert service == "mobile_app_tablet"
+    assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Test4")
+    assert watchdog._stopped_push_unsent == {}
+    # A push the target took since replaces the alarm waiting there: no retry left for it.
+    watchdog._hass.services.async_call.side_effect = tablet_down
+    asyncio.run(watchdog.async_check({47: "Other"}, _states(p47=False)))
+    assert set(watchdog._stopped_push_unsent) == {47}
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_push_start_failed(47, "Other"))
+    assert watchdog._stopped_push_unsent == {}
+
+
+def test_a_fresh_alarm_goes_to_every_target_while_a_retry_waits(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """(local review) The retry's narrowed targets must not win over a new alarm for the ID; its failure warns."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
+
+    async def tablet_down(_domain: str, service: str, *_args: Any, **_kwargs: Any) -> None:
+        if service == "mobile_app_tablet":
+            raise HomeAssistantError("down")
+
+    watchdog._hass.services.async_call.side_effect = tablet_down
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC  # the retry is due
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(watchdog.async_check({47: "Other"}, _states(p47=False)))  # another plan holds the ID now
+    (_d1, phone, alarm), (_d2, tablet, _a) = _pushes(watchdog)[2:]
+    assert (phone, tablet) == ("mobile_app_phone", "mobile_app_tablet")  # sent once, to both
+    assert "Other" in alarm["message"]
+    assert "notify.mobile_app_tablet failed" in caplog.text
+    assert watchdog._stopped_push_unsent[47] == (clock[0], {"mobile_app_tablet"})
+
+
+def test_a_retry_to_a_target_no_longer_configured_is_dropped(ir: MagicMock, clock: list[float]) -> None:
+    """(local review) Else the entry stays and is "retried" at every check, reaching no one."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._stopped_push_unsent[47] = (clock[0], frozenset({"mobile_app_tablet"}))  # removed from the options
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))  # the alarm, to the phone
+    assert set(watchdog._stopped_push_unsent) == {47}
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert len(_pushes(watchdog)) == 1
+    assert watchdog._stopped_push_unsent == {}
+
+
+def test_a_reused_id_does_not_inherit_the_auto_start_state(ir: MagicMock) -> None:
+    """(#185) Auto-Start gave up on "Test4": "Other", now holding its ID, gets its own attempts and alarm."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    watchdog.suspended.add(47)
+    watchdog._failed_starts[47] = FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS
+    watchdog._gave_up_at[47] = "12:00"
+    # By name: _deferred_at is rebuilt by every check.
+    states = ("_auto_started_at", "_refused_at", "_deferred_at")
+    for state in states:
+        getattr(watchdog, state)[47] = 0.0
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert 47 in watchdog.suspended  # same plan: kept
+    assert all(47 in getattr(watchdog, state) for state in states)
+    asyncio.run(watchdog.async_check({47: "Other"}, _states(p47=False)))
+    assert 47 not in watchdog.suspended
+    assert 47 not in watchdog._failed_starts
+    assert 47 not in watchdog._gave_up_at
+    assert not any(47 in getattr(watchdog, state) for state in states)
+    (*_, (_d, _s, alarm)) = _pushes(watchdog)
+    assert alarm["title"] == plan_watchdog.PUSH_TEXTS["de"]["stopped_title"]
+
+
+def test_an_undelivered_stopped_alarm_is_sent_again(ir: MagicMock, clock: list[float]) -> None:
+    """(#185) Else the plan's last push stays, maybe one naming the plan that held the ID before."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert set(watchdog._stopped_push_unsent) == {47}
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert len(_pushes(watchdog)) == 1  # not due yet
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    (*_, (_d, _s, alarm)) = _pushes(watchdog)
+    assert len(_pushes(watchdog)) == 2
+    assert alarm["data"]["tag"] == watchdog._push_tag(47)
+    assert watchdog._stopped_push_unsent == {}
+    # One for a plan running again is dropped, not sent.
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    pushed = len(_pushes(watchdog))
+    asyncio.run(watchdog.async_check({47: "Other"}, _states(p47=False)))
+    assert set(watchdog._stopped_push_unsent) == {47}
+    asyncio.run(watchdog.async_check({47: "Other"}, _states(p47=True)))
+    assert watchdog._stopped_push_unsent == {}
+    (_d1, _s1, alarm), (_d2, _s2, cleared) = _pushes(watchdog)[pushed:]  # no retry of the alarm
+    assert "Other" in alarm["message"]
+    assert cleared["message"] == "clear_notification"
+
+
+def test_an_undelivered_alarm_retried_in_vain_waits_again_and_keeps_its_kind(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A suspended plan's alarm is sent again as "suspended"; a dead notify service gets one quiet try per interval."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.suspended.add(47)
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+        clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+        asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))  # retried in vain
+    assert len(_pushes(watchdog)) == 2
+    assert caplog.text.count("notify.mobile_app_phone") == 1  # the retry stays quiet
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert len(_pushes(watchdog)) == 2  # the interval starts again at the failed retry
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    (*_, (_d, _s, alarm)) = _pushes(watchdog)
+    assert alarm["title"] == plan_watchdog.PUSH_TEXTS["de"]["suspended_title"]
+    assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Test4")
+
+
+def test_a_stopped_id_holding_another_plan_with_an_unknown_state_is_not_reported_running(
+    ir: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(#185) The verdict was the old plan's: the log names the plan holding the ID now, not "runs again"."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    with caplog.at_level(logging.INFO):
+        asyncio.run(watchdog.async_check({47: "Other"}, _states()))
+    assert "its ID holds 'Other' now" in caplog.text
+    assert "runs again" not in caplog.text
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+@pytest.mark.parametrize(
+    ("previous", "stopped", "expected"),
+    [
+        ({}, {42: "B", 34: "A"}, [34, 42]),
+        ({34: "A"}, {34: "A", 42: "B"}, [42]),
+        ({34: "A"}, {34: "C"}, [34]),
+        ({34: "A"}, {}, []),
+    ],
+)
+def test_newly_stopped_plans(previous: dict[int, str], stopped: dict[int, str], expected: list[int]) -> None:
+    assert plan_watchdog.newly_stopped_plans(previous, stopped) == expected
 
 
 def test_a_stopped_plan_that_vanishes_swaps_its_push_for_the_alarm(ir: MagicMock) -> None:
@@ -699,6 +910,38 @@ def test_dismissing_a_push_clears_the_tag_it_was_sent_with() -> None:
     ]
 
 
+def test_a_stale_push_is_not_cleared_once_the_ids_plan_stopped(ir: MagicMock) -> None:
+    """(Sourcery, #185) A stop judged after the clear was asked for pushed the alarm under the same tag."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    pushes = len(_pushes(watchdog))
+    asyncio.run(watchdog.async_dismiss_push(47))
+    assert len(_pushes(watchdog)) == pushes
+    asyncio.run(watchdog.async_dismiss_push(47, "Test4"))  # a deleted plan's push has a tag of its own
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_an_outdated_replacement_a_target_failed_to_take_is_sent_again(ir: MagicMock, clock: list[float]) -> None:
+    """(Sourcery, #185) Else that phone keeps the old push, whose button starts nothing."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+
+    async def tablet_down(_domain: str, service: str, *_args: Any, **_kwargs: Any) -> None:
+        if service == "mobile_app_tablet":
+            raise HomeAssistantError("down")
+
+    watchdog._hass.services.async_call.side_effect = tablet_down
+    asyncio.run(watchdog.async_push_start_outdated(47, "Test4"))
+    assert watchdog._stopped_push_unsent[47][1] == {"mobile_app_tablet"}
+    watchdog._hass.services.async_call.side_effect = None
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    (*_, (_d, service, alarm)) = _pushes(watchdog)
+    assert service == "mobile_app_tablet"
+    assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Test4")
+    assert watchdog._stopped_push_unsent == {}
+
+
 def test_the_push_state_of_two_deleted_plans_on_one_id_stays_apart(ir: MagicMock, clock: list[float]) -> None:
     """The "restored" confirmation and the unsent alarm are kept per deleted plan, not per ID."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
@@ -726,7 +969,7 @@ def test_a_deleted_plan_without_a_backup_identity_is_not_offered_restore(ir: Mag
     ((_domain, _service, data),) = _pushes(watchdog)
     token = plan_watchdog.vanished_plan_token(47, unnamed)
     assert [action["action"] for action in data["data"]["actions"]] == [
-        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, token)
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, token)
     ]
 
 
@@ -744,7 +987,7 @@ def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[
     asyncio.run(getattr(watchdog, method)(*args))
     ((_domain, _service, data),) = _pushes(watchdog)
     assert [action["action"] for action in data["data"].get("actions", [])] == [
-        plan_action_id(kind, SERVER_ID, 47, TOKEN) for kind in actions
+        plan_action_id(kind, SERVER_ID, TOKEN) for kind in actions
     ]
     assert "{" not in data["message"]
     assert "{" not in data["title"]

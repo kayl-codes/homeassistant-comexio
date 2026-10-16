@@ -80,6 +80,11 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
             "{name} (ID {fub_id}) was not started: a sync, restore, poll, function plan edit or bus-load "
             "watchdog run is in progress. Try again in a moment."
         ),
+        "outdated_title": "Comexio: push outdated",
+        "outdated": (
+            "That push was sent before an update and did not name its plan, so nothing was started. ID {fub_id} "
+            "now holds {name}: tap Start plan to start it."
+        ),
         "suspended_title": "Comexio: check function plan",
         "suspended": (
             "Plan Auto-Start could not keep {name} (ID {fub_id}) running after {attempts} attempts and "
@@ -114,6 +119,11 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "busy": (
             "{name} (ID {fub_id}) wurde nicht gestartet: Gerade läuft ein Sync, eine Wiederherstellung, ein "
             "Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Versuche es gleich noch einmal."
+        ),
+        "outdated_title": "Comexio: Push veraltet",
+        "outdated": (
+            "Diese Push-Nachricht stammt von vor einem Update und nannte ihren Plan nicht, daher wurde nichts "
+            "gestartet. ID {fub_id} gehört jetzt zu {name}: Plan starten startet ihn."
         ),
         "suspended_title": "Comexio: Logikplan prüfen",
         "suspended": (
@@ -153,10 +163,11 @@ def stopped_plan_issue_id(server_id: str, fub_id: int) -> str:
 
 
 def vanished_plan_token(fub_id: int, name: str) -> str:
-    """A deleted plan's identity in its repair id, push tag and push actions: its ID and a digest of its name.
+    """A plan's identity in a deleted plan's repair id, push tag and push actions and in the "Start plan" action.
 
-    The ID alone is not one: an ID can be reused, so two deleted watched plans may share it (picks
-    "47:X" and "47:Y"). The name itself cannot go into an action id (any character), its digest can:
+    Its ID and a digest of its name. The ID alone is not one: an ID can be reused, so two deleted
+    watched plans may share it (picks "47:X" and "47:Y"), and a stale "Start plan" could start the
+    plan holding the ID now. The name itself cannot go into an action id (any character), its digest can:
     64 bits of SHA-256, so two names of one ID do not collide (CRC32's 32 bits could).
     """
     return f"{fub_id}_{hashlib.sha256(name.encode()).hexdigest()[:16]}"
@@ -197,30 +208,34 @@ def _own_issue_ids(hass: HomeAssistant, server_id: str, *, vanished: bool = Fals
     return [issue_id for domain, issue_id in ir.async_get(hass).issues if domain == DOMAIN and own.fullmatch(issue_id)]
 
 
-def start_action_id(server_id: str, fub_id: int) -> str:
+def start_action_id(server_id: str, fub_id: int, name: str) -> str:
     """Action id of the push's "Start plan" button."""
-    return f"{START_ACTION_PREFIX}{server_id}_{fub_id}"
+    return plan_action_id(ACTION_START, server_id, vanished_plan_token(fub_id, name))
 
 
-def plan_action_id(kind: str, server_id: str, fub_id: int, token: str | None = None) -> str:
-    """Action id of a push button: ACTION_START (by plan id), ACTION_RESTORE or ACTION_UNWATCH (by vanished token)."""
-    return f"{_ACTION_PREFIXES[kind]}{server_id}_{fub_id if kind == ACTION_START else token}"
+def plan_action_id(kind: str, server_id: str, token: str) -> str:
+    """Action id of a push button, by the plan's vanished_plan_token: the started plan's or the deleted plan's.
+
+    "Start plan" carries the name digest too: a push from before Comexio gave the plan's ID to
+    another watched plan must not start that one.
+    """
+    return f"{_ACTION_PREFIXES[kind]}{server_id}_{token}"
 
 
 def parse_plan_action(server_id: str, action: Any) -> tuple[str, int, str | None] | None:
-    """(kind, plan id, vanished token) of one of this instance's push actions, None for any other action.
+    """(kind, plan id, vanished_plan_token) of one of this instance's push actions, None for any other action.
 
-    The token is None for "Start plan". fullmatch, so server "home" does not pick up the actions
-    of server "home_2".
+    The token is None only for a "Start plan" sent before the action carried the name digest (the
+    plan id alone). fullmatch, so server "home" does not pick up the actions of server "home_2".
     """
     if not isinstance(action, str):
         return None
     for kind, prefix in _ACTION_PREFIXES.items():
-        pattern = r"(\d+)" if kind == ACTION_START else f"(?P<token>{_VANISHED_ID_PATTERN})"
-        if match := re.fullmatch(rf"{re.escape(prefix + server_id)}_{pattern}", action):
-            if kind == ACTION_START:
-                return kind, int(match[1]), None
+        own = re.escape(prefix + server_id)
+        if match := re.fullmatch(rf"{own}_(?P<token>{_VANISHED_ID_PATTERN})", action):
             return kind, int(match[2]), match["token"]
+        if kind == ACTION_START and (match := re.fullmatch(rf"{own}_(\d+)", action)):
+            return kind, int(match[1]), None
     return None
 
 
@@ -230,20 +245,52 @@ def parse_start_action(server_id: str, action: Any) -> int | None:
     return parsed[1] if parsed is not None and parsed[0] == ACTION_START else None
 
 
+def _retries_due[K](unsent: Mapping[K, tuple[float, frozenset[str]]]) -> dict[K, frozenset[str] | None]:
+    """The undelivered alarms (key → (time it failed, targets that failed)) due again, with their targets."""
+    now = time.monotonic()
+    return {
+        key: targets
+        for key, (failed_at, targets) in unsent.items()
+        if now - failed_at >= FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    }
+
+
+def _drop_delivered[K](unsent: dict[K, tuple[float, frozenset[str]]], key: K, done: frozenset[str]) -> None:
+    """A push delivered to some targets replaced (same tag) an alarm waiting there to be sent again."""
+    if key not in unsent:
+        return
+    failed_at, targets = unsent[key]
+    if targets - done:
+        unsent[key] = (failed_at, targets - done)
+    else:
+        del unsent[key]
+
+
 def next_stopped_plans(
-    managed: Mapping[int, str], run_state: Callable[[int], bool | None], previous: Collection[int]
+    managed: Mapping[int, str], run_state: Callable[[int], bool | None], previous: Mapping[int, str]
 ) -> dict[int, str]:
     """fub_id → name of the managed plans that do not run.
 
     A plan whose run state is unknown right now (None: unreadable, or stopped by HA itself a
     moment ago) keeps its previous verdict, so a poll outage neither raises nor clears a repair.
+    The verdict is the plan's, not the ID's: an ID holding another plan now (name changed) keeps none.
     """
     stopped: dict[int, str] = {}
     for fub_id, name in managed.items():
         running = run_state(fub_id)
-        if running is False or (running is None and fub_id in previous):
+        if running is False or (running is None and previous.get(fub_id) == name):
             stopped[fub_id] = name
     return stopped
+
+
+def newly_stopped_plans(previous: Mapping[int, str], stopped: Mapping[int, str]) -> list[int]:
+    """IDs of the plans that stopped since the last check, sorted.
+
+    An ID stopped then under another name holds another plan now (Comexio reused the ID, or the
+    plan was renamed): the old push names the plan that held it, so the one holding it gets its own.
+    Only a bare-ID pick keeps an ID watched across a name change (see _watched_user_plan_names).
+    """
+    return sorted(fub_id for fub_id, name in stopped.items() if previous.get(fub_id) != name)
 
 
 class ManagedPlanWatchdog:
@@ -290,9 +337,14 @@ class ManagedPlanWatchdog:
         # Tokens (vanished_plan_token) of vanished plans whose push was replaced by "restored": the plan
         # dropping out of vanished keeps it.
         self._restored_pushes: set[str] = set()
-        # token → time.monotonic() of a vanished alarm push no notify service took: sent again with a
-        # check at least FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC later; any push delivered for the plan drops it.
-        self._vanished_push_unsent: dict[str, float] = {}
+        # token → (time.monotonic(), notify targets) of a vanished alarm push those targets failed to take:
+        # sent again to them with a check at least FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC later; a target
+        # any push for the plan reached since is dropped.
+        self._vanished_push_unsent: dict[str, tuple[float, frozenset[str]]] = {}
+        # fub_id → the same for a stopped alarm push.
+        self._stopped_push_unsent: dict[int, tuple[float, frozenset[str]]] = {}
+        # fub_id → name of the managed plans as of the last check: an ID under another name holds another plan.
+        self._names: dict[int, str] = {}
         # Local time of the last check; shown in the repair dialogs and on the problem sensor.
         self.last_check: datetime | None = None
         self._checking = False
@@ -372,10 +424,20 @@ class ManagedPlanWatchdog:
         """Tell the phone a start from its push was not sent (something else runs), with the action again."""
         await self._async_push(fub_id, name, "busy_title", "busy", with_action=True)
 
+    async def async_push_start_outdated(self, fub_id: int, name: str) -> None:
+        """Replace a "Start plan" push that names no plan (sent before the update) with one naming the ID's plan.
+
+        The alarm is pushed on the stop only, so the old push would otherwise keep a button that starts nothing.
+        A target that failed to take it gets the plan's alarm again (it names the plan too) while it stays stopped.
+        """
+        failed = await self._async_push(fub_id, name, "outdated_title", "outdated", with_action=True)
+        if failed:
+            self._stopped_push_unsent[fub_id] = (time.monotonic(), failed)
+
     def _log_transitions(
         self, previous: Mapping[int, str], stopped: Mapping[int, str], managed: Mapping[int, str]
     ) -> None:
-        for fub_id in stopped.keys() - previous.keys():
+        for fub_id in newly_stopped_plans(previous, stopped):
             _LOGGER.warning(
                 "[%s] Monitored function plan '%s' (ID %s) is not running in Comexio",
                 self._server_id,
@@ -384,7 +446,12 @@ class ManagedPlanWatchdog:
             )
         for fub_id in previous.keys() - stopped.keys():
             # A stopped plan deleted, renamed or unpicked (or its ID reused) drops out of managed: no recovery.
-            verdict = "runs again" if fub_id in managed else "is no longer watched (deleted, renamed or unselected)"
+            if fub_id not in managed:
+                verdict = "is no longer watched (deleted, renamed or unselected)"
+            elif managed[fub_id] != previous[fub_id]:
+                verdict = f"is no longer watched: its ID holds '{managed[fub_id]}' now"
+            else:
+                verdict = "runs again"
             _LOGGER.info(
                 "[%s] Monitored function plan '%s' (ID %s) %s", self._server_id, previous[fub_id], fub_id, verdict
             )
@@ -395,6 +462,7 @@ class ManagedPlanWatchdog:
         A plan seen running starts with a clean slate — unless it is still inside the stopped-again
         window of its own auto-start, where it has yet to prove it keeps running.
         """
+        self._forget_reassigned(managed)
         now = time.monotonic()
         lifted = {fub_id for fub_id in self.suspended if fub_id not in managed or run_state(fub_id) is True}
         on_probation = {
@@ -426,6 +494,22 @@ class ManagedPlanWatchdog:
             self._auto_started_at.pop(fub_id, None)
             self._failed_starts.pop(fub_id, None)
             self._refused_at.pop(fub_id, None)
+
+    def _forget_reassigned(self, managed: Mapping[int, str]) -> None:
+        """An ID under another name than at the last check holds another plan (Comexio reused it, or the
+        plan was renamed): the Auto-Start state of the plan that held it is not the new one's."""
+        reassigned = {fub_id for fub_id, name in managed.items() if self._names.get(fub_id, name) != name}
+        self._names = dict(managed)
+        self.suspended -= reassigned
+        for fub_id in reassigned:
+            for state in (
+                self._failed_starts,
+                self._auto_started_at,
+                self._gave_up_at,
+                self._refused_at,
+                self._deferred_at,
+            ):
+                state.pop(fub_id, None)
 
     def _count_failed_start(self, fub_id: int, name: str, reason: str) -> None:
         """One more failed auto-start; at FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS Auto-Start gives up on the plan."""
@@ -562,16 +646,36 @@ class ManagedPlanWatchdog:
     ) -> None:
         """Alarm push for a newly stopped plan or one Auto-Start gave up on; the push of a plan running
         again (or deleted: its vanished push has a tag of its own) is replaced or removed."""
-        for fub_id in sorted(stopped.keys() - previous.keys() - set(newly_suspended)):
-            await self._async_push(fub_id, stopped[fub_id], "stopped_title", "stopped", with_action=True, alarm=True)
-        for fub_id in sorted(set(newly_suspended) & stopped.keys()):
-            await self._async_push(
-                fub_id, stopped[fub_id], "suspended_title", "suspended", with_action=True, alarm=True
-            )
+        alarms = dict.fromkeys(
+            {*newly_stopped_plans(previous, stopped), *(set(newly_suspended) & stopped.keys())}, None
+        )
+        for fub_id, targets in sorted((self._stopped_push_retries_due(stopped) | alarms).items()):
+            await self._async_push_stopped(fub_id, stopped[fub_id], targets)
         for fub_id, name in sorted(auto_started.items()):
             await self._async_push(fub_id, name, "started_title", "auto_started")
         for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys()):
             await self._async_clear_push(fub_id)
+
+    async def _async_push_stopped(self, fub_id: int, name: str, targets: frozenset[str] | None) -> None:
+        """The alarm push of a stopped plan: "suspended" once Auto-Start gave up on it.
+
+        targets: a retry, to the notify targets that failed to take it; None sends it to every one.
+        """
+        kind = "suspended" if fub_id in self.suspended else "stopped"
+        failed = await self._async_push(
+            fub_id, name, f"{kind}_title", kind, with_action=True, alarm=True, targets=targets
+        )
+        if failed:
+            # Else the plan's last push stays on that phone, maybe one naming the plan that held the ID before.
+            self._stopped_push_unsent[fub_id] = (time.monotonic(), failed)
+
+    def _stopped_push_retries_due(self, stopped: Mapping[int, str]) -> dict[int, frozenset[str] | None]:
+        """Undelivered stopped alarms due again, with their targets; one of a plan running again (or unwatched)
+        is dropped."""
+        self._stopped_push_unsent = {
+            fub_id: unsent for fub_id, unsent in self._stopped_push_unsent.items() if fub_id in stopped
+        }
+        return _retries_due(self._stopped_push_unsent)
 
     def _texts(self) -> dict[str, str]:
         return PUSH_TEXTS.get(self._hass.config.language, PUSH_TEXTS["en"])
@@ -595,26 +699,30 @@ class ManagedPlanWatchdog:
         with_action: bool = False,
         actions: Collection[str] = (),
         alarm: bool = False,
-        quiet: bool = False,
-    ) -> bool:
+        targets: frozenset[str] | None = None,
+    ) -> frozenset[str]:
         """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
 
-        token: a deleted plan's push (vanished_plan_token), with its own tag and actions. False
-        when every notify service it went to failed (see _async_send). One delivered replaces (same
-        tag) a vanished alarm still waiting to be sent again, so that one is dropped.
+        token: a deleted plan's push (vanished_plan_token), with its own tag and actions. targets: only
+        to these notify targets (an alarm's retry, its failures logged quietly). Returns the targets
+        that failed to take it (see _async_send). Where it was delivered it replaces (same tag) the
+        plan's stopped or vanished alarm still waiting to be sent again, so those targets are dropped.
         """
         texts = self._texts()
         data: dict[str, Any] = {"tag": self._push_tag(fub_id, token), "group": f"{DOMAIN}_{self._server_id}"}
         buttons = [*([ACTION_START] if with_action else []), *actions]
         if buttons:
             data["actions"] = [
-                {"action": plan_action_id(kind, self._server_id, fub_id, token), "title": texts[kind]}
+                {
+                    "action": plan_action_id(kind, self._server_id, token or vanished_plan_token(fub_id, name)),
+                    "title": texts[kind],
+                }
                 for kind in buttons
             ]
         if alarm:
             # Delivered at once and through Do Not Disturb focus (Android: ttl/priority, iOS: interruption-level).
             data |= {"ttl": 0, "priority": "high", "push": {"interruption-level": "time-sensitive"}}
-        delivered = await self._async_send(
+        delivered, failed = await self._async_send(
             {
                 "title": texts[title_key],
                 "message": texts[message_key].format(
@@ -622,11 +730,16 @@ class ManagedPlanWatchdog:
                 ),
                 "data": data,
             },
-            quiet=quiet,
+            targets=targets,
         )
-        if delivered and token is not None:
-            self._vanished_push_unsent.pop(token, None)
-        return delivered
+        # Delivered replaces (same tag) the plan's alarm still waiting to be sent again there; a retry's
+        # target no longer configured is dropped too, else it would be "retried" forever, reaching no one.
+        done = delivered if targets is None else targets - failed
+        if token is None:
+            _drop_delivered(self._stopped_push_unsent, fub_id, done)
+        else:
+            _drop_delivered(self._vanished_push_unsent, token, done)
+        return failed
 
     async def async_sync_vanished(self, vanished: Collection[tuple[int, str]]) -> None:
         """Repair per watched user plan Comexio no longer has, by (fub_id, name); alarm push for a newly vanished one.
@@ -639,8 +752,9 @@ class ManagedPlanWatchdog:
         self.vanished = set(vanished)
         self._sync_vanished_issues(self.vanished)
         newly_vanished = self.vanished - previous
-        for fub_id, name in sorted(newly_vanished | self._vanished_push_retries_due(self.vanished)):
-            await self._async_push_vanished(fub_id, name, retry=(fub_id, name) not in newly_vanished)
+        retries = self._vanished_push_retries_due(self.vanished) | dict.fromkeys(newly_vanished, None)
+        for (fub_id, name), targets in sorted(retries.items()):
+            await self._async_push_vanished(fub_id, name, targets)
         for fub_id, name in sorted(previous - self.vanished):
             token = vanished_plan_token(fub_id, name)
             if token in self._restored_pushes:
@@ -666,14 +780,17 @@ class ManagedPlanWatchdog:
             if issue_id not in wanted:
                 ir.async_delete_issue(self._hass, DOMAIN, issue_id)
 
-    async def _async_push_vanished(self, fub_id: int, name: str, *, retry: bool) -> None:
-        """The alarm push of a deleted plan; "Restore" only for a plan its backups can be found by."""
-        if not retry:
+    async def _async_push_vanished(self, fub_id: int, name: str, targets: frozenset[str] | None) -> None:
+        """The alarm push of a deleted plan; "Restore" only for a plan its backups can be found by.
+
+        targets: a retry, to the notify targets that failed to take it; None sends it to every one.
+        """
+        if targets is None:
             _LOGGER.warning(
                 "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio", self._server_id, name, fub_id
             )
         token = vanished_plan_token(fub_id, name)
-        delivered = await self._async_push(
+        failed = await self._async_push(
             fub_id,
             name,
             "vanished_title",
@@ -681,23 +798,21 @@ class ManagedPlanWatchdog:
             token=token,
             actions=_vanished_actions(fub_id, name),
             alarm=True,
-            quiet=retry,  # its first failure was logged; a dead notify service must not flood the log
+            targets=targets,
         )
-        if not delivered:
-            self._vanished_push_unsent[token] = time.monotonic()  # the answer's time: the gap starts here
+        if failed:
+            self._vanished_push_unsent[token] = (time.monotonic(), failed)  # the answer's time: the gap starts here
 
-    def _vanished_push_retries_due(self, vanished: Collection[tuple[int, str]]) -> set[tuple[int, str]]:
-        """Undelivered vanished alarms due again; one of a plan back again (or unpicked) is dropped."""
+    def _vanished_push_retries_due(
+        self, vanished: Collection[tuple[int, str]]
+    ) -> dict[tuple[int, str], frozenset[str] | None]:
+        """Undelivered vanished alarms due again, with their targets; one of a plan back again (or unpicked)
+        is dropped."""
         by_token = {vanished_plan_token(fub_id, name): (fub_id, name) for fub_id, name in vanished}
         self._vanished_push_unsent = {
-            token: failed_at for token, failed_at in self._vanished_push_unsent.items() if token in by_token
+            token: unsent for token, unsent in self._vanished_push_unsent.items() if token in by_token
         }
-        now = time.monotonic()
-        return {
-            by_token[token]
-            for token, failed_at in self._vanished_push_unsent.items()
-            if now - failed_at >= FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
-        }
+        return {by_token[token]: targets for token, targets in _retries_due(self._vanished_push_unsent).items()}
 
     def vanished_name(self, token: str) -> str | None:
         """The name of the vanished plan a push action's token (vanished_plan_token) names; None if none is."""
@@ -754,7 +869,11 @@ class ManagedPlanWatchdog:
         """Remove a plan's push from the phones: its "stopped" one, or with name its deleted-plan one.
 
         E.g. one whose "Start plan" action is no longer honoured, or the alarm of a plan restored meanwhile.
+        The "stopped" one is kept while the ID's plan is stopped, judged when it runs: a stop judged since
+        the clear was asked for pushed that plan's alarm under the same tag, which the clear would take off.
         """
+        if name is None and fub_id in (self.stopped or {}):
+            return
         await self._async_clear_push(fub_id, None if name is None else vanished_plan_token(fub_id, name))
 
     async def async_dismiss_vanished_push(self, fub_id: int, token: str) -> None:
@@ -768,29 +887,38 @@ class ManagedPlanWatchdog:
         )
 
     async def _async_send(
-        self, service_data: dict[str, Any], *, mobile_app_only: bool = False, quiet: bool = False
-    ) -> bool:
+        self,
+        service_data: dict[str, Any],
+        *,
+        mobile_app_only: bool = False,
+        targets: frozenset[str] | None = None,
+    ) -> tuple[frozenset[str], frozenset[str]]:
         """Send to every configured notify service; a failing one is logged and does not stop the others.
 
-        False only when it went to at least one service and every one of them failed. quiet logs the
-        failures at debug level (a retry of a push whose first failure was logged).
+        targets: only to those of them (a retry; a target no longer configured is skipped), whose
+        failures were logged already, so they are logged at debug level: a dead notify service must not
+        flood the log. Returns the targets it was delivered to and those that failed.
         """
-        log_failure = _LOGGER.debug if quiet else _LOGGER.warning
-        attempted = delivered = False
+        log_failure = _LOGGER.warning if targets is None else _LOGGER.debug
+        delivered: set[str] = set()
+        failed: set[str] = set()
         for target in self._notify_targets():
             service = target.removeprefix(f"{NOTIFY_DOMAIN}.")
-            if mobile_app_only and not service.startswith(MOBILE_APP_SERVICE_PREFIX):
+            if (mobile_app_only and not service.startswith(MOBILE_APP_SERVICE_PREFIX)) or (
+                targets is not None and target not in targets
+            ):
                 continue
-            attempted = True
             try:
                 await self._hass.services.async_call(NOTIFY_DOMAIN, service, service_data, blocking=True)
-                delivered = True
+                delivered.add(target)
             except (HomeAssistantError, vol.Invalid) as err:
+                failed.add(target)
                 log_failure("[%s] Function plan watchdog push to notify.%s failed: %s", self._server_id, service, err)
             except Exception:
                 # Third-party notify platforms raise their own errors (aiohttp, timeouts, ...); none of
                 # them may skip the remaining targets or the watchdog check that sends the push.
+                failed.add(target)
                 log_failure(
                     "[%s] Function plan watchdog push to notify.%s failed", self._server_id, service, exc_info=True
                 )
-        return delivered or not attempted
+        return frozenset(delivered), frozenset(failed)
