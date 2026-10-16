@@ -323,12 +323,12 @@ def _marker_category_is(record: dict[str, Any], expected: int) -> bool:
 
 
 def _is_api_created_marker(record: dict[str, Any]) -> bool:
-    """True if the marker record carries CategoryId==1 (created via the admin API, not Studio)."""
+    """True if the marker record carries CategoryId==1 (admin API, or the plan editor's "new marker")."""
     return _marker_category_is(record, 1)
 
 
 def _is_studio_marker(record: dict[str, Any]) -> bool:
-    """True if the marker record carries CategoryId==0 (factory or Studio-created).
+    """True if the marker record carries CategoryId==0 (factory-provisioned or from Studio's marker list).
 
     marker_delete's force option only applies to this known category — an unknown or malformed
     CategoryId stays protected even when the marker is untitled and unplaced.
@@ -364,8 +364,8 @@ def _marker_delete_block_reason(
     if not _is_studio_marker(record):
         return f"unknown CategoryId {record.get('CategoryId')!r}"
     if _marker_has_title(record):
-        return "factory/Studio marker with a title"
-    return None if force else "factory/Studio marker — enable 'force' for untitled ones"
+        return "CategoryId 0 marker with a title"
+    return None if force else "CategoryId 0 marker — enable 'force' for untitled ones"
 
 
 def _classify_marker_delete_ids(
@@ -377,7 +377,7 @@ def _classify_marker_delete_ids(
     - Absent from records (already deleted / never existed): deletable — delete_marker then
       reports it as the harmless "already absent" case.
     - CategoryId==1 (created via the admin API — this integration, or the plan editor): deletable.
-    - CategoryId==0 (factory or Studio-created): protected, unless force is on AND the marker
+    - CategoryId==0 (factory-provisioned or from Studio's marker list): protected, unless force is on AND the marker
       has no title.
     - Anything else (unknown/malformed CategoryId): always protected, force or not.
     """
@@ -1947,10 +1947,10 @@ class ComexioAPI:
 
         Safety gate for marker_delete. Every plan is loaded first, force or not: a marker placed
         in any function plan is never deleted. Of the unplaced ones, markers created via the
-        admin API carry CategoryId==1 and may be deleted. CategoryId==0 covers both
-        factory-provisioned markers (M1 "System rebooted", M2 "TRUE", M3 "FALSE") and markers
-        from Comexio Studio's marker list — protected; force=True opens them only when they have
-        no title. See _classify_marker_delete_ids.
+        admin API or with the plan editor's "new marker" carry CategoryId==1 and may be deleted.
+        CategoryId==0 covers both factory-provisioned markers (M1 "System rebooted", M2 "TRUE",
+        M3 "FALSE") and markers from Comexio Studio's marker list — protected; force=True opens
+        them only when they have no title. See _classify_marker_delete_ids.
 
         Protected ids no longer abort the batch — the caller deletes the deletable ones and
         reports the protected ones, `protected` maps each to its reason. A marker_id absent from

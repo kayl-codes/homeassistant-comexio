@@ -687,11 +687,12 @@ marker_delete:
     Permanently deletes one or more Markers directly on the Comexio server (from Comexio's
     marker list, not a function plan element). Markers placed in a function plan are never
     deleted — remove them from the plan first; every function plan is loaded before each call,
-    and if one cannot be read, nothing is deleted. Of the unplaced markers, those created via
-    the admin API (e.g. KNX bridge markers) are deleted; factory and Studio-created markers
-    are protected. Protected markers are skipped and listed as "protected" with their reason,
-    the remaining ids are still deleted. With "force", unplaced factory/Studio markers are
-    deleted too if they have no name. A marker id that does not (or no longer) exist is
+    and if one cannot be read, nothing is deleted. Of the unplaced markers, those with
+    CategoryId 1 are deleted — created via the admin API (e.g. KNX bridge markers) or with the
+    Studio plan editor's "new marker"; CategoryId 0 markers (factory-provisioned or from
+    Studio's marker list) are protected. Protected markers are skipped and listed as
+    "protected" with their reason, the remaining ids are still deleted. With "force", unplaced
+    CategoryId 0 markers are deleted too if they have no name. A marker id that does not (or no longer) exist is
     silently skipped, not reported as an error — a genuine request failure (e.g. session
     drop) is still reported, never mistaken for that. Limited to 200 markers per call.
     Requires "confirm" — without it, nothing is deleted. The response lists the ids per
@@ -721,7 +722,7 @@ marker_delete:
         boolean:
     force:
       name: Force (untitled, unplaced markers)
-      description: "Also delete factory/Studio-created markers — but only those without a name. Markers placed in a function plan stay protected even with force."
+      description: "Also delete CategoryId 0 markers (factory or from Studio's marker list) — but only those without a name. Markers placed in a function plan stay protected even with force."
       required: false
       default: false
       selector:

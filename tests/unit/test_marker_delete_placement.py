@@ -56,7 +56,7 @@ def test_an_unplaced_api_created_marker_stays_deletable(comexio_api: ComexioAPI)
 def test_force_opens_only_unplaced_untitled_studio_markers(comexio_api: ComexioAPI) -> None:
     deletable, protected, _categories, _gate_error = _eligibility(_scenario(comexio_api), [1, 3, 4, 7], force=True)
     assert deletable == [3, 7]  # M7 absent: delete_marker reports it as already gone
-    assert protected == {1: "factory/Studio marker with a title", 4: PLACED_REASON}
+    assert protected == {1: "CategoryId 0 marker with a title", 4: PLACED_REASON}
 
 
 def test_a_marker_in_several_plans_names_all_of_them(comexio_api: ComexioAPI) -> None:

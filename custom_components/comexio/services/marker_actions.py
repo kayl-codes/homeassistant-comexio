@@ -7,9 +7,10 @@ needs its own id-list parsing + confirm-gate + per-id result bookkeeping.
 
 Scope is deliberately narrow — see api.get_marker_delete_eligibility: a marker placed in any
 function plan is never deleted, force or not. Of the unplaced ones, markers created via the
-admin API (CategoryId==1) are deletable; factory and Studio-created markers (CategoryId==0)
-are protected, 'force' only opens that for markers without a title. Protected ids are skipped
-and reported with their reason, they no longer abort the whole call.
+admin API or the plan editor (CategoryId==1) are deletable; factory markers and those from
+Studio's marker list (CategoryId==0) are protected, 'force' only opens that for markers without
+a title. Protected ids are skipped and reported with their reason, they no longer abort the
+whole call.
 """
 
 import logging
