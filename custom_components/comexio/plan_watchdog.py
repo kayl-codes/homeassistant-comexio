@@ -665,17 +665,15 @@ class ManagedPlanWatchdog:
 
         Ignored for the plan that held the ID before (renamed, or the ID reused), or Auto-Start gave up
         on the plan since (a more severe report than the stop the user ignored). Placeholders and key are
-        not kept across a restart: an ignore read back from storage names neither.
+        not kept across a restart: an ignore read back from storage names neither, so it holds for the name
+        (the next check writes both back) but not for a give-up.
         """
         ignored = self._ignored_issue(fub_id)
         if ignored is None:
             return False
         if (ignored.translation_placeholders or {}).get("plan_name", name) != name:
             return True
-        return fub_id in self.suspended and ignored.translation_key not in (
-            None,
-            ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED,
-        )
+        return fub_id in self.suspended and ignored.translation_key != ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED
 
     def _issue_translation_key(self, fub_id: int) -> str:
         if fub_id in self.suspended:

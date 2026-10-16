@@ -1776,6 +1776,18 @@ def test_stop_watching_drops_the_named_and_the_bare_pick(api: ComexioAPI) -> Non
     assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is False
 
 
+def test_stop_watching_drops_the_bare_pick_of_a_plan_still_holding_its_id(api: ComexioAPI) -> None:
+    """(Sourcery) The plan itself at its ID is no reuse: "stop watching" must not keep its bare pick."""
+    api._fub_data["47"] = {"Id": 47, "Name": "Test4", "Active": 0}
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47", "19:Test1"]}
+    coordinator = _coordinator(
+        api, config_entry=SimpleNamespace(options=options), request_options_update_without_reload=MagicMock()
+    )
+    assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["19:Test1"]
+
+
 def test_stop_watching_keeps_a_bare_pick_whose_id_another_plan_holds_again(api: ComexioAPI) -> None:
     """(Sourcery) Comexio reused the ID since the last check: the bare pick watches that plan by now."""
     api._fub_data["47"] = {"Id": 47, "Name": "Other", "Active": 1}

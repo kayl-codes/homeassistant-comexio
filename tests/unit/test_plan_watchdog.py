@@ -825,6 +825,19 @@ def test_an_ignore_read_back_after_a_restart_sends_no_alarm(ir: MagicMock) -> No
     assert ir.async_get.return_value.issues[issue].dismissed_version is not None
 
 
+def test_an_ignore_read_back_after_a_restart_does_not_hide_a_give_up(ir: MagicMock) -> None:
+    """(Sourcery) The restored ignore names no repair kind: it cannot have been one of the give-up."""
+    issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
+    ir.async_get.return_value.issues[issue] = SimpleNamespace(
+        dismissed_version="2026.10.0", translation_placeholders=None, translation_key=None
+    )
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.suspended.add(34)
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    entry = ir.async_get.return_value.issues[issue]
+    assert (entry.translation_key, entry.dismissed_version) == (ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED, None)
+
+
 def test_the_ignore_of_the_plan_that_held_the_id_before_does_not_hide_another(ir: MagicMock) -> None:
     """Renamed or the ID reused: the plan holding the ID now gets its own repair and alarm."""
     issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
