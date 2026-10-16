@@ -38,7 +38,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Descriptions follow the behaviour:** a change in what an option, service, switch or repair does updates its
   description in the same PR — `services.yaml`, the option and field descriptions in `strings.json` and all
   translation files, and the README/CONFIGURATION sections that describe it. Flag a behaviour change whose
-  descriptions still state the old behaviour (#181).
+  descriptions still state the old behaviour (#181). A description of a protection or eligibility rule names the
+  attribute the code checks (e.g. the marker's CategoryId), not an origin it is assumed to stand for ("created by
+  HA", "created in Studio") — markers from the Studio plan editor carry CategoryId 1 like API-created ones (#186).
 - **Concurrency:** Web-IO syncs run under the coordinator's `_sync_lock`; webhook values arriving during a config
   fetch must win over the stale API snapshot (guard R1). Flag changes that weaken these guards.
 - **Poll timer:** `async_set_updated_data` cancels and reschedules the coordinator's periodic poll. Code that runs
@@ -87,6 +89,16 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   read or parse failure into "entry missing" and acts on it (#158). A failed read is also no fresh reading: the
   steps that do not depend on it still run, and steps that judge by elapsed time do not use the last known values
   as if they were new. Flag an early return on a failed read that skips the independent steps (#181).
+- **Fail closed on every transport error:** `get_raw_config` raises a plain `ComexioConnectionError` when the
+  failure has no aiohttp or timeout cause. A path that must refuse when Comexio cannot be read (a delete gate, a
+  safety check) catches `ComexioConnectionError` next to `aiohttp.ClientError` and `TimeoutError`; otherwise the
+  error escapes the gate and the service ends without a result or notification. Flag a fail-closed `except` behind
+  `get_raw_config` that lacks it (#186).
+- **Names from Comexio are cleaned before output:** plan, marker and IO names come from the Comexio admin and can
+  hold line breaks or control characters. Before a name goes into a log line, a notification or a service response,
+  replace non-printable characters and collapse whitespace to one line (`_plan_display_name`), so a name cannot
+  split a log entry or break the notification layout. Flag new code that writes a Comexio name to a log line,
+  notification or response unfiltered; entity display names are out of scope (#186).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
