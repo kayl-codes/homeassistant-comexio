@@ -74,6 +74,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   that id now, like any selection stored as a `fub_id` alone — acting on that plan, renamed or not, is intended, do
   not flag it. The exception covers only that bare-ID watch: an HA-managed plan that holds the id is matched by
   name, and a "Start plan" action sent before it carried the token (no name) starts only a bare-ID pick.
+- **Push tags are shared slots:** a live plan's push carries the tag `plan_{fub_id}` (`_push_tag`), and a newer
+  push or a `clear_notification` under that tag replaces or removes whatever the phone shows there — also the
+  current alarm of another plan that holds the ID now. A push whose action is ignored as stale is taken off the
+  phone or replaced, never left with a button that does nothing. Before clearing a `plan_{fub_id}` push, check that
+  the ID's plan is not stopped: while it is, its own alarm holds the tag (`async_dismiss_push` keeps it). A deleted
+  plan's push has its own `vanished_{token}` tag and is removed by that token, not by the `fub_id`.
+  `clear_notification` goes to mobile_app notify services only (`mobile_app_only=True`); any other service shows it
+  as text. Flag a clear or replacement under a shared tag without that check, and a stale push left in place (#185).
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
