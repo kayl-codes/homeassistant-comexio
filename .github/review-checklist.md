@@ -80,11 +80,15 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   phone or replaced, never left with a button that does nothing. Before clearing a `plan_{fub_id}` push, check that
   the ID's plan is not stopped: while it is, its own alarm holds the tag (`async_dismiss_push` keeps it) — that
   alarm, pushed on the stop and sent again to a target that did not take it, is what replaced the stale push, so
-  keeping the tag is not leaving the stale push in place. Clears and replacements reach the notify targets
-  configured now; a phone whose target was removed is out of HA's reach and not a finding. A deleted
-  plan's push has its own `vanished_{token}` tag and is removed by that token, not by the `fub_id`.
-  `clear_notification` goes to mobile_app notify services only (`mobile_app_only=True`); any other service shows it
-  as text. Flag a clear or replacement under a shared tag without that check, and a stale push left in place (#185).
+  keeping the tag is not leaving the stale push in place. The check and the clear are apart by an `await`: a stop
+  judged meanwhile pushes the alarm, which a clear arriving after it takes off, so the clear is followed by
+  sending that alarm again where it was delivered (#187). Clears and replacements reach the notify targets
+  configured now; a phone whose target was removed is out of HA's reach and not a finding. A failed clear is logged
+  and not retried: pressing the stale action again sends it again. A deleted plan's push has its own
+  `vanished_{token}` tag and is removed by that token, not by the `fub_id`. Only `clear_notification` goes to
+  mobile_app notify services alone (`mobile_app_only=True`), since any other service shows it as text; alarms
+  and replacement pushes go to every configured target. Flag a clear or replacement under a shared tag without
+  that check, and a stale push left in place (#185).
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore

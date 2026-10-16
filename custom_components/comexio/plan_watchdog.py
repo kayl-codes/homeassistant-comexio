@@ -431,8 +431,7 @@ class ManagedPlanWatchdog:
         A target that failed to take it gets the plan's alarm again (it names the plan too) while it stays stopped.
         """
         failed = await self._async_push(fub_id, name, "outdated_title", "outdated", with_action=True)
-        if failed:
-            self._stopped_push_unsent[fub_id] = (time.monotonic(), failed)
+        self._keep_stopped_push_unsent(fub_id, failed)
 
     def _log_transitions(
         self, previous: Mapping[int, str], stopped: Mapping[int, str], managed: Mapping[int, str]
@@ -656,18 +655,26 @@ class ManagedPlanWatchdog:
         for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys()):
             await self._async_clear_push(fub_id)
 
-    async def _async_push_stopped(self, fub_id: int, name: str, targets: frozenset[str] | None) -> None:
+    async def _async_push_stopped(self, fub_id: int, name: str, targets: frozenset[str] | None) -> frozenset[str]:
         """The alarm push of a stopped plan: "suspended" once Auto-Start gave up on it.
 
         targets: a retry, to the notify targets that failed to take it; None sends it to every one.
+        Returns the targets that failed to take it.
         """
         kind = "suspended" if fub_id in self.suspended else "stopped"
         failed = await self._async_push(
             fub_id, name, f"{kind}_title", kind, with_action=True, alarm=True, targets=targets
         )
-        if failed:
-            # Else the plan's last push stays on that phone, maybe one naming the plan that held the ID before.
-            self._stopped_push_unsent[fub_id] = (time.monotonic(), failed)
+        # Else the plan's last push stays on that phone, maybe one naming the plan that held the ID before.
+        self._keep_stopped_push_unsent(fub_id, failed)
+        return failed
+
+    def _keep_stopped_push_unsent(self, fub_id: int, failed: frozenset[str]) -> None:
+        """Targets that failed to take a plan's alarm, added to those still waiting for it (not sent to now)."""
+        if not failed:
+            return
+        _failed_at, waiting = self._stopped_push_unsent.get(fub_id, (0.0, frozenset()))
+        self._stopped_push_unsent[fub_id] = (time.monotonic(), waiting | failed)
 
     def _stopped_push_retries_due(self, stopped: Mapping[int, str]) -> dict[int, frozenset[str] | None]:
         """Undelivered stopped alarms due again, with their targets; one of a plan running again (or unwatched)
@@ -874,17 +881,36 @@ class ManagedPlanWatchdog:
         """
         if name is None and fub_id in (self.stopped or {}):
             return
-        await self._async_clear_push(fub_id, None if name is None else vanished_plan_token(fub_id, name))
+        cleared = await self._async_clear_push(fub_id, None if name is None else vanished_plan_token(fub_id, name))
+        if name is None and cleared and (stopped_name := (self.stopped or {}).get(fub_id)) is not None:
+            # A stop judged while the clear was on its way pushed the alarm under the same tag; where the clear
+            # arrived after it, it took the alarm off, so the alarm is sent there again.
+            _LOGGER.debug(
+                "[%s] Function plan %s stopped while its stale push was cleared: its alarm is sent again",
+                self._server_id,
+                fub_id,
+            )
+            if failed := await self._async_push_stopped(fub_id, stopped_name, cleared):
+                # A first attempt to these targets (the targets path logs at debug, as for a retry).
+                _LOGGER.warning(
+                    "[%s] Alarm of function plan %s not sent again to %s after its stale push was cleared; "
+                    "it is retried",
+                    self._server_id,
+                    fub_id,
+                    ", ".join(sorted(failed)),
+                )
 
     async def async_dismiss_vanished_push(self, fub_id: int, token: str) -> None:
         """Remove a deleted plan's push by the token its action carried (the name may be unknown by now)."""
         await self._async_clear_push(fub_id, token)
 
-    async def _async_clear_push(self, fub_id: int, token: str | None = None) -> None:
+    async def _async_clear_push(self, fub_id: int, token: str | None = None) -> frozenset[str]:
+        """Returns the targets it was delivered to."""
         # A companion-app command: any other notify service would deliver it as the text "clear_notification".
-        await self._async_send(
+        delivered, _failed = await self._async_send(
             {"message": "clear_notification", "data": {"tag": self._push_tag(fub_id, token)}}, mobile_app_only=True
         )
+        return delivered
 
     async def _async_send(
         self,
