@@ -910,6 +910,38 @@ def test_dismissing_a_push_clears_the_tag_it_was_sent_with() -> None:
     ]
 
 
+def test_a_stale_push_is_not_cleared_once_the_ids_plan_stopped(ir: MagicMock) -> None:
+    """(Sourcery, #185) A stop judged after the clear was asked for pushed the alarm under the same tag."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    pushes = len(_pushes(watchdog))
+    asyncio.run(watchdog.async_dismiss_push(47))
+    assert len(_pushes(watchdog)) == pushes
+    asyncio.run(watchdog.async_dismiss_push(47, "Test4"))  # a deleted plan's push has a tag of its own
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_an_outdated_replacement_a_target_failed_to_take_is_sent_again(ir: MagicMock, clock: list[float]) -> None:
+    """(Sourcery, #185) Else that phone keeps the old push, whose button starts nothing."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+
+    async def tablet_down(_domain: str, service: str, *_args: Any, **_kwargs: Any) -> None:
+        if service == "mobile_app_tablet":
+            raise HomeAssistantError("down")
+
+    watchdog._hass.services.async_call.side_effect = tablet_down
+    asyncio.run(watchdog.async_push_start_outdated(47, "Test4"))
+    assert watchdog._stopped_push_unsent[47][1] == {"mobile_app_tablet"}
+    watchdog._hass.services.async_call.side_effect = None
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    (*_, (_d, service, alarm)) = _pushes(watchdog)
+    assert service == "mobile_app_tablet"
+    assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Test4")
+    assert watchdog._stopped_push_unsent == {}
+
+
 def test_the_push_state_of_two_deleted_plans_on_one_id_stays_apart(ir: MagicMock, clock: list[float]) -> None:
     """The "restored" confirmation and the unsent alarm are kept per deleted plan, not per ID."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])

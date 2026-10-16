@@ -428,8 +428,11 @@ class ManagedPlanWatchdog:
         """Replace a "Start plan" push that names no plan (sent before the update) with one naming the ID's plan.
 
         The alarm is pushed on the stop only, so the old push would otherwise keep a button that starts nothing.
+        A target that failed to take it gets the plan's alarm again (it names the plan too) while it stays stopped.
         """
-        await self._async_push(fub_id, name, "outdated_title", "outdated", with_action=True)
+        failed = await self._async_push(fub_id, name, "outdated_title", "outdated", with_action=True)
+        if failed:
+            self._stopped_push_unsent[fub_id] = (time.monotonic(), failed)
 
     def _log_transitions(
         self, previous: Mapping[int, str], stopped: Mapping[int, str], managed: Mapping[int, str]
@@ -866,7 +869,11 @@ class ManagedPlanWatchdog:
         """Remove a plan's push from the phones: its "stopped" one, or with name its deleted-plan one.
 
         E.g. one whose "Start plan" action is no longer honoured, or the alarm of a plan restored meanwhile.
+        The "stopped" one is kept while the ID's plan is stopped, judged when it runs: a stop judged since
+        the clear was asked for pushed that plan's alarm under the same tag, which the clear would take off.
         """
+        if name is None and fub_id in (self.stopped or {}):
+            return
         await self._async_clear_push(fub_id, None if name is None else vanished_plan_token(fub_id, name))
 
     async def async_dismiss_vanished_push(self, fub_id: int, token: str) -> None:
