@@ -22,8 +22,9 @@ def test_a_flag_reads_strings_as_ha_does(data: dict, expected: bool) -> None:
 
 
 def test_a_flag_that_is_no_boolean_is_refused() -> None:
+    call = SimpleNamespace(data={"flag": "maybe"})
     with pytest.raises(ServiceValidationError, match="'flag' must be true or false"):
-        service_flag(SimpleNamespace(data={"flag": "maybe"}), "flag", False)
+        service_flag(call, "flag", False)
 
 
 def test_no_service_reads_a_flag_by_truthiness() -> None:
