@@ -4639,9 +4639,34 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.async_update_listeners()
         return True
 
+    def watched_plan_name(self, fub_id: int) -> str | None:
+        """Name of the plan watched under this ID right now (HA-managed or a picked user plan), else None."""
+        managed = self._managed_plan_names()
+        if fub_id in managed:
+            return managed[fub_id]
+        return self._watched_user_plan_names().get(fub_id)
+
     def is_watched_plan(self, fub_id: int) -> bool:
         """Whether the watchdog watches this plan right now (HA-managed or a picked user plan)."""
-        return fub_id in self._managed_plan_names() or fub_id in self._watched_user_plan_names()
+        return self.watched_plan_name(fub_id) is not None
+
+    def watches_plan_raised_for(self, fub_id: int, name_matches: Callable[[str], bool]) -> bool:
+        """Whether the plan a push or repair was raised for is still the one watched under its ID.
+
+        name_matches tells whether the watched plan's name is the one it was raised for: Comexio may
+        have given the ID to another watched plan since. A bare-ID pick (no name) watches whichever
+        plan holds the ID, renamed or not, so any name passes for it.
+        """
+        name = self.watched_plan_name(fub_id)
+        if name is None:
+            return False
+        return name_matches(name) or (fub_id not in self._managed_plan_names() and self._has_bare_pick(fub_id))
+
+    def _has_bare_pick(self, fub_id: int) -> bool:
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        return isinstance(raw_picks, list) and any(
+            parse_watchdog_user_plan_pick(value) == (fub_id, None) for value in raw_picks
+        )
 
     def _plan_watchdog_notify_targets(self) -> list[str]:
         targets = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or []
@@ -4657,9 +4682,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if kind != ACTION_START and token is not None:
             self._handle_vanished_plan_action(kind, fub_id, token)
             return
-        if self.is_watched_plan(fub_id):
+        # A "Start plan" sent before the action carried the name digest (token None) names the plan by ID only.
+        if self.watches_plan_raised_for(fub_id, lambda name: token in (None, vanished_plan_token(fub_id, name))):
             self.hass.async_create_background_task(
                 self._async_start_plan_from_push(fub_id), name=f"{DOMAIN}_{self.server_id}_start_plan_{fub_id}"
+            )
+            return
+        if self.is_watched_plan(fub_id):
+            # Comexio gave the ID to another watched plan since: its own push shares the tag, so the
+            # stale one is left alone (the newer push replaced it on the phone anyway).
+            _LOGGER.warning(
+                "[%s] Watchdog push action for function plan %s ignored: the ID belongs to another watched plan "
+                "now (%s)",
+                self.server_id,
+                fub_id,
+                self.watched_plan_name(fub_id),
             )
             return
         # A push from before the plan was unselected or deleted in Comexio: starting it is no longer

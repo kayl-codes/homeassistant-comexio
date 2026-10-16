@@ -153,10 +153,11 @@ def stopped_plan_issue_id(server_id: str, fub_id: int) -> str:
 
 
 def vanished_plan_token(fub_id: int, name: str) -> str:
-    """A deleted plan's identity in its repair id, push tag and push actions: its ID and a digest of its name.
+    """A plan's identity in a deleted plan's repair id, push tag and push actions and in the "Start plan" action.
 
-    The ID alone is not one: an ID can be reused, so two deleted watched plans may share it (picks
-    "47:X" and "47:Y"). The name itself cannot go into an action id (any character), its digest can:
+    Its ID and a digest of its name. The ID alone is not one: an ID can be reused, so two deleted
+    watched plans may share it (picks "47:X" and "47:Y"), and a stale "Start plan" could start the
+    plan holding the ID now. The name itself cannot go into an action id (any character), its digest can:
     64 bits of SHA-256, so two names of one ID do not collide (CRC32's 32 bits could).
     """
     return f"{fub_id}_{hashlib.sha256(name.encode()).hexdigest()[:16]}"
@@ -197,30 +198,34 @@ def _own_issue_ids(hass: HomeAssistant, server_id: str, *, vanished: bool = Fals
     return [issue_id for domain, issue_id in ir.async_get(hass).issues if domain == DOMAIN and own.fullmatch(issue_id)]
 
 
-def start_action_id(server_id: str, fub_id: int) -> str:
+def start_action_id(server_id: str, fub_id: int, name: str) -> str:
     """Action id of the push's "Start plan" button."""
-    return f"{START_ACTION_PREFIX}{server_id}_{fub_id}"
+    return plan_action_id(ACTION_START, server_id, vanished_plan_token(fub_id, name))
 
 
-def plan_action_id(kind: str, server_id: str, fub_id: int, token: str | None = None) -> str:
-    """Action id of a push button: ACTION_START (by plan id), ACTION_RESTORE or ACTION_UNWATCH (by vanished token)."""
-    return f"{_ACTION_PREFIXES[kind]}{server_id}_{fub_id if kind == ACTION_START else token}"
+def plan_action_id(kind: str, server_id: str, token: str) -> str:
+    """Action id of a push button, by the plan's vanished_plan_token: the started plan's or the deleted plan's.
+
+    "Start plan" carries the name digest too: a push from before Comexio gave the plan's ID to
+    another watched plan must not start that one.
+    """
+    return f"{_ACTION_PREFIXES[kind]}{server_id}_{token}"
 
 
 def parse_plan_action(server_id: str, action: Any) -> tuple[str, int, str | None] | None:
-    """(kind, plan id, vanished token) of one of this instance's push actions, None for any other action.
+    """(kind, plan id, vanished_plan_token) of one of this instance's push actions, None for any other action.
 
-    The token is None for "Start plan". fullmatch, so server "home" does not pick up the actions
-    of server "home_2".
+    The token is None only for a "Start plan" sent before the action carried the name digest (the
+    plan id alone). fullmatch, so server "home" does not pick up the actions of server "home_2".
     """
     if not isinstance(action, str):
         return None
     for kind, prefix in _ACTION_PREFIXES.items():
-        pattern = r"(\d+)" if kind == ACTION_START else f"(?P<token>{_VANISHED_ID_PATTERN})"
-        if match := re.fullmatch(rf"{re.escape(prefix + server_id)}_{pattern}", action):
-            if kind == ACTION_START:
-                return kind, int(match[1]), None
+        own = re.escape(prefix + server_id)
+        if match := re.fullmatch(rf"{own}_(?P<token>{_VANISHED_ID_PATTERN})", action):
             return kind, int(match[2]), match["token"]
+        if kind == ACTION_START and (match := re.fullmatch(rf"{own}_(\d+)", action)):
+            return kind, int(match[1]), None
     return None
 
 
@@ -608,7 +613,10 @@ class ManagedPlanWatchdog:
         buttons = [*([ACTION_START] if with_action else []), *actions]
         if buttons:
             data["actions"] = [
-                {"action": plan_action_id(kind, self._server_id, fub_id, token), "title": texts[kind]}
+                {
+                    "action": plan_action_id(kind, self._server_id, token or vanished_plan_token(fub_id, name)),
+                    "title": texts[kind],
+                }
                 for kind in buttons
             ]
         if alarm:

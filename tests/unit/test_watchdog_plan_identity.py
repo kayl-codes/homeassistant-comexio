@@ -76,11 +76,11 @@ def test_user_plan_picks_carry_the_plan_name() -> None:
 
 
 def _run_stopped_repair(
-    *, watched: bool, running: bool = False, blocked: bool = False, started: bool | None = True
+    *, watched: str | None, running: bool = False, blocked: bool = False, started: bool | None = True
 ) -> tuple[dict, AsyncMock, SimpleNamespace]:
     start = AsyncMock(return_value=started)
     coordinator = SimpleNamespace(
-        is_watched_plan=lambda fub_id: watched,
+        watches_plan_raised_for=lambda fub_id, name_matches: watched is not None and name_matches(watched),
         plan_watchdog=SimpleNamespace(last_check_text=lambda: "—", async_plan_started=AsyncMock()),
         api=SimpleNamespace(get_fub_active=MagicMock(return_value=running)),
         managed_plan_start_blocked=blocked,
@@ -95,12 +95,14 @@ def _run_stopped_repair(
 
 
 @pytest.mark.parametrize("running", [False, True], ids=["stopped", "running-meanwhile"])
-def test_the_stopped_plan_repair_starts_only_a_watched_plan(running: bool) -> None:
+@pytest.mark.parametrize("watched", [None, "Other"], ids=["not-watched", "id-reused-by-another-watched-plan"])
+def test_the_stopped_plan_repair_starts_only_a_watched_plan(running: bool, watched: str | None) -> None:
     """Review (Copilot, #132): unselected, deleted or ID reused while the dialog was open — no start.
 
     Checked before the run state: a reused ID's running plan must not be confirmed as the old one.
+    (Sourcery, #184) also when another watched plan holds the ID now: the repair's plan name must match.
     """
-    result, start, coordinator = _run_stopped_repair(watched=False, running=running)
+    result, start, coordinator = _run_stopped_repair(watched=watched, running=running)
     assert (result["type"], result["reason"]) == ("abort", "plan_not_watched")
     assert result["description_placeholders"]["fub_id"] == "19"
     assert result["description_placeholders"]["plan_name"] == "P"
@@ -111,7 +113,7 @@ def test_the_stopped_plan_repair_starts_only_a_watched_plan(running: bool) -> No
 
 
 def test_the_stopped_plan_repair_starts_a_watched_plan() -> None:
-    result, start, _ = _run_stopped_repair(watched=True)
+    result, start, _ = _run_stopped_repair(watched="P")
     assert result["type"] == "create_entry"
     start.assert_awaited_once_with(19)
 
@@ -125,7 +127,7 @@ def test_a_stopped_plan_repair_that_sent_no_start_reports_busy(
     blocked: bool, started: bool | None, reason: str
 ) -> None:
     """(Review) a plan edit, sync or restore running means "try again", not "Comexio refused the start"."""
-    result, start, coordinator = _run_stopped_repair(watched=True, blocked=blocked, started=started)
+    result, start, coordinator = _run_stopped_repair(watched="P", blocked=blocked, started=started)
     assert (result["type"], result["reason"]) == ("abort", reason)
     assert start.await_count == (0 if blocked else 1)
     coordinator.delete_issue.assert_not_called()

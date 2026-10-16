@@ -346,6 +346,15 @@ def _pushes(watchdog: ManagedPlanWatchdog) -> list[tuple[str, str, dict[str, Any
     return [call.args[:3] for call in watchdog._hass.services.async_call.call_args_list]
 
 
+@pytest.mark.parametrize("push", ["async_push_start_failed", "async_push_start_busy"])
+def test_a_repeated_start_action_names_the_plan_it_was_pushed_for(ir: MagicMock, push: str) -> None:
+    """(#184) the "Start plan" of the failed/busy push carries the plan name it is sent with, as the alarm's."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(getattr(watchdog, push)(34, "HA - Marker 1"))
+    actions = _pushes(watchdog)[0][2]["data"]["actions"]
+    assert [action["action"] for action in actions] == [start_action_id(SERVER_ID, 34, "HA - Marker 1")]
+
+
 def test_stop_pushes_an_alarm_with_a_start_action_and_recovery_clears_it(ir: MagicMock) -> None:
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "mobile_app_tablet"])
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
@@ -356,7 +365,9 @@ def test_stop_pushes_an_alarm_with_a_start_action_and_recovery_clears_it(ir: Mag
     ]
     alarm = pushes[0][2]
     assert "HA - Marker 1" in alarm["message"]
-    assert alarm["data"]["actions"] == [{"action": start_action_id(SERVER_ID, 34), "title": "Plan starten"}]
+    assert alarm["data"]["actions"] == [
+        {"action": start_action_id(SERVER_ID, 34, "HA - Marker 1"), "title": "Plan starten"}
+    ]
     tag = alarm["data"]["tag"]
 
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
@@ -447,8 +458,10 @@ def test_deleted_watched_plan_is_not_logged_as_running_again(ir: MagicMock, capl
 @pytest.mark.parametrize(
     ("action", "expected"),
     [
-        (start_action_id(SERVER_ID, 34), 34),
-        (start_action_id(f"{SERVER_ID}_2", 34), None),  # another server's action
+        (start_action_id(SERVER_ID, 34, "HA - Marker 1"), 34),
+        ("COMEXIO_START_PLAN_cx1_34", 34),  # sent before the action carried the name digest
+        (start_action_id(f"{SERVER_ID}_2", 34, "HA - Marker 1"), None),  # another server's action
+        ("COMEXIO_START_PLAN_cx1_2_34", None),
         ("SOME_OTHER_ACTION", None),
         (None, None),
     ],
@@ -485,8 +498,8 @@ def test_a_vanished_plan_gets_its_repair_and_one_alarm_push(ir: MagicMock) -> No
     assert service == "mobile_app_phone"
     assert data["message"] == "Der überwachte Logikplan Test4 (ID 47) existiert in Comexio nicht mehr."
     assert [action["action"] for action in data["data"]["actions"]] == [
-        plan_action_id(ACTION_RESTORE, SERVER_ID, 47, TOKEN),
-        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, TOKEN),
+        plan_action_id(ACTION_RESTORE, SERVER_ID, TOKEN),
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, TOKEN),
     ]
     assert data["data"]["priority"] == "high"  # an alarm
 
@@ -574,8 +587,8 @@ def test_a_plan_vanished_before_setup_gets_its_repair_and_push(ir: MagicMock) ->
     ((_domain, _service, data),) = _pushes(watchdog)
     assert data["data"]["tag"] == watchdog._push_tag(47, TOKEN)
     assert [action["action"] for action in data["data"]["actions"]] == [
-        plan_action_id(ACTION_RESTORE, SERVER_ID, 47, TOKEN),
-        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, TOKEN),
+        plan_action_id(ACTION_RESTORE, SERVER_ID, TOKEN),
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, TOKEN),
     ]
 
 
@@ -626,12 +639,13 @@ def test_vanished_and_stopped_repairs_do_not_clean_up_each_other(ir: MagicMock) 
 @pytest.mark.parametrize(
     ("action", "parsed"),
     [
-        ("COMEXIO_START_PLAN_cx1_47", (ACTION_START, 47, None)),
+        ("COMEXIO_START_PLAN_cx1_47_0123456789abcdef", (ACTION_START, 47, "47_0123456789abcdef")),
+        ("COMEXIO_START_PLAN_cx1_47", (ACTION_START, 47, None)),  # sent before it carried the name digest
         ("COMEXIO_RESTORE_PLAN_cx1_47_0123456789abcdef", (ACTION_RESTORE, 47, "47_0123456789abcdef")),
         ("COMEXIO_UNWATCH_PLAN_cx1_47_0123456789abcdef", (ACTION_UNWATCH, 47, "47_0123456789abcdef")),
         ("COMEXIO_RESTORE_PLAN_cx1_47", None),  # a deleted plan's action carries its name digest
-        ("COMEXIO_START_PLAN_cx1_47_0123456789abcdef", None),
         ("COMEXIO_RESTORE_PLAN_cx1_2_47_0123456789abcdef", None),  # another server's ("cx1_2")
+        ("COMEXIO_START_PLAN_cx1_2_47_0123456789abcdef", None),
         ("COMEXIO_RESTORE_PLAN_cx1_x", None),
         (None, None),
     ],
@@ -726,7 +740,7 @@ def test_a_deleted_plan_without_a_backup_identity_is_not_offered_restore(ir: Mag
     ((_domain, _service, data),) = _pushes(watchdog)
     token = plan_watchdog.vanished_plan_token(47, unnamed)
     assert [action["action"] for action in data["data"]["actions"]] == [
-        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, token)
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, token)
     ]
 
 
@@ -744,7 +758,7 @@ def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[
     asyncio.run(getattr(watchdog, method)(*args))
     ((_domain, _service, data),) = _pushes(watchdog)
     assert [action["action"] for action in data["data"].get("actions", [])] == [
-        plan_action_id(kind, SERVER_ID, 47, TOKEN) for kind in actions
+        plan_action_id(kind, SERVER_ID, TOKEN) for kind in actions
     ]
     assert "{" not in data["message"]
     assert "{" not in data["title"]
