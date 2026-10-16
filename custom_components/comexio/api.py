@@ -302,9 +302,16 @@ def _marker_plan_placements_strict(
 
 
 def _plan_display_name(entry: Any) -> str | None:
-    """A $Fubs entry's plan name, stripped, or None if it has none."""
+    """A $Fubs entry's plan name on one line, or None if it has none.
+
+    Control characters (newlines included) become spaces and runs of whitespace collapse — the
+    name goes into marker_delete's log line, notification and response, where a newline in a
+    name set in Comexio would forge extra lines.
+    """
     name = entry.get("Name") if isinstance(entry, dict) else None
-    return name.strip() if isinstance(name, str) and name.strip() else None
+    if not isinstance(name, str):
+        return None
+    return " ".join("".join(c if c.isprintable() else " " for c in name).split()) or None
 
 
 _MARKER_CONFIG_UNREADABLE = "Comexio marker config could not be fetched or parsed — every id refused (see log)."
@@ -1968,7 +1975,9 @@ class ComexioAPI:
         """
         try:
             conf = await self.get_raw_config()
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, TimeoutError, ComexioConnectionError):
+            # get_raw_config re-raises a ComexioConnectionError itself when its cause is neither
+            # of the other two — it must refuse every id here too, not escape the gate.
             _LOGGER.exception("get_marker_delete_eligibility: config fetch failed — refusing all ids")
             return [], dict.fromkeys(marker_ids, _MARKER_CONFIG_UNREADABLE), {}, _MARKER_CONFIG_UNREADABLE
         records = self._parse_marker_records(conf)

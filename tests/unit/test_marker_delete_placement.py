@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from aiocomexio import ComexioError
+from aiocomexio import ComexioConnectionError, ComexioError
+import aiohttp
 import pytest
 
 from custom_components.comexio.api import _MARKER_CONFIG_UNREADABLE, _PLACEMENT_UNKNOWN, ComexioAPI
@@ -108,12 +109,32 @@ def test_an_unreadable_marker_config_refuses_every_id(comexio_api: ComexioAPI, c
 
 
 @pytest.mark.parametrize(
+    "error",
+    [aiohttp.ClientError(), TimeoutError(), ComexioConnectionError("unusual cause")],
+    ids=["client", "timeout", "comexio-connection"],
+)
+def test_a_failed_config_fetch_refuses_every_id(comexio_api: ComexioAPI, error: Exception) -> None:
+    api = _scenario(comexio_api)
+    api.get_raw_config = AsyncMock(side_effect=error)  # type: ignore[method-assign]
+    assert _eligibility(api, [300, 7]) == (
+        [],
+        dict.fromkeys([300, 7], _MARKER_CONFIG_UNREADABLE),
+        {},
+        _MARKER_CONFIG_UNREADABLE,
+    )
+
+
+@pytest.mark.parametrize(
     ("fubs_entry", "cached_entry", "shown"),
     [
         ({"Id": 1, "Name": "  Test4 "}, None, "Test4"),
         ({"Id": 1, "Name": "   "}, {"Id": 1, "Name": "Cached"}, "Cached"),
         ({"Id": 1}, None, "#1"),
         ("malformed", None, "#1"),
+        ({"Id": 1, "Name": "Test4\nFAKE log\r\x1b[31m"}, None, "Test4 FAKE log [31m"),
+        ({"Id": 1, "Name": "\x1b\n\t"}, {"Id": 1, "Name": "Cached"}, "Cached"),
+        ({"Id": 1, "Name": "\x1b\n\t"}, None, "#1"),
+        ({"Id": 1}, {"Id": 1, "Name": "Ca\nched"}, "Ca ched"),
     ],
 )
 def test_the_plan_name_falls_back_to_the_cache_then_the_id(
