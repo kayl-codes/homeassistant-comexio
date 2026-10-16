@@ -13,6 +13,9 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
+import homeassistant.helpers.config_validation as cv
+import voluptuous as vol
 
 from ..const import (
     DOMAIN,
@@ -52,6 +55,18 @@ PLAN_EDIT_RUNNING_MSG = (
 )
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
+
+
+def service_flag(call: ServiceCall, key: str, default: bool) -> bool:
+    """A boolean service field read as HA reads it ("false", "off", 0 → False); anything else is refused.
+
+    bool() would read the string "false" as True — for a deleting option that deletes what was spared.
+    """
+    value = call.data.get(key, default)
+    try:
+        return cv.boolean(value)
+    except vol.Invalid as err:
+        raise ServiceValidationError(f"'{key}' must be true or false, not {value!r}.") from err
 
 
 def format_plan_label(name: str, fub_id) -> str:
@@ -243,7 +258,7 @@ def refuse_while_plans_busy(hass: HomeAssistant, coordinator: ComexioCoordinator
     plans, and a reload closes the API session.
     """
     # Sync first: a reload holds _restore_lock too (restores_held_off), and is no restore.
-    if coordinator._sync_lock.locked() or coordinator.in_sync:
+    if coordinator._sync_lock.locked() or coordinator.in_sync or coordinator.unloading:
         msg = SYNC_RUNNING_MSG
     elif coordinator._restore_lock.locked():
         msg = RESTORE_RUNNING_MSG

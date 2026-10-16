@@ -465,6 +465,9 @@ class FunctionPlanBackupManager:
         self._kept: set[tuple[int, str]] = set()
         # Serializes every write to the three stores (see _serialized).
         self._write_lock = asyncio.Lock()
+        # Serializes the first load: a reader loading alongside a writer could otherwise assign its
+        # older disk copy over the snapshot the writer just added, and the next save would drop it.
+        self._load_lock = asyncio.Lock()
         # Lazy-loaded caches: {fub_id_str: {plan_name: [snapshot, ...]}} — newest first per identity.
         # fub_id alone is not a stable identity (Comexio reuses IDs after deletion), so rotation
         # and lookups are always scoped to the (fub_id, plan_name) pair, never to fub_id alone.
@@ -495,6 +498,11 @@ class FunctionPlanBackupManager:
     async def _async_ensure_loaded(self) -> None:
         if self._loaded:
             return
+        async with self._load_lock:
+            if not self._loaded:  # a caller waiting on the lock finds the caches loaded meanwhile
+                await self._async_load_stores()
+
+    async def _async_load_stores(self) -> None:
         self._auto_data = await self._auto_store.async_load() or {}
         if self._migrate_legacy_shape(self._auto_data):
             await self._auto_store.async_save(self._auto_data)
@@ -1242,6 +1250,11 @@ class FunctionPlanBackupManager:
                     if str(ref.get("type")) == "2":
                         referenced.add(str(ref.get("ref_id")))
         return referenced
+
+    def plan_names_for_fub_id_sync(self, fub_id: int) -> set[str]:
+        """The plan names the auto and change snapshots of fub_id are kept under (cache-only)."""
+        key = str(fub_id)
+        return {name for data in (self._auto_data, self._change_data) for name in (data or {}).get(key, {})}
 
     def plan_backups_for_identity_sync(self, fub_id: int, plan_name: str) -> list[dict[str, Any]]:
         """Return auto+change snapshot metadata for one plan identity, newest first per kind.

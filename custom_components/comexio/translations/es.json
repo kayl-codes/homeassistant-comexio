@@ -106,6 +106,12 @@
         "ignore": "🔇 Ignorar (conservarlo todo)",
         "enable": "🔁 Volver a activar la importación"
       }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Restaurar desde la copia más reciente",
+        "unwatch": "🚫 Dejar de supervisar este plan"
+      }
     }
   },
   "options": {
@@ -145,8 +151,8 @@
           "function_plan_backup_retention_months": "Cuando la copia más reciente de un plan eliminado directamente en Comexio supera este plazo, una reparación pregunta si eliminar o conservar sus copias — no se elimina nada sin tu confirmación. Las copias de un plan que sigue existiendo nunca se ven afectadas. La acción 'Function Plan Purge Orphaned Backups' elimina de una vez todas las vencidas.",
           "bus_watchdog_enabled": "Ante una subida sostenida de la carga del bus, reinicia automáticamente los planes de función de clúster gestionados por HA (de atrás hacia adelante) para intentar aliviarla. No es destructivo para el propio sistema Comexio.",
           "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo.",
-          "function_plan_watchdog_notify": "Servicios de notificación (p. ej. notify.mobile_app_tu_telefono) que reciben un push cuando se detiene un plan de funciones vigilado (gestionado por HA, o un plan de usuario elegido abajo). El push tiene un botón «Iniciar plan» y desaparece en cuanto el plan vuelve a ejecutarse. Déjalo vacío para no enviar push; la reparación se crea en cualquier caso.",
-          "function_plan_watchdog_user_plans": "Planes de usuario (no gestionados por Home Assistant) que deben ejecutarse siempre. El watchdog los trata como los planes HA: reparación, sensor de problema y push cuando uno se detiene. El interruptor Inicio automático de planes (planes de usuario) los vuelve a iniciar por sí mismo. No incluyas los planes que detienes a propósito (pruebas)."
+          "function_plan_watchdog_notify": "Servicios de notificación (p. ej. notify.mobile_app_tu_telefono) que reciben un push cuando se detiene un plan de funciones vigilado (gestionado por HA, o un plan de usuario elegido abajo). El push tiene un botón «Iniciar plan» y desaparece en cuanto el plan vuelve a ejecutarse. Un plan de usuario vigilado eliminado en Comexio también recibe un push, con los botones «Restaurar» (su copia de seguridad más reciente, como plan nuevo) y «Dejar de vigilar». Déjalo vacío para no enviar push; la reparación se crea en cualquier caso.",
+          "function_plan_watchdog_user_plans": "Planes de usuario (no gestionados por Home Assistant) que deben ejecutarse siempre. El watchdog los trata como los planes HA: reparación, sensor de problema y push cuando uno se detiene. El interruptor Inicio automático de planes (planes de usuario) los vuelve a iniciar por sí mismo. Un plan elegido que se eliminó en Comexio no se inicia: su reparación y su push ofrecen restaurarlo desde su copia de seguridad más reciente o dejar de vigilarlo. No incluyas los planes que detienes a propósito (pruebas)."
         }
       }
     },
@@ -382,7 +388,8 @@
           "plan_exists_again": "Este plan vuelve a existir en Comexio, así que sus copias ya no están huérfanas. No se ha cambiado nada.",
           "already_deleted": "Estas copias ya se eliminaron. No se ha cambiado nada.",
           "loaded_in_preview": "La copia más reciente del plan se muestra ahora en la tarjeta del plan (Plan → Orphaned plans). Esta reparación sigue abierta hasta que conserves o elimines las copias.",
-          "preview_failed": "No se pudieron cargar las copias en la vista previa del plan — puede que se hayan eliminado entretanto o que los selectores de plan estén desactivados. Las copias no se han modificado."
+          "preview_failed": "No se pudieron cargar las copias en la vista previa del plan — puede que se hayan eliminado entretanto o que los selectores de plan estén desactivados. Las copias no se han modificado.",
+          "backups_busy": "Hay una restauración de plan de funciones en curso o la integración se está recargando — mueve y marca copias. Las copias no se han modificado; inténtalo de nuevo cuando haya terminado."
         }
       }
     },
@@ -437,6 +444,23 @@
           "plan_not_watched": "El plan {plan_name} (ID {fub_id}) ya no se supervisa (deseleccionado, eliminado o su ID reasignado). No se inició nada.",
           "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta, una edición de plan de funciones o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
           "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "El plan de funciones {plan_name} ya no existe",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de funciones supervisado eliminado",
+            "description": "El plan de funciones supervisado **{plan_name}** (ID {fub_id}) ya no existe en Comexio — se eliminó, por ejemplo en Comexio Studio.\n\n**Restaurar** lo reconstruye a partir de su copia de seguridad más reciente como un plan nuevo y lo inicia; sigue supervisado con su nuevo ID. Para restaurar una copia más antigua, usa la tarjeta del plan (Plan → Orphaned plans).\n**Dejar de supervisar** lo quita de los planes de usuario supervisados."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado.",
+          "plan_not_missing": "El plan {plan_name} (ID {fub_id}) ya no falta (restaurado o ya no supervisado). No se cambió nada.",
+          "no_backup": "No hay ninguna copia de seguridad de {plan_name} (ID {fub_id}) para restaurarlo. No se cambió nada — puedes dejar de supervisarlo.",
+          "check_pending": "La lista de planes aún no se ha leído desde que se inició Home Assistant, así que todavía no se sabe si {plan_name} (ID {fub_id}) sigue faltando. No se cambió nada; vuelve a intentarlo en un momento."
         }
       }
     },

@@ -714,6 +714,9 @@ FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC = 600
 # Minimum gap after a refused auto-start before the next attempt: a check can follow within seconds
 # (switch turned on, fast preview polling), which would use up both attempts on a short-lived refusal.
 FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC = 60
+# Minimum gap before a deleted plan's alarm push that reached no notify service is sent again: the
+# checks run every few seconds while a plan card is open, and a removed phone must not get a retry each.
+FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC = 300
 # After Comexio was unreachable (a poll or run-state fetch failed to connect, or HA's own emergency
 # reboot) the watchdog waits this long from the first successful read before judging the plans
 # again: a booting Comexio starts its plans itself, so a stopped plan then is no fault.
@@ -726,6 +729,15 @@ LOGIN_ERROR_CONNECTION = "connection"
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
+# Longest the watchdog holds back a newly stopped plan while the plan list is re-read to tell a deleted
+# plan from a stopped one (a full poll takes a few seconds; one that brings no plan list must not mute it).
+FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC = 120
+# Longest an unload (HA's own reload) waits for a running sync, function plan restore or edit.
+FUNCTION_PLAN_UNLOAD_WAIT_SEC = 120
+# How often that unload looks whether the restore is over (it watches the lock, see async_wait_before_unload).
+FUNCTION_PLAN_UNLOAD_POLL_SEC = 0.5
+# Longest a deleted plan's Restore (watchdog push or repair) waits for a restore running elsewhere.
+FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC = 120
 # User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
 # (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
@@ -766,6 +778,32 @@ def parse_watchdog_user_plan_pick(value: object) -> tuple[int, str | None] | Non
     if not raw_id.isdigit():
         return None
     return int(raw_id), (name if separator else None)
+
+
+def repointed_watchdog_user_plan_picks(
+    options: Mapping[str, Any], plan_name: str, old_fub_id: int, new_fub_id: int, *, old_id_still_live: bool = False
+) -> list[Any] | None:
+    """The watchdog's user-plan picks with plan_name's pick moved from old_fub_id to new_fub_id.
+
+    For a restore-as-new, which gives a plan a fresh ID: the watched plan stays watched. A bare-ID
+    pick (saved before names were) moves too when old_fub_id is free, as it can only mean this
+    plan; while another plan holds old_fub_id (old_id_still_live) it watches that one and stays.
+    None if no pick matched.
+    """
+    movable_names = (plan_name,) if old_id_still_live else (None, plan_name)
+    raw_picks = options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS)
+    if not isinstance(raw_picks, list):
+        return None
+    moved = False
+    picks: list[Any] = []
+    for value in raw_picks:
+        pick = parse_watchdog_user_plan_pick(value)
+        if pick is not None and pick[0] == old_fub_id and pick[1] in movable_names:
+            value = watchdog_user_plan_pick(new_fub_id, plan_name)
+            moved = True
+        if value not in picks:
+            picks.append(value)
+    return picks if moved else None
 
 
 # Bus-Load-Watchdog: self-healing reaction to a sustained bus-load rise (observed root cause:

@@ -535,19 +535,23 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     async def _async_acquire_sync_lock(self, notify_enabled: bool) -> bool:
         """Take the sync lock for this press; False (lock not held, user told why) when the sync must not run."""
-        # A restore or a plan edit (sort, connect, …) changes function plans the sync writes into as well.
+        # A restore or a plan edit (sort, connect, …) changes function plans the sync writes into as well;
+        # an unloading entry closes the API session under a sync started now (async_wait_before_unload).
         if (
             self.coordinator._sync_lock.locked()
             or self.coordinator._restore_lock.locked()
             or self.coordinator.plan_edits_running
+            or self.coordinator.unloading
         ):
             _LOGGER.warning(
-                "[%s] Sync already in progress or a restore / plan edit running, ignoring request", self.server_id
+                "[%s] Sync already in progress, a restore / plan edit running or the integration unloading, "
+                "ignoring request",
+                self.server_id,
             )
             self._notify_sync_blocked(
                 notify_enabled,
-                "a sync, Web-IO range check, function plan restore or function plan edit is already running. "
-                "Please try again shortly.",
+                "a sync, Web-IO range check, function plan restore or function plan edit is already running, "
+                "or the integration is reloading. Please try again shortly.",
             )
             return False
         await self.coordinator._sync_lock.acquire()

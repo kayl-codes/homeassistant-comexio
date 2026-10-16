@@ -106,6 +106,12 @@
         "ignore": "🔇 Ignorieren (alles behalten)",
         "enable": "🔁 Import wieder einschalten"
       }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Aus dem neuesten Backup wiederherstellen",
+        "unwatch": "🚫 Diesen Plan nicht mehr überwachen"
+      }
     }
   },
   "options": {
@@ -145,8 +151,8 @@
           "function_plan_backup_retention_months": "Ist das neueste Backup eines direkt in Comexio gelöschten Plans älter als diese Frist, fragt eine Reparaturmeldung, ob seine Backups gelöscht oder behalten werden — ohne deine Bestätigung wird nichts gelöscht. Backups eines noch existierenden Plans sind davon nie betroffen. Die Action 'Function Plan Purge Orphaned Backups' löscht alle abgelaufenen auf einmal.",
           "bus_watchdog_enabled": "Bei anhaltendem Anstieg der Busauslastung werden die von HA verwalteten Cluster-Logikpläne automatisch (von hinten nach vorne) neu gestartet, um die Auslastung zu entlasten. Greift nicht destruktiv in die Comexio-Anlage selbst ein.",
           "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust.",
-          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
-          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Absichtlich gestoppte Pläne (Tests) hier nicht auswählen."
+          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Wird ein überwachter eigener Plan in Comexio gelöscht, kommt ebenfalls ein Push, mit den Knöpfen „Wiederherstellen“ (aus seinem neuesten Backup, als neuer Plan) und „Nicht mehr überwachen“. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
+          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Ein gewählter Plan, der in Comexio gelöscht wurde, wird nicht gestartet: Reparaturmeldung und Push bieten an, ihn aus seinem neuesten Backup wiederherzustellen oder ihn nicht mehr zu überwachen. Absichtlich gestoppte Pläne (Tests) hier nicht auswählen."
         }
       }
     },
@@ -382,7 +388,8 @@
           "plan_exists_again": "Diesen Plan gibt es in Comexio wieder, seine Backups sind also nicht mehr verwaist. Es wurde nichts geändert.",
           "already_deleted": "Diese Backups wurden bereits gelöscht. Es wurde nichts geändert.",
           "loaded_in_preview": "Das neueste Backup des Plans wird jetzt in der Plan-Karte angezeigt (Plan → Orphaned plans). Diese Reparatur bleibt offen, bis du die Backups behältst oder löschst.",
-          "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert."
+          "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert.",
+          "backups_busy": "Gerade läuft eine Logikplan-Wiederherstellung, oder die Integration wird neu geladen — dabei werden Backups verschoben und markiert. An den Backups wurde nichts geändert — versuche es erneut, sobald sie abgeschlossen ist."
         }
       }
     },
@@ -437,6 +444,23 @@
           "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
           "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
           "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "Logikplan {plan_name} existiert nicht mehr",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Überwachter Logikplan gelöscht",
+            "description": "Der überwachte Logikplan **{plan_name}** (ID {fub_id}) existiert in Comexio nicht mehr — er wurde gelöscht, zum Beispiel im Comexio Studio.\n\n**Wiederherstellen** baut ihn aus seinem neuesten Backup als neuen Plan wieder auf und startet ihn; er bleibt unter seiner neuen ID überwacht. Ein älteres Backup stellst du über die Plan-Karte wieder her (Plan → Orphaned plans).\n**Nicht mehr überwachen** nimmt ihn aus den überwachten Benutzerplänen."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "plan_not_missing": "Der Plan {plan_name} (ID {fub_id}) fehlt nicht mehr (wiederhergestellt oder nicht mehr überwacht). Es wurde nichts geändert.",
+          "no_backup": "Es gibt kein Backup von {plan_name} (ID {fub_id}), aus dem er wiederhergestellt werden kann. Es wurde nichts geändert — du kannst ihn stattdessen nicht mehr überwachen.",
+          "check_pending": "Die Planliste wurde seit dem Start von Home Assistant noch nicht gelesen, daher ist noch unklar, ob {plan_name} (ID {fub_id}) noch fehlt. Es wurde nichts geändert; bitte gleich erneut versuchen."
         }
       }
     },

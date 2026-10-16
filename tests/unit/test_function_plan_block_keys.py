@@ -583,6 +583,7 @@ def _run_restore(
     live_name: str = "Kitch",
     fetch_error: Exception | None = None,
     page: dict[str, Any] | None = None,
+    vanished_running: bool = False,
     **data: Any,
 ) -> tuple[SimpleNamespace, MagicMock]:
     api = SimpleNamespace(login=AsyncMock(return_value=logged_in), comexio_version="11.0.2")
@@ -608,7 +609,11 @@ def _run_restore(
         patch.object(backup_service, "_restore_plan_as_new", AsyncMock()) as as_new,
         patch.object(backup_service, "_refresh_service_descriptions", AsyncMock()),
     ):
-        coordinator = SimpleNamespace(server_id="iosrv1")
+        coordinator = SimpleNamespace(
+            server_id="iosrv1",
+            vanished_restore_running=lambda *_: vanished_running,
+            note_vanished_plan_back=MagicMock(),
+        )
         asyncio.run(backup_service._run_function_plan_restore(MagicMock(), call, coordinator, api, plan_hash))
     api.restore_as_copy, api.restore_in_place, api.restore_as_new = as_copy, in_place, as_new
     return api, notify
@@ -741,6 +746,25 @@ def test_a_plan_among_others_is_restored_in_place() -> None:
 
     api.restore_in_place.assert_awaited_once()
     api.restore_as_new.assert_not_awaited()
+
+
+def test_a_deleted_plans_restore_leaves_the_plan_back_under_its_id_alone() -> None:
+    """(Sourcery) The plan came back while the watchdog's restore of it ran: no conflict, so it was overwritten."""
+    page = {"FubModules": {}, "Fubs": {"42": {"Id": 42, "Name": "Kitch"}}}
+
+    api, notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, page=page, vanished_running=True)
+
+    assert _restores_run(api) == 0
+    assert "is back in Comexio" in notify.call_args.args[1]
+
+
+def test_a_deleted_plans_restore_still_rebuilds_it_while_it_is_gone() -> None:
+    api, _notify = _run_restore(
+        {"plan_name": "Kitch"}, logged_in=True, page={"FubModules": {}, "Fubs": {}}, vanished_running=True
+    )
+
+    api.restore_as_new.assert_awaited_once()
+    api.restore_in_place.assert_not_awaited()
 
 
 @pytest.mark.parametrize(("page", "fetch_error", "hint"), UNREAD_PLAN_LISTS)

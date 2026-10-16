@@ -67,7 +67,7 @@ from .const import (
 )
 from .function_plan_backup import is_orphaned_identity
 from .orphaned_backups import ISSUE_ORPHANED_PLAN_BACKUPS, repair_placeholders
-from .plan_watchdog import ISSUE_FUNCTION_PLAN_STOPPED
+from .plan_watchdog import ISSUE_FUNCTION_PLAN_STOPPED, ISSUE_FUNCTION_PLAN_VANISHED, vanished_plan_restorable
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +78,8 @@ ACTION_KNX_TRIG = "trig"
 ACTION_KEEP = "keep"
 ACTION_DELETE = "delete"
 ACTION_PREVIEW = "preview"
+ACTION_RESTORE = "restore"
+ACTION_UNWATCH = "unwatch"
 ACTION_CLEANUP = "cleanup"
 ACTION_ENABLE = "enable"
 
@@ -358,6 +360,8 @@ class ComexioRepairFlow(RepairsFlow):
             return await self.async_step_orphaned_backups()
         if self.issue_id.startswith(f"{ISSUE_FUNCTION_PLAN_STOPPED}_"):
             return await self.async_step_function_plan_stopped()
+        if self.issue_id.startswith(f"{ISSUE_FUNCTION_PLAN_VANISHED}_"):
+            return await self.async_step_function_plan_vanished()
         if self.issue_id.startswith(f"{ISSUE_IMPORT_DISABLED}_"):
             return await self.async_step_import_disabled()
 
@@ -1368,7 +1372,12 @@ class ComexioRepairFlow(RepairsFlow):
             # would delete it).
             loaded = await coordinator.async_load_orphaned_plan_into_preview(fub_id, plan_name)
             return self.async_abort(reason="loaded_in_preview" if loaded else "preview_failed")
-        title = await self._async_apply_orphaned_backups_action(manager, user_input["action"], fub_id, plan_name)
+        if coordinator.unloading or coordinator._restore_lock.locked():
+            # A restore moves and marks backups; after the unload's wait a write would hit a torn-down entry.
+            return self.async_abort(reason="backups_busy")
+        # No await since the check: a restore starting from here on refuses until the change ends.
+        with coordinator.plan_edit():
+            title = await self._async_apply_orphaned_backups_action(manager, user_input["action"], fub_id, plan_name)
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
         if title is None:
             return self.async_abort(reason="already_deleted")
@@ -1411,6 +1420,60 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_abort(reason="start_failed", description_placeholders=placeholders)
         title = "Plan gestartet" if self.hass.config.language == "de" else "Plan started"
         return self.async_create_entry(title=title, data={})
+
+    async def async_step_function_plan_vanished(self, user_input=None):
+        """Restore a deleted watched user plan from its newest backup, or stop watching it."""
+        placeholders = {key: str(self.issue_data.get(key, "?")) for key in ("plan_name", "fub_id")}
+        fub_id = int(self.issue_data["fub_id"])
+        name = str(self.issue_data.get("plan_name", ""))
+        # A bare-ID pick its backups name ambiguously has no backup identity to restore by.
+        actions = [ACTION_RESTORE, ACTION_UNWATCH] if vanished_plan_restorable(fub_id, name) else [ACTION_UNWATCH]
+        if user_input is None:
+            return self.async_show_form(
+                step_id="function_plan_vanished",
+                description_placeholders=placeholders,
+                data_schema=vol.Schema(
+                    {
+                        vol.Required("action", default=actions[0]): SelectSelector(
+                            SelectSelectorConfig(
+                                options=actions,
+                                mode=SelectSelectorMode.LIST,
+                                translation_key="function_plan_vanished_action",
+                            )
+                        )
+                    }
+                ),
+            )
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
+        if coordinator is None:
+            return self.async_abort(reason="entry_not_found")
+        if coordinator.plan_watchdog.vanished is None:
+            # Not checked since setup (no plan list read yet): unknown, so the repair stays.
+            return self.async_abort(reason="check_pending", description_placeholders=placeholders)
+        if (fub_id, name) not in coordinator.plan_watchdog.vanished:
+            # Restored, unpicked or back meanwhile.
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason="plan_not_missing", description_placeholders=placeholders)
+        is_de = self.hass.config.language == "de"
+        if user_input["action"] == ACTION_UNWATCH:
+            await coordinator.async_unwatch_user_plan(fub_id, name)
+            return self.async_create_entry(title="Nicht mehr überwacht" if is_de else "No longer watched", data={})
+        try:
+            has_backup = await coordinator.async_newest_backup_field(fub_id, name) is not None
+        except Exception:
+            # The backups failed to load: the restore below reads them again and reports a failure itself.
+            _LOGGER.warning(
+                "Function plan '%s' (ID %s): backups not readable for the repair", name, fub_id, exc_info=True
+            )
+            has_backup = True
+        if not has_backup:
+            return self.async_abort(reason="no_backup", description_placeholders=placeholders)
+        # A background task: a restore can outlast the repair dialog; it reports through its notifications.
+        self.hass.async_create_background_task(
+            coordinator.async_restore_vanished_plan(fub_id, name),
+            name=f"{DOMAIN}_{coordinator.server_id}_restore_plan_{fub_id}",
+        )
+        return self.async_create_entry(title="Wiederherstellung gestartet" if is_de else "Restore started", data={})
 
     async def _async_apply_orphaned_backups_action(
         self, manager, action: str, fub_id: int, plan_name: str

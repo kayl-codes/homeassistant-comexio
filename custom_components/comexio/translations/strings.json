@@ -106,6 +106,12 @@
         "ignore": "🔇 Ignore (keep everything)",
         "enable": "🔁 Switch the import on again"
       }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Restore from the newest backup",
+        "unwatch": "🚫 Stop watching this plan"
+      }
     }
   },
   "options": {
@@ -145,8 +151,8 @@
           "function_plan_backup_retention_months": "Once the newest backup of a plan that was deleted directly in Comexio is older than this, a repair asks whether to delete or keep that plan's backups — nothing is deleted without your confirmation. A live plan's backups are never affected. The 'Function Plan Purge Orphaned Backups' action deletes all expired ones at once.",
           "bus_watchdog_enabled": "On a sustained bus-load rise, automatically restart the HA-managed cluster function plans (back to front) to try to relieve it. Non-destructive to the Comexio system itself.",
           "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog.",
-          "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when a watched function plan stops (HA-managed, or a user plan picked below). The push has a 'Start plan' button, and is removed again once the plan runs. Leave empty for no push; the repair is raised either way.",
-          "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. Leave plans you stop on purpose (tests) out."
+          "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when a watched function plan stops (HA-managed, or a user plan picked below). The push has a 'Start plan' button, and is removed again once the plan runs. A watched user plan deleted in Comexio gets a push too, with 'Restore' (its newest backup, as a new plan) and 'Stop watching' buttons. Leave empty for no push; the repair is raised either way.",
+          "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. A picked plan deleted in Comexio is not started: its repair and push offer to restore it from its newest backup or to stop watching it. Leave plans you stop on purpose (tests) out."
         }
       }
     },
@@ -382,7 +388,8 @@
           "plan_exists_again": "This plan exists in Comexio again, so its backups are no longer orphaned. Nothing was changed.",
           "already_deleted": "These backups were already deleted. Nothing was changed.",
           "loaded_in_preview": "The plan's newest backup is now shown in the plan card (Plan → Orphaned plans). This repair stays open until you keep or delete the backups.",
-          "preview_failed": "The backups could not be loaded into the plan preview — they may have been deleted meanwhile, or the plan selectors are disabled. The backups were not changed."
+          "preview_failed": "The backups could not be loaded into the plan preview — they may have been deleted meanwhile, or the plan selectors are disabled. The backups were not changed.",
+          "backups_busy": "A function plan restore is running, or the integration is reloading — it moves and marks backups. The backups were not changed — try again once it has finished."
         }
       }
     },
@@ -437,6 +444,23 @@
           "plan_not_watched": "The plan {plan_name} (ID {fub_id}) is no longer watched (unselected, deleted or its ID reused). Nothing was started.",
           "busy": "A sync, restore, poll, function plan edit or bus-load watchdog run is in progress right now. Nothing was changed — try again in a moment.",
           "start_failed": "Comexio did not confirm the start of {plan_name} (ID {fub_id}). Check the plan in Comexio Studio; this repair stays open."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "Function plan {plan_name} no longer exists",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Watched function plan deleted",
+            "description": "The watched function plan **{plan_name}** (ID {fub_id}) no longer exists in Comexio — it was deleted, for example in Comexio Studio.\n\n**Restore** rebuilds it from its newest backup as a new plan and starts it; it stays watched under its new ID. To restore an older backup instead, use the plan card (Plan → Orphaned plans).\n**Stop watching** removes it from the watched user plans."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "plan_not_missing": "The plan {plan_name} (ID {fub_id}) is no longer missing (restored or no longer watched). Nothing was changed.",
+          "no_backup": "There is no backup of {plan_name} (ID {fub_id}) to restore it from. Nothing was changed — you can stop watching it instead.",
+          "check_pending": "The plan list was not read since Home Assistant started, so it is not known yet whether {plan_name} (ID {fub_id}) is still missing. Nothing was changed; please try again shortly."
         }
       }
     },

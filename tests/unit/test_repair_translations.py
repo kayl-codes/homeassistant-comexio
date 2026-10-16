@@ -31,6 +31,7 @@ ENTRY_STEP_BY_ISSUE = {
     "function_plan_stopped": "async_step_function_plan_stopped",
     "function_plan_stopped_user": "async_step_function_plan_stopped",
     "function_plan_auto_start_suspended": "async_step_function_plan_stopped",
+    "function_plan_vanished": "async_step_function_plan_vanished",
     "import_disabled": "async_step_import_disabled",
 }
 

@@ -1,25 +1,33 @@
 """Watchdog of the HA-managed function plans (plan_watchdog.py)."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 
 from custom_components.comexio import api as api_module, plan_watchdog
 from custom_components.comexio.const import (
     DOMAIN,
+    FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC,
     FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
 )
 from custom_components.comexio.plan_watchdog import (
+    ACTION_RESTORE,
+    ACTION_START,
+    ACTION_UNWATCH,
     ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED,
     ISSUE_FUNCTION_PLAN_STOPPED,
     ISSUE_FUNCTION_PLAN_STOPPED_USER,
+    ISSUE_FUNCTION_PLAN_VANISHED,
     ManagedPlanWatchdog,
     next_stopped_plans,
     parse_start_action,
+    plan_action_id,
     start_action_id,
     stopped_plan_issue_id,
 )
@@ -64,7 +72,7 @@ def ir(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 def _watchdog(
-    start_results: list[bool | None] | None = None, targets: list[str] | None = None
+    start_results: list[bool | None] | None = None, targets: list[str] | None = None, server_id: str = SERVER_ID
 ) -> tuple[ManagedPlanWatchdog, list[int]]:
     started: list[int] = []
     results = iter(start_results or [])
@@ -77,7 +85,7 @@ def _watchdog(
     hass.config.language = "de"
     hass.services.async_call = AsyncMock()
     watchdog = ManagedPlanWatchdog(
-        hass, entry_id="e1", server_id=SERVER_ID, start_plan=start, notify_targets=lambda: list(targets or [])
+        hass, entry_id="e1", server_id=server_id, start_plan=start, notify_targets=lambda: list(targets or [])
     )
     # The alarm/repair tests run with Plan Auto-Start off; the auto-start tests switch it on themselves.
     watchdog.auto_restart = False
@@ -259,15 +267,56 @@ def test_last_check_is_kept_for_the_repair_dialog(ir: MagicMock, monkeypatch: py
     assert watchdog.last_check_text() == "03.10.2026 08:14:34"  # HA language "de"
 
 
-def test_blocked_or_unanswered_start_is_not_a_failed_attempt(ir: MagicMock) -> None:
-    """None (sync/restore running, connection lost) says nothing about the plan: retried, never counted."""
+def test_blocked_or_unanswered_start_is_not_a_failed_attempt(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """None (sync/restore running, no answer) says nothing about the plan: never counted, but retried only
+    after the retry gap — an unanswered start must not be sent again with every check (#181)."""
     watchdog, started = _watchdog([None, None, None])
     watchdog.auto_restart = True
-    for _ in range(3):
+    caplog.set_level(logging.DEBUG, logger=plan_watchdog.__name__)
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC - 1
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34]  # inside the gap: not sent again
+    for _ in range(2):
+        clock[0] += FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC
         asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
     assert started == [34, 34, 34]
     assert watchdog.suspended == set()
+    assert watchdog._failed_starts == {}
     assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_STOPPED
+    deferred = [r.levelno for r in caplog.records if "not sent or not answered" in r.getMessage()]
+    assert deferred == [logging.INFO, logging.DEBUG, logging.DEBUG]  # info once per series
+
+
+def test_an_answered_start_ends_the_deferral_series(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refusal between two unanswered starts ends the series: the next deferral is logged at info again."""
+    watchdog, started = _watchdog([None, False, None])
+    watchdog.auto_restart = True
+    caplog.set_level(logging.DEBUG, logger=plan_watchdog.__name__)
+    deferral_after: list[dict[int, float]] = []
+    for _ in range(3):
+        asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+        deferral_after.append(dict(watchdog._deferred_at))
+        clock[0] += FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC
+    assert started == [34, 34, 34]
+    assert deferral_after[1] == {}  # the refused (answered) start cleared the deferral
+    deferred = [r.levelno for r in caplog.records if "not sent or not answered" in r.getMessage()]
+    assert deferred == [logging.INFO, logging.INFO]
+
+
+def test_a_deferred_start_of_a_plan_seen_running_is_forgotten(ir: MagicMock, clock: list[float]) -> None:
+    """A plan running again starts its next stop with a fresh attempt, not inside an old retry gap."""
+    watchdog, started = _watchdog([None, True])
+    watchdog.auto_restart = True
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert watchdog._deferred_at == {}
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert started == [34, 34]
 
 
 def test_plan_started_by_the_repair_clears_it_at_once(ir: MagicMock) -> None:
@@ -318,8 +367,6 @@ def test_stop_pushes_an_alarm_with_a_start_action_and_recovery_clears_it(ir: Mag
 
 
 def test_failing_notify_service_does_not_stop_the_watchdog(ir: MagicMock) -> None:
-    from homeassistant.exceptions import HomeAssistantError
-
     watchdog, _ = _watchdog(targets=["mobile_app_gone", "mobile_app_phone"])
     watchdog._hass.services.async_call.side_effect = [HomeAssistantError("service not found"), None]
     assert asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True))) is True
@@ -419,3 +466,291 @@ def test_without_auto_start_a_stopped_plan_only_keeps_its_repair(ir: MagicMock) 
     assert started == []
     assert watchdog.stopped == {34: "HA - Marker 1"}  # unknown keeps the verdict, no new one for 42
     assert set(ir.async_get.return_value.issues) == {(DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))}
+
+
+# (cl) A watched user plan deleted in Comexio: "no longer exists" with Restore / Stop watching.
+
+TEST4 = {(47, "Test4")}
+TOKEN = plan_watchdog.vanished_plan_token(47, "Test4")
+
+
+def test_a_vanished_plan_gets_its_repair_and_one_alarm_push(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(set()))  # first check after setup
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    issue_id = plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47, "Test4")
+    assert (DOMAIN, issue_id) in ir.async_get.return_value.issues
+    assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_VANISHED
+    ((_domain, service, data),) = _pushes(watchdog)
+    assert service == "mobile_app_phone"
+    assert data["message"] == "Der überwachte Logikplan Test4 (ID 47) existiert in Comexio nicht mehr."
+    assert [action["action"] for action in data["data"]["actions"]] == [
+        plan_action_id(ACTION_RESTORE, SERVER_ID, 47, TOKEN),
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, TOKEN),
+    ]
+    assert data["data"]["priority"] == "high"  # an alarm
+
+    asyncio.run(watchdog.async_sync_vanished(TEST4))  # still missing: no second push
+    assert len(_pushes(watchdog)) == 1
+    asyncio.run(watchdog.async_sync_vanished(set()))  # restored under a new ID, or unpicked
+    assert (DOMAIN, issue_id) not in ir.async_get.return_value.issues
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_a_vanished_alarm_no_service_delivered_is_sent_again(
+    ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery) The plan counted as reported although the push failed: the phone never heard of it.
+
+    (local review) Not with every check (every few seconds with a plan card open), and only the
+    first failure warns: a removed phone must not flood the log.
+    """
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "notify.mobile_app_tablet"])
+    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("down"), TimeoutError("down")]
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert caplog.text.count("Function plan watchdog push to notify") == 2
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("still down")
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC - 1
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert len(_pushes(watchdog)) == 2  # too soon: no retry
+    clock[0] += 1
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert len(_pushes(watchdog)) == 4  # retried, failed again ...
+    assert caplog.text.count("Function plan watchdog push to notify") == 2  # ... quietly
+    watchdog._hass.services.async_call.side_effect = None
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert [data["message"] for *_, data in _pushes(watchdog)][-2:] == [
+        "Der überwachte Logikplan Test4 (ID 47) existiert in Comexio nicht mehr."
+    ] * 2
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished(TEST4))  # delivered now: no further push
+    assert len(_pushes(watchdog)) == 6
+
+
+def test_a_vanished_alarm_one_service_delivered_is_not_sent_again(ir: MagicMock, clock: list[float]) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "notify.mobile_app_tablet"])
+    watchdog._hass.services.async_call.side_effect = [HomeAssistantError("down"), None]
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert len(_pushes(watchdog)) == 2  # one push to each service, no retry
+
+
+def test_a_later_push_delivered_for_the_plan_replaces_its_undelivered_alarm(ir: MagicMock, clock: list[float]) -> None:
+    """(local review) The retry would overwrite (same tag) e.g. the "restore failed" push the phone shows now."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_push_restore_failed(47, "Test4"))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert _pushes(watchdog)[-1][2]["title"] == watchdog._texts()["restore_failed_title"]
+
+
+def test_an_undelivered_alarm_of_a_plan_back_again_is_not_sent(ir: MagicMock, clock: list[float]) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    watchdog._hass.services.async_call.side_effect = None
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+    assert watchdog._vanished_push_unsent == {}
+
+
+def test_a_vanished_alarm_without_notify_service_is_not_retried(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog()
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert watchdog._vanished_push_unsent == {}
+
+
+def test_a_plan_vanished_before_setup_gets_its_repair_and_push(ir: MagicMock) -> None:
+    """(Sourcery) Deleted while HA was down: reported and pushed (Restore / Stop watching)."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47, "Test4")) in ir.async_get.return_value.issues
+    ((_domain, _service, data),) = _pushes(watchdog)
+    assert data["data"]["tag"] == watchdog._push_tag(47, TOKEN)
+    assert [action["action"] for action in data["data"]["actions"]] == [
+        plan_action_id(ACTION_RESTORE, SERVER_ID, 47, TOKEN),
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, TOKEN),
+    ]
+
+
+def test_the_restored_confirmation_stays_once_the_plan_is_back(ir: MagicMock) -> None:
+    """(Sourcery) The plan dropping out of vanished must not clear the "restored" push (same tag)."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    messages = [data["message"] for *_, data in _pushes(watchdog)]
+    assert "clear_notification" not in messages
+    assert len(messages) == 2
+    # Vanished again later: a new alarm, and leaving vanished then clears it as usual.
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_a_partial_restore_says_so_on_the_phone(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_push_restored(47, "Test4", complete=False))
+    assert "nicht vollständig" in _pushes(watchdog)[-1][2]["message"]
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    assert "bleibt überwacht" in _pushes(watchdog)[-1][2]["message"]
+
+
+def test_a_restored_push_after_the_check_cleared_the_plan_leaves_no_stale_entry(ir: MagicMock) -> None:
+    """(Review) A check clearing the plan before the "restored" push: a later loss still clears as usual."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_vanished_and_stopped_repairs_do_not_clean_up_each_other(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog()
+    asyncio.run(watchdog.async_check({34: "HA - Marker 1"}, _states(p34=False)))
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    asyncio.run(watchdog.async_check({34: "HA - Marker 1"}, _states(p34=False)))
+    issues = ir.async_get.return_value.issues
+    assert (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34)) in issues
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47, "Test4")) in issues
+
+
+@pytest.mark.parametrize(
+    ("action", "parsed"),
+    [
+        ("COMEXIO_START_PLAN_cx1_47", (ACTION_START, 47, None)),
+        ("COMEXIO_RESTORE_PLAN_cx1_47_0123456789abcdef", (ACTION_RESTORE, 47, "47_0123456789abcdef")),
+        ("COMEXIO_UNWATCH_PLAN_cx1_47_0123456789abcdef", (ACTION_UNWATCH, 47, "47_0123456789abcdef")),
+        ("COMEXIO_RESTORE_PLAN_cx1_47", None),  # a deleted plan's action carries its name digest
+        ("COMEXIO_START_PLAN_cx1_47_0123456789abcdef", None),
+        ("COMEXIO_RESTORE_PLAN_cx1_2_47_0123456789abcdef", None),  # another server's ("cx1_2")
+        ("COMEXIO_RESTORE_PLAN_cx1_x", None),
+        (None, None),
+    ],
+)
+def test_parse_plan_action(action: object, parsed: tuple[str, int, str | None] | None) -> None:
+    assert plan_watchdog.parse_plan_action(SERVER_ID, action) == parsed
+    assert parse_start_action(SERVER_ID, action) == (parsed[1] if parsed and parsed[0] == ACTION_START else None)
+
+
+def test_a_stopped_plan_that_vanishes_swaps_its_push_for_the_alarm(ir: MagicMock) -> None:
+    """Its "stopped" push (Start action) is cleared; the alarm has its own tag, so the clear cannot overtake it."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False), [47]))
+    asyncio.run(watchdog.async_check({}, _states()))
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    (*_, (_d1, _s1, cleared), (_d2, _s2, alarm)) = _pushes(watchdog)
+    assert cleared["message"] == "clear_notification"
+    assert cleared["data"]["tag"] == watchdog._push_tag(47)
+    assert alarm["data"]["tag"] == watchdog._push_tag(47, TOKEN) != watchdog._push_tag(47)
+
+
+def test_two_deleted_plans_on_one_id_get_a_repair_and_push_each(ir: MagicMock) -> None:
+    """(Sourcery) An ID can be reused: picks "47:Test4" and "47:Other" are two deleted plans, not one."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished({(47, "Test4"), (47, "Other")}))
+    issues = ir.async_get.return_value.issues
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47, "Test4")) in issues
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47, "Other")) in issues
+    other = plan_watchdog.vanished_plan_token(47, "Other")
+    assert {data["data"]["tag"] for *_, data in _pushes(watchdog)} == {
+        watchdog._push_tag(47, TOKEN),
+        watchdog._push_tag(47, other),
+    }
+    assert watchdog.vanished_name(other) == "Other"
+    # One restored: only its repair goes, and its push is cleared, not the other's.
+    asyncio.run(watchdog.async_sync_vanished({(47, "Other")}))
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47, "Test4")) not in issues
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47, "Other")) in issues
+    assert _pushes(watchdog)[-1][2]["data"]["tag"] == watchdog._push_tag(47, TOKEN)
+    assert watchdog.vanished_name(TOKEN) is None
+
+
+def test_a_server_does_not_clean_up_the_deleted_plan_repairs_of_another(ir: MagicMock) -> None:
+    """Server "cx1" must not take "cx1_2"'s repairs ("..._cx1_2_47_<digest>") for its own."""
+    other, _ = _watchdog(server_id="cx1_2")
+    asyncio.run(other.async_sync_vanished(TEST4))
+    watchdog, _ = _watchdog()
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    issues = ir.async_get.return_value.issues
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id("cx1_2", 47, "Test4")) in issues
+    assert (DOMAIN, plan_watchdog.vanished_plan_issue_id(SERVER_ID, 47, "Test4")) not in issues
+
+
+def test_dismissing_a_push_clears_the_tag_it_was_sent_with() -> None:
+    """A deleted plan's push carries its own tag: clearing the plan's "stopped" tag would leave the alarm."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_dismiss_vanished_push(47, TOKEN))
+    asyncio.run(watchdog.async_dismiss_push(47, "Test4"))
+    asyncio.run(watchdog.async_dismiss_push(47))
+    assert [(data["message"], data["data"]["tag"]) for *_, data in _pushes(watchdog)] == [
+        ("clear_notification", watchdog._push_tag(47, TOKEN)),
+        ("clear_notification", watchdog._push_tag(47, TOKEN)),
+        ("clear_notification", watchdog._push_tag(47)),
+    ]
+
+
+def test_the_push_state_of_two_deleted_plans_on_one_id_stays_apart(ir: MagicMock, clock: list[float]) -> None:
+    """The "restored" confirmation and the unsent alarm are kept per deleted plan, not per ID."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    other = plan_watchdog.vanished_plan_token(47, "Other")
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_sync_vanished({(47, "Test4"), (47, "Other")}))
+    assert set(watchdog._vanished_push_unsent) == {TOKEN, other}
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    assert set(watchdog._vanished_push_unsent) == {other}  # the confirmation replaced Test4's alarm only
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished({(47, "Other")}))
+    tags = [(data["message"], data["data"]["tag"]) for *_, data in _pushes(watchdog)]
+    assert ("clear_notification", watchdog._push_tag(47, TOKEN)) not in tags  # its confirmation stays
+    assert tags[-1][1] == watchdog._push_tag(47, other)  # the other's alarm is sent again
+    assert watchdog._vanished_push_unsent == {}
+    assert watchdog._restored_pushes == set()
+
+
+def test_a_deleted_plan_without_a_backup_identity_is_not_offered_restore(ir: MagicMock) -> None:
+    """(Sourcery) A bare-ID pick whose backups name several plans: Restore could not pick one."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    unnamed = plan_watchdog.unnamed_plan_label(47)
+    asyncio.run(watchdog.async_sync_vanished({(47, unnamed)}))
+    ((_domain, _service, data),) = _pushes(watchdog)
+    token = plan_watchdog.vanished_plan_token(47, unnamed)
+    assert [action["action"] for action in data["data"]["actions"]] == [
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, 47, token)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "actions"),
+    [
+        ("async_push_restored", (47, "Test4"), []),
+        ("async_push_restore_failed", (47, "Test4"), [ACTION_RESTORE, ACTION_UNWATCH]),
+        ("async_push_check_pending", (47, TOKEN), [ACTION_RESTORE, ACTION_UNWATCH]),
+        ("async_push_no_backup", (47, "Test4"), [ACTION_UNWATCH]),
+    ],
+)
+def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[str]) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(getattr(watchdog, method)(*args))
+    ((_domain, _service, data),) = _pushes(watchdog)
+    assert [action["action"] for action in data["data"].get("actions", [])] == [
+        plan_action_id(kind, SERVER_ID, 47, TOKEN) for kind in actions
+    ]
+    assert "{" not in data["message"]
+    assert "{" not in data["title"]
+    assert data["data"]["tag"] == watchdog._push_tag(47, TOKEN)  # replaces the plan's alarm push
+
+
+def test_push_texts_have_the_same_keys_in_every_language() -> None:
+    keys = {lang: set(texts) for lang, texts in plan_watchdog.PUSH_TEXTS.items()}
+    assert all(lang_keys == keys["en"] for lang_keys in keys.values())

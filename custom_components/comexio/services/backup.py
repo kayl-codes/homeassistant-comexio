@@ -57,6 +57,7 @@ from ._context import (
     _parse_snapshot_field,
     _resolve_backup_identity,
     _resolve_fub_id,
+    service_flag,
 )
 from ._yaml_sync import _refresh_service_descriptions
 
@@ -951,10 +952,36 @@ def _new_plan_status(
     return "OK" if structurally_complete and not warnings and _block_settings_ok(block_settings) else "PARTIAL"
 
 
-def _new_plan_activation_line(run_ok: bool | None, auto_start: bool) -> str:
+async def _start_new_plan(api, new_fub_id: int, plan_name: str, auto_start: bool) -> tuple[bool | None, str | None]:
+    """run_fup of a plan a restore built: (run_ok, start error label).
+
+    run_ok is None with auto_start off (create_fup leaves it inactive). A start that raises —
+    whatever the error — does not undo the build: the plan stays restored, only not started — not
+    reported as a failed restore, whose retry would build it a second time. Its error label names
+    it in the result; an unexpected error is logged with its traceback.
+    """
+    if not auto_start:
+        return None, None
+    try:
+        return await api.function_plan_run_fup(new_fub_id), None
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        _LOGGER.warning(
+            "Restored function plan '%s' (ID %s) was built, but starting it failed: %r", plan_name, new_fub_id, exc
+        )
+        return False, _error_label(exc)
+    except Exception as exc:  # the plan exists: any start error must leave it restored
+        _LOGGER.exception(
+            "Restored function plan '%s' (ID %s) was built, but starting it failed", plan_name, new_fub_id
+        )
+        return False, _error_label(exc)
+
+
+def _new_plan_activation_line(run_ok: bool | None, auto_start: bool, start_error: str | None = None) -> str:
     """Activation line of a restore that built a new plan (as new ID or as copy)."""
     if not auto_start:
         return f"Activation: {ICON_INACTIVE} not started (auto-start disabled for this restore)"
+    if start_error is not None:
+        return f"Activation: {ICON_WARNING} starting it failed ({start_error}) — start it in Comexio Studio"
     if run_ok:
         return f"Activation: {ICON_SUCCESS} active"
     return (
@@ -1027,20 +1054,33 @@ async def _move_restored_plan_lineage(
     updated: list[str] = []
     refs_error = None
     try:
-        updated = await coordinator.async_repoint_function_plan_fub_id(plan_name, old_fub_id, new_fub_id)
+        updated = await coordinator.async_repoint_function_plan_fub_id(
+            plan_name, old_fub_id, new_fub_id, old_id_still_live=old_id_still_live
+        )
     except Exception as exc:
         _LOGGER.exception("Function Plan restore as new plan: references to '%s' not updated", plan_name)
         refs_error = type(exc).__name__
     return purged, updated, backups_error, refs_error
 
 
-def _restored_references_line(old_fub_id: int, updated_consumers: list[str], refs_error: str | None) -> str:
+def _restored_references_line(
+    old_fub_id: int, updated_consumers: list[str], refs_error: str | None, old_id_still_live: bool
+) -> str:
     """Result line of a restore as new plan: what happened to the references to the old ID."""
     if refs_error:
         return (
             f"References: {ICON_WARNING} not updated — they still point at old ID {old_fub_id} "
             f"({refs_error} — see log)."
         )
+    if old_id_still_live:
+        # A selection by the ID alone (plan selector, unnamed watchdog pick) means the plan holding it now.
+        kept = (
+            f"another plan holds old ID {old_fub_id} now, so a selection by that ID alone "
+            "(plan selector, unnamed watchdog pick) stays with that plan."
+        )
+        if updated_consumers:
+            return f"Updated references: {', '.join(updated_consumers)}; {kept}"
+        return f"References: none moved — {kept}"
     if updated_consumers:
         return f"Updated references: {', '.join(updated_consumers)}"
     return "References: nothing pointed at the old ID (cluster plan map / plan selector) — nothing to update."
@@ -1111,12 +1151,6 @@ async def _restore_plan_as_new(
         elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
             api, new_fub_id, snapshot
         )
-        # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
-        # therefore routinely reports result=False even though the data payload IS applied — the
-        # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
-        # criterion here; the recreated/expected element+connection counts are. The structure is
-        # already built by the calls above, so auto_start=False can skip run_fup altogether.
-        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
     except (aiohttp.ClientError, TimeoutError) as exc:
         # Same gap as the copy-restore path closes: without this the "in progress" notification
         # above would stay forever. The backup lineage stays at the old ID — nothing was rekeyed.
@@ -1130,6 +1164,11 @@ async def _restore_plan_as_new(
             notification_id=notif_id,
         )
         return
+    # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
+    # therefore routinely reports result=False even though the data payload IS applied — the
+    # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
+    # criterion here; the recreated/expected element+connection counts are.
+    run_ok, start_error = await _start_new_plan(api, new_fub_id, plan_name, auto_start)
     duration = time.monotonic() - t_start
 
     purged, updated_consumers, lineage_error, refs_error = await _move_restored_plan_lineage(
@@ -1145,13 +1184,15 @@ async def _restore_plan_as_new(
     status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
     if (lineage_error or refs_error) and status == "OK":
         status = "PARTIAL"
+    # Built: a Restore from a watchdog push judges its outcome by this, not by the plan's name.
+    coordinator.note_plan_restored_as_new(old_fub_id, plan_name, new_fub_id, complete=status == "OK")
 
     captured_raw = snapshot.get("captured_at")
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    activation_line = _new_plan_activation_line(run_ok, auto_start)
-    consumer_line = _restored_references_line(old_fub_id, updated_consumers, refs_error)
+    activation_line = _new_plan_activation_line(run_ok, auto_start, start_error)
+    consumer_line = _restored_references_line(old_fub_id, updated_consumers, refs_error, old_id_still_live)
     lineage_line = _restored_lineage_line(plan_name, old_fub_id, new_fub_id, old_id_still_live, purged, lineage_error)
 
     msg = (
@@ -1236,10 +1277,6 @@ async def _restore_plan_as_copy(
         elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
             api, new_fub_id, snapshot
         )
-        # create_fup always creates plans inactive — auto_start=False just leaves that default
-        # alone instead of calling run_fup at all (no plan_data payload here: the structure was
-        # already built above via individual element/connection calls, not via run_fup).
-        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
     except (aiohttp.ClientError, TimeoutError) as exc:
         # Without this, a connection drop mid-restore leaves the "in progress" notification
         # above stuck forever — the exception propagates past the persistent_notification calls
@@ -1254,6 +1291,9 @@ async def _restore_plan_as_copy(
             notification_id=notif_id,
         )
         return
+    # No plan_data payload here: the structure was already built above via individual
+    # element/connection calls, not via run_fup.
+    run_ok, start_error = await _start_new_plan(api, new_fub_id, new_plan_name, auto_start)
     duration = time.monotonic() - t_start
 
     elem_count = len(snapshot.get("elements", {}))
@@ -1264,7 +1304,7 @@ async def _restore_plan_as_copy(
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    activation_line = _new_plan_activation_line(run_ok, auto_start)
+    activation_line = _new_plan_activation_line(run_ok, auto_start, start_error)
 
     msg = (
         f"Plan '{new_plan_name}' created as a COPY of '{source_name}' "
@@ -1521,6 +1561,30 @@ async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, A
     return None, error
 
 
+def _refuse_restore_over_returned_plan(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int, plan_name: str
+) -> bool:
+    """True (user told) when a deleted plan's Restore finds a plan of its name back under its ID.
+
+    That Restore (watchdog push or repair) builds a new plan; it never overwrites the plan back there.
+    """
+    if not coordinator.vanished_restore_running(fub_id, plan_name):
+        return False
+    # The Restore that runs this judges its outcome by it: the plan is back, not "restore failed".
+    coordinator.note_vanished_plan_back(fub_id, plan_name)
+    _LOGGER.warning(
+        "Function Plan Restore of deleted plan '%s' (fub=%s) not run: a plan of that name is back under its ID",
+        plan_name,
+        fub_id,
+    )
+    persistent_notification.async_create(
+        hass,
+        f"'{plan_name}' (ID {fub_id}) is back in Comexio, so it was not restored over it. Nothing was changed.",
+        title=_TITLE_RESTORE_ERR,
+    )
+    return True
+
+
 async def _resolve_restore_conflict(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -1587,6 +1651,7 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         or coordinator._sync_lock.locked()
         or coordinator.in_sync
         or coordinator.plan_edits_running
+        or coordinator.unloading
     ):
         _LOGGER.warning("Function Plan Restore not started — a restore, sync, cleanup, reload or plan edit is running")
         persistent_notification.async_create(
@@ -1636,6 +1701,15 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
     await _refresh_service_descriptions(hass)
 
 
+def _restore_identity_conflict(
+    snapshot: dict[str, Any], fub_id: int, live_fub: dict[str, Any] | None
+) -> tuple[bool, str, str | None]:
+    """Whether the plan at fub_id is gone or carries another name than the snapshot's, plus both names."""
+    snapshot_name = snapshot.get("plan_name", str(fub_id))
+    live_name = live_fub.get("Name") if live_fub else None
+    return live_fub is None or live_name != snapshot_name, snapshot_name, live_name
+
+
 async def _run_function_plan_restore(
     hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator, api, plan_hash
 ) -> None:
@@ -1651,11 +1725,11 @@ async def _run_function_plan_restore(
         return
 
     on_conflict = str(call.data.get("on_conflict", "new_id")).strip().lower()
-    confirm = bool(call.data.get("confirm", False))
-    as_copy = bool(call.data.get("as_copy", False))
+    confirm = service_flag(call, "confirm", False)
+    as_copy = service_flag(call, "as_copy", False)
     new_plan_name = str(call.data.get("new_plan_name", "")).strip()
-    auto_start = bool(call.data.get("auto_start", True))
-    accept_unverified = bool(call.data.get("accept_unverified_blocks", False))
+    auto_start = service_flag(call, "auto_start", True)
+    accept_unverified = service_flag(call, "accept_unverified_blocks", False)
     _LOGGER.info(
         "Function Plan Restore: fub_id=%s plan_name=%s kind=%s slot=%s on_conflict=%s confirm=%s "
         "as_copy=%s new_plan_name=%s auto_start=%s accept_unverified_blocks=%s",
@@ -1705,9 +1779,9 @@ async def _run_function_plan_restore(
 
     if live_fub is not None:
         api.update_fub_cache_entry(fub_id, live_fub)  # keep the cache fresh for _restore_plan_in_place's reads
-    snapshot_name = snapshot.get("plan_name", str(fub_id))
-    live_name = live_fub.get("Name") if live_fub else None
-    conflict = live_fub is None or live_name != snapshot_name
+    conflict, snapshot_name, live_name = _restore_identity_conflict(snapshot, fub_id, live_fub)
+    if not conflict and _refuse_restore_over_returned_plan(hass, coordinator, fub_id, snapshot_name):
+        return
     # A conflict without confirm stops the restore (_resolve_restore_conflict) — no warning then.
     if confirm or not conflict:
         warn_firmware()
@@ -1806,7 +1880,7 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
         return
     coordinator, _api, _unused_fub_id = ctx
 
-    if not bool(call.data.get("confirm", False)):
+    if not service_flag(call, "confirm", False):
         persistent_notification.async_create(
             hass, "Nothing deleted — 'confirm' must be enabled.", title=_TITLE_DELETE_BACKUPS_ERR
         )
@@ -1827,15 +1901,22 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
 
 
 def _refuse_backup_change_while_restoring(hass: HomeAssistant, coordinator: ComexioCoordinator, title: str) -> bool:
-    """Whether a restore runs — it moves and marks backups, and a deletion meanwhile could be undone on disk."""
-    if not coordinator._restore_lock.locked():
+    """Whether a restore runs or the entry unloads — then notify and return True.
+
+    A restore moves and marks backups, and a deletion or keep decision meanwhile could be undone on
+    disk. Once the unload has waited for the running plan edits (async_wait_before_unload), a change
+    starting after it would still write the backup store while the entry is torn down.
+    """
+    if coordinator.unloading:
+        reason = "the integration is reloading or unloading"
+        msg = "The Comexio integration is reloading or unloading. Please try again once it has finished."
+    elif coordinator._restore_lock.locked():
+        reason = "a function plan restore is running"
+        msg = "A function plan restore is running — it moves and marks backups. Please try again once it has finished."
+    else:
         return False
-    _LOGGER.warning("[%s] %s not started — a function plan restore is running", coordinator.server_id, title)
-    persistent_notification.async_create(
-        hass,
-        "A function plan restore is running — it moves and marks backups. Please try again once it has finished.",
-        title=title,
-    )
+    _LOGGER.warning("[%s] %s not started — %s", coordinator.server_id, title, reason)
+    persistent_notification.async_create(hass, msg, title=title)
     return True
 
 
@@ -1862,7 +1943,8 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
 
     Only orphaned identities (fub_id/plan_name pairs whose plan was deleted directly in
     Comexio Studio) are ever touched, and only once their newest snapshot is older than
-    the configured retention (Options → Function Plan, default 6 months) — a live plan's
+    the configured retention (Options → Function Plan, default 6 months), or of any age with
+    include_recent — a live plan's
     backups are never purged, no matter how old, and neither are kept ones. The periodic
     backup cycle never deletes; it raises an orphaned_plan_backups repair per expired plan
     instead, so this service is the bulk "delete them all" shortcut. Local storage only, no
@@ -1875,7 +1957,7 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
         return
     coordinator, _api, _unused_fub_id = ctx
 
-    if not bool(call.data.get("confirm", False)):
+    if not service_flag(call, "confirm", False):
         persistent_notification.async_create(
             hass, "Nothing purged — 'confirm' must be enabled.", title=_TITLE_PURGE_ORPHANED_BACKUPS_ERR
         )
@@ -1887,26 +1969,50 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     retention_months = coordinator.config_entry.options.get(
         CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
     )
+    include_recent = service_flag(call, "include_recent", False)
+    _LOGGER.info("Function Plan Purge Orphaned Backups: called (include_recent=%s)", include_recent)
     if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_PURGE_ORPHANED_BACKUPS_ERR):
         return
+    # include_recent: every orphan, however young — its newest snapshot is older than now.
+    cutoff = dt_util.utcnow() if include_recent else retention_cutoff(int(retention_months))
+    age = "of any age" if include_recent else f"older than {retention_months} month(s)"
     # No await since the check: a restore starting from here on refuses until the purge ends.
     with coordinator.plan_edit():
-        purged = await coordinator.function_plan_backup.async_purge_orphaned(
-            live_plans, cutoff=retention_cutoff(int(retention_months))
-        )
+        purged = await coordinator.function_plan_backup.async_purge_orphaned(live_plans, cutoff=cutoff)
     for plan in purged:
         delete_orphaned_backup_issue(hass, coordinator.server_id, plan["fub_id"], plan["plan_name"])
     total = sum(p["removed"] for p in purged)
     msg = (
-        f"Purged {total} snapshot(s) across {len(purged)} orphaned plan(s) (older than {retention_months} month(s))."
+        f"Purged {total} snapshot(s) across {len(purged)} orphaned plan(s) ({age})."
         if purged
-        else f"No orphaned plan backups older than {retention_months} month(s) found — nothing purged."
+        else f"No orphaned plan backups {age} found — nothing purged."
     )
 
     _LOGGER.info("Function Plan Purge Orphaned Backups: %s", msg)
     coordinator.async_update_listeners()  # refresh the backup-summary diagnostic sensor
     await _refresh_service_descriptions(hass)
     persistent_notification.async_create(hass, msg, title="Function Plan Purge Orphaned Backups")
+
+
+async def _apply_keep_decision(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int, plan_name: str, keep: bool
+) -> str:
+    """Keep (or stop keeping) a deleted plan's backups; returns the result message."""
+    manager = coordinator.function_plan_backup
+    if keep:
+        newly_kept = await manager.async_keep_orphaned(fub_id, plan_name)
+        delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
+        return (
+            f"Keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — they are no longer purged."
+            if newly_kept
+            else f"The backups of deleted plan '{plan_name}' (fub {fub_id}) are kept already — nothing changed."
+        )
+    if await manager.async_unkeep_orphaned(fub_id, plan_name):
+        return (
+            f"No longer keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — you are asked "
+            "about them again once the retention period has passed."
+        )
+    return f"The backups of deleted plan '{plan_name}' (fub {fub_id}) were not kept — nothing changed."
 
 
 async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceCall):
@@ -1952,21 +2058,12 @@ async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceC
         )
         return
 
-    if bool(call.data.get("keep", True)):
-        newly_kept = await manager.async_keep_orphaned(fub_id, plan_name)
-        delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
-        msg = (
-            f"Keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — they are no longer purged."
-            if newly_kept
-            else f"The backups of deleted plan '{plan_name}' (fub {fub_id}) are kept already — nothing changed."
-        )
-    elif await manager.async_unkeep_orphaned(fub_id, plan_name):
-        msg = (
-            f"No longer keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — you are asked "
-            "about them again once the retention period has passed."
-        )
-    else:
-        msg = f"The backups of deleted plan '{plan_name}' (fub {fub_id}) were not kept — nothing changed."
+    keep = service_flag(call, "keep", True)
+    if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_KEEP_BACKUPS_ERR):
+        return
+    # No await since the check: a restore starting from here on refuses until the change ends.
+    with coordinator.plan_edit():
+        msg = await _apply_keep_decision(hass, coordinator, fub_id, plan_name, keep)
 
     _LOGGER.info("Function Plan Keep Backups: %s", msg)
     coordinator.async_update_listeners()  # refresh the backup selector's orphaned-plans view
@@ -2001,8 +2098,8 @@ async def _handle_function_plan_list_backups(hass: HomeAssistant, call: ServiceC
     cutoff = _age_cutoff(call.data.get("max_age"))
     kind = call.data.get("kind", "all")
     order_by = call.data.get("order_by", "newest")
-    export_as_json = bool(call.data.get("export_as_json", False))
-    diff = bool(call.data.get("diff", False))
+    export_as_json = service_flag(call, "export_as_json", False)
+    diff = service_flag(call, "diff", False)
 
     backups = await coordinator.function_plan_backup.async_list_backups()
 

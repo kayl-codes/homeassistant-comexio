@@ -22,7 +22,7 @@ from homeassistant.helpers import entity_registry as er
 from ..const import DOMAIN, MarkerKind, webio_class_name
 from ..coordinator import ComexioCoordinator
 from ..plan_preview import PreviewStoppedError, async_render_opened_preview, preview_selection_available
-from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator
+from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator, service_flag
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ async def _handle_function_plan_debug_session(hass: HomeAssistant, call: Service
     if ctx is None:
         return
     coordinator, _api, _fub_id = ctx
-    active = bool(call.data.get("open"))
+    active = service_flag(call, "open", False)
     _LOGGER.debug("Function Plan Debug Session: open=%s", active)
     coordinator.set_debug_session_active(active)
 

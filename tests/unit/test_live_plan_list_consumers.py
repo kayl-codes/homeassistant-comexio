@@ -1,6 +1,8 @@
 """Deleted-plan backups follow coordinator.live_plan_list(): None = no plan list, {} = no plan left in Comexio."""
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -63,6 +65,7 @@ def _service_coordinator(live_plans: dict | None, manager: SimpleNamespace) -> S
         config_entry=SimpleNamespace(options={}),
         async_update_listeners=MagicMock(),
         _restore_lock=asyncio.Lock(),
+        unloading=False,
         plan_edit=MagicMock(),  # a context manager, like coordinator.plan_edit()
     )
 
@@ -96,6 +99,102 @@ def test_keep_needs_a_plan_list(live_plans: dict | None) -> None:
         assert notify.call_args.kwargs["title"] == backup._TITLE_KEEP_BACKUPS_ERR
     else:
         manager.async_keep_orphaned.assert_awaited_once_with(2, "Pumps")
+
+
+BUSY = pytest.mark.parametrize("busy", ["restore", "unloading"])
+
+
+def _make_busy(coordinator: SimpleNamespace, busy: str) -> None:
+    if busy == "unloading":
+        coordinator.unloading = True
+    else:
+        coordinator._restore_lock = SimpleNamespace(locked=lambda: True)  # a restore holds the lock
+
+
+def _recording_plan_edit(coordinator: SimpleNamespace, manager: SimpleNamespace, method: str) -> list[bool]:
+    """Record whether manager.<method> ran inside coordinator.plan_edit()."""
+    inside = [False]
+    seen: list[bool] = []
+
+    @contextmanager
+    def plan_edit() -> Iterator[None]:
+        inside[0] = True
+        try:
+            yield
+        finally:
+            inside[0] = False
+
+    async def write(*_args: Any) -> bool:
+        seen.append(inside[0])
+        return True
+
+    coordinator.plan_edit = plan_edit
+    setattr(manager, method, write)
+    return seen
+
+
+@BUSY
+@pytest.mark.parametrize("keep", [True, False])
+def test_keep_refuses_while_a_restore_runs_or_the_entry_unloads(busy: str, keep: bool) -> None:
+    """(Review, #181) a restore moves and marks backups; after the unload's wait the store is torn down."""
+    manager = _manager(async_keep_orphaned=AsyncMock(), async_unkeep_orphaned=AsyncMock())
+    coordinator = _service_coordinator({}, manager)
+    _make_busy(coordinator, busy)
+    notify = _run_service(backup._handle_function_plan_keep_backups, coordinator, {"fub_id": "2:Pumps", "keep": keep})
+
+    manager.async_keep_orphaned.assert_not_called()
+    manager.async_unkeep_orphaned.assert_not_called()
+    assert notify.call_args.kwargs["title"] == backup._TITLE_KEEP_BACKUPS_ERR
+    assert ("reloading or unloading" if busy == "unloading" else "restore is running") in notify.call_args.args[1]
+
+
+@pytest.mark.parametrize(("keep", "method"), [(True, "async_keep_orphaned"), (False, "async_unkeep_orphaned")])
+def test_keep_writes_as_a_marked_plan_edit(keep: bool, method: str) -> None:
+    """A restore starting meanwhile refuses instead of moving the backups under the write."""
+    manager = _manager()
+    coordinator = _service_coordinator({}, manager)
+    seen = _recording_plan_edit(coordinator, manager, method)
+    _run_service(backup._handle_function_plan_keep_backups, coordinator, {"fub_id": "2:Pumps", "keep": keep})
+    assert seen == [True]
+
+
+def _orphaned_backups_flow(coordinator: SimpleNamespace) -> ComexioRepairFlow:
+    flow = ComexioRepairFlow("orphaned_plan_backups_cx1_2_x", {"entry_id": "e1", "fub_id": "2", "plan_name": "Pumps"})
+    flow.hass = SimpleNamespace(data={DOMAIN: {"e1": coordinator}}, config=SimpleNamespace(language="en"))  # type: ignore[assignment]
+    return flow
+
+
+@BUSY
+@pytest.mark.parametrize("action", ["delete", "keep"])
+def test_the_orphaned_backups_repair_refuses_while_a_restore_runs_or_the_entry_unloads(busy: str, action: str) -> None:
+    """(Review, #181) the repair's delete/keep wrote the backup store with no restore or unload guard."""
+    manager = _manager(async_delete_plan_backups=AsyncMock(), async_keep_orphaned=AsyncMock())
+    coordinator = _service_coordinator({}, manager)
+    _make_busy(coordinator, busy)
+
+    with patch.object(repairs.ir, "async_delete_issue") as delete_issue:
+        result = asyncio.run(_orphaned_backups_flow(coordinator).async_step_orphaned_backups({"action": action}))
+
+    assert result["reason"] == "backups_busy"
+    manager.async_delete_plan_backups.assert_not_called()
+    manager.async_keep_orphaned.assert_not_called()
+    delete_issue.assert_not_called()  # the decision is still open
+
+
+@pytest.mark.parametrize(
+    ("action", "method"), [("delete", "async_delete_plan_backups"), ("keep", "async_keep_orphaned")]
+)
+def test_the_orphaned_backups_repair_writes_as_a_marked_plan_edit(action: str, method: str) -> None:
+    manager = _manager()
+    coordinator = _service_coordinator({}, manager)
+    coordinator._async_refresh_service_descriptions = AsyncMock()
+    seen = _recording_plan_edit(coordinator, manager, method)
+
+    with patch.object(repairs.ir, "async_delete_issue"):
+        result = asyncio.run(_orphaned_backups_flow(coordinator).async_step_orphaned_backups({"action": action}))
+
+    assert result["type"] == "create_entry"
+    assert seen == [True]
 
 
 def test_a_backup_cycle_without_plans_still_audits_the_orphaned_backups() -> None:

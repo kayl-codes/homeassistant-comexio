@@ -106,6 +106,12 @@
         "ignore": "🔇 Ignorer (tout conserver)",
         "enable": "🔁 Réactiver l'import"
       }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Restaurer depuis la sauvegarde la plus récente",
+        "unwatch": "🚫 Ne plus surveiller ce plan"
+      }
     }
   },
   "options": {
@@ -145,8 +151,8 @@
           "function_plan_backup_retention_months": "Dès que la sauvegarde la plus récente d'un plan supprimé directement dans Comexio dépasse ce délai, une réparation demande s'il faut supprimer ou conserver ses sauvegardes — rien n'est supprimé sans votre confirmation. Les sauvegardes d'un plan existant ne sont jamais concernées. L'action 'Function Plan Purge Orphaned Backups' supprime d'un coup toutes celles qui ont expiré.",
           "bus_watchdog_enabled": "En cas de hausse durable de la charge du bus, redémarre automatiquement les plans fonctionnels de cluster gérés par HA (de l'arrière vers l'avant) pour tenter de la soulager. Non destructif pour le système Comexio lui-même.",
           "bus_watchdog_auto_reboot": "Si la charge du bus dépasse en moyenne 90 % pendant 5 minutes, déclenche un redémarrage COMPLET et IMMÉDIAT de Comexio, sans confirmation. Désactivé par défaut — à activer une fois que vous faites confiance au mécanisme.",
-          "function_plan_watchdog_notify": "Services de notification (p. ex. notify.mobile_app_votre_telephone) qui reçoivent un push lorsqu'un plan de fonctions surveillé s'arrête (géré par HA, ou plan utilisateur choisi ci-dessous). Le push comporte un bouton « Démarrer le plan » et disparaît dès que le plan s'exécute de nouveau. Laisser vide pour aucun push ; la réparation est créée dans tous les cas.",
-          "function_plan_watchdog_user_plans": "Plans utilisateur (non gérés par Home Assistant) qui doivent toujours s'exécuter. Le watchdog les traite comme les plans HA : réparation, capteur de problème et push lorsqu'un plan s'arrête. L'interrupteur Démarrage auto des plans (plans utilisateur) les redémarre lui-même. N'y mettez pas les plans arrêtés volontairement (tests)."
+          "function_plan_watchdog_notify": "Services de notification (p. ex. notify.mobile_app_votre_telephone) qui reçoivent un push lorsqu'un plan de fonctions surveillé s'arrête (géré par HA, ou plan utilisateur choisi ci-dessous). Le push comporte un bouton « Démarrer le plan » et disparaît dès que le plan s'exécute de nouveau. Un plan utilisateur surveillé supprimé dans Comexio reçoit aussi un push, avec les boutons « Restaurer » (sa sauvegarde la plus récente, comme nouveau plan) et « Ne plus surveiller ». Laisser vide pour aucun push ; la réparation est créée dans tous les cas.",
+          "function_plan_watchdog_user_plans": "Plans utilisateur (non gérés par Home Assistant) qui doivent toujours s'exécuter. Le watchdog les traite comme les plans HA : réparation, capteur de problème et push lorsqu'un plan s'arrête. L'interrupteur Démarrage auto des plans (plans utilisateur) les redémarre lui-même. Un plan choisi supprimé dans Comexio n'est pas démarré : sa réparation et son push proposent de le restaurer depuis sa sauvegarde la plus récente ou de ne plus le surveiller. N'y mettez pas les plans arrêtés volontairement (tests)."
         }
       }
     },
@@ -382,7 +388,8 @@
           "plan_exists_again": "Ce plan existe de nouveau dans Comexio, ses sauvegardes ne sont donc plus orphelines. Rien n'a été modifié.",
           "already_deleted": "Ces sauvegardes ont déjà été supprimées. Rien n'a été modifié.",
           "loaded_in_preview": "La sauvegarde la plus récente du plan est maintenant affichée dans la carte du plan (Plan → Orphaned plans). Cette réparation reste ouverte jusqu'à ce que vous conserviez ou supprimiez les sauvegardes.",
-          "preview_failed": "Les sauvegardes n'ont pas pu être chargées dans l'aperçu du plan — elles ont peut-être été supprimées entre-temps, ou les sélecteurs de plan sont désactivés. Les sauvegardes n'ont pas été modifiées."
+          "preview_failed": "Les sauvegardes n'ont pas pu être chargées dans l'aperçu du plan — elles ont peut-être été supprimées entre-temps, ou les sélecteurs de plan sont désactivés. Les sauvegardes n'ont pas été modifiées.",
+          "backups_busy": "Une restauration de plan de fonctions est en cours, ou l'intégration est en train de se recharger — elle déplace et marque des sauvegardes. Les sauvegardes n'ont pas été modifiées — réessayez une fois l'opération terminée."
         }
       }
     },
@@ -437,6 +444,23 @@
           "plan_not_watched": "Le plan {plan_name} (ID {fub_id}) n'est plus surveillé (désélectionné, supprimé ou son ID réattribué). Rien n'a été démarré.",
           "busy": "Une synchronisation, une restauration, une interrogation, une modification de plan de fonctions ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
           "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "Le plan de fonctions {plan_name} n'existe plus",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de fonctions surveillé supprimé",
+            "description": "Le plan de fonctions surveillé **{plan_name}** (ID {fub_id}) n'existe plus dans Comexio — il a été supprimé, par exemple dans Comexio Studio.\n\n**Restaurer** le reconstruit à partir de sa sauvegarde la plus récente en tant que nouveau plan et le démarre ; il reste surveillé sous son nouvel ID. Pour restaurer une sauvegarde plus ancienne, utilisez la carte du plan (Plan → Orphaned plans).\n**Ne plus surveiller** le retire des plans utilisateur surveillés."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "plan_not_missing": "Le plan {plan_name} (ID {fub_id}) ne manque plus (restauré ou plus surveillé). Rien n'a été modifié.",
+          "no_backup": "Il n'existe aucune sauvegarde de {plan_name} (ID {fub_id}) pour le restaurer. Rien n'a été modifié — vous pouvez cesser de le surveiller.",
+          "check_pending": "La liste des plans n'a pas encore été lue depuis le démarrage de Home Assistant ; on ne sait donc pas encore si {plan_name} (ID {fub_id}) manque toujours. Rien n'a été modifié ; veuillez réessayer dans un instant."
         }
       }
     },
