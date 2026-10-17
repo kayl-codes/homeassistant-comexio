@@ -1268,8 +1268,9 @@ def test_a_sync_that_raised_drops_the_marks_of_the_plans_it_did_not_clear(ir: Ma
             raise asyncio.CancelledError
 
     watchdog._hass.services.async_call.side_effect = restore_then_cancel
+    sync = watchdog.async_sync_vanished({(48, "Other"), (49, "New")})  # cancelled on the new alarm
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(watchdog.async_sync_vanished({(48, "Other"), (49, "New")}))  # cancelled on the new alarm
+        asyncio.run(sync)
     assert watchdog._restored_pushes == set()
     assert watchdog._vanished_clearing == set()
 
