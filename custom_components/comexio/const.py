@@ -61,7 +61,7 @@ CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
 DEFAULT_ENABLE_NOTIFICATIONS = True
 
 CONF_COVER_KEYWORDS = "cover_keywords"
-DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
+DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind, markise, awning"
 
 CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
 CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
@@ -482,11 +482,22 @@ SYNC_DURATION_FUNCTION_PLAN_ELEMENT = (
 MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400
 
-# Range of a temperature marker number (name contains soll/temp/setpoint, user decision
+# Range of a temperature marker number (is_temperature_marker_name below, user decision
 # 2026-10-17, #179): down to absolute zero so negative correction offsets and outdoor
 # setpoints are settable, up to a generous ceiling that still blocks gross typos.
 MARKER_TEMPERATURE_MIN_VALUE = -273.15
 MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
+
+# A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
+# word "Grad". A bare "Soll" is no longer enough — it marks any setpoint ("Markise Position SOLL"), not
+# a temperature.
+_MARKER_TEMPERATURE_NAME_RE = re.compile(r"temp|setpoint|°c|\bgrad\b", re.IGNORECASE)
+
+
+def is_temperature_marker_name(name: str) -> bool:
+    """Whether a marker name marks a temperature (number/sensor unit heuristic)."""
+    return _MARKER_TEMPERATURE_NAME_RE.search(name) is not None
+
 
 # Round-boundary size the KNX bridge marker block is aligned to (user decision 2026-09-14,
 # see project_knx_write_path_design memory) — also caps how far _free_marker_ids() looks

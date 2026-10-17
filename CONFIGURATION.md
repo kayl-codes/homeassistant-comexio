@@ -66,7 +66,7 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 | **Show sync notifications** | Display pop-up progress messages during WebIO sync. |
 | **Ignore Web-IO warnings** | Suppress the Repair issue when the Web-IO class is out of sync. |
 | **Show offline extension entities** | Show entities of offline modules as *Unavailable* instead of hiding them. |
-| **Cover detection keywords** | Comma-separated keywords to classify IOs as covers (e.g. `blind, shutter, roller`). |
+| **Cover detection keywords** | Comma-separated keywords; an analog marker whose name contains one becomes a 0–100 % number/sensor (default `rollo, jalousie, blind, markise, awning`). A marker name with `temp`, `setpoint`, `°C` or the word `Grad` becomes a °C temperature (−273.15 to 10,000); a bare `Soll` does not. |
 
 ---
 
@@ -194,7 +194,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 | **Fortschritts-Popups anzeigen** | Fortschrittsmeldungen während des WebIO-Syncs anzeigen. |
 | **Web-IO-Warnung ignorieren** | Reparatur-Issue unterdrücken, wenn die Web-IO-Klasse nicht synchron ist. |
 | **Offline-Extensions anzeigen** | Entitäten offline gegangener Module als *Nicht verfügbar* anzeigen statt ausblenden. |
-| **Schlüsselwörter Rollladen-Erkennung** | Kommaseparierte Liste zur Klassifizierung von IOs als Abdeckungen (z. B. `rollo, jalousie, blind`). |
+| **Schlüsselwörter Rollladen-Erkennung** | Kommaseparierte Liste; ein analoger Merker, dessen Name eines davon enthält, wird zur 0–100-%-Zahl bzw. zum %-Sensor (Standard `rollo, jalousie, blind, markise, awning`). Ein Merkername mit `temp`, `setpoint`, `°C` oder dem Wort `Grad` wird zur °C-Temperatur (−273,15 bis 10 000); ein bloßes `Soll` reicht dafür nicht. |
 
 ---
 

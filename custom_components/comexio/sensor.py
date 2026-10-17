@@ -46,6 +46,7 @@ from .const import (
     bus_load_signal,
     function_plan_ids,
     function_plan_run_state_unique_id,
+    is_temperature_marker_name,
 )
 from .coordinator import ComexioCoordinator
 from .entity import (
@@ -228,7 +229,7 @@ class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):
             if "%" in name_lower or is_cover or "dimmer" in name_lower:
                 self._attr_native_unit_of_measurement = PERCENTAGE
                 self._attr_icon = "mdi:window-shutter" if is_cover else "mdi:percent"
-            elif any(x in name_lower for x in ["soll", "temp", "setpoint"]):
+            elif is_temperature_marker_name(name_lower):
                 self._attr_device_class = SensorDeviceClass.TEMPERATURE
                 self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
             else:
@@ -254,7 +255,7 @@ class ComexioKnxSensor(ComexioKnxEntity, ComexioMarkerSensor):
 
         # Same DPT-over-name-heuristic precedence as ComexioKnxNumber (see its own comment,
         # number.py) — a read-only KNX object must not inherit ComexioMarkerSensor's
-        # "soll/temp/setpoint" name guess when the resolved DPT says otherwise (or says
+        # temperature name guess (is_temperature_marker_name) when the resolved DPT says otherwise (or says
         # nothing at all, e.g. an unresolved/unmapped DPT keeps the name heuristic instead).
         if knx.get("dpt_min") is not None and knx.get("dpt_max") is not None:
             self._attr_native_unit_of_measurement = knx.get("dpt_unit") or None
