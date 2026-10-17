@@ -695,6 +695,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     if unload_ok:
         coordinator = hass.data[DOMAIN].pop(entry.entry_id)
         if coordinator and hasattr(coordinator, "api"):
+            # Only now, not before the wait: the work it waited for still sends its pushes, and a failed unload
+            # keeps them. The reloaded entry's watchdog takes the plans' pushes over (its first check alarms every
+            # stopped and deleted plan); a check of this one still running sends nothing more (a push with buttons
+            # on its way still arrives: the new watchdog's checks take it off for a plan they see running).
+            coordinator.plan_watchdog.close()
             # Stop the connection-value poll timer (and any pending preview refresh) before
             # closing the sessions it polls through — otherwise the timer keeps firing on
             # this now-unloaded entry, each tick racing close() for the preview session.

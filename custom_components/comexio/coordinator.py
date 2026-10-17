@@ -573,6 +573,15 @@ def _append_cleanup_outcome(outcome: dict[str, Any], result: dict, fub_id: int) 
             outcome[key].append(value)
 
 
+def _outdated_push_outcome(name: str, *, stopped: bool, current: bool) -> str:
+    """What becomes of a push sent before the update whose ID's plan is watched (logged with the ignored action)."""
+    if not stopped:
+        return f"{name} runs, so it is taken off the phone"
+    if current:
+        return f"it is replaced by one for {name}"
+    return f"{name} was renamed since the last check, which pushes its alarm next"
+
+
 def _previous_vanished_name(previous: set[tuple[int, str]], fub_id: int) -> str:
     """The name the last check gave a bare-ID pick's deleted plan; unnamed_plan_label unless just one."""
     names = {name for vanished_id, name in previous if vanished_id == fub_id}
@@ -4699,20 +4708,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # check yet): no alarm replaced a stale push and its clear may have failed, so it is taken off the phone.
         stopped = fub_id in (self.plan_watchdog.stopped or {})
         if token is None and (name := self.watched_plan_name(fub_id)) is not None:
-            # The alarm is pushed on the stop only: replaced (same tag) by one naming the ID's plan now.
+            # The alarm is pushed on the stop only: replaced (same tag) by one naming the ID's plan now. Renamed
+            # since the last check (judged under the old name): that check's successor pushes the alarm instead.
+            current = (self.plan_watchdog.stopped or {}).get(fub_id) == name
             _LOGGER.warning(
                 "[%s] Watchdog push action for function plan %s ignored: the push was sent before the update and "
                 "does not name the plan; %s",
                 self.server_id,
                 fub_id,
-                f"it is replaced by one for {name}" if stopped else f"{name} runs, so it is taken off the phone",
+                _outdated_push_outcome(name, stopped=stopped, current=current),
             )
-            if stopped:
+            if stopped and current:
                 self.hass.async_create_background_task(
                     self.plan_watchdog.async_push_start_outdated(fub_id, name),
                     name=f"{DOMAIN}_{self.server_id}_outdated_push_{fub_id}",
                 )
-            else:
+            elif not stopped:
                 self._dismiss_stale_push(fub_id)
             return
         if self.is_watched_plan(fub_id):

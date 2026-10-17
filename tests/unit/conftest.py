@@ -1,10 +1,11 @@
 """Fixtures for the pure-logic unit tests."""
 
+from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
 
-from custom_components.comexio import api as api_module
+from custom_components.comexio import api as api_module, plan_watchdog
 from custom_components.comexio.api import ComexioAPI
 from tests.common import load_json_fixture
 
@@ -28,3 +29,12 @@ def parsing_api(comexio_api: ComexioAPI) -> ComexioAPI:
     comexio_api.io_types = load_json_fixture("io_types.json")
     comexio_api.io_input_types = load_json_fixture("io_input_types.json")
     return comexio_api
+
+
+@pytest.fixture(autouse=True)
+def _fresh_push_tag_state() -> Iterator[None]:
+    """The watchdog's push tag state is module-wide (shared with a reloaded entry's watchdog): a tag one test
+    left would lock or clear the next test's pushes."""
+    yield
+    plan_watchdog._PUSH_LOCKS.clear()
+    plan_watchdog._ACTIONABLE_TAGS.clear()

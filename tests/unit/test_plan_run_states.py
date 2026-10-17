@@ -1198,6 +1198,31 @@ def test_push_action_starts_only_the_plan_it_was_sent_for(
         coordinator.plan_watchdog.async_push_start_outdated.assert_not_called()
 
 
+def test_an_outdated_push_of_a_plan_renamed_since_the_check_waits_for_the_next_one(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(local review, #187) The stop was judged under the old name: the watchdog would drop a replacement naming
+    the new one, so none is asked for (nor the alarm cleared), and the log says the next check pushes it."""
+    hass = MagicMock()
+    coordinator = _coordinator(
+        api,
+        hass=hass,
+        config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19}}),
+        plan_watchdog=SimpleNamespace(
+            async_dismiss_push=MagicMock(return_value="dismiss"),
+            async_push_start_outdated=MagicMock(return_value="outdated"),
+            stopped={19: "Old"},
+        ),
+        _async_start_plan_from_push=MagicMock(return_value="start"),
+    )
+    with caplog.at_level(logging.WARNING):
+        coordinator.async_handle_notification_action(SimpleNamespace(data={"action": "COMEXIO_START_PLAN_iosrv1_19"}))
+    hass.async_create_background_task.assert_not_called()
+    coordinator.plan_watchdog.async_dismiss_push.assert_not_called()  # the stopped plan's alarm stays
+    coordinator.plan_watchdog.async_push_start_outdated.assert_not_called()
+    assert "Test1 was renamed since the last check, which pushes its alarm next" in caplog.text
+
+
 @pytest.mark.parametrize("stopped", [{}, None], ids=["running", "before-the-first-check"])
 @pytest.mark.parametrize(
     ("action", "logged"),
