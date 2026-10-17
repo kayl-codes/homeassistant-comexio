@@ -13,10 +13,13 @@ from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_INTERVAL_MAX_VALUE,
+    MARKER_TEMPERATURE_MAX_VALUE,
+    MARKER_TEMPERATURE_MIN_VALUE,
     MARKER_TYPE_INTERVAL,
     WEBIO_MARKER_ANALOG_MAX,
     WEBIO_MARKER_ANALOG_MIN,
     MarkerKind,
+    is_temperature_marker_name,
 )
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity
@@ -93,10 +96,11 @@ class ComexioMarkerNumber(ComexioMarkerEntity, NumberEntity):
                 self._attr_native_unit_of_measurement = PERCENTAGE
                 self._attr_native_max_value = 100.0
                 self._attr_icon = "mdi:window-shutter" if is_cover else "mdi:percent"
-            elif any(x in name_lower for x in ["soll", "temp", "setpoint"]):
+            elif is_temperature_marker_name(name_lower):
                 self._attr_device_class = NumberDeviceClass.TEMPERATURE
                 self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-                self._attr_native_max_value = 50.0
+                self._attr_native_min_value = MARKER_TEMPERATURE_MIN_VALUE
+                self._attr_native_max_value = MARKER_TEMPERATURE_MAX_VALUE
             else:
                 # Comexio has no configurable value range for markers (see
                 # WEBIO_MARKER_ANALOG_MIN/MAX docstring) — don't clamp to the 0-100 default.
