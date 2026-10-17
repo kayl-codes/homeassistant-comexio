@@ -1183,6 +1183,7 @@ def test_a_restored_push_that_failed_leaves_the_vanished_alarm_to_be_cleared(ir:
     watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
     asyncio.run(watchdog.async_push_restored(47, "Test4"))
     watchdog._hass.services.async_call.side_effect = None
+    assert _pushes(watchdog)[-1][2]["title"] == watchdog._texts()["restored_title"]  # the confirmation was tried
     assert watchdog._restored_pushes == set()
     asyncio.run(watchdog.async_sync_vanished(set()))
     (*_, (_domain, _service, clear)) = _pushes(watchdog)
@@ -1298,10 +1299,13 @@ def test_a_failed_restored_push_leaves_the_alarm_of_a_plan_vanished_again_meanwh
         if data["title"] == watchdog._texts()["restored_title"]:
             await watchdog.async_sync_vanished(set())
             await watchdog.async_sync_vanished(TEST4)
+            meanwhile.append("vanished again")
             raise HomeAssistantError("down")
 
+    meanwhile: list[str] = []
     watchdog._hass.services.async_call.side_effect = back_and_vanished_again_then_fail
     asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    assert meanwhile == ["vanished again"]
     (*_, (_domain, _service, last)) = _pushes(watchdog)
     assert last["message"] != "clear_notification"
     assert last["data"]["actions"][0]["action"] == plan_action_id(ACTION_RESTORE, SERVER_ID, TOKEN)
