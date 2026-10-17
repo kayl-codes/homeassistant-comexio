@@ -149,8 +149,9 @@ def test_ignoring_a_plan_running_meanwhile_reports_it_running() -> None:
     assert (result["type"], result["reason"]) == ("abort", "already_running")
     coordinator.plan_watchdog.async_ignore_stopped.assert_not_called()
     # Its repair cleared between the run-state read and the ignore: nothing was ignored.
-    result, _, _ = _run_stopped_repair(watched="P", ignored=False, user_input={"action": "ignore"})
+    result, _, coordinator = _run_stopped_repair(watched="P", ignored=False, user_input={"action": "ignore"})
     assert (result["type"], result["reason"]) == ("abort", "already_running")
+    coordinator.plan_watchdog.async_ignore_stopped.assert_awaited_once()
 
 
 def test_a_stop_watching_that_kept_the_pick_keeps_the_repair() -> None:

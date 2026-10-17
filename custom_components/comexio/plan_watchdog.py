@@ -381,7 +381,8 @@ class ManagedPlanWatchdog:
             if to_start:
                 auto_started = await self._async_auto_start(to_start)
                 stopped = {fub_id: name for fub_id, name in stopped.items() if fub_id not in auto_started}
-            self._sync_issues(stopped)
+            undecided = {fub_id for fub_id in managed if fub_id not in stopped and run_state(fub_id) is None}
+            self._sync_issues(stopped, undecided)
             changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
             await self._async_push_transitions(previous, stopped, auto_started, self.suspended - suspended_before)
@@ -630,9 +631,17 @@ class ManagedPlanWatchdog:
             notification_id=f"{DOMAIN}_{self._server_id}_plan_auto_start_{fub_id}",
         )
 
-    def _sync_issues(self, stopped: Mapping[int, str]) -> None:
-        """Raise a repair per stopped plan and close the ones of plans that run again."""
-        wanted: set[str] = set()
+    def _sync_issues(self, stopped: Mapping[int, str], undecided: Collection[int] = ()) -> None:
+        """Raise a repair per stopped plan and close the ones of plans that run again.
+
+        An ignored repair of a plan whose run state is unknown stays: after a restart no previous verdict
+        holds it, and closing it would drop the ignore before the plan was seen running again.
+        """
+        wanted = {
+            stopped_plan_issue_id(self._server_id, fub_id)
+            for fub_id in undecided
+            if self._ignored_issue(fub_id) is not None
+        }
         for fub_id, name in stopped.items():
             issue_id = stopped_plan_issue_id(self._server_id, fub_id)
             wanted.add(issue_id)

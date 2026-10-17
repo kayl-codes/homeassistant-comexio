@@ -838,6 +838,36 @@ def test_an_ignore_read_back_after_a_restart_does_not_hide_a_give_up(ir: MagicMo
     assert (entry.translation_key, entry.dismissed_version) == (ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED, None)
 
 
+def test_an_ignore_read_back_after_a_restart_survives_an_unknown_run_state(ir: MagicMock) -> None:
+    """(Sourcery) No previous verdict after a restart: an unreadable run state must not close the ignored repair."""
+    issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
+    ir.async_get.return_value.issues[issue] = SimpleNamespace(
+        dismissed_version="2026.10.0", translation_placeholders=None, translation_key=None
+    )
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=None, p42=True)))
+    assert ir.async_get.return_value.issues[issue].dismissed_version == "2026.10.0"
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))  # still stopped: stays ignored
+    assert ir.async_get.return_value.issues[issue].dismissed_version == "2026.10.0"
+    assert _alarms(watchdog) == []
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))  # ran again: the ignore goes
+    assert issue not in ir.async_get.return_value.issues
+
+
+@pytest.mark.parametrize(("fub_id", "dismissed_version"), [(34, None), (99, "2026.10.0")])
+def test_an_unknown_run_state_keeps_only_the_ignore_of_a_watched_plan(
+    ir: MagicMock, fub_id: int, dismissed_version: str | None
+) -> None:
+    """A repair not ignored, or the ignored one of a plan no longer watched (99), still closes."""
+    issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, fub_id))
+    ir.async_get.return_value.issues[issue] = SimpleNamespace(
+        dismissed_version=dismissed_version, translation_placeholders=None, translation_key=None
+    )
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=None, p42=True, p99=None)))
+    assert issue not in ir.async_get.return_value.issues
+
+
 def test_the_ignore_of_the_plan_that_held_the_id_before_does_not_hide_another(ir: MagicMock) -> None:
     """Renamed or the ID reused: the plan holding the ID now gets its own repair and alarm."""
     issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
