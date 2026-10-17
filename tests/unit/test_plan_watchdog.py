@@ -1818,6 +1818,28 @@ def test_a_push_without_buttons_arriving_after_the_unload_is_left_on_the_phone(i
     assert not plan_watchdog._ACTIONABLE_TAGS
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        lambda w: w.async_push_no_backup(47, "Test4"),
+        lambda w: w.async_push_restore_failed(47, "Test4"),
+        lambda w: w.async_push_check_pending(47, vanished_plan_token(47, "Test4")),
+    ],
+    ids=["no_backup", "restore_failed", "check_pending"],
+)
+def test_a_restore_reply_waiting_while_the_plan_was_restored_is_not_sent(
+    ir: MagicMock, reply: Callable[[ManagedPlanWatchdog], Awaitable[None]]
+) -> None:
+    """(Sourcery, #187) Its Restore/Unwatch buttons would replace the "restored" push that went out first."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.vanished = {(47, "Test4")}
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog, lambda: watchdog.async_push_restored(47, "Test4"), lambda: reply(watchdog)
+    )
+    assert arrived == ["alarm"]  # the "restored" push only
+    assert [data["title"] for _, _, data in _pushes(watchdog)] == [plan_watchdog.PUSH_TEXTS["de"]["restored_title"]]
+
+
 def test_a_hanging_notify_service_counts_as_failed(ir: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
     """Else it holds the tag's lock, and the plan's clears wait for it forever."""
     monkeypatch.setattr(plan_watchdog, "FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC", 0.01)

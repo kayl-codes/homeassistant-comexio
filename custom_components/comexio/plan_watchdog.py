@@ -1047,6 +1047,7 @@ class ManagedPlanWatchdog:
             "no_backup",
             token=vanished_plan_token(fub_id, name),
             actions=(ACTION_UNWATCH,),
+            unless_restored=True,  # its buttons would replace the "restored" push sent meanwhile
         )
 
     async def async_push_restored(self, fub_id: int, name: str, *, complete: bool = True) -> None:
@@ -1069,6 +1070,7 @@ class ManagedPlanWatchdog:
             "restore_failed",
             token=vanished_plan_token(fub_id, name),
             actions=_vanished_actions(fub_id, name),
+            unless_restored=True,  # its buttons would replace the "restored" push sent meanwhile
         )
 
     async def async_push_check_pending(self, fub_id: int, token: str) -> None:
@@ -1080,6 +1082,7 @@ class ManagedPlanWatchdog:
             "check_pending",
             token=token,
             actions=(ACTION_RESTORE, ACTION_UNWATCH),
+            unless_restored=True,  # its buttons would replace the "restored" push sent meanwhile
         )
 
     async def async_dismiss_push(self, fub_id: int, name: str | None = None) -> None:

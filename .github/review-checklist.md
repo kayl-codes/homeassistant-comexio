@@ -86,7 +86,7 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   button (alarm, busy/failed reply, outdated replacement) only while the ID still holds that stopped plan, same name
   (`while_stopped=True`) — a stop or start judged while another send waited would else have its alarm taken off,
   a running plan get a button, or another plan under the ID a push naming the old one (#187). Flag a send under a
-  shared tag outside that lock, a start-button push without `while_stopped`, and a condition judged before waiting
+  shared tag outside that lock, a start-button push without `while_stopped`, a deleted plan's push with buttons without `unless_restored`, and a condition judged before waiting
   for the lock. The locks are dropped once no send holds or waits for them, and are module-wide (`_PUSH_LOCKS`):
   a reloaded entry's watchdog sends under the old one's tags while its sends may still be on their way, so a lock
   per instance does not serialize them. The unload closes the old watchdog once the platforms unloaded (`close()`,
