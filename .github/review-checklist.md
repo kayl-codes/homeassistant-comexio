@@ -82,10 +82,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   alarm, pushed on the stop and sent again to a target that did not take it, is what replaced the stale push, so
   keeping the tag is not leaving the stale push in place. The phone shows the push under a tag that arrived last,
   so every send under one tag (push or clear) holds the tag's lock (`_push_lock`), and what it depends on is judged
-  under that lock: the clear's "not stopped" check (`keep_stopped=True`), and a push asking to start the plan only
-  while it is still stopped (`while_stopped=True`) — a stop or start judged while another send waited would else
-  have its alarm taken off, or a running plan get an alarm (#187). Flag a send under a shared tag outside that
-  lock, and a condition judged before waiting for it. Each notify call is bounded
+  under that lock: the clear's "not stopped" check (`keep_stopped=True`), and every push with a "Start plan"
+  button (alarm, busy/failed reply, outdated replacement) only while the ID still holds that stopped plan, same name
+  (`while_stopped=True`) — a stop or start judged while another send waited would else have its alarm taken off,
+  a running plan get a button, or another plan under the ID a push naming the old one (#187). Flag a send under a
+  shared tag outside that lock, a start-button push without `while_stopped`, and a condition judged before waiting
+  for the lock. The locks are dropped once no send holds or waits for them. Each notify call is bounded
   (`FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC`), since a hanging one holds the lock. Clears and replacements reach the notify targets
   configured now; a phone whose target was removed is out of HA's reach and not a finding. A failed clear is logged
   and not retried: pressing the stale action again sends it again. A deleted plan's push has its own

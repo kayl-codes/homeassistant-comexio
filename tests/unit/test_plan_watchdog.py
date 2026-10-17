@@ -32,6 +32,7 @@ from custom_components.comexio.plan_watchdog import (
     plan_action_id,
     start_action_id,
     stopped_plan_issue_id,
+    vanished_plan_token,
 )
 
 SERVER_ID = "cx1"
@@ -1089,6 +1090,101 @@ def test_an_alarm_decided_before_its_plan_was_started_is_not_sent(ir: MagicMock)
     assert [data["data"]["tag"] for *_, data in _pushes(watchdog) if data["message"] != "clear_notification"] == [
         watchdog._push_tag(46)
     ]
+
+
+@pytest.mark.parametrize("push", ["async_push_start_busy", "async_push_start_failed"])
+def test_a_start_reply_waiting_while_another_phone_started_the_plan_is_not_sent(ir: MagicMock, push: str) -> None:
+    """(Sourcery, #187) Phone B's start pushes "runs again"; phone A's busy/failed reply would bring the button back."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.stopped = {47: "Test4"}
+    _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_plan_started(47, confirm=True),
+        lambda: getattr(watchdog, push)(47, "Test4"),
+    )
+    assert [data["message"] for *_, data in _pushes(watchdog)] == [
+        plan_watchdog.PUSH_TEXTS["de"]["started"].format(name="Test4", fub_id=47)
+    ]
+    assert watchdog._push_locks == {}
+
+
+def test_an_outdated_replacement_waiting_while_the_id_holds_another_plan_is_not_sent(ir: MagicMock) -> None:
+    """(Sourcery, #187) The replacement names the plan the action was judged for; Other's alarm names its own."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.stopped = {47: "Test4"}
+
+    def id_reassigned() -> None:
+        watchdog.stopped = {47: "Other"}
+
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog._async_clear_push(47),
+        lambda: watchdog.async_push_start_outdated(47, "Test4"),
+        id_reassigned,
+    )
+    assert arrived == ["clear"]
+    assert watchdog._stopped_push_unsent == {}
+
+
+def test_a_push_tag_lock_is_kept_while_used_and_dropped_after(ir: MagicMock) -> None:
+    """(Sourcery, #187) Deleted plans' tags are many: their locks must not pile up for the coordinator's lifetime."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    users: list[int] = []
+    _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_dismiss_push(47, "Test4"),
+        lambda: watchdog.async_dismiss_push(47, "Test4"),
+        lambda: users.append(watchdog._push_locks[watchdog._push_tag(47, vanished_plan_token(47, "Test4"))][1]),
+    )
+    assert users == [2]
+    assert watchdog._push_locks == {}
+
+
+@pytest.mark.parametrize("stopped", [None, {}, {47: "Other"}], ids=["before-the-first-check", "running", "id-reused"])
+@pytest.mark.parametrize("push", ["async_push_start_busy", "async_push_start_failed"])
+def test_a_start_reply_for_a_plan_not_judged_stopped_is_not_sent(
+    ir: MagicMock, caplog: pytest.LogCaptureFixture, push: str, stopped: dict[int, str] | None
+) -> None:
+    """(#187) No button for a plan not (or no longer) the ID's stopped one; the check that judges it pushes one."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.stopped = stopped
+    with caplog.at_level(logging.INFO):
+        asyncio.run(getattr(watchdog, push)(47, "Test4"))
+    watchdog._hass.services.async_call.assert_not_called()
+    assert "function plan 47 (Test4) not sent" in caplog.text
+    assert watchdog._push_locks == {}
+
+
+def test_a_send_cancelled_while_waiting_for_its_tag_leaves_the_lock_usable(ir: MagicMock) -> None:
+    """(local review, #187) The waiter's count is dropped on cancel; the holder's send and later ones go out."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    tag = watchdog._push_tag(47)
+
+    async def run() -> list[int]:
+        release = asyncio.Event()
+
+        async def call(*_args: Any, **_kwargs: Any) -> None:
+            await release.wait()
+
+        watchdog._hass.services.async_call.side_effect = call
+        holder = asyncio.create_task(watchdog.async_dismiss_push(47))
+        await asyncio.sleep(0)
+        waiter = asyncio.create_task(watchdog.async_dismiss_push(47))
+        await asyncio.sleep(0)
+        users = [watchdog._push_locks[tag][1]]
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        users.append(watchdog._push_locks[tag][1])
+        release.set()
+        await holder
+        users.append(len(watchdog._push_locks))
+        await watchdog.async_dismiss_push(47)
+        return users
+
+    assert asyncio.run(run()) == [2, 1, 0]
+    assert len(_pushes(watchdog)) == 2
+    assert watchdog._push_locks == {}
 
 
 def test_a_hanging_notify_service_counts_as_failed(ir: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
