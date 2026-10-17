@@ -20,6 +20,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
+from enum import StrEnum
 import hashlib
 import logging
 import re
@@ -185,7 +186,7 @@ _VANISHED_ID_PATTERN = r"(\d+)_[0-9a-f]{16}"
 _PUSH_LOCKS: dict[str, tuple[asyncio.Lock, int]] = {}
 # Plan push tags whose last push delivered carries buttons (an alarm, a start reply). Module-wide like _PUSH_LOCKS:
 # a reloaded entry's watchdog has no verdict of its own that would take such a push off (one delivered before the
-# reload, or still on its way), so its checks clear the ones of plans they see running.
+# reload, or still on its way), so its checks clear the ones of plans they see running or no longer watch.
 _ACTIONABLE_TAGS: set[str] = set()
 
 
@@ -308,6 +309,22 @@ def newly_stopped_plans(previous: Mapping[int, str], stopped: Mapping[int, str])
     Only a bare-ID pick keeps an ID watched across a name change (see _watched_user_plan_names).
     """
     return sorted(fub_id for fub_id, name in stopped.items() if previous.get(fub_id) != name)
+
+
+class _VanishedGuard(StrEnum):
+    """What a deleted plan's push (token) is judged by again once its tag's lock is held (see _no_longer_due)."""
+
+    NONE = "none"
+    # Not once the plan's "restored" push went out: it would replace that confirmation.
+    UNLESS_RESTORED = "unless_restored"
+    # As UNLESS_RESTORED, and only while the plan still is vanished (a reply offering its Restore).
+    WHILE_VANISHED = "while_vanished"
+    # Not once a check ran (a reply before the first check): a listed plan got that check's alarm, same buttons;
+    # one not listed is back or unwatched, its buttons would be turned down.
+    WHILE_PENDING = "while_pending"
+    # Not once a check dropped the plan from vanished and listed it again (a "restored" push: a new episode's
+    # alarm holds the tag).
+    UNLESS_VANISHED_AGAIN = "unless_vanished_again"
 
 
 class ManagedPlanWatchdog:
@@ -449,22 +466,28 @@ class ManagedPlanWatchdog:
         entry's watchdog sends under the same tags (shared lock: a send already on its way arrives first), so
         a clear of this one queued behind its alarm would take that alarm off the phone.
         One on its way arrives still: if it has buttons, the reloaded watchdog takes it off for a plan it sees
-        running (see _maybe_actionable).
+        running or no longer watches (see _maybe_actionable).
         """
         self._closed = True
 
     def _maybe_actionable(self, states: Mapping[int, bool | None]) -> set[int]:
-        """The plans running now whose tag may still show a push with buttons (see _ACTIONABLE_TAGS).
+        """The plans running now whose tag may still show a push with buttons (see _ACTIONABLE_TAGS), and the plans
+        no longer watched whose tag may (e.g. unpicked, then reloaded: no verdict of this watchdog clears it).
 
         Its last push delivered has them, or a push under it is on its way (one of an unloaded entry's watchdog
         is judged only once it arrived). Judged again under the tag's lock (see _async_clear_push): the clear then
         waits for that push.
         """
-        return {
+        running = {
             fub_id
             for fub_id, state in states.items()
             if state and ((tag := self._push_tag(fub_id)) in self._actionable_tags or tag in self._push_locks)
         }
+        prefix = self._push_tag(0).removesuffix("0")
+        shown = {
+            tag.removeprefix(prefix) for tag in {*self._actionable_tags, *self._push_locks} if tag.startswith(prefix)
+        }
+        return running | ({int(fub_id) for fub_id in shown if fub_id.isdecimal() and fub_id.isascii()} - states.keys())
 
     def last_check_text(self) -> str:
         """The last check as local time in the HA language's format, "—" before the first one."""
@@ -804,8 +827,8 @@ class ManagedPlanWatchdog:
     ) -> None:
         """Alarm push for a newly stopped plan or one Auto-Start gave up on; the push of a plan running
         again (or deleted: its vanished push has a tag of its own) is replaced or removed, so is one with buttons
-        still shown for a plan running now that no verdict of this watchdog clears (maybe_actionable, e.g. after
-        a reload)."""
+        still shown for a plan running now, or no longer watched, that no verdict of this watchdog clears
+        (maybe_actionable, e.g. after a reload)."""
         alarms = dict.fromkeys(
             {*newly_stopped_plans(previous, stopped), *(set(newly_suspended) & stopped.keys())}, None
         )
@@ -877,9 +900,7 @@ class ManagedPlanWatchdog:
         alarm: bool = False,
         targets: frozenset[str] | None = None,
         while_stopped: bool = False,
-        unless_restored: bool = False,
-        while_vanished: bool = False,
-        unless_vanished_again: bool = False,
+        vanished_guard: _VanishedGuard = _VanishedGuard.NONE,
         unless_ignored: bool = False,
     ) -> frozenset[str]:
         """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
@@ -887,11 +908,9 @@ class ManagedPlanWatchdog:
         token: a deleted plan's push (vanished_plan_token), with its own tag and actions. targets: only
         to these notify targets (an alarm's retry, its failures logged quietly). while_stopped: only if the
         ID still holds this stopped plan (same name) once the tag's lock is held (a push asking to start it):
-        started since, its clear went out first; another plan under the ID has its own alarm. unless_restored: not
-        once the deleted plan's "restored" push went out, while_vanished: as unless_restored, and only while the plan
-        still is vanished (a reply offering its Restore), unless_vanished_again: not once a check dropped the plan
-        from vanished and listed it again (a "restored" push: a new episode's alarm holds the tag), unless_ignored:
-        not once the plan's stopped repair was ignored (all judged under the lock too). Returns the targets
+        started since, its clear went out first; another plan under the ID has its own alarm. vanished_guard: a
+        deleted plan's push judged by its vanished state (see _VanishedGuard), unless_ignored: not once the plan's
+        stopped repair was ignored (all judged under the lock too). Returns the targets
         that failed to take it (see _async_send). Where it was delivered it replaces (same tag) the
         plan's stopped or vanished alarm still waiting to be sent again, so those targets are dropped.
         """
@@ -918,9 +937,7 @@ class ManagedPlanWatchdog:
                 name,
                 token,
                 while_stopped=while_stopped,
-                unless_restored=unless_restored or while_vanished,
-                while_vanished=while_vanished,
-                unless_vanished_again=unless_vanished_again,
+                vanished_guard=vanished_guard,
                 unless_ignored=unless_ignored,
             )
             if reason is not None:
@@ -968,24 +985,28 @@ class ManagedPlanWatchdog:
         token: str | None,
         *,
         while_stopped: bool,
-        unless_restored: bool,
-        while_vanished: bool,
-        unless_vanished_again: bool,
+        vanished_guard: _VanishedGuard,
         unless_ignored: bool,
     ) -> str | None:
         """Why a push judged due before its tag's lock was free is no longer due (see _async_push); None if it is."""
         if while_stopped and (self.stopped or {}).get(fub_id) != name:
             return "the plan no longer is the ID's stopped one (started meanwhile, or the next check pushes its alarm)"
-        if unless_restored and token in self._restored_pushes:
-            return "it was restored meanwhile"
-        vanished = (fub_id, name) in (self.vanished or ())
-        if while_vanished and not vanished:
-            return "it is no longer vanished (back again, or unwatched)"
-        if unless_vanished_again and vanished and token not in self._restored_pushes:
-            # Marked while vanished (see async_push_restored); the mark gone, a check dropped the plan since.
-            return "it vanished again meanwhile"
         if unless_ignored and self._ignored_issue(fub_id) is not None:
             return "its repair was ignored meanwhile"
+        return None if token is None else self._vanished_push_not_due(token, vanished_guard)
+
+    def _vanished_push_not_due(self, token: str, guard: _VanishedGuard) -> str | None:
+        restored = token in self._restored_pushes
+        if restored and guard in (_VanishedGuard.UNLESS_RESTORED, _VanishedGuard.WHILE_VANISHED):
+            return "it was restored meanwhile"
+        if guard is _VanishedGuard.WHILE_PENDING and self.vanished is not None:
+            return "a check ran meanwhile (its alarm, or the plan is no longer vanished)"
+        listed = self.vanished_name(token) is not None
+        if guard is _VanishedGuard.WHILE_VANISHED and not listed:
+            return "it is no longer vanished (back again, or unwatched)"
+        if guard is _VanishedGuard.UNLESS_VANISHED_AGAIN and listed and not restored:
+            # Marked while vanished (see async_push_restored); the mark gone, a check dropped the plan since.
+            return "it vanished again meanwhile"
         return None
 
     async def async_sync_vanished(self, vanished: Collection[tuple[int, str]]) -> None:
@@ -1062,7 +1083,7 @@ class ManagedPlanWatchdog:
             targets=targets,
             # Restored while an earlier plan's push was sent: the alarm would replace that confirmation, and the
             # next sync keeps the "restored" push (see _restored_pushes), so the stale Restore button would stay.
-            unless_restored=True,
+            vanished_guard=_VanishedGuard.UNLESS_RESTORED,
         )
         if failed:
             self._vanished_push_unsent[token] = (time.monotonic(), failed)  # the answer's time: the gap starts here
@@ -1095,7 +1116,7 @@ class ManagedPlanWatchdog:
             token=vanished_plan_token(fub_id, name),
             actions=(ACTION_UNWATCH,),
             # Its buttons would replace the "restored" push sent meanwhile, or name a plan no longer vanished.
-            while_vanished=True,
+            vanished_guard=_VanishedGuard.WHILE_VANISHED,
         )
 
     async def async_push_restored(self, fub_id: int, name: str, *, complete: bool = True) -> None:
@@ -1114,7 +1135,7 @@ class ManagedPlanWatchdog:
         try:
             # Vanished again while it waited for the tag: it would replace that episode's alarm with its Restore.
             failed = await self._async_push(
-                fub_id, name, "restored_title", key, token=token, unless_vanished_again=True
+                fub_id, name, "restored_title", key, token=token, vanished_guard=_VanishedGuard.UNLESS_VANISHED_AGAIN
             )
         except BaseException:
             # Cancelled on its way: the alarm is cleared after all, as for a failed send.
@@ -1141,8 +1162,10 @@ class ManagedPlanWatchdog:
             self._vanished_push_unsent.pop(token, None)  # as for a failed send: the plan is back
         elif (fub_id, name) not in (self.vanished or ()):
             # A check dropped it meanwhile and kept the alarm for the confirmation: no await in a cancelled task.
+            # Queued once the task runs: a check listing the plan again meanwhile sent that episode's alarm first.
             self._hass.async_create_background_task(
-                self._async_clear_push(fub_id, token), name=f"{DOMAIN}_{self._server_id}_restored_push_cancelled"
+                self._async_clear_push(fub_id, token, unless_vanished=True),
+                name=f"{DOMAIN}_{self._server_id}_restored_push_cancelled",
             )
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
@@ -1155,7 +1178,7 @@ class ManagedPlanWatchdog:
             token=vanished_plan_token(fub_id, name),
             actions=_vanished_actions(fub_id, name),
             # Its buttons would replace the "restored" push sent meanwhile, or name a plan no longer vanished.
-            while_vanished=True,
+            vanished_guard=_VanishedGuard.WHILE_VANISHED,
         )
 
     async def async_push_check_pending(self, fub_id: int, token: str) -> None:
@@ -1167,8 +1190,13 @@ class ManagedPlanWatchdog:
             "check_pending",
             token=token,
             actions=(ACTION_RESTORE, ACTION_UNWATCH),
-            unless_restored=True,  # its buttons would replace the "restored" push sent meanwhile
+            # The first check ran while it waited: it would replace that check's alarm, or offer buttons the
+            # action handler turns down (see _VanishedGuard.WHILE_PENDING).
+            vanished_guard=_VanishedGuard.WHILE_PENDING,
         )
+        # Not listed by a check: the tapped push is stale (nothing else clears it, the first check had no previous).
+        if self.vanished is not None and self.vanished_name(token) is None and token not in self._restored_pushes:
+            await self._async_clear_push(fub_id, token, unless_vanished=True)
 
     async def async_dismiss_push(self, fub_id: int, name: str | None = None) -> None:
         """Remove a plan's push from the phones: its "stopped" one, or with name its deleted-plan one.
@@ -1184,21 +1212,33 @@ class ManagedPlanWatchdog:
             await self._async_clear_push(fub_id, vanished_plan_token(fub_id, name))
 
     async def async_dismiss_vanished_push(self, fub_id: int, token: str) -> None:
-        """Remove a deleted plan's push by the token its action carried (the name may be unknown by now)."""
-        await self._async_clear_push(fub_id, token)
+        """Remove a deleted plan's push by the token its action carried (the name may be unknown by now).
+
+        Not once a check listed the plan as vanished again before the clear was sent: that episode's alarm holds
+        the tag (this clear is queued from a background task, after the check found the push stale).
+        """
+        await self._async_clear_push(fub_id, token, unless_vanished=True)
 
     async def _async_clear_push(
-        self, fub_id: int, token: str | None = None, *, keep_stopped: bool = False, only_actionable: bool = False
+        self,
+        fub_id: int,
+        token: str | None = None,
+        *,
+        keep_stopped: bool = False,
+        only_actionable: bool = False,
+        unless_vanished: bool = False,
     ) -> None:
         """keep_stopped: not while the ID's plan is stopped, judged under the tag's lock, so a stop judged meanwhile
         sends its alarm after the clear arrived. only_actionable: only while the tag's last push delivered has
-        buttons, judged under the lock too: a push sent since replaced it."""
+        buttons, judged under the lock too: a push sent since replaced it. unless_vanished: not while the deleted
+        plan (token) is vanished, judged under the lock too: a check listed it again, its new alarm holds the tag."""
         tag = self._push_tag(fub_id, token)
         async with self._push_lock(tag):
             if (
                 self._closed
                 or (keep_stopped and fub_id in (self.stopped or {}))
                 or (only_actionable and tag not in self._actionable_tags)
+                or (unless_vanished and token is not None and self.vanished_name(token) is not None)
             ):
                 return
             # A companion-app command: any other notify service would deliver it as the text "clear_notification".

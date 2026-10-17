@@ -1271,7 +1271,8 @@ def test_a_deleted_plan_without_a_backup_identity_is_not_offered_restore(ir: Mag
 )
 def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[str]) -> None:
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
-    watchdog.vanished = set(TEST4)  # each follows a push action of the vanished plan
+    if method != "async_push_check_pending":  # that one only before the first check
+        watchdog.vanished = set(TEST4)  # each follows a push action of the vanished plan
     asyncio.run(getattr(watchdog, method)(*args))
     ((_domain, _service, data),) = _pushes(watchdog)
     assert [action["action"] for action in data["data"].get("actions", [])] == [
@@ -2231,3 +2232,99 @@ def test_a_restored_push_waiting_while_a_check_dropped_its_plan_is_still_sent(ir
     assert arrived == ["alarm", "alarm"]
     titles = [data["title"] for *_, data in _pushes(watchdog)]
     assert titles == [watchdog._texts()["no_backup_title"], watchdog._texts()["restored_title"]]
+
+
+def test_a_stale_vanished_push_clear_waiting_while_its_plan_vanished_again_is_not_sent(ir: MagicMock) -> None:
+    """(Sourcery #187) The tap found the push stale, a check then listed the plan again: its alarm holds the tag."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.vanished = set()
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog._async_push_vanished(47, "Test4", None),  # the new episode's alarm
+        lambda: watchdog.async_dismiss_vanished_push(47, TOKEN),
+        meanwhile=lambda: setattr(watchdog, "vanished", set(TEST4)),
+    )
+    assert arrived == ["alarm"]
+
+
+def test_a_pending_reply_waiting_while_the_first_check_found_its_plan_back_clears_the_push(ir: MagicMock) -> None:
+    """(Sourcery #187) Its Restore/Unwatch buttons would be turned down: the tapped push is taken off instead."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_dismiss_vanished_push(47, TOKEN),  # holds the token's tag
+        lambda: watchdog.async_push_check_pending(47, TOKEN),
+        meanwhile=lambda: watchdog.async_sync_vanished(set()),  # the first check: the plan is not missing
+    )
+    assert arrived == ["clear", "clear"]
+    assert all(data["message"] == "clear_notification" for *_, data in _pushes(watchdog))
+
+
+def test_a_check_clears_the_actionable_push_of_a_plan_no_longer_watched(ir: MagicMock) -> None:
+    """(Sourcery #187) Unpicked, then reloaded: no verdict of the new watchdog would take its button off."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    other_server = "comexio_cx10_plan_99"
+    plan_watchdog._ACTIONABLE_TAGS.update({watchdog._push_tag(99), other_server})
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    ((_domain, _service, clear),) = _pushes(watchdog)
+    assert (clear["message"], clear["data"]["tag"]) == ("clear_notification", watchdog._push_tag(99))
+    assert set(plan_watchdog._ACTIONABLE_TAGS) == {other_server}
+
+
+def test_a_pending_reply_waiting_while_the_first_check_alarmed_its_plan_is_not_sent(ir: MagicMock) -> None:
+    """(#187) The check's alarm has the same buttons: "plans not read yet" would replace it, no longer true."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog._async_push_vanished(47, "Test4", None),  # the first check's alarm
+        lambda: watchdog.async_push_check_pending(47, TOKEN),
+        meanwhile=lambda: setattr(watchdog, "vanished", set(TEST4)),
+    )
+    assert arrived == ["alarm"]
+
+
+def test_a_pending_reply_before_any_check_is_sent(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog._async_push_vanished(47, "Test4", None),
+        lambda: watchdog.async_push_check_pending(47, TOKEN),
+    )
+    assert arrived == ["alarm", "alarm"]
+    (*_, (_domain, _service, reply)) = _pushes(watchdog)
+    assert reply["title"] == watchdog._texts()["check_pending_title"]
+
+
+@pytest.mark.parametrize(
+    ("vanished", "token", "sent"),
+    [({(47, "Test4")}, TOKEN, False), (set(), TOKEN, True), ({(47, "Test4")}, None, True)],
+)
+def test_a_clear_unless_vanished_is_kept_only_while_the_deleted_plan_is_vanished(
+    ir: MagicMock, vanished: set[tuple[int, str]], token: str | None, sent: bool
+) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.vanished = vanished
+    asyncio.run(watchdog._async_clear_push(47, token, unless_vanished=True))
+    assert len(_pushes(watchdog)) == int(sent)
+
+
+def test_a_check_leaves_the_actionable_tags_of_watched_plans_and_deleted_plans_alone(ir: MagicMock) -> None:
+    """Only this server's plan tags of plans no longer watched are cleared; odd suffixes are skipped."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    prefix = watchdog._push_tag(0).removesuffix("0")
+    kept = {watchdog._push_tag(5, TOKEN), f"{prefix}abc", f"{prefix}²", watchdog._push_tag(42)}
+    plan_watchdog._ACTIONABLE_TAGS.update(kept)
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=False)))  # 42 watched, stopped: its alarm
+    assert all(data["message"] != "clear_notification" for *_, data in _pushes(watchdog))
+    assert kept <= plan_watchdog._ACTIONABLE_TAGS
+
+
+def test_a_push_on_its_way_for_a_plan_no_longer_watched_is_judged_for_a_clear(ir: MagicMock) -> None:
+    """Its tag joins the actionable ones only once it arrived: the clear waits for it under the tag's lock."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    tag = watchdog._push_tag(99)
+    plan_watchdog._PUSH_LOCKS[tag] = (asyncio.Lock(), 1)
+    try:
+        assert watchdog._maybe_actionable({34: True}) == {99}
+    finally:
+        del plan_watchdog._PUSH_LOCKS[tag]

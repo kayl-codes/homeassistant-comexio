@@ -86,7 +86,7 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   button (alarm, busy/failed reply, outdated replacement) only while the ID still holds that stopped plan, same name
   (`while_stopped=True`) — a stop or start judged while another send waited would else have its alarm taken off,
   a running plan get a button, or another plan under the ID a push naming the old one (#187). Flag a send under a
-  shared tag outside that lock, a start-button push without `while_stopped`, a deleted plan's push with buttons without `unless_restored`, and a condition judged before waiting
+  shared tag outside that lock, a start-button push without `while_stopped`, a deleted plan's push with buttons without a `vanished_guard` (`_VanishedGuard`: not once restored, nor once a check dropped the plan from vanished or listed it again), and a condition judged before waiting
   for the lock. The locks are dropped once no send holds or waits for them, and are module-wide (`_PUSH_LOCKS`):
   a reloaded entry's watchdog sends under the old one's tags while its sends may still be on their way, so a lock
   per instance does not serialize them. The unload closes the old watchdog once the platforms unloaded (`close()`,
@@ -94,7 +94,7 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   the unload's wait (the awaited restore's push would be lost) nor on a failed unload (alarms silenced for good). After an await, a closed watchdog applies
   nothing to the server's shared repairs: its snapshot predates the new one's. A plan's last push with buttons, delivered
   before the reload or still on its way, is the reloaded watchdog's to clear (`_ACTIONABLE_TAGS`, module-wide) for a
-  plan it sees running, judged under the lock (`only_actionable`). Flag a post-await write of a closed watchdog. Each notify call is bounded
+  plan it sees running or no longer watches (tags of its own server only), judged under the lock (`only_actionable`). Flag a post-await write of a closed watchdog. Each notify call is bounded
   (`FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC`), since a hanging one holds the lock. Clears and replacements reach the notify targets
   configured now; a phone whose target was removed is out of HA's reach and not a finding. A failed clear is logged
   and not retried: pressing the stale action again sends it again. A deleted plan's push has its own
