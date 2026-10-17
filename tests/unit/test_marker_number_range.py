@@ -9,7 +9,13 @@ from homeassistant.const import PERCENTAGE, UnitOfTemperature
 import pytest
 
 from custom_components.comexio.const import (
+    CONF_COVER_KEYWORDS,
+    CONF_KNX_PRERELEASE_CLEANUP_PENDING,
+    CONF_SCHEMA_IO,
+    CONFIG_ENTRY_MINOR_VERSION,
     DEFAULT_COVER_KEYWORDS,
+    LEGACY_DEFAULT_COVER_KEYWORDS,
+    LEGACY_DEFAULT_SCHEMA_IO,
     MARKER_INTERVAL_MAX_VALUE,
     MARKER_TEMPERATURE_MAX_VALUE,
     MARKER_TEMPERATURE_MIN_VALUE,
@@ -17,6 +23,7 @@ from custom_components.comexio.const import (
     WEBIO_MARKER_ANALOG_MAX,
     WEBIO_MARKER_ANALOG_MIN,
     is_temperature_marker_name,
+    migrate_entry_options,
 )
 from custom_components.comexio.number import ComexioKnxNumber, ComexioMarkerNumber
 from custom_components.comexio.sensor import ComexioKnxSensor, ComexioMarkerSensor
@@ -157,3 +164,51 @@ def test_knx_sensor_uses_the_heuristic_only_without_a_dpt(
 
     assert sensor.device_class == device_class
     assert sensor.native_unit_of_measurement == unit
+
+
+@pytest.mark.parametrize(
+    ("data", "options"),
+    [
+        ({}, {CONF_COVER_KEYWORDS: LEGACY_DEFAULT_COVER_KEYWORDS}),
+        ({CONF_COVER_KEYWORDS: "Rollo,jalousie , blind"}, {}),
+        ({}, {CONF_COVER_KEYWORDS: "rollo, jalousie, blind,"}),
+    ],
+)
+def test_migration_upgrades_a_saved_old_default_cover_list(data: dict[str, Any], options: dict[str, Any]) -> None:
+    """The options form stores the shown default, so a saved old default must not hide markise/awning."""
+    migrated = migrate_entry_options(3, data, options)
+
+    assert migrated[CONF_COVER_KEYWORDS] == DEFAULT_COVER_KEYWORDS
+
+
+@pytest.mark.parametrize(
+    ("data", "options"),
+    [
+        ({}, {}),
+        ({}, {CONF_COVER_KEYWORDS: "rollo, jalousie, blind, markise"}),
+        ({}, {CONF_COVER_KEYWORDS: "rollo"}),
+        ({}, {CONF_COVER_KEYWORDS: "blind, jalousie, rollo"}),
+        ({}, {CONF_COVER_KEYWORDS: ""}),
+        # Options win over data, like the coordinator reads them.
+        ({CONF_COVER_KEYWORDS: LEGACY_DEFAULT_COVER_KEYWORDS}, {CONF_COVER_KEYWORDS: "rollo, shutter"}),
+    ],
+)
+def test_migration_keeps_an_unsaved_or_customised_cover_list(data: dict[str, Any], options: dict[str, Any]) -> None:
+    assert migrate_entry_options(3, data, options) == options
+
+
+def test_migration_from_1_1_runs_every_step_including_cover_keywords() -> None:
+    migrated = migrate_entry_options(1, {}, {CONF_COVER_KEYWORDS: LEGACY_DEFAULT_COVER_KEYWORDS})
+
+    assert migrated == {
+        CONF_KNX_PRERELEASE_CLEANUP_PENDING: True,
+        CONF_SCHEMA_IO: LEGACY_DEFAULT_SCHEMA_IO,
+        CONF_COVER_KEYWORDS: DEFAULT_COVER_KEYWORDS,
+    }
+
+
+def test_migration_leaves_a_re_saved_old_list_alone_at_the_current_version() -> None:
+    """After 1.4 the old list can only be a deliberate choice."""
+    options = {CONF_COVER_KEYWORDS: LEGACY_DEFAULT_COVER_KEYWORDS}
+
+    assert migrate_entry_options(CONFIG_ENTRY_MINOR_VERSION, {}, options) == options

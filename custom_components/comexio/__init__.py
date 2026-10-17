@@ -635,6 +635,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool: 
     plain v0.9.x installs just clear it again.
     1.2 -> 1.3: pins the old IO naming schema into entries that never saved one, so the new
     DEFAULT_SCHEMA_IO only applies to new installs (see const.migrate_entry_options).
+    1.3 -> 1.4: an entry that saved the old default cover keywords gets the new default
+    (markise/awning added, #179); a customised list is kept.
     """
     if entry.version > 1:
         # Downgrade from a future major version: refuse rather than guess the layout.
