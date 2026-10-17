@@ -1450,3 +1450,16 @@ def test_a_confirmation_cancelled_after_the_check_kept_the_alarm_clears_it(ir: M
     asyncio.run(clear)
     assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
     assert watchdog._restored_pushes == set()
+
+
+def test_a_cancelled_confirmation_drops_the_alarm_retry_to_the_phone(ir: MagicMock) -> None:
+    """(Sourcery #189) A check still listing the plan vanished would send the old alarm again."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert set(watchdog._vanished_push_unsent) == {TOKEN}
+    watchdog._hass.services.async_call.side_effect = asyncio.CancelledError
+    restore = watchdog.async_push_restored(47, "Test4")
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(restore)
+    assert watchdog._vanished_push_unsent == {}

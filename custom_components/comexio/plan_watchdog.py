@@ -952,6 +952,7 @@ class ManagedPlanWatchdog:
     def _unmark_cancelled_restored(self, fub_id: int, name: str, token: str) -> None:
         if token in self._restored_pushes:
             self._restored_pushes.discard(token)  # the check dropping the plan from vanished clears it
+            self._vanished_push_unsent.pop(token, None)  # as for a failed send: the plan is back
         elif (fub_id, name) not in (self.vanished or ()):
             # A check dropped it meanwhile and kept the alarm for the confirmation: no await in a cancelled task.
             self._hass.async_create_background_task(
