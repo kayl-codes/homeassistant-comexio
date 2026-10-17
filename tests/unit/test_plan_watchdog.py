@@ -1282,8 +1282,9 @@ def test_a_check_that_raised_forgets_the_plans_it_auto_started(ir: MagicMock) ->
         raise RuntimeError("registry")
 
     watchdog._sync_issues = MagicMock(side_effect=fail_after_the_auto_start)
+    check = watchdog.async_check(MANAGED, _states(p34=False, p42=True))
     with pytest.raises(RuntimeError):
-        asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+        asyncio.run(check)
     assert watchdog._auto_started_in_check == set()
 
 
