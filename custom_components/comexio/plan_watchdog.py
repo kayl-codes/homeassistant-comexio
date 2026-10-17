@@ -878,6 +878,8 @@ class ManagedPlanWatchdog:
         targets: frozenset[str] | None = None,
         while_stopped: bool = False,
         unless_restored: bool = False,
+        while_vanished: bool = False,
+        unless_vanished_again: bool = False,
         unless_ignored: bool = False,
     ) -> frozenset[str]:
         """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
@@ -886,8 +888,10 @@ class ManagedPlanWatchdog:
         to these notify targets (an alarm's retry, its failures logged quietly). while_stopped: only if the
         ID still holds this stopped plan (same name) once the tag's lock is held (a push asking to start it):
         started since, its clear went out first; another plan under the ID has its own alarm. unless_restored: not
-        once the deleted plan's "restored" push went out, unless_ignored: not once the plan's stopped repair was
-        ignored (both judged under the lock too). Returns the targets
+        once the deleted plan's "restored" push went out, while_vanished: as unless_restored, and only while the plan
+        still is vanished (a reply offering its Restore), unless_vanished_again: not once a check dropped the plan
+        from vanished and listed it again (a "restored" push: a new episode's alarm holds the tag), unless_ignored:
+        not once the plan's stopped repair was ignored (all judged under the lock too). Returns the targets
         that failed to take it (see _async_send). Where it was delivered it replaces (same tag) the
         plan's stopped or vanished alarm still waiting to be sent again, so those targets are dropped.
         """
@@ -914,7 +918,9 @@ class ManagedPlanWatchdog:
                 name,
                 token,
                 while_stopped=while_stopped,
-                unless_restored=unless_restored,
+                unless_restored=unless_restored or while_vanished,
+                while_vanished=while_vanished,
+                unless_vanished_again=unless_vanished_again,
                 unless_ignored=unless_ignored,
             )
             if reason is not None:
@@ -963,6 +969,8 @@ class ManagedPlanWatchdog:
         *,
         while_stopped: bool,
         unless_restored: bool,
+        while_vanished: bool,
+        unless_vanished_again: bool,
         unless_ignored: bool,
     ) -> str | None:
         """Why a push judged due before its tag's lock was free is no longer due (see _async_push); None if it is."""
@@ -970,6 +978,12 @@ class ManagedPlanWatchdog:
             return "the plan no longer is the ID's stopped one (started meanwhile, or the next check pushes its alarm)"
         if unless_restored and token in self._restored_pushes:
             return "it was restored meanwhile"
+        vanished = (fub_id, name) in (self.vanished or ())
+        if while_vanished and not vanished:
+            return "it is no longer vanished (back again, or unwatched)"
+        if unless_vanished_again and vanished and token not in self._restored_pushes:
+            # Marked while vanished (see async_push_restored); the mark gone, a check dropped the plan since.
+            return "it vanished again meanwhile"
         if unless_ignored and self._ignored_issue(fub_id) is not None:
             return "its repair was ignored meanwhile"
         return None
@@ -1080,7 +1094,8 @@ class ManagedPlanWatchdog:
             "no_backup",
             token=vanished_plan_token(fub_id, name),
             actions=(ACTION_UNWATCH,),
-            unless_restored=True,  # its buttons would replace the "restored" push sent meanwhile
+            # Its buttons would replace the "restored" push sent meanwhile, or name a plan no longer vanished.
+            while_vanished=True,
         )
 
     async def async_push_restored(self, fub_id: int, name: str, *, complete: bool = True) -> None:
@@ -1097,7 +1112,10 @@ class ManagedPlanWatchdog:
             self._restored_pushes.add(token)
         key = "restored" if complete else "restored_partial"
         try:
-            failed = await self._async_push(fub_id, name, "restored_title", key, token=token)
+            # Vanished again while it waited for the tag: it would replace that episode's alarm with its Restore.
+            failed = await self._async_push(
+                fub_id, name, "restored_title", key, token=token, unless_vanished_again=True
+            )
         except BaseException:
             # Cancelled on its way: the alarm is cleared after all, as for a failed send.
             if marked:
@@ -1136,7 +1154,8 @@ class ManagedPlanWatchdog:
             "restore_failed",
             token=vanished_plan_token(fub_id, name),
             actions=_vanished_actions(fub_id, name),
-            unless_restored=True,  # its buttons would replace the "restored" push sent meanwhile
+            # Its buttons would replace the "restored" push sent meanwhile, or name a plan no longer vanished.
+            while_vanished=True,
         )
 
     async def async_push_check_pending(self, fub_id: int, token: str) -> None:

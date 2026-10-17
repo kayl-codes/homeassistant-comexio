@@ -1139,11 +1139,12 @@ def _arrivals_while_the_first_push_is_held(
     watchdog: ManagedPlanWatchdog,
     first: Callable[[], Awaitable[Any]],
     then: Callable[[], Awaitable[Any]],
-    meanwhile: Callable[[], None] = lambda: None,
+    meanwhile: Callable[[], Awaitable[Any] | None] = lambda: None,
 ) -> list[str]:
     """Runs first and holds its first push on its way; runs then, calls meanwhile, then lets the push arrive.
 
-    Returns the pushes in the order they arrived.
+    A coroutine meanwhile returns runs as its own task, up to its first wait for a tag. Returns the pushes in the
+    order they arrived.
     """
     arrived: list[str] = []
 
@@ -1162,9 +1163,13 @@ def _arrivals_while_the_first_push_is_held(
         then_task = asyncio.create_task(then())
         for _ in range(10):  # then runs up to its own push
             await asyncio.sleep(0)
-        meanwhile()
+        tasks = [first_task, then_task]
+        if (pending := meanwhile()) is not None:
+            tasks.append(asyncio.ensure_future(pending))
+            for _ in range(10):
+                await asyncio.sleep(0)
         release.set()
-        await asyncio.gather(first_task, then_task)
+        await asyncio.gather(*tasks)
 
     asyncio.run(run())
     return arrived
@@ -1197,6 +1202,10 @@ def test_a_plan_started_while_its_alarm_is_sent_has_the_alarm_cleared_after_it(i
         lambda: watchdog.async_plan_started(47),
     )
     assert arrived == ["alarm", "clear"]
+    (_d, _s, alarm), (_d2, _s2, clear) = _pushes(watchdog)
+    assert alarm["title"] == watchdog._texts()["stopped_title"]
+    assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Test4")
+    assert (clear["message"], clear["data"]["tag"]) == ("clear_notification", watchdog._push_tag(47))
 
 
 def test_an_outdated_replacement_a_target_failed_to_take_is_sent_again(ir: MagicMock, clock: list[float]) -> None:
@@ -1262,6 +1271,7 @@ def test_a_deleted_plan_without_a_backup_identity_is_not_offered_restore(ir: Mag
 )
 def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[str]) -> None:
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.vanished = set(TEST4)  # each follows a push action of the vanished plan
     asyncio.run(getattr(watchdog, method)(*args))
     ((_domain, _service, data),) = _pushes(watchdog)
     assert [action["action"] for action in data["data"].get("actions", [])] == [
@@ -1298,8 +1308,11 @@ def test_an_alarm_decided_before_its_plan_was_started_is_not_sent(ir: MagicMock)
         lambda: watchdog.async_plan_started(47),
     )
     assert arrived == ["clear", "alarm"]
-    assert [data["data"]["tag"] for *_, data in _pushes(watchdog) if data["message"] != "clear_notification"] == [
-        watchdog._push_tag(46)
+    assert [
+        (data["title" if "title" in data else "message"], data["data"]["tag"]) for *_, data in _pushes(watchdog)
+    ] == [
+        (watchdog._texts()["stopped_title"], watchdog._push_tag(46)),
+        ("clear_notification", watchdog._push_tag(47)),
     ]
 
 
@@ -1778,6 +1791,8 @@ def test_an_undelivered_push_leaves_the_actionable_push_to_be_cleared(ir: MagicM
     plan_watchdog._ACTIONABLE_TAGS.add(tag)
     watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
     asyncio.run(watchdog.async_plan_started(42, confirm=True))
+    ((_domain, _service, data),) = _pushes(watchdog)  # attempted, and failed
+    assert (data["title"], data["data"]["tag"]) == (watchdog._texts()["started_title"], tag)
     assert tag in plan_watchdog._ACTIONABLE_TAGS
 
 
@@ -1802,6 +1817,9 @@ def test_an_alarm_delivered_nowhere_after_the_unload_is_not_kept_actionable(ir: 
 
     old._hass.services.async_call.side_effect = call
     asyncio.run(old._async_push_stopped(42, "HA - TRIGGER", None))
+    ((_domain, _service, alarm),) = _pushes(old)  # attempted, and failed
+    assert alarm["data"]["tag"] == old._push_tag(42)
+    assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 42, "HA - TRIGGER")
     assert not plan_watchdog._ACTIONABLE_TAGS
 
 
@@ -2153,3 +2171,63 @@ def test_a_cancelled_confirmation_drops_the_alarm_retry_to_the_phone(ir: MagicMo
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(restore)
     assert watchdog._vanished_push_unsent == {}
+
+
+@pytest.mark.parametrize("push", ["async_push_restore_failed", "async_push_no_backup"])
+def test_a_restore_reply_waiting_while_a_check_dropped_its_plan_is_not_sent(
+    ir: MagicMock, push: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery #187) The check took the "restored" mark along: the reply's buttons would replace the confirmation."""
+    caplog.set_level(logging.INFO)
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.vanished = set(TEST4)
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_push_restored(47, "Test4"),
+        lambda: getattr(watchdog, push)(47, "Test4"),
+        meanwhile=lambda: watchdog.async_sync_vanished(set()),  # Comexio lists the plan again
+    )
+    assert arrived == ["alarm"]
+    ((_domain, _service, confirmation),) = _pushes(watchdog)
+    assert confirmation["title"] == watchdog._texts()["restored_title"]
+    assert "not sent: it is no longer vanished" in caplog.text
+
+
+def test_a_restored_push_waiting_while_its_plan_vanished_again_is_not_sent(
+    ir: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery #189) A new episode: the confirmation would replace its alarm, queued behind it, for a moment."""
+    caplog.set_level(logging.INFO)
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.vanished = set(TEST4)
+
+    async def back_and_vanished_again() -> None:
+        await watchdog.async_sync_vanished(set())
+        await watchdog.async_sync_vanished(TEST4)
+
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_push_no_backup(47, "Test4"),
+        lambda: watchdog.async_push_restored(47, "Test4"),
+        meanwhile=back_and_vanished_again,
+    )
+    assert arrived == ["alarm", "alarm"]  # the "no backup" reply, then the new alarm
+    titles = [data["title"] for *_, data in _pushes(watchdog)]
+    assert titles == [watchdog._texts()["no_backup_title"], watchdog._texts()["vanished_title"]]
+    assert watchdog._restored_pushes == set()
+    assert "not sent: it vanished again meanwhile" in caplog.text
+
+
+def test_a_restored_push_waiting_while_a_check_dropped_its_plan_is_still_sent(ir: MagicMock) -> None:
+    """Mark gone but the plan not listed again: the same episode, its confirmation is due."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.vanished = set(TEST4)
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_push_no_backup(47, "Test4"),
+        lambda: watchdog.async_push_restored(47, "Test4"),
+        meanwhile=lambda: watchdog.async_sync_vanished(set()),  # keeps the push for the confirmation
+    )
+    assert arrived == ["alarm", "alarm"]
+    titles = [data["title"] for *_, data in _pushes(watchdog)]
+    assert titles == [watchdog._texts()["no_backup_title"], watchdog._texts()["restored_title"]]
