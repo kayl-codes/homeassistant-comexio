@@ -4,7 +4,7 @@
   "after_dependencies": ["recorder"],
   "codeowners": ["@kayl-codes"],
   "config_flow": true,
-  "dependencies": ["webhook"],
+  "dependencies": ["network", "webhook"],
   "documentation": "https://github.com/kayl-codes/homeassistant-comexio",
   "integration_type": "hub",
   "iot_class": "local_push",
