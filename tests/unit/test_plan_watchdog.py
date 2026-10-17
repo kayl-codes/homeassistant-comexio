@@ -1140,11 +1140,14 @@ def _arrivals_while_the_first_push_is_held(
     first: Callable[[], Awaitable[Any]],
     then: Callable[[], Awaitable[Any]],
     meanwhile: Callable[[], Awaitable[Any] | None] = lambda: None,
+    *,
+    waiting_at: str | None = None,
 ) -> list[str]:
     """Runs first and holds its first push on its way; runs then, calls meanwhile, then lets the push arrive.
 
-    A coroutine meanwhile returns runs as its own task, up to its first wait for a tag. Returns the pushes in the
-    order they arrived.
+    A coroutine meanwhile returns runs as its own task, up to its first wait for a tag. waiting_at: asserts that
+    then waits for this tag's lock before the push arrives (a then returning early would pass unnoticed). Returns
+    the pushes in the order they arrived.
     """
     arrived: list[str] = []
 
@@ -1163,6 +1166,8 @@ def _arrivals_while_the_first_push_is_held(
         then_task = asyncio.create_task(then())
         for _ in range(10):  # then runs up to its own push
             await asyncio.sleep(0)
+        if waiting_at is not None:
+            assert plan_watchdog._PUSH_LOCKS[waiting_at][1] == 2  # first holds the lock, then waits for it
         tasks = [first_task, then_task]
         if (pending := meanwhile()) is not None:
             tasks.append(asyncio.ensure_future(pending))
@@ -1768,6 +1773,7 @@ def test_a_confirmation_on_its_way_replaces_an_actionable_push_and_is_not_cleare
         watchdog,
         lambda: watchdog.async_plan_started(42, confirm=True),
         lambda: watchdog.async_check(MANAGED, _states(p34=True, p42=True)),
+        waiting_at=watchdog._push_tag(42),
     )
     assert arrived == ["alarm"]  # the "runs again" push only
     assert not plan_watchdog._ACTIONABLE_TAGS
@@ -1870,7 +1876,10 @@ def test_a_restore_reply_waiting_while_the_plan_was_restored_is_not_sent(
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
     watchdog.vanished = {(47, "Test4")}
     arrived = _arrivals_while_the_first_push_is_held(
-        watchdog, lambda: watchdog.async_push_restored(47, "Test4"), lambda: reply(watchdog)
+        watchdog,
+        lambda: watchdog.async_push_restored(47, "Test4"),
+        lambda: reply(watchdog),
+        waiting_at=watchdog._push_tag(47, vanished_plan_token(47, "Test4")),
     )
     assert arrived == ["alarm"]  # the "restored" push only
     assert [data["title"] for _, _, data in _pushes(watchdog)] == [plan_watchdog.PUSH_TEXTS["de"]["restored_title"]]
