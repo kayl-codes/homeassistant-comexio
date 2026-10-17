@@ -919,8 +919,10 @@ class ManagedPlanWatchdog:
             # notify service failing has no button to keep, nor would a clear reach it.
             if token in self._restored_pushes:
                 self._restored_pushes.discard(token)  # the check dropping the plan from vanished clears it
-            else:
-                await self._async_clear_push(fub_id, token)  # a check dropped it meanwhile and kept the push
+            elif (fub_id, name) not in (self.vanished or ()):
+                # A check dropped it meanwhile and kept the push. Vanished again since: the same tag holds that
+                # episode's new alarm, which stays.
+                await self._async_clear_push(fub_id, token)
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
         """Tell the phone a Restore from its push failed or was refused, with both actions again."""

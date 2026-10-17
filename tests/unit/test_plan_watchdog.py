@@ -1276,7 +1276,31 @@ def test_a_check_that_raised_forgets_the_plans_it_auto_started(ir: MagicMock) ->
     """A later tap is the user's start again, as after a check that returned."""
     watchdog, _ = _watchdog([True])
     watchdog.auto_restart = True
-    watchdog._sync_issues = MagicMock(side_effect=RuntimeError("registry"))
+
+    def fail_after_the_auto_start(*_args: Any) -> None:
+        assert watchdog._auto_started_in_check == {34}  # the check did auto-start it
+        raise RuntimeError("registry")
+
+    watchdog._sync_issues = MagicMock(side_effect=fail_after_the_auto_start)
     with pytest.raises(RuntimeError):
         asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
     assert watchdog._auto_started_in_check == set()
+
+
+def test_a_failed_restored_push_leaves_the_alarm_of_a_plan_vanished_again_meanwhile(ir: MagicMock) -> None:
+    """(Sourcery #189) Back and vanished again while the confirmation was sent: the same tag holds the new
+    alarm, which keeps its Restore action."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+
+    async def back_and_vanished_again_then_fail(_domain: str, _service: str, data: dict[str, Any], **_kw: Any) -> None:
+        if data["title"] == watchdog._texts()["restored_title"]:
+            await watchdog.async_sync_vanished(set())
+            await watchdog.async_sync_vanished(TEST4)
+            raise HomeAssistantError("down")
+
+    watchdog._hass.services.async_call.side_effect = back_and_vanished_again_then_fail
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    (*_, (_domain, _service, last)) = _pushes(watchdog)
+    assert last["message"] != "clear_notification"
+    assert last["data"]["actions"][0]["action"] == plan_action_id(ACTION_RESTORE, SERVER_ID, TOKEN)
