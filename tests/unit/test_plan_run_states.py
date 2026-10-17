@@ -2175,3 +2175,18 @@ def test_no_plan_starts_while_the_entry_unloads(api: ComexioAPI) -> None:
     """(Sourcery) The API session closes under a start begun after the unload's wait."""
     coordinator = _coordinator(api, unloading=True)
     assert coordinator.managed_plan_start_blocked is True
+
+
+def test_a_plan_restored_while_the_check_awaits_is_not_synced_as_vanished(api: ComexioAPI) -> None:
+    """(#187 review) Restored under a new ID during the check's auto-starts/pushes: no repair or alarm again."""
+    api.client.get_function_plan_run_states = AsyncMock(return_value={19: True, 43: True})
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+
+    async def restored_meanwhile(*_args: Any, **_kwargs: Any) -> bool:
+        options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = ["43:Test4"]  # the restore moved the pick
+        return False
+
+    coordinator.plan_watchdog.async_check.side_effect = restored_meanwhile
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with(set())

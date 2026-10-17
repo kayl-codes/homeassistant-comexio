@@ -4472,7 +4472,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_stop_unverified = {
             fub_id: seen for fub_id, seen in self._plan_stop_unverified.items() if fub_id in watched
         }
-        vanished = await self._async_vanished_user_plans_named()
         # In an outage and the boot grace after it a plan seen running still clears its verdict,
         # but no plan is judged stopped anew or started: a booting Comexio starts its plans itself.
         stopped_changed = await self.plan_watchdog.async_check(
@@ -4483,6 +4482,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # with the first check after the edit.
             auto_start=run_states_read and not in_grace and not self.plan_edits_running,
         )
+        # Read after the check's awaits (auto-starts, pushes): a vanished plan restored meanwhile is no longer
+        # vanished, so its repair is not raised again nor its alarm sent again. No await between it and the sync.
+        vanished = await self._async_vanished_user_plans_named()
         await self.plan_watchdog.async_sync_vanished(vanished)
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
