@@ -87,7 +87,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   (`while_stopped=True`) — a stop or start judged while another send waited would else have its alarm taken off,
   a running plan get a button, or another plan under the ID a push naming the old one (#187). Flag a send under a
   shared tag outside that lock, a start-button push without `while_stopped`, and a condition judged before waiting
-  for the lock. The locks are dropped once no send holds or waits for them. Each notify call is bounded
+  for the lock. The locks are dropped once no send holds or waits for them, and are module-wide (`_PUSH_LOCKS`):
+  a reloaded entry's watchdog sends under the old one's tags while its sends may still be on their way, so a lock
+  per instance does not serialize them. Each notify call is bounded
   (`FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC`), since a hanging one holds the lock. Clears and replacements reach the notify targets
   configured now; a phone whose target was removed is out of HA's reach and not a finding. A failed clear is logged
   and not retried: pressing the stale action again sends it again. A deleted plan's push has its own
@@ -139,6 +141,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   saves it with `async_update_entry` has no `await` in between — another save during that await (options flow,
   watchdog, sync) is otherwise overwritten with the stale copy. Await follow-ups (push dismissal, notifications)
   after the save. Flag an `await` between the read of `entry.options` and its write (#181).
+- **No stale write-back after an await:** the same holds for state judged before an await and assigned after it.
+  The watchdog's check judges the stopped plans, awaits Auto-Start, then writes them back — a plan started from its
+  repair or push meanwhile is left out (`_started_in_check`), else its repair and alarm come back while it runs.
+  Flag state read before an `await` and assigned back after it without merging what changed meanwhile (#187).
 - **Unload waits for running work:** `async_unload_entry` calls `coordinator.async_wait_before_unload()` before it
   unloads the platforms; the wait is bounded and polls — it never queues on a lock — for every operation that
   writes Comexio, the options or the backup store: a restore, a sync, a vanished-plan restore, a plan edit, a
