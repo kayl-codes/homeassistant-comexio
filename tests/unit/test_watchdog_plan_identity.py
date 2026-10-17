@@ -166,6 +166,7 @@ def test_every_stopped_repair_action_is_translated(file_name: str) -> None:
     path = Path(repairs.__file__).parent / "translations" / file_name
     options = json.loads(path.read_text(encoding="utf-8"))["selector"]["function_plan_stopped_action"]["options"]
     assert set(options) == set(_stopped_repair_actions(user_plan=True))
+    assert all(isinstance(label, str) and label.strip() for label in options.values())
 
 
 @pytest.mark.parametrize("running", [False, True], ids=["stopped", "running-meanwhile"])
