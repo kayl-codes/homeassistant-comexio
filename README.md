@@ -182,7 +182,7 @@ The integration can manage Comexio **function plans** directly from Home Assista
 
 HA's markers, IOs, KNX objects and triggers only work while the function plans the integration manages run in Comexio. Their run state is read about every 60 s (more often while the plan card is open), so a plan stopped in Comexio Studio is noticed without a webhook. When a watched plan does not run:
 
-- a **repair** offers to start it right away, and the **Managed Plans Problem** sensor turns on;
+- a **repair** offers to start it right away, and the **Managed Plans Problem** sensor turns on. The repair can also **ignore** the stop: repair and push go away while the plan stays watched (the sensor stays on), and its next stop after it has run again is reported anew. For a user plan it can also **stop watching** it;
 - the notify services set in the options (**Function plan watchdog: push to**) get a push with a **Start plan** button, which disappears again once the plan runs;
 - with **Plan Auto-Start (HA plans)** on (the default), the integration starts it again on its own. If the start is refused, or the plan stops again within 10 minutes, that counts as a failed attempt: after **2 failed attempts** (a refused start is retried at most once a minute) Auto-Start gives up on the plan — most likely the plan itself has an error — and raises a **Check function plan** repair plus an alarm push. The repair shows when the last attempt failed and when the watchdog last checked. Auto-Start resumes for that plan once it is seen running again (e.g. after you fixed it and started it from the repair or the push).
 
@@ -414,7 +414,7 @@ Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwa
 
 Merker, IOs, KNX-Objekte und Trigger von HA funktionieren nur, solange die von der Integration verwalteten Logikpläne in Comexio laufen. Ihr Laufzustand wird etwa alle 60 s gelesen (bei offener Plan-Karte öfter), sodass auch ein in Comexio Studio gestoppter Plan ohne Webhook auffällt. Läuft ein überwachter Plan nicht:
 
-- bietet eine **Reparaturmeldung** an, ihn sofort zu starten, und der Sensor **Problem verwaltete Pläne** geht an;
+- bietet eine **Reparaturmeldung** an, ihn sofort zu starten, und der Sensor **Problem verwaltete Pläne** geht an. Die Reparaturmeldung kann den Stopp auch **ignorieren**: Meldung und Push verschwinden, der Plan bleibt überwacht (der Sensor bleibt an), und sein nächster Stopp, nachdem er wieder lief, wird neu gemeldet. Bei einem User-Plan kann sie ihn auch **aus der Überwachung nehmen**;
 - die in den Optionen eingetragenen Benachrichtigungsdienste (**Logikplan-Watchdog: Push an**) bekommen eine Push-Meldung mit einem Knopf **Plan starten**, die wieder verschwindet, sobald der Plan läuft;
 - ist **Plan Auto-Start (HA-Pläne)** an (Standard), startet die Integration ihn selbst wieder. Wird der Start abgelehnt oder stoppt der Plan innerhalb von 10 Minuten erneut, zählt das als Fehlversuch: Nach **2 Fehlversuchen** (ein abgelehnter Start wird höchstens einmal pro Minute wiederholt) gibt Auto-Start den Plan auf — vermutlich steckt ein Fehler im Plan — und meldet per Reparaturmeldung **Logikplan prüfen** plus Alarm-Push. Die Reparaturmeldung zeigt, wann der letzte Fehlversuch war und wann der Watchdog zuletzt geprüft hat. Auto-Start greift für den Plan erst wieder, wenn er einmal als laufend erkannt wurde (z. B. nachdem du ihn korrigiert und über die Reparaturmeldung oder den Push gestartet hast).
 

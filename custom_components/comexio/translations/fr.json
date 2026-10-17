@@ -107,6 +107,13 @@
         "enable": "🔁 Réactiver l'import"
       }
     },
+    "function_plan_stopped_action": {
+      "options": {
+        "start": "▶️ Démarrer le plan maintenant",
+        "ignore": "🔕 Ignorer (jusqu'à la prochaine exécution du plan)",
+        "unwatch": "🚫 Ne plus surveiller ce plan"
+      }
+    },
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Restaurer depuis la sauvegarde la plus récente",
@@ -399,7 +406,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Plan de fonctions géré arrêté",
-            "description": "Le plan de fonctions **{plan_name}** (ID {fub_id}) est géré par Home Assistant, mais il ne s'exécute pas dans Comexio. Les marqueurs, IO, objets KNX ou déclencheurs qu'il relie n'atteignent plus Home Assistant tant qu'il est arrêté.\n\nDernière vérification : {last_check}.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans HA)** de l'appareil des plans de fonctions."
+            "description": "Le plan de fonctions **{plan_name}** (ID {fub_id}) est géré par Home Assistant, mais il ne s'exécute pas dans Comexio. Les marqueurs, IO, objets KNX ou déclencheurs qu'il relie n'atteignent plus Home Assistant tant qu'il est arrêté.\n\nDernière vérification : {last_check}.\n\n**Démarrer le plan** le démarre maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans HA)** de l'appareil des plans de fonctions.\n**Ignorer** masque cette réparation et sa notification push ; le plan reste surveillé, et son prochain arrêt après une nouvelle exécution les signale à nouveau."
           }
         },
         "abort": {
@@ -407,7 +414,9 @@
           "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
           "plan_not_watched": "Le plan {plan_name} (ID {fub_id}) n'est plus surveillé (désélectionné, supprimé ou son ID réattribué). Rien n'a été démarré.",
           "busy": "Une synchronisation, une restauration, une interrogation, une modification de plan de fonctions ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
-          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
+          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte.",
+          "ignored": "La réparation de {plan_name} (ID {fub_id}) est ignorée et sa notification push a été supprimée. Le plan reste surveillé : une fois qu'il s'est de nouveau exécuté, son prochain arrêt crée une nouvelle réparation. Les réparations ignorées s'affichent via le menu (⋮) de la page Réparations.",
+          "still_watched": "Le plan {plan_name} (ID {fub_id}) reste surveillé : sa sélection dans les options ne nomme que l'ID, qu'un autre plan détient désormais. Retirez la sélection dans les options de l'intégration pour ne plus le surveiller."
         }
       }
     },
@@ -417,7 +426,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Plan utilisateur surveillé arrêté",
-            "description": "Le plan utilisateur **{plan_name}** (ID {fub_id}) est surveillé par le watchdog des plans de fonctions, mais il ne s'exécute pas dans Comexio.\n\nDernière vérification : {last_check}.\n\n**Valider** démarre le plan maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans utilisateur)** de l'appareil des plans de fonctions. Pour ne plus le surveiller, retirez-le des options de l'intégration."
+            "description": "Le plan utilisateur **{plan_name}** (ID {fub_id}) est surveillé par le watchdog des plans de fonctions, mais il ne s'exécute pas dans Comexio.\n\nDernière vérification : {last_check}.\n\n**Démarrer le plan** le démarre maintenant. Pour que l'intégration démarre elle-même un tel plan, activez l'interrupteur **Démarrage auto des plans (plans utilisateur)** de l'appareil des plans de fonctions.\n**Ignorer** masque cette réparation et sa notification push ; le plan reste surveillé, et son prochain arrêt après une nouvelle exécution les signale à nouveau.\n**Ne plus surveiller** le retire des plans utilisateur surveillés."
           }
         },
         "abort": {
@@ -425,7 +434,9 @@
           "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
           "plan_not_watched": "Le plan {plan_name} (ID {fub_id}) n'est plus surveillé (désélectionné, supprimé ou son ID réattribué). Rien n'a été démarré.",
           "busy": "Une synchronisation, une restauration, une interrogation, une modification de plan de fonctions ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
-          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
+          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte.",
+          "ignored": "La réparation de {plan_name} (ID {fub_id}) est ignorée et sa notification push a été supprimée. Le plan reste surveillé : une fois qu'il s'est de nouveau exécuté, son prochain arrêt crée une nouvelle réparation. Les réparations ignorées s'affichent via le menu (⋮) de la page Réparations.",
+          "still_watched": "Le plan {plan_name} (ID {fub_id}) reste surveillé : sa sélection dans les options ne nomme que l'ID, qu'un autre plan détient désormais. Retirez la sélection dans les options de l'intégration pour ne plus le surveiller."
         }
       }
     },
@@ -435,7 +446,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Le plan de fonctions s'arrête sans cesse",
-            "description": "Plan Auto-Start a démarré le plan de fonctions **{plan_name}** (ID {fub_id}) {attempts} fois, mais à chaque fois le démarrage a été refusé ou le plan s'est de nouveau arrêté peu après. Le plan contient probablement une erreur ; Auto-Start cesse donc de réessayer pour ce plan.\n\nDernière tentative échouée : {gave_up_at}. Dernière vérification : {last_check}.\n\nVérifiez le plan dans Comexio Studio. Auto-Start reprend de lui-même dès que le plan est de nouveau détecté en cours d'exécution.\n\n**Valider** démarre le plan une fois maintenant."
+            "description": "Plan Auto-Start a démarré le plan de fonctions **{plan_name}** (ID {fub_id}) {attempts} fois, mais à chaque fois le démarrage a été refusé ou le plan s'est de nouveau arrêté peu après. Le plan contient probablement une erreur ; Auto-Start cesse donc de réessayer pour ce plan.\n\nDernière tentative échouée : {gave_up_at}. Dernière vérification : {last_check}.\n\nVérifiez le plan dans Comexio Studio. Auto-Start reprend de lui-même dès que le plan est de nouveau détecté en cours d'exécution.\n\n**Démarrer le plan** le démarre une fois maintenant. **Ignorer** masque cette réparation et sa notification push jusqu'à ce que le plan se soit de nouveau exécuté. Pour un plan utilisateur, **Ne plus surveiller** le retire des plans utilisateur surveillés."
           }
         },
         "abort": {
@@ -443,7 +454,9 @@
           "already_running": "Le plan {plan_name} (ID {fub_id}) s'exécute de nouveau. Rien n'a été modifié.",
           "plan_not_watched": "Le plan {plan_name} (ID {fub_id}) n'est plus surveillé (désélectionné, supprimé ou son ID réattribué). Rien n'a été démarré.",
           "busy": "Une synchronisation, une restauration, une interrogation, une modification de plan de fonctions ou le watchdog de charge du bus est en cours. Rien n'a été modifié — réessayez dans un instant.",
-          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte."
+          "start_failed": "Comexio n'a pas confirmé le démarrage de {plan_name} (ID {fub_id}). Vérifiez le plan dans Comexio Studio ; cette réparation reste ouverte.",
+          "ignored": "La réparation de {plan_name} (ID {fub_id}) est ignorée et sa notification push a été supprimée. Le plan reste surveillé : une fois qu'il s'est de nouveau exécuté, son prochain arrêt crée une nouvelle réparation. Les réparations ignorées s'affichent via le menu (⋮) de la page Réparations.",
+          "still_watched": "Le plan {plan_name} (ID {fub_id}) reste surveillé : sa sélection dans les options ne nomme que l'ID, qu'un autre plan détient désormais. Retirez la sélection dans les options de l'intégration pour ne plus le surveiller."
         }
       }
     },
