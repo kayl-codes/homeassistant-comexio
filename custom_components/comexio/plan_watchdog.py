@@ -387,6 +387,9 @@ class ManagedPlanWatchdog:
         try:
             self.last_check = dt_util.now()
             self._user_plans = frozenset(user_plans)
+            # Read once: a state changing during the auto-start await must not judge a plan twice differently.
+            states = {fub_id: run_state(fub_id) for fub_id in managed}
+            run_state = states.__getitem__
             previous = self.stopped or {}
             suspended_before = frozenset(self.suspended)
             self._track_running(managed, run_state)
@@ -408,7 +411,8 @@ class ManagedPlanWatchdog:
             # Also one whose Auto-Start answered after it was confirmed running: its "auto-started" push would
             # replace that confirmation.
             auto_started = {fub_id: name for fub_id, name in auto_started.items() if fub_id not in started}
-            self._sync_issues(stopped)
+            undecided = {fub_id for fub_id, state in states.items() if fub_id not in stopped and state is None}
+            self._sync_issues(stopped, undecided)
             changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
             await self._async_push_transitions(previous, stopped, auto_started, self.suspended - suspended_before)
@@ -431,6 +435,32 @@ class ManagedPlanWatchdog:
 
     def is_user_plan(self, fub_id: int) -> bool:
         return fub_id in self._user_plans
+
+    def _ignored_issue(self, fub_id: int) -> ir.IssueEntry | None:
+        """The plan's stopped repair if the user ignored it (HA's own ignore, kept across restarts)."""
+        issue = ir.async_get(self._hass).async_get_issue(DOMAIN, stopped_plan_issue_id(self._server_id, fub_id))
+        return issue if issue is not None and issue.dismissed_version is not None else None
+
+    async def async_ignore_stopped(self, fub_id: int) -> bool:
+        """Ignore a stopped plan's repair from its dialog: repair and alarm push go, the plan stays watched.
+
+        The checks keep the ignored repair hidden and send no alarm for it. The plan running again
+        deletes the repair and with it the ignore, so its next stop raises a repair and an alarm again;
+        Auto-Start giving up on it lifts the ignore too. False if the repair was cleared meanwhile.
+        """
+        issue_id = stopped_plan_issue_id(self._server_id, fub_id)
+        if ir.async_get(self._hass).async_get_issue(DOMAIN, issue_id) is None:
+            return False  # Cleared meanwhile (the plan ran again): nothing left to ignore.
+        ir.async_ignore_issue(self._hass, DOMAIN, issue_id, True)
+        self._stopped_push_unsent.pop(fub_id, None)
+        _LOGGER.info(
+            "[%s] Stopped function plan '%s' (ID %s): repair ignored, no alarm until it ran again",
+            self._server_id,
+            (self.stopped or {}).get(fub_id, str(fub_id)),
+            fub_id,
+        )
+        await self._async_clear_push(fub_id)
+        return True
 
     def _auto_start_enabled(self, fub_id: int) -> bool:
         return self.auto_restart_user if self.is_user_plan(fub_id) else self.auto_restart
@@ -657,9 +687,17 @@ class ManagedPlanWatchdog:
             notification_id=f"{DOMAIN}_{self._server_id}_plan_auto_start_{fub_id}",
         )
 
-    def _sync_issues(self, stopped: Mapping[int, str]) -> None:
-        """Raise a repair per stopped plan and close the ones of plans that run again."""
-        wanted: set[str] = set()
+    def _sync_issues(self, stopped: Mapping[int, str], undecided: Collection[int] = ()) -> None:
+        """Raise a repair per stopped plan and close the ones of plans that run again.
+
+        An ignored repair of a plan whose run state is unknown stays: after a restart no previous verdict
+        holds it, and closing it would drop the ignore before the plan was seen running again.
+        """
+        wanted = {
+            stopped_plan_issue_id(self._server_id, fub_id)
+            for fub_id in undecided
+            if self._ignored_issue(fub_id) is not None
+        }
         for fub_id, name in stopped.items():
             issue_id = stopped_plan_issue_id(self._server_id, fub_id)
             wanted.add(issue_id)
@@ -670,6 +708,8 @@ class ManagedPlanWatchdog:
             }
             if fub_id in self._gave_up_at:
                 details["gave_up_at"] = self._gave_up_at[fub_id]
+            if self._ignore_lapsed(fub_id, name):
+                ir.async_delete_issue(self._hass, DOMAIN, issue_id)
             ir.async_create_issue(
                 self._hass,
                 DOMAIN,
@@ -684,6 +724,21 @@ class ManagedPlanWatchdog:
         for issue_id in _own_issue_ids(self._hass, self._server_id):
             if issue_id not in wanted:
                 ir.async_delete_issue(self._hass, DOMAIN, issue_id)
+
+    def _ignore_lapsed(self, fub_id: int, name: str) -> bool:
+        """Whether the ignore of the ID's repair no longer holds for this stop: it is then raised afresh.
+
+        Ignored for the plan that held the ID before (renamed, or the ID reused), or Auto-Start gave up
+        on the plan since (a more severe report than the stop the user ignored). Placeholders and key are
+        not kept across a restart: an ignore read back from storage names neither, so it holds for the name
+        (the next check writes both back) but not for a give-up.
+        """
+        ignored = self._ignored_issue(fub_id)
+        if ignored is None:
+            return False
+        if (ignored.translation_placeholders or {}).get("plan_name", name) != name:
+            return True
+        return fub_id in self.suspended and ignored.translation_key != ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED
 
     def _issue_translation_key(self, fub_id: int) -> str:
         if fub_id in self.suspended:
@@ -703,7 +758,8 @@ class ManagedPlanWatchdog:
             {*newly_stopped_plans(previous, stopped), *(set(newly_suspended) & stopped.keys())}, None
         )
         for fub_id, targets in sorted((self._stopped_push_retries_due(stopped) | alarms).items()):
-            await self._async_push_stopped(fub_id, stopped[fub_id], targets)
+            if self._ignored_issue(fub_id) is None:  # An ignored repair alarms no more until the plan ran again.
+                await self._async_push_stopped(fub_id, stopped[fub_id], targets)
         # Re-checked per plan: one started from its push while an earlier push was sent has its push already.
         for fub_id, name in sorted(auto_started.items()):
             if fub_id not in self._started_in_check:
@@ -719,7 +775,16 @@ class ManagedPlanWatchdog:
         """
         kind = "suspended" if fub_id in self.suspended else "stopped"
         failed = await self._async_push(
-            fub_id, name, f"{kind}_title", kind, with_action=True, alarm=True, targets=targets, while_stopped=True
+            fub_id,
+            name,
+            f"{kind}_title",
+            kind,
+            with_action=True,
+            alarm=True,
+            targets=targets,
+            while_stopped=True,
+            # Ignored while it waited for the tag's lock: the ignore's clear went out first, the alarm would undo it.
+            unless_ignored=True,
         )
         if failed:
             # Else the plan's last push stays on that phone, maybe one naming the plan that held the ID before.
@@ -758,6 +823,7 @@ class ManagedPlanWatchdog:
         targets: frozenset[str] | None = None,
         while_stopped: bool = False,
         unless_restored: bool = False,
+        unless_ignored: bool = False,
     ) -> frozenset[str]:
         """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
 
@@ -765,7 +831,8 @@ class ManagedPlanWatchdog:
         to these notify targets (an alarm's retry, its failures logged quietly). while_stopped: only if the
         ID still holds this stopped plan (same name) once the tag's lock is held (a push asking to start it):
         started since, its clear went out first; another plan under the ID has its own alarm. unless_restored: not
-        once the deleted plan's "restored" push went out (judged under the lock too). Returns the targets
+        once the deleted plan's "restored" push went out, unless_ignored: not once the plan's stopped repair was
+        ignored (both judged under the lock too). Returns the targets
         that failed to take it (see _async_send). Where it was delivered it replaces (same tag) the
         plan's stopped or vanished alarm still waiting to be sent again, so those targets are dropped.
         """
@@ -787,23 +854,22 @@ class ManagedPlanWatchdog:
             if self._closed:
                 _LOGGER.debug("[%s] Watchdog push '%s' not sent: the entry unloads", self._server_id, message_key)
                 return frozenset()
-            if while_stopped and (self.stopped or {}).get(fub_id) != name:
+            reason = self._no_longer_due(
+                fub_id,
+                name,
+                token,
+                while_stopped=while_stopped,
+                unless_restored=unless_restored,
+                unless_ignored=unless_ignored,
+            )
+            if reason is not None:
                 _LOGGER.info(
-                    "[%s] Watchdog push '%s' for function plan %s (%s) not sent: the plan no longer is the ID's "
-                    "stopped one (started meanwhile, or the next check pushes its alarm)",
+                    "[%s] Watchdog push '%s' for function plan %s (%s) not sent: %s",
                     self._server_id,
                     message_key,
                     fub_id,
                     name,
-                )
-                return frozenset()
-            if unless_restored and token in self._restored_pushes:
-                _LOGGER.info(
-                    "[%s] Watchdog push '%s' for function plan %s (%s) not sent: it was restored meanwhile",
-                    self._server_id,
-                    message_key,
-                    fub_id,
-                    name,
+                    reason,
                 )
                 return frozenset()
             delivered, failed = await self._async_send(
@@ -826,6 +892,25 @@ class ManagedPlanWatchdog:
         else:
             _drop_delivered(self._vanished_push_unsent, token, done)
         return failed
+
+    def _no_longer_due(
+        self,
+        fub_id: int,
+        name: str,
+        token: str | None,
+        *,
+        while_stopped: bool,
+        unless_restored: bool,
+        unless_ignored: bool,
+    ) -> str | None:
+        """Why a push judged due before its tag's lock was free is no longer due (see _async_push); None if it is."""
+        if while_stopped and (self.stopped or {}).get(fub_id) != name:
+            return "the plan no longer is the ID's stopped one (started meanwhile, or the next check pushes its alarm)"
+        if unless_restored and token in self._restored_pushes:
+            return "it was restored meanwhile"
+        if unless_ignored and self._ignored_issue(fub_id) is not None:
+            return "its repair was ignored meanwhile"
+        return None
 
     async def async_sync_vanished(self, vanished: Collection[tuple[int, str]]) -> None:
         """Repair per watched user plan Comexio no longer has, by (fub_id, name); alarm push for a newly vanished one.

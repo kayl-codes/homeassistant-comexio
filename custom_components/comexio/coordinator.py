@@ -4655,6 +4655,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return managed[fub_id]
         return self._watched_user_plan_names().get(fub_id)
 
+    def is_watched_user_plan(self, fub_id: int) -> bool:
+        """Whether this plan is watched as a user plan now, read from the options: known before the first check."""
+        return fub_id in self._watched_user_plan_names()
+
     def is_watched_plan(self, fub_id: int) -> bool:
         """Whether the watchdog watches this plan right now (HA-managed or a picked user plan)."""
         return self.watched_plan_name(fub_id) is not None
@@ -5006,12 +5010,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_unwatch_user_plan(self, fub_id: int, name: str) -> bool:
         """Take a user plan off the watchdog's list (its pick by ID and name, or a bare-ID one); False if not picked.
 
-        A bare-ID pick stays once another plan holds the ID again: it watches that plan by now.
+        A bare-ID pick stays once another plan holds the ID again: it watches that plan by now. The plan
+        itself still holding its ID is no reuse: its bare-ID pick goes too.
         """
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         if not isinstance(raw_picks, list):
             return False
-        id_reused = str(fub_id) in self.api.fub_data
+        id_reused = str(fub_id) in self.api.fub_data and self.api.function_plan_name(fub_id) != name
         dropped = {(fub_id, name)} if id_reused else {(fub_id, name), (fub_id, None)}
         kept = [value for value in raw_picks if parse_watchdog_user_plan_pick(value) not in dropped]
         if len(kept) == len(raw_picks):

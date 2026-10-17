@@ -212,6 +212,7 @@ class _FakeCoordinator(SimpleNamespace):
     async_start_managed_plan = ComexioCoordinator.async_start_managed_plan
     watched_plan_name = ComexioCoordinator.watched_plan_name
     is_watched_plan = ComexioCoordinator.is_watched_plan
+    is_watched_user_plan = ComexioCoordinator.is_watched_user_plan
     watches_plan_raised_for = ComexioCoordinator.watches_plan_raised_for
     _has_bare_pick = ComexioCoordinator._has_bare_pick
     async_handle_notification_action = ComexioCoordinator.async_handle_notification_action
@@ -804,6 +805,8 @@ def test_poll_adds_the_watched_user_plans(api: ComexioAPI) -> None:
     managed, _, user_plans = coordinator.plan_watchdog.async_check.call_args.args
     assert managed == {19: "Test1", 50: "Rollo Logik"}
     assert set(user_plans) == {50}
+    # The stopped repair offers "Stop watching" for the user plan only, not for the HA-managed pick.
+    assert (coordinator.is_watched_user_plan(50), coordinator.is_watched_user_plan(19)) == (True, False)
 
 
 def test_a_mapped_id_comexio_gave_another_plan_is_not_watched(api: ComexioAPI) -> None:
@@ -825,6 +828,8 @@ def test_a_user_pick_holds_only_while_its_id_carries_its_name(api: ComexioAPI) -
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
     assert coordinator._watched_user_plan_names() == {19: "Test1"}
     assert coordinator.is_watched_plan(43) is False
+    # (Review) The stopped repair offers "Stop watching" by this, also before the watchdog's first check.
+    assert (coordinator.is_watched_user_plan(19), coordinator.is_watched_user_plan(43)) == (True, False)
 
 
 def test_a_reused_id_picked_as_user_plan_is_watched_as_one(api: ComexioAPI) -> None:
@@ -1799,6 +1804,18 @@ def test_stop_watching_drops_the_named_and_the_bare_pick(api: ComexioAPI) -> Non
     assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["19:Test1", "47:Other"]
     coordinator.config_entry.options = new_options
     assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is False
+
+
+def test_stop_watching_drops_the_bare_pick_of_a_plan_still_holding_its_id(api: ComexioAPI) -> None:
+    """(Sourcery) The plan itself at its ID is no reuse: "stop watching" must not keep its bare pick."""
+    api._fub_data["47"] = {"Id": 47, "Name": "Test4", "Active": 0}
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47", "19:Test1"]}
+    coordinator = _coordinator(
+        api, config_entry=SimpleNamespace(options=options), request_options_update_without_reload=MagicMock()
+    )
+    assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["19:Test1"]
 
 
 def test_stop_watching_keeps_a_bare_pick_whose_id_another_plan_holds_again(api: ComexioAPI) -> None:

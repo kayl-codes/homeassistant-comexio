@@ -107,6 +107,13 @@
         "enable": "🔁 Import wieder einschalten"
       }
     },
+    "function_plan_stopped_action": {
+      "options": {
+        "start": "▶️ Plan jetzt starten",
+        "ignore": "🔕 Ignorieren (bis der Plan wieder lief)",
+        "unwatch": "🚫 Aus der Überwachung nehmen"
+      }
+    },
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Aus dem neuesten Backup wiederherstellen",
@@ -399,7 +406,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Verwalteter Logikplan gestoppt",
-            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\nLetzte Prüfung: {last_check}.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (HA-Pläne)** am Logikplan-Gerät ein."
+            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\nLetzte Prüfung: {last_check}.\n\n**Plan starten** startet ihn jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (HA-Pläne)** am Logikplan-Gerät ein.\n**Ignorieren** blendet diese Reparaturmeldung und ihren Push aus; der Plan bleibt überwacht, und sein nächster Stopp, nachdem er wieder lief, meldet sich neu."
           }
         },
         "abort": {
@@ -407,7 +414,9 @@
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
           "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
           "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
-          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen.",
+          "ignored": "Die Reparaturmeldung zu {plan_name} (ID {fub_id}) wird ignoriert, ihr Push wurde entfernt. Der Plan bleibt überwacht: Sobald er wieder lief, meldet sein nächster Stopp eine neue Reparaturmeldung. Ignorierte Reparaturmeldungen zeigt das Menü (⋮) der Reparaturen-Seite.",
+          "still_watched": "Der Plan {plan_name} (ID {fub_id}) bleibt überwacht: Seine Auswahl in den Optionen nennt nur die ID, die jetzt ein anderer Plan hat. Entferne die Auswahl in den Optionen der Integration, um ihn nicht mehr zu überwachen."
         }
       }
     },
@@ -417,7 +426,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Überwachter Anwender-Logikplan gestoppt",
-            "description": "Der Anwender-Logikplan **{plan_name}** (ID {fub_id}) wird vom Logikplan-Watchdog überwacht, läuft in Comexio aber nicht.\n\nLetzte Prüfung: {last_check}.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (User-Pläne)** am Logikplan-Gerät ein. Um ihn nicht mehr zu überwachen, entferne ihn in den Optionen der Integration."
+            "description": "Der Anwender-Logikplan **{plan_name}** (ID {fub_id}) wird vom Logikplan-Watchdog überwacht, läuft in Comexio aber nicht.\n\nLetzte Prüfung: {last_check}.\n\n**Plan starten** startet ihn jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (User-Pläne)** am Logikplan-Gerät ein.\n**Ignorieren** blendet diese Reparaturmeldung und ihren Push aus; der Plan bleibt überwacht, und sein nächster Stopp, nachdem er wieder lief, meldet sich neu.\n**Aus der Überwachung nehmen** entfernt ihn aus den überwachten User-Plänen."
           }
         },
         "abort": {
@@ -425,7 +434,9 @@
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
           "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
           "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
-          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen.",
+          "ignored": "Die Reparaturmeldung zu {plan_name} (ID {fub_id}) wird ignoriert, ihr Push wurde entfernt. Der Plan bleibt überwacht: Sobald er wieder lief, meldet sein nächster Stopp eine neue Reparaturmeldung. Ignorierte Reparaturmeldungen zeigt das Menü (⋮) der Reparaturen-Seite.",
+          "still_watched": "Der Plan {plan_name} (ID {fub_id}) bleibt überwacht: Seine Auswahl in den Optionen nennt nur die ID, die jetzt ein anderer Plan hat. Entferne die Auswahl in den Optionen der Integration, um ihn nicht mehr zu überwachen."
         }
       }
     },
@@ -435,7 +446,7 @@
         "step": {
           "function_plan_stopped": {
             "title": "Logikplan stoppt immer wieder",
-            "description": "Plan Auto-Start hat den Logikplan **{plan_name}** (ID {fub_id}) {attempts}-mal gestartet, aber jedes Mal wurde der Start abgelehnt oder der Plan stoppte kurz danach wieder. Vermutlich enthält der Plan einen Fehler, deshalb versucht Auto-Start es für diesen Plan nicht weiter.\n\nLetzter Fehlversuch: {gave_up_at}. Letzte Prüfung: {last_check}.\n\nPrüfe den Plan im Comexio Studio. Auto-Start greift von selbst wieder, sobald der Plan wieder als laufend erkannt wird.\n\n**Absenden** startet den Plan jetzt einmalig."
+            "description": "Plan Auto-Start hat den Logikplan **{plan_name}** (ID {fub_id}) {attempts}-mal gestartet, aber jedes Mal wurde der Start abgelehnt oder der Plan stoppte kurz danach wieder. Vermutlich enthält der Plan einen Fehler, deshalb versucht Auto-Start es für diesen Plan nicht weiter.\n\nLetzter Fehlversuch: {gave_up_at}. Letzte Prüfung: {last_check}.\n\nPrüfe den Plan im Comexio Studio. Auto-Start greift von selbst wieder, sobald der Plan wieder als laufend erkannt wird.\n\n**Plan starten** startet ihn jetzt einmalig. **Ignorieren** blendet diese Reparaturmeldung und ihren Push aus, bis der Plan wieder lief. Bei einem User-Plan entfernt **Aus der Überwachung nehmen** ihn aus den überwachten User-Plänen."
           }
         },
         "abort": {
@@ -443,7 +454,9 @@
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
           "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
           "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
-          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen.",
+          "ignored": "Die Reparaturmeldung zu {plan_name} (ID {fub_id}) wird ignoriert, ihr Push wurde entfernt. Der Plan bleibt überwacht: Sobald er wieder lief, meldet sein nächster Stopp eine neue Reparaturmeldung. Ignorierte Reparaturmeldungen zeigt das Menü (⋮) der Reparaturen-Seite.",
+          "still_watched": "Der Plan {plan_name} (ID {fub_id}) bleibt überwacht: Seine Auswahl in den Optionen nennt nur die ID, die jetzt ein anderer Plan hat. Entferne die Auswahl in den Optionen der Integration, um ihn nicht mehr zu überwachen."
         }
       }
     },
