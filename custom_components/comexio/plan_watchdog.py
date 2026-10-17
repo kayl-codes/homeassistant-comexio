@@ -342,6 +342,9 @@ class ManagedPlanWatchdog:
         # Tokens (vanished_plan_token) of vanished plans whose push was replaced by "restored": the plan
         # dropping out of vanished keeps it.
         self._restored_pushes: set[str] = set()
+        # (fub_id, name) of the plans a running async_sync_vanished dropped from vanished but has not cleared yet:
+        # a "restored" push meanwhile is marked as for a vanished plan.
+        self._vanished_clearing: set[tuple[int, str]] = set()
         # token → (time.monotonic(), notify targets) of a vanished alarm push those targets failed to take:
         # sent again to them with a check at least FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC later; a target
         # any push for the plan reached since is dropped.
@@ -821,14 +824,21 @@ class ManagedPlanWatchdog:
         self._sync_vanished_issues(self.vanished)
         newly_vanished = self.vanished - previous
         retries = self._vanished_push_retries_due(self.vanished) | dict.fromkeys(newly_vanished, None)
-        for (fub_id, name), targets in sorted(retries.items()):
-            await self._async_push_vanished(fub_id, name, targets)
-        for fub_id, name in sorted(previous - self.vanished):
-            token = vanished_plan_token(fub_id, name)
-            if token in self._restored_pushes:
-                self._restored_pushes.discard(token)
-                continue
-            await self._async_clear_push(fub_id, token)
+        self._vanished_clearing = previous - self.vanished
+        try:
+            for (fub_id, name), targets in sorted(retries.items()):
+                await self._async_push_vanished(fub_id, name, targets)
+            for fub_id, name in sorted(previous - self.vanished):
+                self._vanished_clearing.discard((fub_id, name))
+                token = vanished_plan_token(fub_id, name)
+                if token in self._restored_pushes:
+                    self._restored_pushes.discard(token)
+                    continue
+                await self._async_clear_push(fub_id, token)
+        finally:
+            # Not reached (the sync raised): a mark set meanwhile would outlive its plan and hold back its next alarm.
+            self._restored_pushes -= {vanished_plan_token(fub_id, name) for fub_id, name in self._vanished_clearing}
+            self._vanished_clearing = set()
 
     def _sync_vanished_issues(self, vanished: Collection[tuple[int, str]]) -> None:
         for fub_id, name in vanished:
@@ -858,6 +868,11 @@ class ManagedPlanWatchdog:
                 "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio", self._server_id, name, fub_id
             )
         token = vanished_plan_token(fub_id, name)
+        if token in self._restored_pushes:
+            # Its Restore brought it back meanwhile: the alarm would replace the confirmation on its way.
+            _LOGGER.debug("[%s] No alarm push for function plan '%s' (ID %s): restored", self._server_id, name, fub_id)
+            self._vanished_push_unsent.pop(token, None)
+            return
         failed = await self._async_push(
             fub_id,
             name,
@@ -907,8 +922,9 @@ class ManagedPlanWatchdog:
         """
         token = vanished_plan_token(fub_id, name)
         # Marked before the send: a check dropping the plan from vanished meanwhile must not clear the confirmation
-        # on its way. Not marked once a check cleared it already: the entry would stay stale.
-        marked = (fub_id, name) in (self.vanished or ())
+        # on its way, nor the one dropping it right now (its clear still pending). Not marked once a check cleared it
+        # already: the entry would stay stale.
+        marked = (fub_id, name) in (self.vanished or ()) or (fub_id, name) in self._vanished_clearing
         if marked:
             self._restored_pushes.add(token)
         key = "restored" if complete else "restored_partial"
@@ -916,7 +932,9 @@ class ManagedPlanWatchdog:
         if marked and any(_is_mobile_app(target) for target in failed):
             # A phone it failed on keeps the vanished alarm with its Restore button: cleared after all (also
             # where the confirmation arrived; a stale button weighs more than a lost confirmation). Another
-            # notify service failing has no button to keep, nor would a clear reach it.
+            # notify service failing has no button to keep, nor would a clear reach it. Nor is the alarm retried
+            # to a phone that missed it: the plan is back.
+            self._vanished_push_unsent.pop(token, None)
             if token in self._restored_pushes:
                 self._restored_pushes.discard(token)  # the check dropping the plan from vanished clears it
             elif (fub_id, name) not in (self.vanished or ()):

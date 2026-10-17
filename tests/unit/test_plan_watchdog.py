@@ -1207,6 +1207,92 @@ def test_a_restored_push_failing_after_a_check_kept_it_clears_the_alarm_itself(i
     assert watchdog._restored_pushes == set()
 
 
+def test_a_restore_while_a_check_retries_another_alarm_keeps_its_confirmation(
+    ir: MagicMock, clock: list[float]
+) -> None:
+    """(#189 review) The check dropping the plan had not cleared it yet: the confirmation was not marked."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    restored: list[bool] = []
+
+    async def other_down_then_restore(_domain: str, _service: str, data: dict[str, Any], **_kw: Any) -> None:
+        if "Other" not in data["message"]:
+            return
+        if not clock[0] > 1000.0:
+            raise HomeAssistantError("down")
+        if not restored:  # the retry of the other plan's alarm is on its way
+            restored.append(True)
+            await watchdog.async_push_restored(47, "Test4")
+
+    watchdog._hass.services.async_call.side_effect = other_down_then_restore
+    asyncio.run(watchdog.async_sync_vanished(TEST4 | {(48, "Other")}))
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    asyncio.run(watchdog.async_sync_vanished({(48, "Other")}))
+    assert restored == [True]
+    (*_, (_domain, _service, last)) = _pushes(watchdog)
+    assert last["title"] == watchdog._texts()["restored_title"]  # no clear after the confirmation
+    assert watchdog._restored_pushes == set()
+    assert watchdog._vanished_clearing == set()
+
+
+def test_an_alarm_retry_after_the_restore_began_is_not_sent(ir: MagicMock, clock: list[float]) -> None:
+    """(#189 review) It would replace the confirmation on the phone, its Restore button back."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert set(watchdog._vanished_push_unsent) == {TOKEN}
+    clock[0] += FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC
+    checked: list[bool] = []
+
+    async def check_while_the_confirmation_is_sent(*_args: Any, **_kwargs: Any) -> None:
+        if not checked:
+            checked.append(True)
+            await watchdog.async_sync_vanished(TEST4)  # Comexio does not list the restored plan yet
+
+    watchdog._hass.services.async_call.side_effect = check_while_the_confirmation_is_sent
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    assert checked == [True]
+    titles = [data["title"] for _d, _s, data in _pushes(watchdog)]
+    texts = watchdog._texts()
+    assert titles == [texts["vanished_title"], texts["restored_title"]]  # no alarm after the confirmation
+    assert watchdog._vanished_push_unsent == {}
+
+
+def test_a_sync_that_raised_drops_the_marks_of_the_plans_it_did_not_clear(ir: MagicMock) -> None:
+    """(#189 local review) The mark would outlive the plan and hold back its next alarm."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(TEST4 | {(48, "Other")}))
+
+    async def restore_then_cancel(_domain: str, _service: str, data: dict[str, Any], **_kw: Any) -> None:
+        if "New" in data["message"]:
+            await watchdog.async_push_restored(47, "Test4")
+            raise asyncio.CancelledError
+
+    watchdog._hass.services.async_call.side_effect = restore_then_cancel
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(watchdog.async_sync_vanished({(48, "Other"), (49, "New")}))  # cancelled on the new alarm
+    assert watchdog._restored_pushes == set()
+    assert watchdog._vanished_clearing == set()
+
+
+def test_a_skipped_alarm_drops_its_retry(ir: MagicMock, clock: list[float]) -> None:
+    """(#189 local review) Else it is due again at every check, never sent."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._vanished_push_unsent[TOKEN] = (clock[0], frozenset({"mobile_app_phone"}))
+    watchdog._restored_pushes.add(TOKEN)
+    asyncio.run(watchdog._async_push_vanished(47, "Test4", frozenset({"mobile_app_phone"})))
+    assert _pushes(watchdog) == []
+    assert watchdog._vanished_push_unsent == {}
+
+
+def test_a_failed_confirmation_drops_the_alarm_retry_to_the_phone(ir: MagicMock, clock: list[float]) -> None:
+    """(#189 local review) The phone that missed the alarm would get it after the plan is back."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    assert watchdog._vanished_push_unsent == {}
+
+
 @pytest.mark.parametrize(
     ("tap_in_check", "failed_starts"),
     [(True, {34: 1}), (False, {})],
