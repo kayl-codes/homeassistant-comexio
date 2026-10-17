@@ -12,6 +12,7 @@ from custom_components.comexio.const import (
     io_column_rows,
     io_group_headers,
     io_sort_key,
+    one_line,
     parse_ignored_marker_tokens,
     prune_import_disabled_ignored,
     webio_class_name,
@@ -99,3 +100,17 @@ def test_prune_import_disabled_ignored(options: dict, data: dict, expected: list
     assert pruned.get(CONF_IMPORT_DISABLED_IGNORED) == expected
     assert (CONF_IMPORT_DISABLED_IGNORED in pruned) is (expected is not None)
     assert options == before  # the caller's options stay untouched
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Licht Flur", "Licht Flur"),
+        ("Licht\nFlur", "Licht Flur"),
+        ("  Licht \r\n\t Flur\x07 ", "Licht Flur"),
+        ("\n\x00", ""),
+        (None, "None"),  # a backup's name read back as null
+    ],
+)
+def test_one_line_cleans_a_comexio_name_for_output(raw: str | None, expected: str) -> None:
+    assert one_line(raw) == expected

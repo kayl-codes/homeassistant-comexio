@@ -70,6 +70,7 @@ from .const import (
     io_sort_key,
     is_valid_entity_name_schema,
     knx_loopback_command_name,
+    one_line,
 )
 from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
 
@@ -302,16 +303,14 @@ def _marker_plan_placements_strict(
 
 
 def _plan_display_name(entry: Any) -> str | None:
-    """A $Fubs entry's plan name on one line, or None if it has none.
+    """A $Fubs entry's plan name on one line (one_line), or None if it has none.
 
-    Control characters (newlines included) become spaces and runs of whitespace collapse — the
-    name goes into marker_delete's log line, notification and response, where a newline in a
-    name set in Comexio would forge extra lines.
+    The name goes into marker_delete's log line, notification and response.
     """
     name = entry.get("Name") if isinstance(entry, dict) else None
     if not isinstance(name, str):
         return None
-    return " ".join("".join(c if c.isprintable() else " " for c in name).split()) or None
+    return one_line(name) or None
 
 
 _MARKER_CONFIG_UNREADABLE = "Comexio marker config could not be fetched or parsed — every id refused (see log)."

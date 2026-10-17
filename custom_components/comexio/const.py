@@ -578,6 +578,17 @@ def webio_range_check_entity_id(server_id: str) -> str:
     return f"button.comexio_{slugify(server_id)}_webio_range_check"
 
 
+def one_line(text: object) -> str:
+    """A name from Comexio on one line, for a log line, notification or service response.
+
+    Control characters (newlines included) become spaces and runs of whitespace collapse: a newline in a
+    name set in Comexio would forge extra log lines or break a notification's layout. Only for output, never
+    for an identity (tokens, issue ids, option values keep the raw name). Any value is shown as str() would:
+    a backup's name read back as null must not abort the log line or the work around it.
+    """
+    return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
+
+
 def stable_object_id(unique_id: str) -> str:
     """Object id (entity_id without domain) a Comexio IO/Marker/KNX entity requests for itself.
 

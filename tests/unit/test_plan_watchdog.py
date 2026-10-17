@@ -540,6 +540,22 @@ def test_a_vanished_plan_gets_its_repair_and_one_alarm_push(ir: MagicMock) -> No
     assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
 
 
+def test_a_plan_name_with_line_breaks_is_pushed_and_logged_on_one_line(
+    ir: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    with caplog.at_level(logging.WARNING, logger=plan_watchdog.__name__):
+        asyncio.run(watchdog.async_sync_vanished({(47, "Test\n4\x07 x")}))
+    ((_domain, _service, data),) = _pushes(watchdog)
+    assert data["message"] == "Der überwachte Logikplan Test 4 x (ID 47) existiert in Comexio nicht mehr."
+    assert "'Test 4 x' (ID 47) no longer exists" in caplog.text
+    # Only the output is cleaned: the token and the repair keep the raw name, the plan's identity.
+    token = plan_watchdog.vanished_plan_token(47, "Test\n4\x07 x")
+    assert data["data"]["actions"][0]["action"] == plan_action_id(ACTION_RESTORE, SERVER_ID, token)
+    assert ir.async_create_issue.call_args.kwargs["translation_placeholders"]["plan_name"] == "Test\n4\x07 x"
+
+
 def test_a_vanished_alarm_no_service_delivered_is_sent_again(
     ir: MagicMock, clock: list[float], caplog: pytest.LogCaptureFixture
 ) -> None:

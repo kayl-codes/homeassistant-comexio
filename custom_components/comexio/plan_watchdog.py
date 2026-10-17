@@ -41,6 +41,7 @@ from .const import (
     FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC,
     FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+    one_line,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -663,7 +664,7 @@ class ManagedPlanWatchdog:
         _LOGGER.warning(
             "[%s] Auto-start of monitored function plan '%s' (ID %s) failed (%s), attempt %s of %s",
             self._server_id,
-            name,
+            one_line(name),
             fub_id,
             reason,
             failed,
@@ -676,7 +677,7 @@ class ManagedPlanWatchdog:
                 "[%s] Plan Auto-Start gave up on function plan '%s' (ID %s); check the plan in Comexio Studio. "
                 "Auto-Start resumes once the plan is seen running again",
                 self._server_id,
-                name,
+                one_line(name),
                 fub_id,
             )
 
@@ -723,7 +724,7 @@ class ManagedPlanWatchdog:
             _LOGGER.debug(
                 "[%s] Auto-start of monitored function plan '%s' (ID %s) waits until %s s after its last attempt",
                 self._server_id,
-                name,
+                one_line(name),
                 fub_id,
                 FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
             )
@@ -753,11 +754,12 @@ class ManagedPlanWatchdog:
         )
 
     def _notify_auto_started(self, fub_id: int, name: str) -> None:
-        _LOGGER.warning("[%s] Auto-started monitored function plan '%s' (ID %s)", self._server_id, name, fub_id)
+        shown = one_line(name)
+        _LOGGER.warning("[%s] Auto-started monitored function plan '%s' (ID %s)", self._server_id, shown, fub_id)
         switch = "Plan Auto-Start (user plans)" if self.is_user_plan(fub_id) else "Plan Auto-Start (HA plans)"
         persistent_notification.async_create(
             self._hass,
-            f"The monitored function plan **{name}** (ID {fub_id}) was not running in Comexio and has been "
+            f"The monitored function plan **{shown}** (ID {fub_id}) was not running in Comexio and has been "
             f"started again by the **{switch}** switch.",
             title=f"Comexio {self._server_id}: function plan started",
             notification_id=f"{DOMAIN}_{self._server_id}_plan_auto_start_{fub_id}",
@@ -950,7 +952,7 @@ class ManagedPlanWatchdog:
                     self._server_id,
                     message_key,
                     fub_id,
-                    name,
+                    one_line(name),
                     reason,
                 )
                 return frozenset()
@@ -958,7 +960,7 @@ class ManagedPlanWatchdog:
                 {
                     "title": texts[title_key],
                     "message": texts[message_key].format(
-                        name=name, fub_id=fub_id, attempts=FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS
+                        name=one_line(name), fub_id=fub_id, attempts=FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS
                     ),
                     "data": data,
                 },
@@ -1068,12 +1070,17 @@ class ManagedPlanWatchdog:
         """
         if targets is None:
             _LOGGER.warning(
-                "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio", self._server_id, name, fub_id
+                "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio",
+                self._server_id,
+                one_line(name),
+                fub_id,
             )
         token = vanished_plan_token(fub_id, name)
         if token in self._restored_pushes:
             # Its Restore brought it back meanwhile: the alarm would replace the confirmation on its way.
-            _LOGGER.debug("[%s] No alarm push for function plan '%s' (ID %s): restored", self._server_id, name, fub_id)
+            _LOGGER.debug(
+                "[%s] No alarm push for function plan '%s' (ID %s): restored", self._server_id, one_line(name), fub_id
+            )
             self._vanished_push_unsent.pop(token, None)
             return
         failed = await self._async_push(

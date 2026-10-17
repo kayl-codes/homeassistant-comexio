@@ -165,6 +165,7 @@ from .const import (
     import_disabled_issue_id,
     io_audit_key,
     io_column_rows,
+    one_line,
     parse_watchdog_user_plan_pick,
     plan_watch_signal,
     repointed_watchdog_user_plan_picks,
@@ -575,10 +576,10 @@ def _append_cleanup_outcome(outcome: dict[str, Any], result: dict, fub_id: int) 
 def _outdated_push_outcome(name: str, *, stopped: bool, current: bool) -> str:
     """What becomes of a push sent before the update whose ID's plan is watched (logged with the ignored action)."""
     if not stopped:
-        return f"{name} runs, so it is taken off the phone"
+        return f"{one_line(name)} runs, so it is taken off the phone"
     if current:
-        return f"it is replaced by one for {name}"
-    return f"{name} was renamed since the last check, which pushes its alarm next"
+        return f"it is replaced by one for {one_line(name)}"
+    return f"{one_line(name)} was renamed since the last check, which pushes its alarm next"
 
 
 def _previous_vanished_name(previous: set[tuple[int, str]], fub_id: int) -> str:
@@ -2491,7 +2492,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "[%s] Selected function plan stays on fub_id %s: another plan holds it now, '%s' is fub_id %s",
                     self.server_id,
                     old_fub_id,
-                    plan_name,
+                    one_line(plan_name),
                     new_fub_id,
                 )
             else:
@@ -2504,7 +2505,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         ) is not None:
             new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = picks
-            updated.append(f"function plan watchdog pick '{plan_name}' → fub_id {new_fub_id}")
+            updated.append(f"function plan watchdog pick '{one_line(plan_name)}' → fub_id {new_fub_id}")
             dismiss_alarm = (old_fub_id, plan_name) in (self.plan_watchdog.vanished or ())
         if updated:
             # Written before any await: options saved meanwhile would be overwritten by this snapshot.
@@ -4811,7 +4812,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.info(
                 "[%s] Restore of function plan '%s' (ID %s) skipped: its restore is already running and reports itself",
                 self.server_id,
-                name,
+                one_line(name),
                 fub_id,
             )
             return False
@@ -4838,7 +4839,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.info(
                     "[%s] Restore of function plan '%s' (ID %s) skipped: it was restored or unwatched meanwhile",
                     self.server_id,
-                    name,
+                    one_line(name),
                     fub_id,
                 )
                 return False
@@ -4846,7 +4847,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 return await self._async_restore_vanished_from_backup(fub_id, name, from_push=from_push)
         except Exception as err:
             # A background task: anything left uncaught would only surface as "never retrieved".
-            _LOGGER.exception("[%s] Restore of function plan '%s' (ID %s) failed", self.server_id, name, fub_id)
+            _LOGGER.exception(
+                "[%s] Restore of function plan '%s' (ID %s) failed", self.server_id, one_line(name), fub_id
+            )
             self._notify_vanished_restore_not_run(fub_id, name, f"it failed ({type(err).__name__})")
         if from_push:
             await self.plan_watchdog.async_push_restore_failed(fub_id, name)
@@ -4873,7 +4876,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """The notification a "not restored" push points at, for a restore that never reached the restore action."""
         persistent_notification.async_create(
             self.hass,
-            f"Function plan '{name}' (ID {fub_id}) was not restored: {reason}. Choose Restore again.",
+            f"Function plan '{one_line(name)}' (ID {fub_id}) was not restored: {reason}. Choose Restore again.",
             title=f"Comexio Function Plan Restore ({self.server_id})",
             notification_id=f"comexio_vanished_restore_{self.server_id}_{vanished_plan_token(fub_id, name)}",
         )
@@ -4886,12 +4889,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         snapshot = await self.async_newest_backup_field(fub_id, name)
         if snapshot is None:
             _LOGGER.warning(
-                "[%s] Function plan '%s' (ID %s) cannot be restored: it has no backup", self.server_id, name, fub_id
+                "[%s] Function plan '%s' (ID %s) cannot be restored: it has no backup",
+                self.server_id,
+                one_line(name),
+                fub_id,
             )
             if from_push:
                 await self.plan_watchdog.async_push_no_backup(fub_id, name)
             return False
-        _LOGGER.info("[%s] Restoring deleted function plan '%s' from backup %s", self.server_id, name, snapshot)
+        _LOGGER.info(
+            "[%s] Restoring deleted function plan '%s' from backup %s", self.server_id, one_line(name), snapshot
+        )
         self._restored_as_new.pop((fub_id, name), None)
         self._vanished_plans_back.discard((fub_id, name))
         try:
@@ -4909,12 +4917,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         except Exception:
             # The action's own errors; it notifies only those it catches itself.
-            _LOGGER.exception("[%s] Restore of function plan '%s' failed", self.server_id, name)
+            _LOGGER.exception("[%s] Restore of function plan '%s' failed", self.server_id, one_line(name))
         if (fub_id, name) in self._vanished_plans_back:
             self._vanished_plans_back.discard((fub_id, name))
             # Back under its ID and name (the restore action told the user): no "failed" push, the alarm goes.
             _LOGGER.info(
-                "[%s] Function plan '%s' (ID %s) is back in Comexio; it was not restored", self.server_id, name, fub_id
+                "[%s] Function plan '%s' (ID %s) is back in Comexio; it was not restored",
+                self.server_id,
+                one_line(name),
+                fub_id,
             )
             await self.plan_watchdog.async_dismiss_push(fub_id, name)
             return False
@@ -4922,7 +4933,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.warning(
                 "[%s] Function plan '%s' (ID %s) was not restored; see the restore notification",
                 self.server_id,
-                name,
+                one_line(name),
                 fub_id,
             )
             if from_push:
@@ -4933,7 +4944,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.warning(
                 "[%s] Function plan '%s' was restored as ID %s, but not completely; see the restore notification",
                 self.server_id,
-                name,
+                one_line(name),
                 new_fub_id,
             )
         try:
@@ -4945,7 +4956,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.exception(
                 "[%s] Function plan '%s' was restored as ID %s, but updating its watchdog pick or push failed",
                 self.server_id,
-                name,
+                one_line(name),
                 new_fub_id,
             )
         return True
@@ -4980,7 +4991,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         _LOGGER.info(
             "[%s] Function plan watchdog pick '%s' moved from ID %s to ID %s",
             self.server_id,
-            name,
+            one_line(name),
             old_fub_id,
             new_fub_id,
         )
@@ -5026,7 +5037,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self._notify_bare_pick_kept(fub_id, name)
             return False
         _LOGGER.info(
-            "[%s] Function plan '%s' (ID %s) is no longer watched (stop watching)", self.server_id, name, fub_id
+            "[%s] Function plan '%s' (ID %s) is no longer watched (stop watching)",
+            self.server_id,
+            one_line(name),
+            fub_id,
         )
         self.request_options_update_without_reload(
             {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: kept}
@@ -5038,17 +5052,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _notify_bare_pick_kept(self, fub_id: int, name: str) -> None:
         """Stop watching left a bare-ID pick: the ID belongs to another plan by now, which it watches."""
-        current = self.api.function_plan_name(fub_id)
+        shown, current = one_line(name), one_line(self.api.function_plan_name(fub_id))
         _LOGGER.info(
             "[%s] Function plan '%s' (ID %s) stays watched: its pick names only the ID, which plan '%s' holds now",
             self.server_id,
-            name,
+            shown,
             fub_id,
             current,
         )
         persistent_notification.async_create(
             self.hass,
-            f"Function plan '{name}' (ID {fub_id}) is watched by its ID only, and plan '{current}' holds that ID "
+            f"Function plan '{shown}' (ID {fub_id}) is watched by its ID only, and plan '{current}' holds that ID "
             "now, so the watchdog keeps watching it. Remove the pick in the integration options to stop that.",
             title="Comexio: function plan still watched",
             notification_id=f"{DOMAIN}_unwatch_kept_{self.server_id}_{fub_id}",

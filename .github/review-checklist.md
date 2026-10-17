@@ -124,7 +124,7 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   `get_raw_config` that lacks it (#186).
 - **Names from Comexio are cleaned before output:** plan, marker and IO names come from the Comexio admin and can
   hold line breaks or control characters. Before a name goes into a log line, a notification or a service response,
-  replace non-printable characters and collapse whitespace to one line (`_plan_display_name`), so a name cannot
+  replace non-printable characters and collapse whitespace to one line (`const.one_line`), so a name cannot
   split a log entry or break the notification layout. Flag new code that writes a Comexio name to a log line,
   notification or response unfiltered; entity display names are out of scope (#186).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
