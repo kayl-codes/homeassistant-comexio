@@ -928,19 +928,35 @@ class ManagedPlanWatchdog:
         if marked:
             self._restored_pushes.add(token)
         key = "restored" if complete else "restored_partial"
-        failed = await self._async_push(fub_id, name, "restored_title", key, token=token)
+        try:
+            failed = await self._async_push(fub_id, name, "restored_title", key, token=token)
+        except BaseException:
+            # Cancelled on its way: the alarm is cleared after all, as for a failed send.
+            if marked:
+                self._unmark_cancelled_restored(fub_id, name, token)
+            raise
         if marked and any(_is_mobile_app(target) for target in failed):
             # A phone it failed on keeps the vanished alarm with its Restore button: cleared after all (also
             # where the confirmation arrived; a stale button weighs more than a lost confirmation). Another
-            # notify service failing has no button to keep, nor would a clear reach it. Nor is the alarm retried
-            # to a phone that missed it: the plan is back.
-            self._vanished_push_unsent.pop(token, None)
+            # notify service failing has no button to keep, nor would a clear reach it.
             if token in self._restored_pushes:
                 self._restored_pushes.discard(token)  # the check dropping the plan from vanished clears it
+                # Nor is the alarm retried to a phone that missed it: the plan is back. Only while still marked:
+                # else a check dropped the plan meanwhile, and a retry now is a new episode's alarm.
+                self._vanished_push_unsent.pop(token, None)
             elif (fub_id, name) not in (self.vanished or ()):
                 # A check dropped it meanwhile and kept the push. Vanished again since: the same tag holds that
                 # episode's new alarm, which stays.
                 await self._async_clear_push(fub_id, token)
+
+    def _unmark_cancelled_restored(self, fub_id: int, name: str, token: str) -> None:
+        if token in self._restored_pushes:
+            self._restored_pushes.discard(token)  # the check dropping the plan from vanished clears it
+        elif (fub_id, name) not in (self.vanished or ()):
+            # A check dropped it meanwhile and kept the alarm for the confirmation: no await in a cancelled task.
+            self._hass.async_create_background_task(
+                self._async_clear_push(fub_id, token), name=f"{DOMAIN}_{self._server_id}_restored_push_cancelled"
+            )
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
         """Tell the phone a Restore from its push failed or was refused, with both actions again."""
