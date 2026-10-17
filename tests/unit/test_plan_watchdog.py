@@ -1267,9 +1267,42 @@ def test_a_plan_started_while_the_check_sends_an_alarm_keeps_its_runs_again_push
         await check
 
     asyncio.run(run())
-    assert [(data["data"]["tag"], data["message"] == "clear_notification") for _, _, data in _pushes(watchdog)] == [
-        (watchdog._push_tag(42), False),
-        (watchdog._push_tag(34), False),
+    texts = plan_watchdog.PUSH_TEXTS["de"]
+    assert [(data["data"]["tag"], data["title"]) for _, _, data in _pushes(watchdog)] == [
+        (watchdog._push_tag(42), texts["stopped_title"]),
+        (watchdog._push_tag(34), texts["started_title"]),
+    ]
+
+
+def test_a_plan_confirmed_running_while_its_own_auto_start_awaits_comexio_keeps_its_runs_again_push(
+    ir: MagicMock,
+) -> None:
+    """(Sourcery, #187) Its Auto-Start answering afterwards sends no "auto-started" push over the confirmation."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    watchdog._hass.services.async_call.reset_mock()
+    watchdog.auto_restart = True
+
+    async def run() -> None:
+        in_flight, release = asyncio.Event(), asyncio.Event()
+
+        async def start(_fub_id: int) -> bool:
+            in_flight.set()
+            await release.wait()
+            return True
+
+        watchdog._start_plan = start
+        check = asyncio.create_task(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+        await in_flight.wait()
+        await watchdog.async_plan_started(34, confirm=True)
+        release.set()
+        await check
+
+    asyncio.run(run())
+    assert watchdog.stopped == {}
+    texts = plan_watchdog.PUSH_TEXTS["de"]
+    assert [data["message"] for _, _, data in _pushes(watchdog)] == [
+        texts["started"].format(name="HA - Marker 1", fub_id=34, attempts=3)
     ]
 
 
@@ -1297,6 +1330,27 @@ def test_a_reloaded_watchdog_waits_for_the_old_ones_push_under_the_same_tag(ir: 
     )
     assert arrived == ["clear", "alarm"]
     assert old._push_locks == {}
+
+
+def test_a_closed_watchdogs_clear_queued_behind_the_reloaded_ones_alarm_is_not_sent(ir: MagicMock) -> None:
+    """(Sourcery, #187) The old watchdog's check still runs after the unload; its send on the way arrives first,
+    what it queues afterwards is dropped, so the new one's alarm stays on the phone."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new._hass = old._hass
+    new.stopped = {47: "Test4"}
+
+    async def then() -> None:
+        alarm = asyncio.create_task(new._async_push_stopped(47, "Test4", None))
+        await asyncio.sleep(0)  # queued first
+        await asyncio.gather(alarm, old._async_clear_push(47), old.async_push_start_busy(47, "Test4"))
+
+    def unload() -> None:
+        old.stopped = {47: "Test4"}  # else its busy reply is dropped as not stopped, not as closed
+        old.close()
+
+    arrived = _arrivals_while_the_first_push_is_held(old, lambda: old.async_dismiss_push(47), then, unload)
+    assert arrived == ["clear", "alarm"]
 
 
 def test_a_hanging_notify_service_counts_as_failed(ir: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:

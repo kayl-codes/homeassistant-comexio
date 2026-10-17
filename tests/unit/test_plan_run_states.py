@@ -1213,6 +1213,8 @@ def test_an_outdated_push_of_a_plan_renamed_since_the_check_waits_for_the_next_o
     with caplog.at_level(logging.WARNING):
         coordinator.async_handle_notification_action(SimpleNamespace(data={"action": "COMEXIO_START_PLAN_iosrv1_19"}))
     hass.async_create_background_task.assert_not_called()
+    coordinator.plan_watchdog.async_dismiss_push.assert_not_called()  # the stopped plan's alarm stays
+    coordinator.plan_watchdog.async_push_start_outdated.assert_not_called()
     assert "Test1 was renamed since the last check, which pushes its alarm next" in caplog.text
 
 

@@ -363,6 +363,8 @@ class ManagedPlanWatchdog:
         self._checking = False
         # Plans started from their repair or push while a check runs: its stopped plans were judged before.
         self._started_in_check: set[int] = set()
+        # Set once the entry unloads (close): no push or clear is sent from then on.
+        self._closed = False
 
     async def async_check(
         self,
@@ -403,6 +405,9 @@ class ManagedPlanWatchdog:
                 fub_id: name for fub_id, name in stopped.items() if fub_id not in auto_started and fub_id not in started
             }
             previous = {fub_id: name for fub_id, name in previous.items() if fub_id not in started}
+            # Also one whose Auto-Start answered after it was confirmed running: its "auto-started" push would
+            # replace that confirmation.
+            auto_started = {fub_id: name for fub_id, name in auto_started.items() if fub_id not in started}
             self._sync_issues(stopped)
             changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
@@ -410,6 +415,15 @@ class ManagedPlanWatchdog:
             return changed
         finally:
             self._checking = False
+
+    def close(self) -> None:
+        """The entry unloads: send nothing more, judged under the tag's lock.
+
+        A check or push action of this watchdog may still run; what it would send now is stale. A reloaded
+        entry's watchdog sends under the same tags (shared lock: a send already on its way arrives first), so
+        a clear of this one queued behind its alarm would take that alarm off the phone.
+        """
+        self._closed = True
 
     def last_check_text(self) -> str:
         """The last check as local time in the HA language's format, "—" before the first one."""
@@ -763,6 +777,9 @@ class ManagedPlanWatchdog:
             # Delivered at once and through Do Not Disturb focus (Android: ttl/priority, iOS: interruption-level).
             data |= {"ttl": 0, "priority": "high", "push": {"interruption-level": "time-sensitive"}}
         async with self._push_lock(data["tag"]):
+            if self._closed:
+                _LOGGER.debug("[%s] Watchdog push '%s' not sent: the entry unloads", self._server_id, message_key)
+                return frozenset()
             if while_stopped and (self.stopped or {}).get(fub_id) != name:
                 _LOGGER.info(
                     "[%s] Watchdog push '%s' for function plan %s (%s) not sent: the plan no longer is the ID's "
@@ -940,7 +957,7 @@ class ManagedPlanWatchdog:
         sends its alarm after the clear arrived."""
         tag = self._push_tag(fub_id, token)
         async with self._push_lock(tag):
-            if keep_stopped and fub_id in (self.stopped or {}):
+            if self._closed or (keep_stopped and fub_id in (self.stopped or {})):
                 return
             # A companion-app command: any other notify service would deliver it as the text "clear_notification".
             await self._async_send({"message": "clear_notification", "data": {"tag": tag}}, mobile_app_only=True)
