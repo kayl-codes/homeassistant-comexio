@@ -183,9 +183,10 @@ _VANISHED_ID_PATTERN = r"(\d+)_[0-9a-f]{16}"
 # (see ManagedPlanWatchdog._push_lock). Module-wide, not per watchdog: a reloaded entry's new watchdog sends
 # under the old one's tags (they name the server) while the old one's sends may still be on their way.
 _PUSH_LOCKS: dict[str, tuple[asyncio.Lock, int]] = {}
-# Push tags whose last push with buttons came from a watchdog whose entry unloaded while it was on its way: no
-# verdict of the reloaded one may take it off, so its checks clear the ones of plans they see running.
-_UNSETTLED_TAGS: set[str] = set()
+# Plan push tags whose last push delivered carries buttons (an alarm, a start reply). Module-wide like _PUSH_LOCKS:
+# a reloaded entry's watchdog has no verdict of its own that would take such a push off (one delivered before the
+# reload, or still on its way), so its checks clear the ones of plans they see running.
+_ACTIONABLE_TAGS: set[str] = set()
 
 
 def unnamed_plan_label(fub_id: int) -> str:
@@ -359,7 +360,7 @@ class ManagedPlanWatchdog:
         # With the number of pushes holding or waiting for it: removed once none does (deleted-plan tags are many).
         # Shared with the watchdog of a reload (see _PUSH_LOCKS).
         self._push_locks = _PUSH_LOCKS
-        self._unsettled_tags = _UNSETTLED_TAGS
+        self._actionable_tags = _ACTIONABLE_TAGS
         # fub_id → name of the managed plans as of the last check: an ID under another name holds another plan.
         self._names: dict[int, str] = {}
         # Local time of the last check; shown in the repair dialogs and on the problem sensor.
@@ -424,7 +425,7 @@ class ManagedPlanWatchdog:
             changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
             await self._async_push_transitions(
-                previous, stopped, auto_started, self.suspended - suspended_before, self._maybe_unsettled(states)
+                previous, stopped, auto_started, self.suspended - suspended_before, self._maybe_actionable(states)
             )
             return changed
         finally:
@@ -436,21 +437,22 @@ class ManagedPlanWatchdog:
         A check or push action of this watchdog may still run; what it would send now is stale. A reloaded
         entry's watchdog sends under the same tags (shared lock: a send already on its way arrives first), so
         a clear of this one queued behind its alarm would take that alarm off the phone.
-        One with buttons on its way arrives still: the reloaded watchdog takes it off for a plan it sees running
-        (see _maybe_unsettled).
+        One on its way arrives still: if it has buttons, the reloaded watchdog takes it off for a plan it sees
+        running (see _maybe_actionable).
         """
         self._closed = True
 
-    def _maybe_unsettled(self, states: Mapping[int, bool | None]) -> set[int]:
-        """The plans running now whose tag may still show a push of an unloaded entry's watchdog.
+    def _maybe_actionable(self, states: Mapping[int, bool | None]) -> set[int]:
+        """The plans running now whose tag may still show a push with buttons (see _ACTIONABLE_TAGS).
 
-        Its tag is unsettled, or a push under it is on its way (one of the old watchdog settles only once it
-        arrived). Judged again under the tag's lock (see _async_clear_push): the clear then waits for that push.
+        Its last push delivered has them, or a push under it is on its way (one of an unloaded entry's watchdog
+        is judged only once it arrived). Judged again under the tag's lock (see _async_clear_push): the clear then
+        waits for that push.
         """
         return {
             fub_id
             for fub_id, state in states.items()
-            if state and ((tag := self._push_tag(fub_id)) in self._unsettled_tags or tag in self._push_locks)
+            if state and ((tag := self._push_tag(fub_id)) in self._actionable_tags or tag in self._push_locks)
         }
 
     def last_check_text(self) -> str:
@@ -777,11 +779,12 @@ class ManagedPlanWatchdog:
         stopped: Mapping[int, str],
         auto_started: Mapping[int, str],
         newly_suspended: Collection[int],
-        maybe_unsettled: Collection[int] = (),
+        maybe_actionable: Collection[int] = (),
     ) -> None:
         """Alarm push for a newly stopped plan or one Auto-Start gave up on; the push of a plan running
-        again (or deleted: its vanished push has a tag of its own) is replaced or removed, so is an unloaded
-        entry's watchdog's push still shown for a plan running now (maybe_unsettled, see _UNSETTLED_TAGS)."""
+        again (or deleted: its vanished push has a tag of its own) is replaced or removed, so is one with buttons
+        still shown for a plan running now that no verdict of this watchdog clears (maybe_actionable, e.g. after
+        a reload)."""
         alarms = dict.fromkeys(
             {*newly_stopped_plans(previous, stopped), *(set(newly_suspended) & stopped.keys())}, None
         )
@@ -792,12 +795,12 @@ class ManagedPlanWatchdog:
         for fub_id, name in sorted(auto_started.items()):
             if fub_id not in self._started_in_check:
                 await self._async_push(fub_id, name, "started_title", "auto_started")
-        cleared = previous.keys() - stopped.keys() - auto_started.keys()
-        for fub_id in sorted(cleared):
+        for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys()):
             if fub_id not in self._started_in_check:
                 await self._async_clear_push(fub_id)
-        for fub_id in sorted(set(maybe_unsettled) - auto_started.keys() - cleared):
-            await self._async_clear_push(fub_id, only_unsettled=True)
+        # A plan cleared just above is skipped under the lock (its tag is no longer actionable).
+        for fub_id in sorted(set(maybe_actionable) - auto_started.keys()):
+            await self._async_clear_push(fub_id, only_actionable=True)
 
     async def _async_push_stopped(self, fub_id: int, name: str, targets: frozenset[str] | None) -> None:
         """The alarm push of a stopped plan: "suspended" once Auto-Start gave up on it.
@@ -913,12 +916,13 @@ class ManagedPlanWatchdog:
                 },
                 targets=targets,
             )
-            # A deleted plan's push stays: no check judges its token running. One delivered to any target settles
-            # the tag for all (accepted: a phone it failed on keeps the old push until its action is pressed).
-            if buttons and token is None and self._closed and delivered:
-                self._unsettled_tags.add(data["tag"])  # unloaded meanwhile (see _UNSETTLED_TAGS)
-            elif delivered:
-                self._unsettled_tags.discard(data["tag"])  # replaced
+            # A deleted plan's push is not tracked: no check judges its token running. One delivered to any target
+            # counts for all (accepted: a phone it failed on keeps the old push until its action is pressed).
+            if delivered and token is None:
+                if buttons:
+                    self._actionable_tags.add(data["tag"])
+                else:
+                    self._actionable_tags.discard(data["tag"])  # replaced
         # No await from the lock's release to the callers' bookkeeping of the failed targets: a push waiting
         # for the tag runs only after it, so its delivery drops these failures, never the other way round.
         # Delivered replaces (same tag) the plan's alarm still waiting to be sent again there; a retry's
@@ -1096,25 +1100,22 @@ class ManagedPlanWatchdog:
         await self._async_clear_push(fub_id, token)
 
     async def _async_clear_push(
-        self, fub_id: int, token: str | None = None, *, keep_stopped: bool = False, only_unsettled: bool = False
+        self, fub_id: int, token: str | None = None, *, keep_stopped: bool = False, only_actionable: bool = False
     ) -> None:
         """keep_stopped: not while the ID's plan is stopped, judged under the tag's lock, so a stop judged meanwhile
-        sends its alarm after the clear arrived. only_unsettled: only while an unloaded entry's watchdog's push is
-        the tag's last one, judged under the lock too: a push sent since replaced it."""
+        sends its alarm after the clear arrived. only_actionable: only while the tag's last push delivered has
+        buttons, judged under the lock too: a push sent since replaced it."""
         tag = self._push_tag(fub_id, token)
         async with self._push_lock(tag):
             if (
                 self._closed
                 or (keep_stopped and fub_id in (self.stopped or {}))
-                or (only_unsettled and tag not in self._unsettled_tags)
+                or (only_actionable and tag not in self._actionable_tags)
             ):
                 return
             # A companion-app command: any other notify service would deliver it as the text "clear_notification".
-            delivered, _ = await self._async_send(
-                {"message": "clear_notification", "data": {"tag": tag}}, mobile_app_only=True
-            )
-            if delivered:
-                self._unsettled_tags.discard(tag)
+            await self._async_send({"message": "clear_notification", "data": {"tag": tag}}, mobile_app_only=True)
+            self._actionable_tags.discard(tag)  # a failed clear is logged, not retried (as every clear)
 
     @asynccontextmanager
     async def _push_lock(self, tag: str) -> AsyncIterator[None]:
