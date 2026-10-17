@@ -1173,3 +1173,110 @@ def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[
 def test_push_texts_have_the_same_keys_in_every_language() -> None:
     keys = {lang: set(texts) for lang, texts in plan_watchdog.PUSH_TEXTS.items()}
     assert all(lang_keys == keys["en"] for lang_keys in keys.values())
+
+
+def test_a_restored_push_that_failed_leaves_the_vanished_alarm_to_be_cleared(ir: MagicMock) -> None:
+    """(#187 review) The phone it failed on keeps the alarm with its Restore button: the plan leaving vanished
+    clears it as without a confirmation."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    watchdog._hass.services.async_call.side_effect = None
+    assert watchdog._restored_pushes == set()
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    (*_, (_domain, _service, clear)) = _pushes(watchdog)
+    assert clear == {"message": "clear_notification", "data": {"tag": watchdog._push_tag(47, TOKEN)}}
+
+
+def test_a_restored_push_failing_after_a_check_kept_it_clears_the_alarm_itself(ir: MagicMock) -> None:
+    """(#187 review) A check dropping the plan from vanished while the confirmation was sent skipped the clear."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+
+    async def check_meanwhile_then_fail(_domain: str, _service: str, data: dict[str, Any], **_kw: Any) -> None:
+        if data["message"] != "clear_notification":
+            await watchdog.async_sync_vanished(set())
+            raise HomeAssistantError("down")
+
+    watchdog._hass.services.async_call.side_effect = check_meanwhile_then_fail
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    (*_, (_domain, _service, clear)) = _pushes(watchdog)
+    assert clear == {"message": "clear_notification", "data": {"tag": watchdog._push_tag(47, TOKEN)}}
+    assert watchdog._restored_pushes == set()
+
+
+@pytest.mark.parametrize(
+    ("tap_in_check", "failed_starts"),
+    [(True, {34: 1}), (False, {})],
+    ids=["tap_while_the_check_runs", "tap_after_the_check"],
+)
+def test_a_start_tap_keeps_the_stopped_again_window_of_the_auto_start_in_its_check(
+    ir: MagicMock, tap_in_check: bool, failed_starts: dict[int, int]
+) -> None:
+    """(#187 review) A tap found the plan Auto-Start just started: that start keeps its stopped-again window.
+    A tap later is the user's start: a stop after it is no failed Auto-Start."""
+    watchdog, _ = _watchdog([True, True], targets=["notify.mobile_app_phone"])
+    watchdog.auto_restart = True
+    tapped: list[bool] = []
+
+    async def tap_on_the_first_push(*_args: Any, **_kwargs: Any) -> None:
+        if tap_in_check and not tapped:
+            tapped.append(True)
+            await watchdog.async_plan_started(34)
+
+    watchdog._hass.services.async_call.side_effect = tap_on_the_first_push
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert tapped == ([True] if tap_in_check else [])
+    if not tap_in_check:
+        asyncio.run(watchdog.async_plan_started(34))
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert watchdog._failed_starts == failed_starts
+
+
+def _failing_for(*services: str) -> Any:
+    async def call(_domain: str, service: str, _data: dict[str, Any], **_kw: Any) -> None:
+        if service in services:
+            raise HomeAssistantError("down")
+
+    return call
+
+
+@pytest.mark.parametrize(
+    ("failing", "cleared"),
+    [("mobile_app_tablet", True), ("telegram", False)],
+    ids=["a_phone_failed", "a_service_without_buttons_failed"],
+)
+def test_a_restored_push_failing_on_one_target_clears_only_for_a_phone(
+    ir: MagicMock, failing: str, cleared: bool
+) -> None:
+    """(#187 review) Only a phone keeps the old alarm's Restore button; a clear reaches no other notify service."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone", "notify.mobile_app_tablet", "notify.telegram"])
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    watchdog._hass.services.async_call.side_effect = _failing_for(failing)
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    assert (TOKEN in watchdog._restored_pushes) is not cleared
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    clears = [service for _d, service, data in _pushes(watchdog) if data["message"] == "clear_notification"]
+    assert clears == (["mobile_app_phone", "mobile_app_tablet"] if cleared else [])
+
+
+def test_a_failed_restored_push_after_the_check_cleared_the_plan_sends_no_clear(ir: MagicMock) -> None:
+    """No longer vanished before the confirmation: the check cleared the alarm already, nothing is marked."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_push_restored(47, "Test4"))
+    ((_domain, _service, confirmation),) = _pushes(watchdog)  # the confirmation's attempt only, no clear
+    assert confirmation["data"]["tag"] == watchdog._push_tag(47, TOKEN)
+    assert confirmation["message"] != "clear_notification"
+    assert watchdog._restored_pushes == set()
+
+
+def test_a_check_that_raised_forgets_the_plans_it_auto_started(ir: MagicMock) -> None:
+    """A later tap is the user's start again, as after a check that returned."""
+    watchdog, _ = _watchdog([True])
+    watchdog.auto_restart = True
+    watchdog._sync_issues = MagicMock(side_effect=RuntimeError("registry"))
+    with pytest.raises(RuntimeError):
+        asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
+    assert watchdog._auto_started_in_check == set()

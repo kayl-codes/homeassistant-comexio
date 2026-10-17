@@ -255,6 +255,11 @@ def _retries_due[K](unsent: Mapping[K, tuple[float, frozenset[str]]]) -> dict[K,
     }
 
 
+def _is_mobile_app(target: str) -> bool:
+    """A companion-app notify target: the only kind with push actions, and the only one a clear reaches."""
+    return target.removeprefix(f"{NOTIFY_DOMAIN}.").startswith(MOBILE_APP_SERVICE_PREFIX)
+
+
 def _drop_delivered[K](unsent: dict[K, tuple[float, frozenset[str]]], key: K, done: frozenset[str]) -> None:
     """A push delivered to some targets replaced (same tag) an alarm waiting there to be sent again."""
     if key not in unsent:
@@ -348,6 +353,8 @@ class ManagedPlanWatchdog:
         # Local time of the last check; shown in the repair dialogs and on the problem sensor.
         self.last_check: datetime | None = None
         self._checking = False
+        # Plans the running check auto-started (see async_plan_started).
+        self._auto_started_in_check: set[int] = set()
 
     async def async_check(
         self,
@@ -392,6 +399,7 @@ class ManagedPlanWatchdog:
             return changed
         finally:
             self._checking = False
+            self._auto_started_in_check.clear()
 
     def last_check_text(self) -> str:
         """The last check as local time in the HA language's format, "—" before the first one."""
@@ -436,7 +444,10 @@ class ManagedPlanWatchdog:
         """
         # The suspension is not touched here: the run-state fetch right after the start (or the next
         # poll) lifts it once it sees the plan running.
-        self._auto_started_at.pop(fub_id, None)
+        if fub_id not in self._auto_started_in_check:
+            # The user's start: a stop after it is no failed Auto-Start. A tap while the check that auto-started
+            # the plan still runs found it started already, so that start keeps its stopped-again window.
+            self._auto_started_at.pop(fub_id, None)
         ir.async_delete_issue(self._hass, DOMAIN, stopped_plan_issue_id(self._server_id, fub_id))
         name = (self.stopped or {}).get(fub_id, str(fub_id))
         if self.stopped is not None:
@@ -592,6 +603,7 @@ class ManagedPlanWatchdog:
             deferred_before = self._deferred_at.pop(fub_id, None) is not None
             if result:
                 self._auto_started_at[fub_id] = now
+                self._auto_started_in_check.add(fub_id)
                 self._notify_auto_started(fub_id, name)
                 started[fub_id] = name
             elif result is False:
@@ -894,10 +906,21 @@ class ManagedPlanWatchdog:
         complete: False says the plan is back but missing parts (a PARTIAL restore).
         """
         token = vanished_plan_token(fub_id, name)
-        if (fub_id, name) in (self.vanished or ()):  # a check that already cleared it would leave the entry stale
+        # Marked before the send: a check dropping the plan from vanished meanwhile must not clear the confirmation
+        # on its way. Not marked once a check cleared it already: the entry would stay stale.
+        marked = (fub_id, name) in (self.vanished or ())
+        if marked:
             self._restored_pushes.add(token)
         key = "restored" if complete else "restored_partial"
-        await self._async_push(fub_id, name, "restored_title", key, token=token)
+        failed = await self._async_push(fub_id, name, "restored_title", key, token=token)
+        if marked and any(_is_mobile_app(target) for target in failed):
+            # A phone it failed on keeps the vanished alarm with its Restore button: cleared after all (also
+            # where the confirmation arrived; a stale button weighs more than a lost confirmation). Another
+            # notify service failing has no button to keep, nor would a clear reach it.
+            if token in self._restored_pushes:
+                self._restored_pushes.discard(token)  # the check dropping the plan from vanished clears it
+            else:
+                await self._async_clear_push(fub_id, token)  # a check dropped it meanwhile and kept the push
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
         """Tell the phone a Restore from its push failed or was refused, with both actions again."""
@@ -960,9 +983,7 @@ class ManagedPlanWatchdog:
         failed: set[str] = set()
         for target in self._notify_targets():
             service = target.removeprefix(f"{NOTIFY_DOMAIN}.")
-            if (mobile_app_only and not service.startswith(MOBILE_APP_SERVICE_PREFIX)) or (
-                targets is not None and target not in targets
-            ):
+            if (mobile_app_only and not _is_mobile_app(target)) or (targets is not None and target not in targets):
                 continue
             try:
                 await self._hass.services.async_call(NOTIFY_DOMAIN, service, service_data, blocking=True)
