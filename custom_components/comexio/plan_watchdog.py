@@ -648,21 +648,7 @@ class ManagedPlanWatchdog:
             # Read per plan: each start awaits Comexio, which serializes requests, so a time taken
             # once before the loop would date the later plans' starts and refusals too early.
             now = time.monotonic()
-            started_at = self._auto_started_at.pop(fub_id, None)
-            if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
-                self._count_failed_start(fub_id, name, "stopped again shortly after its start")
-            # Re-checked per plan: the switch can be turned off, or the plan started from its repair or push,
-            # while an earlier start awaits Comexio.
-            if fub_id in self.suspended or fub_id in self._started_in_check or not self._auto_start_enabled(fub_id):
-                continue
-            if self._retry_too_soon(fub_id, now):
-                _LOGGER.debug(
-                    "[%s] Auto-start of monitored function plan '%s' (ID %s) waits until %s s after its last attempt",
-                    self._server_id,
-                    name,
-                    fub_id,
-                    FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
-                )
+            if not self._auto_start_due(fub_id, name, now):
                 continue
             result = await self._start_plan(fub_id)
             now = time.monotonic()  # the answer's time: the stopped-again window and the retry gap start here
@@ -681,6 +667,26 @@ class ManagedPlanWatchdog:
             else:
                 self._defer_start(fub_id, name, now, logged_before=deferred_before)
         return started
+
+    def _auto_start_due(self, fub_id: int, name: str, now: float) -> bool:
+        """Whether Auto-Start starts this stopped plan now; counts a stop shortly after its own start as a failure."""
+        started_at = self._auto_started_at.pop(fub_id, None)
+        if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
+            self._count_failed_start(fub_id, name, "stopped again shortly after its start")
+        # Re-checked per plan: the switch can be turned off, or the plan started from its repair or push,
+        # while an earlier start awaits Comexio.
+        if fub_id in self.suspended or fub_id in self._started_in_check or not self._auto_start_enabled(fub_id):
+            return False
+        if self._retry_too_soon(fub_id, now):
+            _LOGGER.debug(
+                "[%s] Auto-start of monitored function plan '%s' (ID %s) waits until %s s after its last attempt",
+                self._server_id,
+                name,
+                fub_id,
+                FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+            )
+            return False
+        return True
 
     def _defer_start(self, fub_id: int, name: str, now: float, *, logged_before: bool) -> None:
         """A start not sent (a sync/restore runs) or not answered: no failed attempt, but the retry gap applies.
