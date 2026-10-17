@@ -487,7 +487,7 @@ async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str 
         def resolve(name: str) -> str:
             try:
                 return socket.gethostbyname(name)
-            except OSError:
+            except (OSError, UnicodeError):  # UnicodeError: no valid hostname at all, e.g. "ha..lan"
                 return name
 
         ha_ip = await hass.async_add_executor_job(resolve, ha_host)
@@ -1207,8 +1207,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         }
 
-        # The name a device already carries bounds the search, so a fresh resolver after a
-        # restart does not look up the KNOWN_DOMAINS behind the name Comexio already stores.
+        # The address a device already stores is kept while it still points to this host (#177),
+        # so a fresh resolver after a restart needs at most one lookup instead of a search.
         ha_address = await self.ha_address.async_get(hint=webio_device_hint(webio_devices))
         webio_device_audit = await self._async_audit_webio_devices(webio_devices, ha_address)
         ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
