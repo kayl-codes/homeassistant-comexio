@@ -854,6 +854,24 @@ def test_an_ignore_read_back_after_a_restart_survives_an_unknown_run_state(ir: M
     assert issue not in ir.async_get.return_value.issues
 
 
+def test_a_check_reads_each_run_state_once(ir: MagicMock) -> None:
+    """(Sourcery) Seen running, then unreadable within the same check: the ignore still goes as the plan ran."""
+    issue = (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34))
+    ir.async_get.return_value.issues[issue] = SimpleNamespace(
+        dismissed_version="2026.10.0", translation_placeholders=None, translation_key=None
+    )
+    reads: list[int] = []
+
+    def run_state(fub_id: int) -> bool | None:
+        reads.append(fub_id)
+        return True if reads.count(fub_id) == 1 else None
+
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_check(MANAGED, run_state))
+    assert issue not in ir.async_get.return_value.issues
+    assert sorted(reads) == sorted(MANAGED)
+
+
 @pytest.mark.parametrize(("fub_id", "dismissed_version"), [(34, None), (99, "2026.10.0")])
 def test_an_unknown_run_state_keeps_only_the_ignore_of_a_watched_plan(
     ir: MagicMock, fub_id: int, dismissed_version: str | None

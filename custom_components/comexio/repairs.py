@@ -1410,7 +1410,8 @@ class ComexioRepairFlow(RepairsFlow):
         fub_id = int(self.issue_data["fub_id"])
         if user_input is None:
             actions = [ACTION_START_PLAN, ACTION_IGNORE]
-            if coordinator.plan_watchdog.is_user_plan(fub_id):
+            # Read from the options, not the watchdog: its user plans are known only after its first check.
+            if coordinator.is_watched_user_plan(fub_id):
                 # HA's own plans are always watched: only a user plan can be taken off the list.
                 actions.append(ACTION_UNWATCH)
             return self.async_show_form(

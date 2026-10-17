@@ -4646,6 +4646,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return managed[fub_id]
         return self._watched_user_plan_names().get(fub_id)
 
+    def is_watched_user_plan(self, fub_id: int) -> bool:
+        """Whether this plan is watched as a user plan now, read from the options: known before the first check."""
+        return fub_id in self._watched_user_plan_names()
+
     def is_watched_plan(self, fub_id: int) -> bool:
         """Whether the watchdog watches this plan right now (HA-managed or a picked user plan)."""
         return self.watched_plan_name(fub_id) is not None

@@ -95,8 +95,8 @@ def _run_stopped_repair(
             last_check_text=lambda: "—",
             async_plan_started=AsyncMock(),
             async_ignore_stopped=AsyncMock(return_value=ignored),
-            is_user_plan=lambda fub_id: user_plan,
         ),
+        is_watched_user_plan=lambda fub_id: user_plan,
         api=SimpleNamespace(get_fub_active=MagicMock(return_value=running)),
         managed_plan_start_blocked=blocked,
         async_start_managed_plan=start,
@@ -113,7 +113,7 @@ def _run_stopped_repair(
 
 def _stopped_repair_actions(*, user_plan: bool) -> list[str]:
     coordinator = SimpleNamespace(
-        plan_watchdog=SimpleNamespace(last_check_text=lambda: "—", is_user_plan=lambda fub_id: user_plan)
+        plan_watchdog=SimpleNamespace(last_check_text=lambda: "—"), is_watched_user_plan=lambda fub_id: user_plan
     )
     flow = ComexioRepairFlow("function_plan_stopped_iosrv1_19", {"entry_id": "e1", "fub_id": 19, "plan_name": "P"})
     flow.hass = SimpleNamespace(data={DOMAIN: {"e1": coordinator}}, config=SimpleNamespace(language="en"))  # type: ignore[assignment]

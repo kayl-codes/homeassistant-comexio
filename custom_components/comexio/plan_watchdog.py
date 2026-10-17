@@ -369,6 +369,9 @@ class ManagedPlanWatchdog:
         try:
             self.last_check = dt_util.now()
             self._user_plans = frozenset(user_plans)
+            # Read once: a state changing during the auto-start await must not judge a plan twice differently.
+            states = {fub_id: run_state(fub_id) for fub_id in managed}
+            run_state = states.__getitem__
             previous = self.stopped or {}
             suspended_before = frozenset(self.suspended)
             self._track_running(managed, run_state)
@@ -381,7 +384,7 @@ class ManagedPlanWatchdog:
             if to_start:
                 auto_started = await self._async_auto_start(to_start)
                 stopped = {fub_id: name for fub_id, name in stopped.items() if fub_id not in auto_started}
-            undecided = {fub_id for fub_id in managed if fub_id not in stopped and run_state(fub_id) is None}
+            undecided = {fub_id for fub_id, state in states.items() if fub_id not in stopped and state is None}
             self._sync_issues(stopped, undecided)
             changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
