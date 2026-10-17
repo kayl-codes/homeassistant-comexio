@@ -482,6 +482,12 @@ SYNC_DURATION_FUNCTION_PLAN_ELEMENT = (
 MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400
 
+# Range of a temperature marker number (name contains soll/temp/setpoint, user decision
+# 2026-10-17, #179): down to absolute zero so negative correction offsets and outdoor
+# setpoints are settable, up to a generous ceiling that still blocks gross typos.
+MARKER_TEMPERATURE_MIN_VALUE = -273.15
+MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
+
 # Round-boundary size the KNX bridge marker block is aligned to (user decision 2026-09-14,
 # see project_knx_write_path_design memory) — also caps how far _free_marker_ids() looks
 # above an already-established block's start when hunting for a reusable blank marker, so
