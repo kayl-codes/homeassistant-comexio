@@ -249,7 +249,7 @@ def test_an_unload_closes_the_watchdog_only_once_the_platforms_unloaded(unload_o
     hass.data = {DOMAIN: {"e1": running}}
     hass.config_entries.async_unload_platforms = AsyncMock(side_effect=lambda *_: order.append("unload") or unload_ok)
     assert asyncio.run(async_unload_entry(hass, SimpleNamespace(entry_id="e1"))) is unload_ok
-    assert order == ["wait", "unload", "close"] if unload_ok else ["wait", "unload"]
+    assert order == (["wait", "unload", "close"] if unload_ok else ["wait", "unload"])
 
 
 def test_unload_entry_of_an_entry_that_never_set_up_does_not_wait() -> None:

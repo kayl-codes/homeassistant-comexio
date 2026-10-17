@@ -147,6 +147,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   The watchdog's check judges the stopped plans, awaits Auto-Start, then writes them back — a plan started from its
   repair or push meanwhile is left out (`_started_in_check`), else its repair and alarm come back while it runs.
   Flag state read before an `await` and assigned back after it without merging what changed meanwhile (#187).
+  The same per item in a loop that awaits once per plan (a start, a push): what the loop decided before it began
+  (to start, to push, to clear) is re-checked for each plan right before its own await and its answer — a plan
+  started or restored while an earlier plan's await ran keeps its confirmation (`_started_in_check`,
+  `unless_restored`).
 - **Unload waits for running work:** `async_unload_entry` calls `coordinator.async_wait_before_unload()` before it
   unloads the platforms; the wait is bounded and polls — it never queues on a lock — for every operation that
   writes Comexio, the options or the backup store: a restore, a sync, a vanished-plan restore, a plan edit, a

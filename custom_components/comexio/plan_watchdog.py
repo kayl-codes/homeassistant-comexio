@@ -609,6 +609,10 @@ class ManagedPlanWatchdog:
             result = await self._start_plan(fub_id)
             now = time.monotonic()  # the answer's time: the stopped-again window and the retry gap start here
             deferred_before = self._deferred_at.pop(fub_id, None) is not None
+            if fub_id in self._started_in_check:
+                # Started from its repair or push while this start awaited Comexio: not Auto-Start's start (no
+                # notification, no stopped-again window), nor its refusal (no failed attempt).
+                continue
             if result:
                 self._auto_started_at[fub_id] = now
                 self._notify_auto_started(fub_id, name)
@@ -700,10 +704,11 @@ class ManagedPlanWatchdog:
         )
         for fub_id, targets in sorted((self._stopped_push_retries_due(stopped) | alarms).items()):
             await self._async_push_stopped(fub_id, stopped[fub_id], targets)
+        # Re-checked per plan: one started from its push while an earlier push was sent has its push already.
         for fub_id, name in sorted(auto_started.items()):
-            await self._async_push(fub_id, name, "started_title", "auto_started")
+            if fub_id not in self._started_in_check:
+                await self._async_push(fub_id, name, "started_title", "auto_started")
         for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys()):
-            # Re-checked per plan: one started from its push while an earlier push was sent has its push already.
             if fub_id not in self._started_in_check:
                 await self._async_clear_push(fub_id)
 
@@ -752,13 +757,15 @@ class ManagedPlanWatchdog:
         alarm: bool = False,
         targets: frozenset[str] | None = None,
         while_stopped: bool = False,
+        unless_restored: bool = False,
     ) -> frozenset[str]:
         """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
 
         token: a deleted plan's push (vanished_plan_token), with its own tag and actions. targets: only
         to these notify targets (an alarm's retry, its failures logged quietly). while_stopped: only if the
         ID still holds this stopped plan (same name) once the tag's lock is held (a push asking to start it):
-        started since, its clear went out first; another plan under the ID has its own alarm. Returns the targets
+        started since, its clear went out first; another plan under the ID has its own alarm. unless_restored: not
+        once the deleted plan's "restored" push went out (judged under the lock too). Returns the targets
         that failed to take it (see _async_send). Where it was delivered it replaces (same tag) the
         plan's stopped or vanished alarm still waiting to be sent again, so those targets are dropped.
         """
@@ -784,6 +791,15 @@ class ManagedPlanWatchdog:
                 _LOGGER.info(
                     "[%s] Watchdog push '%s' for function plan %s (%s) not sent: the plan no longer is the ID's "
                     "stopped one (started meanwhile, or the next check pushes its alarm)",
+                    self._server_id,
+                    message_key,
+                    fub_id,
+                    name,
+                )
+                return frozenset()
+            if unless_restored and token in self._restored_pushes:
+                _LOGGER.info(
+                    "[%s] Watchdog push '%s' for function plan %s (%s) not sent: it was restored meanwhile",
                     self._server_id,
                     message_key,
                     fub_id,
@@ -869,6 +885,9 @@ class ManagedPlanWatchdog:
             actions=_vanished_actions(fub_id, name),
             alarm=True,
             targets=targets,
+            # Restored while an earlier plan's push was sent: the alarm would replace that confirmation, and the
+            # next sync keeps the "restored" push (see _restored_pushes), so the stale Restore button would stay.
+            unless_restored=True,
         )
         if failed:
             self._vanished_push_unsent[token] = (time.monotonic(), failed)  # the answer's time: the gap starts here

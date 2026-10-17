@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Iterator
 import logging
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -620,6 +621,40 @@ def test_the_restored_confirmation_stays_once_the_plan_is_back(ir: MagicMock) ->
     asyncio.run(watchdog.async_sync_vanished(TEST4))
     asyncio.run(watchdog.async_sync_vanished(set()))
     assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
+
+
+def test_a_plan_restored_while_an_earlier_plans_alarm_is_sent_keeps_its_restored_push(ir: MagicMock) -> None:
+    """(Sourcery, #187) The sync's alarm for it would replace "restored" (same tag), and the next sync keeps that
+    push, so the stale Restore button would stay."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    test5 = plan_watchdog.vanished_plan_token(48, "Test5")
+
+    async def run() -> None:
+        in_flight, release = asyncio.Event(), asyncio.Event()
+
+        async def call(*_args: Any, **_kwargs: Any) -> None:
+            if not in_flight.is_set():
+                in_flight.set()
+                await release.wait()
+
+        watchdog._hass.services.async_call.side_effect = call
+        sync = asyncio.create_task(watchdog.async_sync_vanished({*TEST4, (48, "Test5")}))
+        await in_flight.wait()
+        await watchdog.async_push_restored(48, "Test5")
+        release.set()
+        await sync
+
+    asyncio.run(run())
+    texts = plan_watchdog.PUSH_TEXTS["de"]
+    assert [(data["data"]["tag"], data["title"]) for _, _, data in _pushes(watchdog)] == [
+        (watchdog._push_tag(47, TOKEN), texts["vanished_title"]),
+        (watchdog._push_tag(48, test5), texts["restored_title"]),
+    ]
+    assert test5 not in watchdog._vanished_push_unsent
+    # Back again: the next sync keeps the "restored" push (no clear), and sends no alarm for it.
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    assert len(_pushes(watchdog)) == 2
+    assert watchdog._restored_pushes == set()
 
 
 def test_a_partial_restore_says_so_on_the_phone(ir: MagicMock) -> None:
@@ -1274,22 +1309,25 @@ def test_a_plan_started_while_the_check_sends_an_alarm_keeps_its_runs_again_push
     ]
 
 
+@pytest.mark.parametrize("result", [True, False, None], ids=["started", "refused", "not-answered"])
 def test_a_plan_confirmed_running_while_its_own_auto_start_awaits_comexio_keeps_its_runs_again_push(
-    ir: MagicMock,
+    ir: MagicMock, result: bool | None
 ) -> None:
-    """(Sourcery, #187) Its Auto-Start answering afterwards sends no "auto-started" push over the confirmation."""
+    """(Sourcery, #187) Its Auto-Start answering afterwards sends no "auto-started" push over the confirmation,
+    nor is its answer taken as Auto-Start's: no notification, no stopped-again window, no failed attempt."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
     asyncio.run(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
     watchdog._hass.services.async_call.reset_mock()
     watchdog.auto_restart = True
+    watchdog._deferred_at[34] = time.monotonic() - FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC  # retry due
 
     async def run() -> None:
         in_flight, release = asyncio.Event(), asyncio.Event()
 
-        async def start(_fub_id: int) -> bool:
+        async def start(_fub_id: int) -> bool | None:
             in_flight.set()
             await release.wait()
-            return True
+            return result
 
         watchdog._start_plan = start
         check = asyncio.create_task(watchdog.async_check(MANAGED, _states(p34=False, p42=True)))
@@ -1304,6 +1342,42 @@ def test_a_plan_confirmed_running_while_its_own_auto_start_awaits_comexio_keeps_
     assert [data["message"] for _, _, data in _pushes(watchdog)] == [
         texts["started"].format(name="HA - Marker 1", fub_id=34, attempts=3)
     ]
+    plan_watchdog.persistent_notification.async_create.assert_not_called()
+    assert watchdog._auto_started_at == {}
+    assert watchdog._failed_starts == {}
+    # No retry gap either: the plan runs.
+    assert watchdog._refused_at == {}
+    assert watchdog._deferred_at == {}
+
+
+def test_a_plan_confirmed_running_while_the_check_sends_an_alarm_keeps_its_runs_again_push(ir: MagicMock) -> None:
+    """(Sourcery, #187) Auto-started before, confirmed from its push while another plan's alarm is on its way: the
+    check's "auto-started" push is not sent over the confirmation (same tag)."""
+    watchdog, _ = _watchdog([True, False], targets=["notify.mobile_app_phone"])
+    watchdog.auto_restart = True
+
+    async def run() -> None:
+        in_flight, release = asyncio.Event(), asyncio.Event()
+
+        async def call(*_args: Any, **_kwargs: Any) -> None:
+            if not in_flight.is_set():
+                in_flight.set()
+                await release.wait()
+
+        watchdog._hass.services.async_call.side_effect = call
+        # 34 auto-started, 42's start refused: 42's alarm is held on its way.
+        check = asyncio.create_task(watchdog.async_check(MANAGED, _states(p34=False, p42=False)))
+        await in_flight.wait()
+        await watchdog.async_plan_started(34, confirm=True)
+        release.set()
+        await check
+
+    asyncio.run(run())
+    texts = plan_watchdog.PUSH_TEXTS["de"]
+    pushes = [(data["data"]["tag"], data["message"]) for _, _, data in _pushes(watchdog)]
+    assert pushes[0] == (watchdog._push_tag(42), texts["stopped"].format(name="HA - TRIGGER", fub_id=42, attempts=2))
+    # The confirmation names the plan by its ID: an auto-started plan is no longer among the stopped ones.
+    assert pushes[1:] == [(watchdog._push_tag(34), texts["started"].format(name="34", fub_id=34, attempts=2))]
 
 
 def test_a_started_plans_clear_waiting_while_a_check_judges_it_stopped_again_is_not_sent(ir: MagicMock) -> None:
