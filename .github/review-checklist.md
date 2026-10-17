@@ -80,9 +80,13 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   phone or replaced, never left with a button that does nothing. Before clearing a `plan_{fub_id}` push, check that
   the ID's plan is not stopped: while it is, its own alarm holds the tag (`async_dismiss_push` keeps it) — that
   alarm, pushed on the stop and sent again to a target that did not take it, is what replaced the stale push, so
-  keeping the tag is not leaving the stale push in place. The check and the clear are apart by an `await`: a stop
-  judged meanwhile pushes the alarm, which a clear arriving after it takes off, so the clear is followed by
-  sending that alarm again where it was delivered (#187). Clears and replacements reach the notify targets
+  keeping the tag is not leaving the stale push in place. The phone shows the push under a tag that arrived last,
+  so every send under one tag (push or clear) holds the tag's lock (`_push_lock`), and what it depends on is judged
+  under that lock: the clear's "not stopped" check (`keep_stopped=True`), and a push asking to start the plan only
+  while it is still stopped (`while_stopped=True`) — a stop or start judged while another send waited would else
+  have its alarm taken off, or a running plan get an alarm (#187). Flag a send under a shared tag outside that
+  lock, and a condition judged before waiting for it. Each notify call is bounded
+  (`FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC`), since a hanging one holds the lock. Clears and replacements reach the notify targets
   configured now; a phone whose target was removed is out of HA's reach and not a finding. A failed clear is logged
   and not retried: pressing the stale action again sends it again. A deleted plan's push has its own
   `vanished_{token}` tag and is removed by that token, not by the `fub_id`. Only `clear_notification` goes to

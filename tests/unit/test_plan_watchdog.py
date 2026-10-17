@@ -1,6 +1,7 @@
 """Watchdog of the HA-managed function plans (plan_watchdog.py)."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -353,6 +354,7 @@ def _pushes(watchdog: ManagedPlanWatchdog) -> list[tuple[str, str, dict[str, Any
 def test_a_repeated_start_action_names_the_plan_it_was_pushed_for(ir: MagicMock, push: str) -> None:
     """(#184) the "Start plan" of the failed/busy push carries the plan name it is sent with, as the alarm's."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.stopped = {34: "HA - Marker 1"}  # the outdated replacement is sent only while it is
     asyncio.run(getattr(watchdog, push)(34, "HA - Marker 1"))
     actions = _pushes(watchdog)[0][2]["data"]["actions"]
     assert [action["action"] for action in actions] == [start_action_id(SERVER_ID, 34, "HA - Marker 1")]
@@ -494,7 +496,6 @@ def test_without_auto_start_a_stopped_plan_only_keeps_its_repair(ir: MagicMock) 
 
 TEST4 = {(47, "Test4")}
 TOKEN = plan_watchdog.vanished_plan_token(47, "Test4")
-TWO = frozenset({"mobile_app_phone", "mobile_app_tablet"})
 
 
 def test_a_vanished_plan_gets_its_repair_and_one_alarm_push(ir: MagicMock) -> None:
@@ -922,87 +923,68 @@ def test_a_stale_push_is_not_cleared_once_the_ids_plan_stopped(ir: MagicMock) ->
     assert _pushes(watchdog)[-1][2]["message"] == "clear_notification"
 
 
-def test_a_stop_judged_during_a_stale_push_clear_gets_its_alarm_back(ir: MagicMock) -> None:
-    """(Sourcery, #187) The clear passed the "not stopped" check, then arrived after the stop's alarm."""
+def _arrivals_while_the_first_push_is_held(
+    watchdog: ManagedPlanWatchdog,
+    first: Callable[[], Awaitable[Any]],
+    then: Callable[[], Awaitable[Any]],
+    meanwhile: Callable[[], None] = lambda: None,
+) -> list[str]:
+    """Runs first and holds its first push on its way; runs then, calls meanwhile, then lets the push arrive.
+
+    Returns the pushes in the order they arrived.
+    """
+    arrived: list[str] = []
+
+    async def run() -> None:
+        in_flight, release = asyncio.Event(), asyncio.Event()
+
+        async def call(_domain: str, _service: str, data: dict[str, Any], **_kwargs: Any) -> None:
+            if not in_flight.is_set():
+                in_flight.set()
+                await release.wait()
+            arrived.append("clear" if data["message"] == "clear_notification" else "alarm")
+
+        watchdog._hass.services.async_call.side_effect = call
+        first_task = asyncio.create_task(first())
+        await in_flight.wait()
+        then_task = asyncio.create_task(then())
+        for _ in range(10):  # then runs up to its own push
+            await asyncio.sleep(0)
+        meanwhile()
+        release.set()
+        await asyncio.gather(first_task, then_task)
+
+    asyncio.run(run())
+    return arrived
+
+
+def test_a_stop_judged_while_a_stale_push_is_cleared_sends_its_alarm_after_the_clear(ir: MagicMock) -> None:
+    """(Sourcery, #187) The clear passed the "not stopped" check; the stop's alarm (same tag) must not arrive first."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
-    calls = watchdog._hass.services.async_call
-
-    async def stop_during_clear(_domain: str, _service: str, data: dict[str, Any], **_kwargs: Any) -> None:
-        if data["message"] == "clear_notification" and watchdog.stopped is None:
-            await watchdog.async_check({47: "Test4"}, _states(p47=False))
-
-    calls.side_effect = stop_during_clear
-    asyncio.run(watchdog.async_dismiss_push(47))
-    # The clear's call, the check's alarm sent while it ran, the alarm sent again after the clear arrived.
-    clear, first_alarm, (_d, service, alarm) = _pushes(watchdog)
-    assert clear[2]["message"] == "clear_notification"
-    assert first_alarm[2]["data"]["tag"] == watchdog._push_tag(47)
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_dismiss_push(47),
+        lambda: watchdog.async_check({47: "Test4"}, _states(p47=False)),
+    )
+    assert arrived == ["clear", "alarm"]
+    _clear, (_d, service, alarm) = _pushes(watchdog)
     assert service == "mobile_app_phone"
     assert alarm["data"]["tag"] == watchdog._push_tag(47)
     assert alarm["data"]["actions"][0]["action"] == start_action_id(SERVER_ID, 47, "Test4")
+    assert alarm["data"]["ttl"] == 0
+    assert alarm["data"]["priority"] == "high"
+    assert alarm["data"]["push"] == {"interruption-level": "time-sensitive"}
 
 
-def _stop_during_clear(
-    watchdog: ManagedPlanWatchdog, down: set[str], *, clear_down: set[str] | frozenset[str] = frozenset()
-) -> None:
-    """The plan stops (its alarm pushed) while the first clear is on its way; down targets refuse alarms."""
-
-    async def call(_domain: str, service: str, data: dict[str, Any], **_kwargs: Any) -> None:
-        if data["message"] == "clear_notification":
-            if watchdog.stopped is None:
-                await watchdog.async_check({47: "Test4"}, _states(p47=False))
-            if service in clear_down:
-                raise HomeAssistantError("down")
-        elif service in down:
-            raise HomeAssistantError("down")
-
-    watchdog._hass.services.async_call.side_effect = call
-
-
-@pytest.mark.parametrize(("clear_down", "resent_to"), [({"mobile_app_tablet"}, ["mobile_app_phone"]), (TWO, [])])
-def test_the_alarm_is_sent_again_only_where_the_clear_arrived(
-    ir: MagicMock, clear_down: set[str], resent_to: list[str]
-) -> None:
-    watchdog, _ = _watchdog(targets=sorted(TWO))
-    _stop_during_clear(watchdog, set(), clear_down=clear_down)
-    asyncio.run(watchdog.async_dismiss_push(47))
-    pushes = _pushes(watchdog)
-    clears = [service for _, service, data in pushes if data["message"] == "clear_notification"]
-    alarms = [service for _, service, data in pushes if data["message"] != "clear_notification"]
-    assert clears == sorted(TWO)
-    assert alarms == [*sorted(TWO), *resent_to]  # the check's alarm to both, then the resend
-
-
-def test_a_stale_push_clear_of_a_running_or_deleted_plan_sends_no_alarm(ir: MagicMock) -> None:
+def test_a_plan_started_while_its_alarm_is_sent_has_the_alarm_cleared_after_it(ir: MagicMock) -> None:
+    """(Sourcery, #187) Else the clear arrives first and the running plan's alarm stays on the phone."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
-    asyncio.run(watchdog.async_dismiss_push(47))
-    assert [data["message"] for *_, data in _pushes(watchdog)] == ["clear_notification"]
-    _stop_during_clear(watchdog, set())
-    asyncio.run(watchdog.async_dismiss_push(47, "Old"))  # a deleted plan's tag: the new stop's alarm stays
-    _first_clear, (_d, _s, clear), (_d2, _s2, alarm) = _pushes(watchdog)
-    assert clear["data"]["tag"] == watchdog._push_tag(47, plan_watchdog.vanished_plan_token(47, "Old"))
-    assert alarm["data"]["tag"] == watchdog._push_tag(47)  # the check's alarm only, not sent again
-
-
-def test_a_failed_resend_is_logged_and_kept_with_the_alarms_still_waiting(
-    ir: MagicMock, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The tablet missed the check's alarm and the clear; the phone misses the resend: both wait for it."""
-    watchdog, _ = _watchdog(targets=sorted(TWO))
-    _stop_during_clear(watchdog, {"mobile_app_tablet"}, clear_down={"mobile_app_tablet"})
-    calls = watchdog._hass.services.async_call
-    check_and_clear = calls.side_effect
-
-    async def phone_misses_the_resend(_domain: str, service: str, data: dict[str, Any], **kwargs: Any) -> None:
-        if service == "mobile_app_phone" and data["message"] != "clear_notification" and calls.call_count == 5:
-            raise HomeAssistantError("down")
-        await check_and_clear(_domain, service, data, **kwargs)
-
-    calls.side_effect = phone_misses_the_resend
-    with caplog.at_level(logging.WARNING):
-        asyncio.run(watchdog.async_dismiss_push(47))
-    assert watchdog._stopped_push_unsent[47][1] == TWO
-    assert "not sent again to mobile_app_phone" in caplog.text
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_check({47: "Test4"}, _states(p47=False)),
+        lambda: watchdog.async_plan_started(47),
+    )
+    assert arrived == ["alarm", "clear"]
 
 
 def test_an_outdated_replacement_a_target_failed_to_take_is_sent_again(ir: MagicMock, clock: list[float]) -> None:
@@ -1081,3 +1063,42 @@ def test_vanished_plan_follow_up_pushes(method: str, args: tuple, actions: list[
 def test_push_texts_have_the_same_keys_in_every_language() -> None:
     keys = {lang: set(texts) for lang, texts in plan_watchdog.PUSH_TEXTS.items()}
     assert all(lang_keys == keys["en"] for lang_keys in keys.values())
+
+
+def test_a_stale_push_clear_waiting_for_the_tag_is_not_sent_once_the_plan_stopped(ir: MagicMock) -> None:
+    """The "not stopped" check is judged under the tag's lock: the plan stopped while this clear waited for it."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_dismiss_push(47),
+        lambda: watchdog.async_dismiss_push(47),
+        meanwhile=lambda: setattr(watchdog, "stopped", {47: "Test4"}),
+    )
+    assert arrived == ["clear"]
+
+
+def test_an_alarm_decided_before_its_plan_was_started_is_not_sent(ir: MagicMock) -> None:
+    """(#187) Test3's alarm holds the check while Test4 is started: Test4's alarm, decided before, is dropped."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_check({46: "Test3", 47: "Test4"}, _states(p46=False, p47=False)),
+        lambda: watchdog.async_plan_started(47),
+    )
+    assert arrived == ["clear", "alarm"]
+    assert [data["data"]["tag"] for *_, data in _pushes(watchdog) if data["message"] != "clear_notification"] == [
+        watchdog._push_tag(46)
+    ]
+
+
+def test_a_hanging_notify_service_counts_as_failed(ir: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Else it holds the tag's lock, and the plan's clears wait for it forever."""
+    monkeypatch.setattr(plan_watchdog, "FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC", 0.01)
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+
+    async def hang(*_args: Any, **_kwargs: Any) -> None:
+        await asyncio.sleep(1)
+
+    watchdog._hass.services.async_call.side_effect = hang
+    asyncio.run(watchdog.async_check({47: "Test4"}, _states(p47=False)))
+    assert watchdog._stopped_push_unsent[47][1] == {"notify.mobile_app_phone"}
