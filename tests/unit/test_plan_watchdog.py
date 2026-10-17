@@ -1404,6 +1404,7 @@ def _no_push_lock_left() -> Iterator[None]:
     yield
     left = dict(plan_watchdog._PUSH_LOCKS)
     plan_watchdog._PUSH_LOCKS.clear()
+    plan_watchdog._UNSETTLED_TAGS.clear()
     assert left == {}
 
 
@@ -1590,7 +1591,9 @@ def test_a_stopped_alarm_waiting_for_its_tag_while_the_repair_is_ignored_is_not_
         lambda: watchdog._async_push_stopped(42, "HA - TRIGGER", None),
         lambda: ir.async_ignore_issue(watchdog._hass, DOMAIN, issue, True),
     )
-    assert arrived == ["alarm"]  # the start-failed push only
+    assert arrived == ["alarm"]
+    failed_text = plan_watchdog.PUSH_TEXTS["de"]["failed"].format(name="HA - TRIGGER", fub_id=42, attempts=3)
+    assert [data["message"] for _, _, data in _pushes(watchdog)] == [failed_text]  # the start-failed push only
 
 
 def test_a_reloaded_watchdog_waits_for_the_old_ones_push_under_the_same_tag(ir: MagicMock) -> None:
@@ -1625,6 +1628,175 @@ def test_a_closed_watchdogs_clear_queued_behind_the_reloaded_ones_alarm_is_not_s
 
     arrived = _arrivals_while_the_first_push_is_held(old, lambda: old.async_dismiss_push(47), then, unload)
     assert arrived == ["clear", "alarm"]
+
+
+def test_a_check_resuming_after_the_unload_leaves_the_reloaded_watchdogs_repairs(ir: MagicMock) -> None:
+    """(Sourcery, #187) The old check's snapshot predates the reload: it neither deletes the repairs the new
+    watchdog raised meanwhile nor starts or pushes anything more."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new._hass = old._hass
+    asyncio.run(old.async_check(MANAGED, _states(p34=False, p42=False)))  # both stopped, Auto-Start off
+    old._hass.services.async_call.reset_mock()
+    old.auto_restart = True
+    started: list[int] = []
+
+    async def run() -> None:
+        in_flight, release = asyncio.Event(), asyncio.Event()
+
+        async def start(fub_id: int) -> bool:
+            started.append(fub_id)
+            in_flight.set()
+            await release.wait()
+            return True
+
+        old._start_plan = start
+        check = asyncio.create_task(old.async_check(MANAGED, _states(p34=False, p42=False)))
+        await in_flight.wait()
+        old.close()
+        await new.async_check(MANAGED, _states(p34=False, p42=True))
+        release.set()
+        assert await check is False
+
+    asyncio.run(run())
+    assert started == [34]  # 42 is not started after the unload
+    assert (DOMAIN, stopped_plan_issue_id(SERVER_ID, 34)) in ir.async_get.return_value.issues
+    assert (DOMAIN, stopped_plan_issue_id(SERVER_ID, 42)) not in ir.async_get.return_value.issues  # seen running
+    assert [data["data"]["tag"] for _, _, data in _pushes(new)] == [new._push_tag(34)]  # the new one's alarm only
+
+
+@pytest.mark.parametrize("still_stopped", [True, False])
+def test_an_alarm_on_its_way_at_the_reloaded_watchdogs_first_check_is_replaced_or_cleared(
+    ir: MagicMock, still_stopped: bool
+) -> None:
+    """(Sourcery, #187) The new watchdog has no verdict of its own to clear: for a plan it sees running it takes the
+    old alarm off after it arrived, for one still stopped its own alarm replaces it."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new._hass = old._hass
+    old.stopped = {42: "HA - TRIGGER"}
+    arrived = _arrivals_while_the_first_push_is_held(
+        old,
+        lambda: old._async_push_stopped(42, "HA - TRIGGER", None),
+        lambda: new.async_check(MANAGED, _states(p34=True, p42=not still_stopped)),
+        old.close,
+    )
+    assert arrived == (["alarm", "alarm"] if still_stopped else ["alarm", "clear"])
+    assert {data["data"]["tag"] for _, _, data in _pushes(old)} == {old._push_tag(42)}
+    assert not plan_watchdog._UNSETTLED_TAGS
+
+
+def test_an_alarm_arrived_after_the_unload_is_cleared_once_its_plan_is_seen_running(ir: MagicMock) -> None:
+    """(Sourcery, #187) Arrived before the new watchdog judged: its checks clear it once, a later check sends nothing;
+    a plan with an unknown state keeps it until it is seen running."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new._hass = old._hass
+    old.stopped = {42: "HA - TRIGGER"}
+    arrived = _arrivals_while_the_first_push_is_held(
+        old, lambda: old._async_push_stopped(42, "HA - TRIGGER", None), lambda: asyncio.sleep(0), old.close
+    )
+    assert arrived == ["alarm"]
+    old._hass.services.async_call.reset_mock()
+    old._hass.services.async_call.side_effect = None
+    asyncio.run(new.async_check(MANAGED, _states(p34=True, p42=None)))
+    assert _pushes(new) == []
+    asyncio.run(new.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert [(data["message"], data["data"]["tag"]) for _, _, data in _pushes(new)] == [
+        ("clear_notification", new._push_tag(42))
+    ]
+    asyncio.run(new.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert len(_pushes(new)) == 1
+
+
+def test_a_closed_watchdog_leaves_the_shared_repairs_to_the_reloaded_one(ir: MagicMock) -> None:
+    """(local review, #187) A check or deleted-plan sync of the unloaded entry would apply a snapshot older than
+    the new watchdog's repairs."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(new.async_check(MANAGED, _states(p34=False, p42=True)))
+    asyncio.run(new.async_sync_vanished({(47, "Test4")}))
+    issues = dict(ir.async_get.return_value.issues)
+    old.close()
+    assert asyncio.run(old.async_check(MANAGED, _states(p34=True, p42=False))) is False
+    asyncio.run(old.async_sync_vanished(set()))
+    assert ir.async_get.return_value.issues == issues
+    assert old.stopped is None
+    assert _pushes(old) == []
+
+
+def test_a_confirmation_on_its_way_replaces_an_unsettled_push_and_is_not_cleared(ir: MagicMock) -> None:
+    """(local review, #187) The clear is judged under the tag's lock: started from the old alarm while a check
+    begins, the "runs again" push sent meanwhile replaced it."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    plan_watchdog._UNSETTLED_TAGS.add(watchdog._push_tag(42))
+    arrived = _arrivals_while_the_first_push_is_held(
+        watchdog,
+        lambda: watchdog.async_plan_started(42, confirm=True),
+        lambda: watchdog.async_check(MANAGED, _states(p34=True, p42=True)),
+    )
+    assert arrived == ["alarm"]  # the "runs again" push only
+    assert not plan_watchdog._UNSETTLED_TAGS
+
+
+def test_an_unsettled_push_whose_clear_failed_is_cleared_by_the_next_check(ir: MagicMock) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    tag = watchdog._push_tag(42)
+    plan_watchdog._UNSETTLED_TAGS.add(tag)
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert tag in plan_watchdog._UNSETTLED_TAGS
+    watchdog._hass.services.async_call.side_effect = None
+    asyncio.run(watchdog.async_check(MANAGED, _states(p34=True, p42=True)))
+    assert len(_pushes(watchdog)) == 2  # the failed clear and its repeat
+    assert not plan_watchdog._UNSETTLED_TAGS
+
+
+def test_an_undelivered_push_leaves_the_unsettled_push_to_be_cleared(ir: MagicMock) -> None:
+    """Delivered nowhere, it replaced nothing: the old push still shows."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    tag = watchdog._push_tag(42)
+    plan_watchdog._UNSETTLED_TAGS.add(tag)
+    watchdog._hass.services.async_call.side_effect = HomeAssistantError("down")
+    asyncio.run(watchdog.async_plan_started(42, confirm=True))
+    assert tag in plan_watchdog._UNSETTLED_TAGS
+
+
+def test_a_deleted_plans_push_arriving_after_the_unload_is_not_kept_unsettled(ir: MagicMock) -> None:
+    """No check judges a deleted plan's token running: its tag would stay in the set for good."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    arrived = _arrivals_while_the_first_push_is_held(
+        old, lambda: old._async_push_vanished(47, "Test4", None), lambda: asyncio.sleep(0), old.close
+    )
+    assert arrived == ["alarm"]
+    assert not plan_watchdog._UNSETTLED_TAGS
+
+
+def test_an_alarm_delivered_nowhere_after_the_unload_is_not_kept_unsettled(ir: MagicMock) -> None:
+    """Nothing to take off: a clear would remove the push shown before, e.g. a "runs again" confirmation."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    old.stopped = {42: "HA - TRIGGER"}
+
+    async def call(*_args: Any, **_kwargs: Any) -> None:
+        old.close()
+        raise HomeAssistantError("down")
+
+    old._hass.services.async_call.side_effect = call
+    asyncio.run(old._async_push_stopped(42, "HA - TRIGGER", None))
+    assert not plan_watchdog._UNSETTLED_TAGS
+
+
+def test_a_push_without_buttons_arriving_after_the_unload_is_left_on_the_phone(ir: MagicMock) -> None:
+    """A confirmation offers nothing to press: it is not cleared."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    arrived = _arrivals_while_the_first_push_is_held(
+        old,
+        lambda: old._async_push(42, "HA - TRIGGER", "started_title", "started"),
+        lambda: asyncio.sleep(0),
+        old.close,
+    )
+    assert arrived == ["alarm"]
+    assert not plan_watchdog._UNSETTLED_TAGS
 
 
 def test_a_hanging_notify_service_counts_as_failed(ir: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:

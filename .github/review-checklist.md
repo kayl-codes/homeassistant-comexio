@@ -91,7 +91,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   a reloaded entry's watchdog sends under the old one's tags while its sends may still be on their way, so a lock
   per instance does not serialize them. The unload closes the old watchdog once the platforms unloaded (`close()`,
   judged under the lock), so what its still-running check queues behind the new one's alarm is dropped; not before
-  the unload's wait (the awaited restore's push would be lost) nor on a failed unload (alarms silenced for good). Each notify call is bounded
+  the unload's wait (the awaited restore's push would be lost) nor on a failed unload (alarms silenced for good). After an await, a closed watchdog applies
+  nothing to the server's shared repairs: its snapshot predates the new one's. A push with buttons still on its way
+  when it closed is the reloaded watchdog's to settle (`_UNSETTLED_TAGS`), cleared for a plan seen running and
+  judged under the lock (`only_unsettled`). Flag a post-await write of a closed watchdog. Each notify call is bounded
   (`FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC`), since a hanging one holds the lock. Clears and replacements reach the notify targets
   configured now; a phone whose target was removed is out of HA's reach and not a finding. A failed clear is logged
   and not retried: pressing the stale action again sends it again. A deleted plan's push has its own
