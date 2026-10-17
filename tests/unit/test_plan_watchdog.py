@@ -1384,12 +1384,21 @@ def test_a_started_plans_clear_waiting_while_a_check_judges_it_stopped_again_is_
     """(Sourcery, #187) The stop's alarm (same tag) is due; the clear would take it off the phone."""
     watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
     watchdog.stopped = {}
+    clear_push = watchdog._async_clear_push
+    asked: list[bool] = []
+
+    async def clear(fub_id: int, token: str | None = None, *, keep_stopped: bool = False) -> None:
+        asked.append(keep_stopped)
+        await clear_push(fub_id, token, keep_stopped=keep_stopped)
+
+    watchdog._async_clear_push = clear
     arrived = _arrivals_while_the_first_push_is_held(
         watchdog,
         lambda: watchdog.async_dismiss_push(47),
         lambda: watchdog.async_plan_started(47),
         lambda: setattr(watchdog, "stopped", {47: "Test4"}),
     )
+    assert asked == [True, True]  # the start asked for its clear too: the guard dropped it
     assert arrived == ["clear"]
 
 
