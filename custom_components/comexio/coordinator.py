@@ -183,7 +183,7 @@ from .function_plan_backup import (
 )
 from .function_plan_block_settings import expand_autohide_blocks, snapshot_block_settings
 from .function_plan_catalog import FunctionPlanCatalogManager
-from .ha_address import HaAddressResolver, webio_device_hint
+from .ha_address import HaAddressResolver, is_loopback_address, webio_device_hint
 from .orphaned_backups import async_audit_orphaned_backups
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
@@ -472,8 +472,12 @@ def _log_audit_items(icon: str, label: str, items: list[dict[str, Any]]) -> None
 
 
 async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
-    """Whether a Web-IO device's recorded IP/port has drifted from this HA instance's current address."""
-    if not (com_dev_id and com_ip and com_ip != ha_address):
+    """Whether a Web-IO device's recorded IP/port has drifted from this HA instance's current address.
+
+    Never for a loopback ha_address (the resolver's last resort, already warned about): the sync
+    would refuse to write it, so the repair could only offer a fix that cannot work.
+    """
+    if not (com_dev_id and com_ip and com_ip != ha_address) or is_loopback_address(ha_address):
         return False
     try:
         ha_host, ha_port = ha_address.rsplit(":", 1)

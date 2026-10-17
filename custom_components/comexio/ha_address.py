@@ -149,6 +149,14 @@ def format_address(host: str, port: int) -> str:
     return f"{host}:{port}"
 
 
+def is_loopback_address(address: str) -> bool:
+    """Whether a "host:port" address (see format_address) points to the loopback interface.
+
+    Comexio cannot reach HA there; the resolver returns such an address only as its last resort.
+    """
+    return _is_loopback(host_of(address) or "")
+
+
 def webio_device_hint(webio_devices: Mapping[str, Mapping[str, Any]] | None) -> str | None:
     """The address a Web-IO device already stores (parsed/audited "webio_devices" per class)."""
     return next((dev["device_ip"] for dev in (webio_devices or {}).values() if dev.get("device_ip")), None)
