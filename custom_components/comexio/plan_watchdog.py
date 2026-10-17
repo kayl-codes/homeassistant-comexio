@@ -530,6 +530,10 @@ class ManagedPlanWatchdog:
 
         confirm replaces the push with a "runs again" one (started from the phone), else the push is removed.
         """
+        if self._closed:
+            # Unloaded while the start awaited Comexio: the reloaded watchdog owns the shared repair now (it may
+            # have raised it again meanwhile); its next check sees the plan running and clears it.
+            return
         # The suspension is not touched here: the run-state fetch right after the start (or the next
         # poll) lifts it once it sees the plan running.
         if fub_id not in self._auto_started_in_check:

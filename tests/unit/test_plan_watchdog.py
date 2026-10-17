@@ -1742,6 +1742,23 @@ def test_a_closed_watchdog_leaves_the_shared_repairs_to_the_reloaded_one(ir: Mag
     assert _pushes(old) == []
 
 
+@pytest.mark.parametrize("confirm", [False, True])
+def test_a_start_finishing_after_the_unload_leaves_the_reloaded_watchdogs_repair(ir: MagicMock, confirm: bool) -> None:
+    """(Sourcery, #187) Started from the old entry's repair or push, its answer arrived after the unload: the
+    reloaded watchdog may have raised the repair again meanwhile, its next check clears it if the plan runs."""
+    old, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    new, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(old.async_check(MANAGED, _states(p34=True, p42=False)))
+    asyncio.run(new.async_check(MANAGED, _states(p34=True, p42=False)))
+    issues = dict(ir.async_get.return_value.issues)
+    pushed = len(_pushes(old))
+    old.close()
+    asyncio.run(old.async_plan_started(42, confirm=confirm))
+    assert ir.async_get.return_value.issues == issues
+    assert old.stopped == {42: "HA - TRIGGER"}
+    assert len(_pushes(old)) == pushed
+
+
 def test_a_confirmation_on_its_way_replaces_an_actionable_push_and_is_not_cleared(ir: MagicMock) -> None:
     """(local review, #187) The clear is judged under the tag's lock: started from the old alarm while a check
     begins, the "runs again" push sent meanwhile replaced it."""
