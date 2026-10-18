@@ -742,7 +742,7 @@ class ManagedPlanWatchdog:
             logging.DEBUG if logged_before else logging.INFO,
             "[%s] Auto-start of monitored function plan '%s' (ID %s) not sent or not answered; retried in %s s",
             self._server_id,
-            name,
+            one_line(name),
             fub_id,
             FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
         )

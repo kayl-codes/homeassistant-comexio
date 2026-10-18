@@ -67,6 +67,7 @@ from .const import (
     SourceCategory,
     WebioClass,
     category_by_fub_module_type,
+    one_line,
     source_category,
     trigger_pair_categories,
     uninstall_cleanup_pending_notification_id,
@@ -2816,7 +2817,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             category_label,
             fub_id,
             expected_name,
-            plan_name,
+            one_line(plan_name),
         )
         return (
             f"{ICON_WARNING} fub {fub_id}: aborted — expected '{expected_name}' but plan is now '{plan_name}'",
@@ -2908,7 +2909,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 "cluster plan for %s — it was renamed/repurposed since resolve_io_clusters() ran",
                 self.server_id,
                 fub_id,
-                plan_name,
+                one_line(plan_name),
                 stale_exts,
             )
             return (
@@ -2953,7 +2954,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 "[%s] function_plan_add_io_pairs: resynced %d group header(s) for plan '%s'",
                 self.server_id,
                 n_headers,
-                plan_name,
+                one_line(plan_name),
             )
 
         note = ""

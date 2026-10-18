@@ -2535,7 +2535,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning(
                     "[%s] Uninstall cleanup: skipping plan %r with invalid fub_id %r",
                     self.server_id,
-                    plan_name,
+                    one_line(plan_name),
                     fub_id,
                 )
                 failed_plans.append(plan_name)
@@ -3135,7 +3135,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         if label is None:
             _LOGGER.warning(
-                "[%s] Orphaned plan preview: no backups left for '%s' (fub=%s)", self.server_id, plan_name, fub_id
+                "[%s] Orphaned plan preview: no backups left for '%s' (fub=%s)",
+                self.server_id,
+                one_line(plan_name),
+                fub_id,
             )
             return False
         registry = er.async_get(self.hass)
@@ -3163,7 +3166,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         choice = self.orphaned_backup_choice(label)
         if choice is None:
-            _LOGGER.warning("[%s] Orphaned plan preview: '%s' was deleted meanwhile", self.server_id, plan_name)
+            _LOGGER.warning(
+                "[%s] Orphaned plan preview: '%s' was deleted meanwhile", self.server_id, one_line(plan_name)
+            )
             return False
         url = await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
         return url is not None
@@ -3189,7 +3194,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
                 kind,
                 slot,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             return None
@@ -4062,7 +4067,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             result[RANGE_CHECK_FIXED] += 1
             _LOGGER.warning(
                 "Web-IO command '%s' Min/Max drifted (%s/%s -> %s/%s); corrected.",
-                name,
+                one_line(name),
                 live_min,
                 live_max,
                 target["Min"],
@@ -4070,7 +4075,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         else:
             result[RANGE_CHECK_CORRECTION_FAILED] += 1
-            _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max drift.", name)
+            _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max drift.", one_line(name))
 
     async def _async_webio_range_check_tick(self, _now: datetime | None = None) -> dict[str, int]:
         """Check and correct analog Web-IO command Min/Max drift against the target range.
@@ -4128,14 +4133,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 if target is None or not cmd_id or not device.get("device_id"):
                     result[RANGE_CHECK_EXCLUDED] += 1
                     _LOGGER.warning(
-                        "Web-IO command '%s' excluded from range check (no matching target/id/device)", name
+                        "Web-IO command '%s' excluded from range check (no matching target/id/device)", one_line(name)
                     )
                     continue
                 try:
                     await self._async_check_one_webio_range(name, cmd_id, device, target, result)
                 except Exception:
                     result[RANGE_CHECK_FAILED] += 1
-                    _LOGGER.exception("Unexpected error checking Web-IO command '%s' range", name)
+                    _LOGGER.exception("Unexpected error checking Web-IO command '%s' range", one_line(name))
 
         _LOGGER.info(
             "[%s] Web-IO range check: %d checked, %d fixed, %d failed to read, %d correction failed, %d excluded",
@@ -4355,7 +4360,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "under this ID any more (renamed, deleted, or the ID reused for another plan). A renamed user plan "
                 "can be picked again in the options",
                 self.server_id,
-                name,
+                one_line(name),
                 fub_id,
             )
         self._unresolved_watch_picks = unresolved
@@ -5341,7 +5346,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning(
                     "[%s] Bus-load watchdog: skipping non-numeric plan_map entry '%s' -> %r",
                     self.server_id,
-                    plan_name,
+                    one_line(plan_name),
                     fub_id,
                 )
         return plan_map
@@ -5354,7 +5359,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "
                     "restarting it anyway, run_fup re-applies its state authoritatively",
                     self.server_id,
-                    plan_name,
+                    one_line(plan_name),
                     fub_id,
                 )
             await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
@@ -5362,7 +5367,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning(
                     "[%s] Bus-load watchdog: run_fup failed for plan '%s' (fub=%s) — it may now be left stopped",
                     self.server_id,
-                    plan_name,
+                    one_line(plan_name),
                     fub_id,
                 )
             await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
@@ -6057,7 +6062,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for plan_name, cluster_ids in clusters.items():
             fub_id, created = await self._resolve_single_cluster_plan(plan_name, plan_map, fub_data)
             if fub_id is None:
-                _LOGGER.error("[%s] Failed to resolve/create cluster plan '%s'", self.server_id, plan_name)
+                _LOGGER.error("[%s] Failed to resolve/create cluster plan '%s'", self.server_id, one_line(plan_name))
                 failed_plans.append(plan_name)
                 continue
             result[fub_id] = cluster_ids
@@ -6103,7 +6108,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # _distrusted_fub_ids' docstring. Without this, a plain by-name match would silently
             # re-adopt the still-contaminated plan the moment fub_data gets refreshed again.
             if fid not in self._distrusted_fub_ids and fub_info.get("Name") == plan_name:
-                _LOGGER.info("[%s] Found cluster plan '%s' (fub_id=%s)", self.server_id, plan_name, fid_str)
+                _LOGGER.info("[%s] Found cluster plan '%s' (fub_id=%s)", self.server_id, one_line(plan_name), fid_str)
                 return fid, False
 
         fub_id = await self._create_managed_plan(plan_name)
@@ -6111,12 +6116,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _create_managed_plan(self, plan_name: str, orientation: str = _ORIENT_LANDSCAPE) -> int | None:
         """Create a managed A3 cluster plan carrying the 'administrated by HA' comment."""
-        _LOGGER.info("[%s] Creating cluster plan '%s'", self.server_id, plan_name)
+        _LOGGER.info("[%s] Creating cluster plan '%s'", self.server_id, one_line(plan_name))
         fub_id = await self.api.create_fup(
             plan_name=plan_name, paper_format=_MANAGED_PLAN_PAPER, orientation=orientation
         )
         if fub_id is None:
-            _LOGGER.error("[%s] Failed to create cluster plan '%s'", self.server_id, plan_name)
+            _LOGGER.error("[%s] Failed to create cluster plan '%s'", self.server_id, one_line(plan_name))
             return None
 
         if not await self._verify_new_plan_is_empty(plan_name, fub_id):
@@ -6187,7 +6192,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.error(
                 "[%s] Could not verify new cluster plan '%s' (fub_id=%s) is empty — removing it and aborting",
                 self.server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             await self._discard_contaminated_plan(plan_name, fub_id)
@@ -6203,7 +6208,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "not cleanable via the API; removing the plan and aborting instead of building on top of "
                 "it. Inspect/clear fub_id=%s directly in Comexio Studio.",
                 self.server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
                 conn_count,
                 fub_id,
@@ -6215,7 +6220,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "[%s] New cluster plan '%s' (fub_id=%s) unexpectedly already has %d element(s)/%d connection(s) — "
             "Comexio likely reused a stale fub_id still carrying leftover data; clearing it before use.",
             self.server_id,
-            plan_name,
+            one_line(plan_name),
             fub_id,
             len(elem_ids),
             conn_count,
@@ -6226,7 +6231,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "[%s] Cleared %d leftover element(s) from '%s' (fub_id=%s) — plan is usable now",
                 self.server_id,
                 len(elem_ids),
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             self._distrusted_fub_ids.discard(fub_id)
@@ -6236,7 +6241,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "[%s] Could not clear leftover elements from new cluster plan '%s' (fub_id=%s) — removing it "
             "and aborting instead of building on top of it",
             self.server_id,
-            plan_name,
+            one_line(plan_name),
             fub_id,
         )
         await self._discard_contaminated_plan(plan_name, fub_id)
@@ -6272,7 +6277,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "[%s] Could not remove contaminated/unverified plan '%s' (fub_id=%s) — quarantined for "
                 "this session, but manual cleanup in Comexio Studio is still required to free the name/id",
                 self.server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
         self.api.fub_data.pop(str(fub_id), None)
@@ -6477,7 +6482,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.info(
                 "[%s] Pruned stale plan_map entry '%s' (fub %s) — no longer exists in Comexio",
                 self.server_id,
-                name,
+                one_line(name),
                 fub_id,
             )
         return stale

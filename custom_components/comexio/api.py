@@ -1651,7 +1651,7 @@ class ComexioAPI:
         try:
             await self.client.create_webio_device(name, base_id, ha_address, username=username, password=password)
         except ComexioError as err:
-            _LOGGER.warning("Creating Web-IO device %r failed: %s", name, err)
+            _LOGGER.warning("Creating Web-IO device %r failed: %s", one_line(name), err)
             return False
         return True
 
@@ -2304,7 +2304,7 @@ class ComexioAPI:
         created = await _attempt(f"Creating function plan {plan_name!r}", create, None)
         if created is None:
             return None
-        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, created.fub_id)
+        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", one_line(plan_name), created.fub_id)
         self._fub_data[str(created.fub_id)] = created.fubs_entry
         self._created_fubs[str(created.fub_id)] = (created.fubs_entry, self._config_fetches_started)
         if self.run_state_listener is not None:
@@ -2339,7 +2339,7 @@ class ComexioAPI:
         _LOGGER.error(
             "create_fup: plan '%s' was created in Comexio, but its id is still unknown (%s) — "
             "it shows up with the next poll; do not create it again",
-            plan_name,
+            one_line(plan_name),
             reason,
         )
         return None
@@ -2397,7 +2397,7 @@ class ComexioAPI:
             paper,
             dpi,
             orient,
-            name,
+            one_line(name),
         )
         return True
 
@@ -2445,7 +2445,7 @@ class ComexioAPI:
             lambda: self.client.rename_marker(int(marker_id), name, binary=binary, default=default, store_memory=store),
         ):
             return False
-        _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, name, binary)
+        _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, one_line(name), binary)
         return True
 
     async def rename_knx_object(self, k_id: str | int, name: str) -> bool:
@@ -2460,7 +2460,7 @@ class ComexioAPI:
         """
         if not await _succeeded(f"Renaming KNX object K{k_id}", lambda: self.client.rename_knx_object(int(k_id), name)):
             return False
-        _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, name)
+        _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, one_line(name))
         return True
 
     @staticmethod
@@ -4946,7 +4946,7 @@ class ComexioAPI:
         if stopped is False:
             _LOGGER.warning(
                 "_delete_plan_elements_and_restart: plan '%s' (fub=%s) could not be stopped, cleanup skipped",
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             return {
@@ -4982,7 +4982,7 @@ class ComexioAPI:
             "_delete_plan_elements_and_restart: deleted %d elements, webio_cmd_ids=%s (plan '%s' %s)",
             len(elem_ids_to_delete),
             webio_cmd_ids,
-            plan_name,
+            one_line(plan_name),
             restart_note,
         )
         return {
