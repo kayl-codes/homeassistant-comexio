@@ -631,7 +631,7 @@ def test_unreadable_adapters_count_as_unknown_own_ips(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(ha_address, "async_load_adapters", _fail)
 
-    assert asyncio.run(ha_address._async_own_ips()) == frozenset()
+    assert asyncio.run(ha_address._async_own_ips()) is None
 
 
 @pytest.mark.parametrize(("hint", "expected"), [(f"{OWN_IP}:8123", f"{OWN_IP}:8123"), ("127.0.0.1:8123", None)])
@@ -648,6 +648,31 @@ def test_unreadable_adapters_keep_the_hint(monkeypatch: pytest.MonkeyPatch, hint
     result = asyncio.run(HaAddressResolver(_FakeHass()).async_get(None, hint))
 
     assert result == (expected or f"{OTHER_OWN_IP}:8123")
+
+
+def test_unreadable_adapters_warn_once_per_outage(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Review) the read error warned on every poll and sync; now once, and again after a successful read."""
+    readable = [False, False, True, False]
+
+    async def _adapters() -> list:
+        if not readable.pop(0):
+            raise OSError("no interfaces")
+        return [{"ipv4": [{"address": OWN_IP}], "ipv6": []}]
+
+    monkeypatch.setattr(ha_address, "async_load_adapters", _adapters)
+    resolver = HaAddressResolver(_FakeHass())
+
+    async def _run() -> None:
+        for _ in range(4):
+            await resolver.async_get(f"{OWN_IP}:8123")
+
+    with caplog.at_level("DEBUG", logger=ha_address.__name__):
+        asyncio.run(_run())
+
+    levels = [r.levelname for r in caplog.records if "unreadable" in r.getMessage()]
+    assert levels == ["WARNING", "DEBUG", "WARNING"]
 
 
 def test_a_value_error_of_the_lookup_is_a_definite_miss(monkeypatch: pytest.MonkeyPatch) -> None:

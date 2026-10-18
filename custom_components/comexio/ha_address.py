@@ -86,6 +86,8 @@ _DEFINITE_MISS_ERRNOS = frozenset(
 )
 
 
+# _noticed key of the adapter read (no host name: contains a space)
+_ADAPTERS = "network adapters"
 _LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
 
 
@@ -139,16 +141,17 @@ def _local_ip() -> str:
     return "127.0.0.1"
 
 
-async def _async_own_ips() -> frozenset[IPAddress]:
-    """The non-loopback addresses of this host's network adapters, read now (enabled for HA or not).
+async def _async_own_ips() -> frozenset[IPAddress] | None:
+    """The non-loopback addresses of this host's network adapters, read now (enabled for HA or not);
+    None when the adapters cannot be read.
 
     Not network.async_get_adapters: that list is loaded once at HA start and goes stale on a DHCP change.
     """
     try:
         adapters = await async_load_adapters()
     except OSError as err:  # ifaddr reads the interfaces from the OS
-        _LOGGER.warning("HA address: reading the network adapters failed, own IPs unknown: %s", err)
-        return frozenset()
+        _LOGGER.debug("HA address: reading the network adapters failed: %s", err)
+        return None
     configured = (entry["address"] for adapter in adapters for entry in (*adapter["ipv4"], *adapter["ipv6"]))
     return frozenset(ip for address in configured if (ip := _ip(address)) is not None and not ip.is_loopback)
 
@@ -226,10 +229,19 @@ class HaAddressResolver:
             # An explicitly configured URL outranks a remembered guess.
             self._guessed_host = None
 
-        own_ips = await _async_own_ips()
+        own_ips = await self._async_own_ips()
         hint_hosts = [host_of(hint) for hint in hints]
         host = await self._async_known_host(hint_hosts, own_ips) or await self._async_search(configured_host, own_ips)
         return format_address(host, port)
+
+    async def _async_own_ips(self) -> frozenset[IPAddress]:
+        """This host's addresses; empty (unknown) when the adapters cannot be read — warned once per outage."""
+        own_ips = await _async_own_ips()
+        if own_ips is None:
+            self._notice(_ADAPTERS, "unreadable", logging.WARNING, "HA address: %s unreadable, own IPs unknown")
+            return frozenset()
+        self._noticed.pop(_ADAPTERS, None)
+        return own_ips
 
     async def _async_known_host(self, hint_hosts: list[str | None], own_ips: frozenset[IPAddress]) -> str | None:
         """The first known address confirmed to point to this host, else the first unchecked one, else None."""
