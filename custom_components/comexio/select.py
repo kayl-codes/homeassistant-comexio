@@ -15,7 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN, FUNCTION_PLAN_ORPHANED_VIEW_OPTION
+from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN, FUNCTION_PLAN_ORPHANED_VIEW_OPTION, one_line
 from .coordinator import ComexioCoordinator
 from .entity import ComexioFunctionPlanEntityMixin
 from .function_plan_backup import format_backup_label
@@ -45,7 +45,7 @@ def _plan_option_label(fid, fub: dict) -> str:
     """Select-option label for one fub_data entry, prefixed when the plan isn't active."""
     name = fub.get("Name") or f"Plan {fid}"
     prefix = "" if fub.get("Active", True) else _INACTIVE_PLAN_PREFIX
-    return format_plan_label(f"{prefix}{name}", fid)
+    return format_plan_label(f"{prefix}{one_line(name)}", fid)
 
 
 def _plan_identity(plan_state: str) -> int | str:

@@ -610,6 +610,33 @@ def one_line(text: object) -> str:
     return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
 
 
+def one_line_values(placeholders: Mapping[str, object]) -> dict[str, str]:
+    """Translation placeholders shown in a repair, every value on one line: the issue data keeps the raw names."""
+    return {key: one_line(value) for key, value in placeholders.items()}
+
+
+def _label_char(raw: str, index: int) -> str:
+    char = raw[index]
+    if char == "\\":
+        return "\\\\"
+    if char == " ":
+        hidden = index in (0, len(raw) - 1) or raw[index - 1] == " "  # a space the frontend would not show
+        return "\\x20" if hidden else char
+    return char if char.isprintable() else ascii(char)[1:-1]
+
+
+def distinct_one_line(text: object) -> str:
+    """A name on one line for a selector label, different for every different name.
+
+    one_line would show two names that differ only in line breaks or spacing alike, and a label is resolved
+    back by equality. Here a control character, a space the frontend would not show (leading, trailing or
+    repeated) and a backslash are written as escapes instead (`Hall\\nway`), so the label is the same on every
+    rebuild and no two names share one. A name without such characters is shown unchanged.
+    """
+    raw = str(text)
+    return "".join(_label_char(raw, index) for index in range(len(raw)))
+
+
 def stable_object_id(unique_id: str) -> str:
     """Object id (entity_id without domain) a Comexio IO/Marker/KNX entity requests for itself.
 
@@ -791,6 +818,11 @@ MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
     """unique_id of a function plan's run-state binary sensor — the plan id only, never its name."""
     return f"comexio_{server_id}_fub{fub_id}".lower()
+
+
+def extension_firmware_update_unique_id(server_id: str, ext_name: str) -> str:
+    """unique_id of an extension module's firmware update entity, from the extension's name as Comexio reports it."""
+    return f"comexio_{server_id}_{ext_name}_firmware_update".lower()
 
 
 def function_plan_id(fid: Any) -> int | None:

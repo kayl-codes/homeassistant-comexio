@@ -23,6 +23,7 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_X_MARKER as _LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
+    one_line,
 )
 from ..coordinator import ComexioCoordinator
 
@@ -70,8 +71,11 @@ def service_flag(call: ServiceCall, key: str, default: bool) -> bool:
 
 
 def format_plan_label(name: str, fub_id) -> str:
-    """Format a plan's select-option label as "<name> (ID <fub_id>)", parseable by _resolve_fub_id()."""
-    return f"{name} (ID {fub_id})"
+    """Format a plan's select-option label as "<name> (ID <fub_id>)", parseable by _resolve_fub_id().
+
+    The name is shown on one line; the label is read back only through its "(ID <n>)" suffix.
+    """
+    return f"{one_line(name)} (ID {fub_id})"
 
 
 def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:
@@ -101,7 +105,8 @@ def _available_plans_str(fub_data: dict) -> str:
     if not fub_data:
         return "no plans loaded — reload the integration"
     return ", ".join(
-        f"'{fub.get('Name', '?')}' (ID {fid})" for fid, fub in sorted(fub_data.items(), key=lambda x: int(x[0]))
+        f"'{one_line(fub.get('Name', '?'))}' (ID {fid})"
+        for fid, fub in sorted(fub_data.items(), key=lambda x: int(x[0]))
     )
 
 
@@ -222,7 +227,7 @@ async def _resolve_backup_identity(
         return identities[0][0], None
     if not identities:
         return None, f"No stored backups for plan {fub_id}."
-    names = ", ".join(f"'{name}'" for name, _ in identities)
+    names = ", ".join(f"'{one_line(name)}'" for name, _ in identities)
     return (
         None,
         (

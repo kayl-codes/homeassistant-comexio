@@ -39,6 +39,7 @@ from .const import (
     WebioClass,
     ignore_list_categories,
     is_valid_entity_name_schema,
+    one_line,
     parse_ignored_marker_tokens,
     parse_watchdog_user_plan_pick,
     prune_import_disabled_ignored,
@@ -107,7 +108,7 @@ def _user_plan_pick_label(value: str) -> str:
     if pick is None:
         return value
     fub_id, name = pick
-    return f"ID {fub_id}" if name is None else f"{name} (ID {fub_id})"
+    return f"ID {fub_id}" if name is None else f"{one_line(name)} (ID {fub_id})"
 
 
 def _watchdog_user_plan_field(coordinator: Any, conf: dict[str, Any]) -> tuple[list[str], SelectSelector]:
@@ -125,7 +126,7 @@ def _watchdog_user_plan_field(coordinator: Any, conf: dict[str, Any]) -> tuple[l
         )
     )
     options = [
-        SelectOptionDict(value=watchdog_user_plan_pick(fub_id, name), label=f"{name} (ID {fub_id})")
+        SelectOptionDict(value=watchdog_user_plan_pick(fub_id, name), label=f"{one_line(name)} (ID {fub_id})")
         for fub_id, name in sorted(candidates.items(), key=lambda item: (item[1].casefold(), item[0]))
     ]
     known = {option["value"] for option in options}

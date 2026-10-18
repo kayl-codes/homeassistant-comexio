@@ -364,7 +364,7 @@ def _marker_delete_block_reason(
     "new marker" seems to create CategoryId==1 markers just like the admin API (2026-10-16).
     """
     if plans := placements.get(marker_id):
-        return f"placed in function plan{'s' if len(plans) > 1 else ''} {', '.join(plans)}"
+        return f"placed in function plan{'s' if len(plans) > 1 else ''} {', '.join(one_line(plan) for plan in plans)}"
     if record is None or _is_api_created_marker(record):
         return None
     if not _is_studio_marker(record):
@@ -1524,7 +1524,9 @@ class ComexioAPI:
         for it would silently strip that combination back to the auth-less POST shape,
         reproducing the exact 401 Unauthorized bug the Phase 7 field combination fixes.
         """
-        _LOGGER.info("Applying command: %s (Update: %s)", cmd_payload.get("Name"), existing_cmd_id is not None)
+        _LOGGER.info(
+            "Applying command: %s (Update: %s)", one_line(cmd_payload.get("Name")), existing_cmd_id is not None
+        )
         try:
             await self.client.save_webio_command(
                 device_id,
@@ -1535,7 +1537,7 @@ class ComexioAPI:
             )
         except (ComexioError, ValueError) as err:
             # ValueError: a command id that is no number, rejected before anything is sent.
-            _LOGGER.warning("Saving Web-IO command %s failed: %s", cmd_payload.get("Name"), err)
+            _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
         return True
 
@@ -1651,7 +1653,7 @@ class ComexioAPI:
         try:
             await self.client.create_webio_device(name, base_id, ha_address, username=username, password=password)
         except ComexioError as err:
-            _LOGGER.warning("Creating Web-IO device %r failed: %s", name, err)
+            _LOGGER.warning("Creating Web-IO device %r failed: %s", one_line(name), err)
             return False
         return True
 
@@ -2301,10 +2303,10 @@ class ComexioAPI:
                 _LOGGER.warning("create_fup: %s — looking the plan up by name once more", err)
                 return await self._find_created_plan(plan_name, known_ids)
 
-        created = await _attempt(f"Creating function plan {plan_name!r}", create, None)
+        created = await _attempt(f"Creating function plan {one_line(plan_name)!r}", create, None)
         if created is None:
             return None
-        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, created.fub_id)
+        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", one_line(plan_name), created.fub_id)
         self._fub_data[str(created.fub_id)] = created.fubs_entry
         self._created_fubs[str(created.fub_id)] = (created.fubs_entry, self._config_fetches_started)
         if self.run_state_listener is not None:
@@ -2339,7 +2341,7 @@ class ComexioAPI:
         _LOGGER.error(
             "create_fup: plan '%s' was created in Comexio, but its id is still unknown (%s) — "
             "it shows up with the next poll; do not create it again",
-            plan_name,
+            one_line(plan_name),
             reason,
         )
         return None
@@ -2397,7 +2399,7 @@ class ComexioAPI:
             paper,
             dpi,
             orient,
-            name,
+            one_line(name),
         )
         return True
 
@@ -2445,7 +2447,7 @@ class ComexioAPI:
             lambda: self.client.rename_marker(int(marker_id), name, binary=binary, default=default, store_memory=store),
         ):
             return False
-        _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, name, binary)
+        _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, one_line(name), binary)
         return True
 
     async def rename_knx_object(self, k_id: str | int, name: str) -> bool:
@@ -2460,7 +2462,7 @@ class ComexioAPI:
         """
         if not await _succeeded(f"Renaming KNX object K{k_id}", lambda: self.client.rename_knx_object(int(k_id), name)):
             return False
-        _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, name)
+        _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, one_line(name))
         return True
 
     @staticmethod
@@ -2838,17 +2840,19 @@ class ComexioAPI:
         else:
             marker_id = await self.create_marker(binary)
             if marker_id is None:
-                _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, k_title)
+                _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, one_line(k_title))
                 return None
 
         # A new, free (blank) or unwired marker: its old default/store flag must not carry over.
         if not await self.rename_marker(marker_id, title, binary, default=0, store=False):
             _LOGGER.error(
-                "create_knx_bridge_marker: rename_marker failed for M%s -> '%s' (K%s)", marker_id, title, k_id
+                "create_knx_bridge_marker: rename_marker failed for M%s -> '%s' (K%s)", marker_id, one_line(title), k_id
             )
             return None
 
-        _LOGGER.info("create_knx_bridge_marker: M%s '%s' created for K%s (binary=%s)", marker_id, title, k_id, binary)
+        _LOGGER.info(
+            "create_knx_bridge_marker: M%s '%s' created for K%s (binary=%s)", marker_id, one_line(title), k_id, binary
+        )
         return marker_id, title
 
     async def wire_knx_bridge_pair(
@@ -4311,12 +4315,14 @@ class ComexioAPI:
         expected_cmd_name = f"HA {source['name']}"
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
-            _LOGGER.warning("function_plan_add_source_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
-            return f"{label}: Web-IO '{expected_cmd_name}' not found after config reload"
+            _LOGGER.warning(
+                "function_plan_add_source_pairs: %s — Web-IO '%s' not found", label, one_line(expected_cmd_name)
+            )
+            return f"{label}: Web-IO '{one_line(expected_cmd_name)}' not found after config reload"
 
         web_ref_id = webio_cmd.get("webIoId")
         if web_ref_id is None:
-            return f"{label}: no webIoId for '{expected_cmd_name}'"
+            return f"{label}: no webIoId for '{one_line(expected_cmd_name)}'"
 
         conn_type = "binary" if source["type"] == "digital" else "analog"
         return await self._function_plan_wire_ref_pair(
@@ -4692,7 +4698,7 @@ class ComexioAPI:
         identical Marker/KNX path — function_plan_add_source_pairs/_function_plan_add_single_pair
         — already threaded it through).
         """
-        label = f"{ext_name} {ident}"
+        label = f"{one_line(ext_name)} {ident}"
         io_entry = ext_ios.get(ident)
         if not io_entry:
             return f"{label}: not found in fresh config"
@@ -4700,12 +4706,14 @@ class ComexioAPI:
         expected_cmd_name = f"HA IO {ext_name} {ident}"
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
-            _LOGGER.warning("function_plan_add_io_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
-            return f"{label}: Web-IO '{expected_cmd_name}' not found after config reload"
+            _LOGGER.warning(
+                "function_plan_add_io_pairs: %s — Web-IO '%s' not found", label, one_line(expected_cmd_name)
+            )
+            return f"{label}: Web-IO '{one_line(expected_cmd_name)}' not found after config reload"
 
         web_ref_id = webio_cmd.get("webIoId")
         if web_ref_id is None:
-            return f"{label}: no webIoId for '{expected_cmd_name}'"
+            return f"{label}: no webIoId for '{one_line(expected_cmd_name)}'"
 
         try:
             io_ref_id = int(io_entry["id"])
@@ -4946,7 +4954,7 @@ class ComexioAPI:
         if stopped is False:
             _LOGGER.warning(
                 "_delete_plan_elements_and_restart: plan '%s' (fub=%s) could not be stopped, cleanup skipped",
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             return {
@@ -4982,7 +4990,7 @@ class ComexioAPI:
             "_delete_plan_elements_and_restart: deleted %d elements, webio_cmd_ids=%s (plan '%s' %s)",
             len(elem_ids_to_delete),
             webio_cmd_ids,
-            plan_name,
+            one_line(plan_name),
             restart_note,
         )
         return {

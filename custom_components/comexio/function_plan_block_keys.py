@@ -23,6 +23,8 @@ from aiocomexio.function_plan import plan_hash
 from aiocomexio.reference_catalog import KEY_SEPARATOR
 from homeassistant.util import dt as dt_util
 
+from .const import one_line
+
 # Plan element reference type of a logic block (fubBase).
 BLOCK_ELEMENT_TYPE = "5"
 
@@ -197,7 +199,7 @@ def _sink_problems(
             continue
         elem_id, pos = endpoint
         if pos >= _input_count(block):
-            problems.append(f"element {elem_id}: input {pos} beyond the {block.get('name')} block's inputs")
+            problems.append(f"element {elem_id}: input {pos} beyond the {one_line(block.get('name'))} block's inputs")
             continue
         sink_type = _port_type(block, "in_types", pos)
         if None not in (source_type, sink_type) and source_type != sink_type:
@@ -252,7 +254,8 @@ def implausible_block_wiring(
         source_block = _block_def(elements, fub_base, source)
         if source and source_block and source[1] >= (_as_int(source_block.get("n_out")) or 0):
             problems.append(
-                f"element {source[0]}: output {source[1]} beyond the {source_block.get('name')} block's outputs"
+                f"element {source[0]}: output {source[1]} beyond the "
+                f"{one_line(source_block.get('name'))} block's outputs"
             )
             source_block = None
         problems.extend(_sink_problems(elements, fub_base, source, source_block, conn.get("output")))

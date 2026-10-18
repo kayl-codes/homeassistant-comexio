@@ -22,6 +22,7 @@ from ..const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     PLAN_TRANSITION_STARTING,
     PLAN_TRANSITION_STOPPING,
+    one_line,
 )
 from ..coordinator import ComexioCoordinator
 from ._context import (
@@ -122,7 +123,7 @@ async def _resolve_visualize_snapshot_source(
     if snapshot is None:
         persistent_notification.async_create(
             hass,
-            f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).",
+            f"No snapshot found for plan '{one_line(plan_name)}' (fub {fub_id}, kind={kind}, slot={slot}).",
             title=error_title,
         )
         return None
@@ -234,8 +235,8 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
             )
         persistent_notification.async_create(
             hass,
-            f"Preview for '{plan_name}' updated — see the Preview image.",
-            title=f"Function Plan Visualize — {plan_name}",
+            f"Preview for '{one_line(plan_name)}' updated — see the Preview image.",
+            title=f"Function Plan Visualize — {one_line(plan_name)}",
         )
         return {"plan_name": plan_name, "url": preview_url}
 
@@ -288,7 +289,7 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
         plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
         persistent_notification.async_create(
             hass,
-            f"Plan '{plan_name}' (ID {fub_id}) is not an HA-managed cluster plan. "
+            f"Plan '{one_line(plan_name)}' (ID {fub_id}) is not an HA-managed cluster plan. "
             "Sort rewrites every element position — on a hand-built Comexio plan "
             "this would destroy its layout.",
             title=_TITLE_SORT_ERR,
@@ -473,16 +474,16 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
     coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-    _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, plan_name)
+    _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, one_line(plan_name))
     t_start = time.monotonic()
     with coordinator.plan_edit():
         async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STOPPING):
             success = await api.function_plan_stop_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
-        f"Plan '{plan_name}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
+        f"Plan '{one_line(plan_name)}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
         if success
-        else f"Stop failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
+        else f"Stop failed (plan '{one_line(plan_name)}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
     _report_run_stop_result(hass, msg, success=success, action="Stop")
 
@@ -496,16 +497,16 @@ async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) 
     coordinator, api, fub_id = ctx
 
     plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-    _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, plan_name)
+    _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, one_line(plan_name))
     t_start = time.monotonic()
     with coordinator.plan_edit():
         async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING):
             success = await api.function_plan_run_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
-        f"Plan '{plan_name}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"
+        f"Plan '{one_line(plan_name)}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"
         if success
-        else f"Activation failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
+        else f"Activation failed (plan '{one_line(plan_name)}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
     _report_run_stop_result(hass, msg, success=success, action="Activate")
 

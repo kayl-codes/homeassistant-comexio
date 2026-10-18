@@ -27,7 +27,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, FUNCTION_PLAN_AUTO_BACKUP_SLOTS, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS, TIMESTAMP_DISPLAY_FORMAT
+from .const import (
+    DOMAIN,
+    FUNCTION_PLAN_AUTO_BACKUP_SLOTS,
+    FUNCTION_PLAN_CHANGE_BACKUP_SLOTS,
+    TIMESTAMP_DISPLAY_FORMAT,
+    distinct_one_line,
+    one_line,
+)
 from .function_plan_block_keys import (
     NO_FUB_BASE,
     SNAPSHOT_KEYS,
@@ -399,7 +406,8 @@ _ORPHAN_SNAPSHOT_INDENT = "\u00a0" * 4
 
 def _orphan_plan_label(orphan: dict[str, Any]) -> str:
     count = len(orphan["backups"])
-    return f"{orphan['plan_name']} (ID {orphan['fub_id']}) — {count} backup{'' if count == 1 else 's'}"
+    shown = distinct_one_line(orphan["plan_name"])
+    return f"{shown} (ID {orphan['fub_id']}) — {count} backup{'' if count == 1 else 's'}"
 
 
 def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
@@ -410,7 +418,8 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
     show; a plan row shows the plan's newest snapshot. Shared by select.py (options) and
     button.py (resolving the chosen label back), like format_backup_label. Labels must be
     unique select options, but two plans changed in the same minute share a snapshot row
-    label — a repeat gets its plan appended.
+    label — a repeat gets its plan appended. Names that differ only in line breaks or spacing
+    are told apart by distinct_one_line, which labels each raw name the same on every rebuild.
     """
     rows: list[tuple[str, dict[str, Any]]] = []
     seen: set[str] = set()
@@ -423,7 +432,7 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
         for entry in backups:
             label = f"{_ORPHAN_SNAPSHOT_INDENT}{format_backup_label(entry)}"
             if label in seen:
-                label += f" · {orphan['plan_name']} (ID {orphan['fub_id']})"
+                label += f" · {distinct_one_line(orphan['plan_name'])} (ID {orphan['fub_id']})"
             seen.add(label)
             rows.append((label, {**identity, "kind": entry["kind"], "slot": entry["slot"], "plan_row": False}))
     return rows
@@ -558,7 +567,7 @@ class FunctionPlanBackupManager:
             _LOGGER.exception(
                 "[%s] Function Plan backup: keep decision for '%s' (fub=%s) not saved as dropped",
                 self._server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
 
@@ -672,7 +681,7 @@ class FunctionPlanBackupManager:
             _LOGGER.info(
                 "[%s] Function Plan auto backup: plan '%s' (fub=%s) changed (%s) — %d/%d slot(s) used",
                 self._server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
                 reason,
                 len(history),
@@ -743,7 +752,7 @@ class FunctionPlanBackupManager:
         _LOGGER.info(
             "[%s] Function Plan pre-change backup: plan '%s' (fub=%s), operation '%s' — %d/%d slot(s) used",
             self._server_id,
-            plan_name,
+            one_line(plan_name),
             fub_id,
             operation,
             len(history),
@@ -879,7 +888,7 @@ class FunctionPlanBackupManager:
                 "[%s] Function Plan backup: rekeyed %d snapshot(s) of '%s' from fub=%s to fub=%s",
                 self._server_id,
                 moved,
-                plan_name,
+                one_line(plan_name),
                 old_fub_id,
                 new_fub_id,
             )
@@ -917,7 +926,7 @@ class FunctionPlanBackupManager:
                 "[%s] Function Plan backup: purged %d superseded snapshot(s) of '%s' at old fub=%s",
                 self._server_id,
                 removed,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
         return removed
@@ -955,7 +964,7 @@ class FunctionPlanBackupManager:
                 "backup history (deleted, rotated out or without capture time) — not marked restored",
                 self._server_id,
                 kind,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
                 captured_at,
             )
@@ -979,7 +988,7 @@ class FunctionPlanBackupManager:
             self._server_id,
             kind,
             slot,
-            plan_name,
+            one_line(plan_name),
             fub_id,
         )
         return True
@@ -1008,7 +1017,7 @@ class FunctionPlanBackupManager:
             kind,
             slot,
             fub_id,
-            plan_name,
+            one_line(plan_name),
         )
         return True
 
@@ -1037,7 +1046,7 @@ class FunctionPlanBackupManager:
                 self._server_id,
                 removed,
                 fub_id,
-                plan_name,
+                one_line(plan_name),
             )
         return removed
 
@@ -1168,7 +1177,7 @@ class FunctionPlanBackupManager:
             "[%s] Function Plan backup: keeping the backups of deleted plan fub=%s ('%s')",
             self._server_id,
             fub_id,
-            plan_name,
+            one_line(plan_name),
         )
         return True
 
@@ -1188,7 +1197,7 @@ class FunctionPlanBackupManager:
             "[%s] Function Plan backup: no longer keeping the backups of deleted plan fub=%s ('%s')",
             self._server_id,
             fub_id,
-            plan_name,
+            one_line(plan_name),
         )
         return True
 

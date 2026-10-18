@@ -32,6 +32,7 @@ from .const import (
     STATISTICS_UNITS_CHANGED_ISSUE_PREFIX,
     MarkerKind,
     WebioClass,
+    extension_firmware_update_unique_id,
     function_plan_ids,
     function_plan_run_state_unique_id,
     migrate_entry_options,
@@ -371,7 +372,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     for ext_name in {
         io["ext_name"] for io in coordinator.data.get("io", []) if not io.get("offline") or include_offline
     }:
-        active_unique_ids.add(f"comexio_{server_id}_{ext_name}_firmware_update".lower())
+        active_unique_ids.add(extension_firmware_update_unique_id(server_id, ext_name))
 
     # Build expected-platform map so that entities which migrated to a different
     # HA domain (e.g. sensor → binary_sensor after firmware upgrade) get removed.
