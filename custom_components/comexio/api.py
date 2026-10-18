@@ -4698,7 +4698,7 @@ class ComexioAPI:
         identical Marker/KNX path — function_plan_add_source_pairs/_function_plan_add_single_pair
         — already threaded it through).
         """
-        label = f"{ext_name} {ident}"
+        label = f"{one_line(ext_name)} {ident}"
         io_entry = ext_ios.get(ident)
         if not io_entry:
             return f"{label}: not found in fresh config"

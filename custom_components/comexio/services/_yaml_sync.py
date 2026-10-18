@@ -25,7 +25,7 @@ from ..const import (
     FUNCTION_PLAN_SERVICE_SORT,
     FUNCTION_PLAN_SERVICE_VISUALIZE,
     TIMESTAMP_DISPLAY_FORMAT,
-    one_line,
+    distinct_one_line,
 )
 from ..coordinator import ComexioCoordinator
 from ._context import format_plan_label
@@ -152,7 +152,7 @@ def _build_restore_options(restore_plans: list[tuple[int, str, bool, int]]) -> l
     return [
         {
             "label": (
-                f"{one_line(name)} — fub {fub_id} ({'live' if is_live else 'deleted'}, "
+                f"{distinct_one_line(name)} — fub {fub_id} ({'live' if is_live else 'deleted'}, "
                 f"{count} snapshot{'s' if count != 1 else ''})"
             ),
             "value": f"{fub_id}:{name}",
@@ -176,7 +176,7 @@ def _snapshot_option_row(kind: str, entry: dict) -> tuple[str, float, dict]:
         operation = operation[: _SNAPSHOT_OPTION_MAX_OP_LEN - 1] + "…"
     op_suffix = f" ({operation})" if kind == "change" and operation else ""
     label = (
-        f"{one_line(entry.get('plan_name'))} — fub {entry.get('fub_id')} — "
+        f"{distinct_one_line(entry.get('plan_name'))} — fub {entry.get('fub_id')} — "
         f"{kind}[{entry.get('slot')}] — {ts_label}{op_suffix}"
     )
     option_value = f"{entry.get('fub_id')}:{kind}:{entry.get('slot')}:{entry.get('plan_name')}"

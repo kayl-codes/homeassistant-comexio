@@ -3802,7 +3802,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     m["value"] = value
                     label = m.get("name") or label
                     break
-        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "marker", label, value, previous)
+        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "marker", one_line(label), value, previous)
         self._async_publish_pushed_value()
         self._fire_plan_event("marker", marker_id_str, label, value)
         self.schedule_plan_preview_refresh()
@@ -3819,7 +3819,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     k["value"] = value
                     label = k.get("name") or label
                     break
-        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "knx", label, value, previous)
+        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "knx", one_line(label), value, previous)
         self._async_publish_pushed_value()
         self._fire_plan_event("knx", knx_id_str, label, value)
         self.schedule_plan_preview_refresh()
@@ -3840,10 +3840,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             io["value"] = value
             self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
             label = io.get("name") or f"{ext_name} {identifier}"
-            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", label, value, previous)
+            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
         else:
-            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, ext_name, identifier, value)
+            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, one_line(ext_name), identifier, value)
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 

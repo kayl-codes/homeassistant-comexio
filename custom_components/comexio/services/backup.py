@@ -713,7 +713,7 @@ async def _recreate_missing_comments(api, fub_id: int, missing_comments: dict[st
         text = (elem.get("name") or "").strip() or FUNCTION_PLAN_MANAGED_PLAN_COMMENT
         x, y = elem.get("position_x", 0.0), elem.get("position_y", 0.0)
         if await api.function_plan_add_comment_element(fub_id, text, x=x, y=y) is None:
-            warnings.append(f"comment element {eid} ('{text}') failed to recreate")
+            warnings.append(f"comment element {eid} ('{one_line(text)}') failed to recreate")
         else:
             recovered += 1
     return recovered, warnings

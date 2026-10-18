@@ -2,10 +2,12 @@
 
 A plan, marker, IO or KNX name is edited in the Comexio admin and can hold line breaks or control characters,
 which split a log entry or break a notification's layout. The integration's code is read for every place that turns a
-Comexio name - a variable in NAME_VARIABLES, or a mapping read like `item["name"]` / `fub.get("Name")` - into text: a
+Comexio name - a variable in NAME_VARIABLES, a mapping read like `item["name"]` / `fub.get("Name")`, or a call in
+NAME_CALLS - into text: a
 value in an f-string, a string built with `+`, `%` or `.format()`, and an argument of a `_LOGGER` call or of
 `persistent_notification.async_create`, directly or through `str()` / `repr()`, a string method or a slice, also
-after it was copied to another variable of the same function. So a message built first and output later is caught as
+after it was copied to another variable of the same function (also as `name or fallback`) or built into a message
+held there. So a message built first and output later is caught as
 well as a new raw log argument, without touching this file.
 
 Text that identifies rather than shows keeps the raw name: a `notification_id` or a `value` (keyword or dict key), an
@@ -17,11 +19,14 @@ read in a nested function, or reassigned to `one_line(...)`, is still flagged: r
 
 import ast
 from pathlib import Path
+import re
 
 import pytest
 
+from custom_components.comexio.const import distinct_one_line, extension_firmware_update_unique_id
 from custom_components.comexio.select import _plan_option_label
 from custom_components.comexio.services._context import _resolve_fub_id
+from custom_components.comexio.services._yaml_sync import _build_restore_options, _build_snapshot_options
 
 COMPONENT = Path(__file__).parents[2] / "custom_components" / "comexio"
 NAME_VARIABLES = {
@@ -35,15 +40,19 @@ NAME_VARIABLES = {
     "snapshot_name",
     "live_name",
     "k_title",
+    "ext_name",
     "option_value",
 }
 # Mapping keys that hold a Comexio name: item["name"], fub.get("Name"), entry.get("plan_name").
 NAME_KEYS = {"name", "Name", "plan_name"}
+# Calls that return a Comexio name: api.function_plan_name(fub_id).
+NAME_CALLS = {"function_plan_name"}
 # Keyword arguments and dict keys that identify rather than show: they keep the raw name.
 IDENTITY_KEYS = {"notification_id", "value"}
-# Variables that hold an identity built from a name: the Web-IO command name Comexio must report back, an option
-# value parsed back. Building them keeps the raw name; they are name variables too, so showing them needs one_line.
-IDENTITY_TARGETS = {"expected_cmd_name", "option_value"}
+# Variables and attributes that hold an identity built from a name: the Web-IO command name Comexio must report back,
+# an option value parsed back, an entity's unique_id. Building them keeps the raw name; the variables are name
+# variables too, so showing them needs one_line.
+IDENTITY_TARGETS = {"expected_cmd_name", "option_value", "_attr_unique_id"}
 # Functions whose f-strings build an identity from a name, so one_line would change what they match or store,
 # per file of the integration.
 IDENTITY_FUNCTIONS = {
@@ -55,6 +64,8 @@ IDENTITY_FUNCTIONS = {
     "const.py": {
         "watchdog_user_plan_pick",  # the stored pick, parsed back into ID and name
         "hub_era_object_id",  # an entity's object id
+        "io_audit_key",  # the audit map's key of an IO
+        "extension_firmware_update_unique_id",  # an entity's unique_id
     },
     "function_plan_block_keys.py": {"_unresolved_element"},  # the element name written into the plan
     "function_plan_block_settings.py": {"block_settings_form"},  # the form field names Comexio's editor sends
@@ -63,6 +74,7 @@ IDENTITY_FUNCTIONS = {
         "_build_ha_audit_map",  # the command names the audit compares with Comexio's
         # unique_ids and device identifiers from extension names; the device name matches the one setup gives
         "_migrate_extension_entities",
+        "update_io_by_name",  # the event label the plan card matches with the plan's element labels
     },
 }
 STRING_WRAPPERS = {"str", "repr"}
@@ -79,9 +91,13 @@ def _is_name(node: ast.AST) -> bool:
         return node.id in NAME_VARIABLES or getattr(node, ALIAS_MARK, False)
     if isinstance(node, ast.Subscript):
         return isinstance(node.slice, ast.Constant) and node.slice.value in NAME_KEYS
+    if not isinstance(node, ast.Call):
+        return False
+    called = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+    if called in NAME_CALLS:
+        return True
     return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
+        isinstance(node.func, ast.Attribute)
         and node.func.attr == "get"
         and bool(node.args)
         and isinstance(node.args[0], ast.Constant)
@@ -106,6 +122,9 @@ def _shown_name(value: ast.AST) -> ast.expr | None:
         return _shown_name(value.func.value)
     if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Slice):
         return _shown_name(value.value)
+    if isinstance(value, ast.BoolOp | ast.IfExp):  # name or fallback, name if x else fallback
+        branches = value.values if isinstance(value, ast.BoolOp) else [value.body, value.orelse]
+        return next(iter(_shown_names(branches)), None)
     return None
 
 
@@ -123,7 +142,8 @@ def _is_identity(node: ast.AST, parents: dict[ast.AST, ast.AST], identity_functi
     if isinstance(parent, ast.keyword) and parent.arg in IDENTITY_KEYS:
         return True
     if isinstance(parent, ast.Assign) and any(
-        isinstance(target, ast.Name) and target.id in IDENTITY_TARGETS for target in parent.targets
+        (target.id if isinstance(target, ast.Name) else getattr(target, "attr", None)) in IDENTITY_TARGETS
+        for target in parent.targets
     ):
         return True
     if isinstance(parent, ast.Dict) and node in parent.values:
@@ -169,7 +189,8 @@ def _name_aliases(scope: ast.AST) -> dict[str, int]:
             target, value = assign.target, assign.value
         else:
             continue
-        if isinstance(target, ast.Name) and target.id not in IDENTITY_TARGETS and _shown_name(value) is not None:
+        holds_name = _shown_name(value) is not None or bool(_raw_in_text(value))  # a name, or text built from one
+        if isinstance(target, ast.Name) and target.id not in IDENTITY_TARGETS and holds_name:
             aliases[target.id] = min(assign.lineno, aliases.get(target.id, assign.lineno))
     return aliases
 
@@ -252,6 +273,15 @@ def raw_name_outputs(source: str, identity_functions: set[str] | None = None) ->
         ("option_value = f\"{fub_id}:{entry.get('plan_name')}\"", []),
         ('_LOGGER.info("Option %s", option_value)', [(1, "option_value")]),
         ('value = f"Plan {name} gone"', [(1, "name")]),
+        ('def f(m):\n    label = m.get("name") or "M1"\n    _LOGGER.debug("%s", label)', [(3, "label")]),
+        ('msg = f"Plan {name if name else fub_id} gone"', [(1, "name")]),
+        ('_LOGGER.debug("%s", fallback or item["name"])', [(1, "item['name']")]),
+        ('def f(m):\n    label = one_line(m.get("name") or "M1")\n    _LOGGER.debug("%s", label)', []),
+        ('def f(name):\n    msg = f"Plan {one_line(name)}"\n    _LOGGER.info(msg)', []),
+        ('_LOGGER.info("Plan %s", self.api.function_plan_name(fid))', [(1, "self.api.function_plan_name(fid)")]),
+        ('names = ", ".join(f"\'{function_plan_name(fid)}\'" for fid in ids)', [(1, "function_plan_name(fid)")]),
+        ('_LOGGER.warning("Unknown IO %s %s", ext_name, identifier)', [(1, "ext_name")]),
+        ('self._attr_unique_id = f"comexio_{server_id}_{ext_name}_x"', []),
         ("total = fub_id + name_count", []),
         ("token = vanished_plan_token(fub_id, plan_name)", []),
     ],
@@ -270,6 +300,11 @@ def test_an_identity_function_keeps_its_f_strings_raw_but_not_its_log_calls() ->
 def test_an_identity_function_still_checks_f_strings_it_outputs() -> None:
     source = 'def pick(fub_id, name):\n    _LOGGER.info(f"Picked {name}")\n    return f"{fub_id}:{name}"'
     assert raw_name_outputs(source, {"pick"}) == [(2, "name")]
+
+
+def test_an_identity_function_still_checks_a_message_it_builds_first() -> None:
+    source = 'def pick(fub_id, name):\n    msg = f"Picked {name}"\n    _LOGGER.info(msg)\n    return f"{fub_id}:{name}"'
+    assert raw_name_outputs(source, {"pick"}) == [(3, "msg")]
 
 
 def test_an_identity_exemption_covers_only_the_named_function() -> None:
@@ -304,3 +339,34 @@ def test_a_plan_label_is_one_line_and_resolves_back_to_its_plan() -> None:
     labels = [_plan_option_label(fid, fub) for fid, fub in fub_data.items()]
     assert labels == ["Hall way (ID 7)", "⏸ Hall way (ID 8)"]
     assert [_resolve_fub_id(label, fub_data) for label in labels] == [7, 8]
+
+
+def test_distinct_one_line_tags_only_a_name_one_line_changes_and_the_same_way_every_time() -> None:
+    assert distinct_one_line("Hall way") == "Hall way"
+    assert distinct_one_line(None) == "None"
+    tagged = distinct_one_line("Hall\nway")
+    assert re.fullmatch(r"Hall way #[0-9a-f]{8}", tagged)
+    assert tagged == distinct_one_line("Hall\nway")
+    assert tagged != distinct_one_line("Hall  way")
+    assert distinct_one_line(" Hall").startswith("Hall #")
+
+
+def test_restore_and_snapshot_options_tell_apart_names_that_coincide_on_one_line() -> None:
+    names = ["Hall\nway", "Hall way"]
+    restore = _build_restore_options([(4, name, False, 1) for name in names])
+    snapshots = _build_snapshot_options({"auto": [{"fub_id": 4, "slot": 0, "plan_name": name} for name in names]})
+    for options in (restore, snapshots):
+        assert len({option["label"] for option in options}) == 2
+        assert all("\n" not in option["label"] for option in options)
+    # The values are parsed back into the plan: they keep the raw name.
+    assert {option["value"] for option in restore} == {"4:Hall\nway", "4:Hall way"}
+    assert {option["value"] for option in snapshots} == {"4:auto:0:Hall\nway", "4:auto:0:Hall way"}
+
+
+@pytest.mark.parametrize(
+    ("ext_name", "unique_id"),
+    [("Ext_01", "comexio_abc_ext_01_firmware_update"), ("EXT\n01", "comexio_abc_ext\n01_firmware_update")],
+)
+def test_the_firmware_update_unique_id_keeps_the_raw_extension_name(ext_name: str, unique_id: str) -> None:
+    """An identity: one_line here would orphan (and the cleanup remove) every existing firmware update entity."""
+    assert extension_firmware_update_unique_id("abc", ext_name) == unique_id

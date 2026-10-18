@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import logging
 import re
 from typing import Any
+import zlib
 
 # Pure Comexio/KNX domain tables live in aiocomexio and are re-exported here, so the platforms
 # keep importing them from const.
@@ -610,6 +611,16 @@ def one_line(text: object) -> str:
     return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
 
 
+def distinct_one_line(text: object) -> str:
+    """one_line(text) for a selector label: tagged from the raw text when one_line changed it.
+
+    Two names that differ only in line breaks or spacing show the same one_line text; the tag tells them apart
+    and is the same on every rebuild, so a label resolved back by equality keeps naming the same raw name.
+    """
+    raw, shown = str(text), one_line(text)
+    return shown if shown == raw else f"{shown} #{zlib.crc32(raw.encode()):08x}"
+
+
 def stable_object_id(unique_id: str) -> str:
     """Object id (entity_id without domain) a Comexio IO/Marker/KNX entity requests for itself.
 
@@ -791,6 +802,11 @@ MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
     """unique_id of a function plan's run-state binary sensor — the plan id only, never its name."""
     return f"comexio_{server_id}_fub{fub_id}".lower()
+
+
+def extension_firmware_update_unique_id(server_id: str, ext_name: str) -> str:
+    """unique_id of an extension module's firmware update entity, from the extension's name as Comexio reports it."""
+    return f"comexio_{server_id}_{ext_name}_firmware_update".lower()
 
 
 def function_plan_id(fid: Any) -> int | None:

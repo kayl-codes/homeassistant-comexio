@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from custom_components.comexio import function_plan_backup as backup_module, orphaned_backups
-from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.const import DOMAIN, distinct_one_line
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager, is_orphaned_identity
 from custom_components.comexio.orphaned_backups import (
     BACKUPS_DOC_URL,
@@ -443,21 +443,31 @@ def test_orphaned_backup_options_keep_labels_unique_across_plans() -> None:
     assert [rows[3][1]["fub_id"], rows[5][1]["fub_id"]] == [2, 5]
 
 
-def test_orphaned_backup_options_number_names_that_coincide_on_one_line() -> None:
-    """Two deleted plans of one fub_id whose names differ only in a line break show the same name."""
+def test_orphaned_backup_options_tell_apart_names_that_coincide_on_one_line() -> None:
+    """Two deleted plans of one fub_id whose names differ only in a line break: each keeps its own plan row label."""
     same = [{"kind": "auto", "slot": 0, "captured_at": OLD}]
+    tagged = distinct_one_line("Hall\nway")
 
     rows = backup_module.build_orphaned_backup_options([_orphan(4, "Hall\nway", same), _orphan(4, "Hall way", same)])
 
     labels = [label for label, _choice in rows]
-    snapshot = " " * 4 + backup_module.format_backup_label(same[0])
+    snapshot = backup_module._ORPHAN_SNAPSHOT_INDENT + backup_module.format_backup_label(same[0])
     assert labels == [
-        "Hall way (ID 4) — 1 backup",
+        f"{tagged} (ID 4) — 1 backup",
         snapshot,
-        "Hall way (ID 4) — 1 backup (2)",
-        snapshot + " · Hall way (ID 4)",
+        "Hall way (ID 4) — 1 backup",
+        f"{snapshot} · Hall way (ID 4)",
     ]
-    assert [choice["plan_name"] for _label, choice in rows] == ["Hall\nway", "Hall\nway", "Hall way", "Hall way"]
+    assert [choice["plan_name"] for _label, choice in rows] == ["Hall\nway"] * 2 + ["Hall way"] * 2
+    # The label follows the raw name, not the row order: without the first plan the second keeps its label.
+    alone = backup_module.build_orphaned_backup_options([_orphan(4, "Hall way", same)])
+    assert alone[0][0] == "Hall way (ID 4) — 1 backup"
+    # Each plan row resolves back to its own raw name, in either row order (button.py resolves by label equality).
+    swapped = dict(
+        backup_module.build_orphaned_backup_options([_orphan(4, "Hall way", same), _orphan(4, "Hall\nway", same)])
+    )
+    assert swapped[f"{tagged} (ID 4) — 1 backup"]["plan_name"] == "Hall\nway"
+    assert swapped["Hall way (ID 4) — 1 backup"]["plan_name"] == "Hall way"
 
 
 def test_summarize_orphaned_backups_counts_every_snapshot_per_plan() -> None:
