@@ -71,8 +71,11 @@ def service_flag(call: ServiceCall, key: str, default: bool) -> bool:
 
 
 def format_plan_label(name: str, fub_id) -> str:
-    """Format a plan's select-option label as "<name> (ID <fub_id>)", parseable by _resolve_fub_id()."""
-    return f"{name} (ID {fub_id})"
+    """Format a plan's select-option label as "<name> (ID <fub_id>)", parseable by _resolve_fub_id().
+
+    The name is shown on one line; the label is read back only through its "(ID <n>)" suffix.
+    """
+    return f"{one_line(name)} (ID {fub_id})"
 
 
 def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:

@@ -18,6 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from custom_components.comexio.select import _plan_option_label
+from custom_components.comexio.services._context import _resolve_fub_id
+
 COMPONENT = Path(__file__).parents[2] / "custom_components" / "comexio"
 NAME_VARIABLES = {
     "name",
@@ -52,14 +55,14 @@ IDENTITY_FUNCTIONS = {
     },
     "function_plan_block_keys.py": {"_unresolved_element"},  # the element name written into the plan
     "function_plan_block_settings.py": {"block_settings_form"},  # the form field names Comexio's editor sends
-    "select.py": {"_plan_option_label"},  # a select option, parsed back into the plan's ID
-    "services/_context.py": {"format_plan_label"},  # the same option format
     "coordinator.py": {
         "async_newest_backup_field",  # the restore action's snapshot value
         "_build_ha_audit_map",  # the command names the audit compares with Comexio's
     },
 }
 STRING_WRAPPERS = {"str", "repr"}
+# String methods that keep a name's line breaks: name.strip(), name.upper().
+STRING_METHODS = {"strip", "lstrip", "rstrip", "upper", "lower", "title", "capitalize", "casefold", "replace"}
 SOURCE_FILES = sorted(COMPONENT.rglob("*.py"))
 
 
@@ -86,11 +89,21 @@ def _is_output_call(call: ast.Call) -> bool:
     return func.value.id == "_LOGGER" or (func.value.id == "persistent_notification" and func.attr == "async_create")
 
 
-def _shown_name(value: ast.expr) -> ast.expr | None:
-    """The name variable an output argument hands over as it is: itself, or wrapped in str()/repr()."""
+def _shown_name(value: ast.AST) -> ast.expr | None:
+    """The name an expression hands over unfiltered: itself, or through str()/repr(), a string method or a slice."""
+    if _is_name(value):
+        return value
     if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in STRING_WRAPPERS:
-        value = value.args[0] if value.args else value
-    return value if _is_name(value) else None
+        return _shown_name(value.args[0]) if value.args else None
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr in STRING_METHODS:
+        return _shown_name(value.func.value)
+    if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Slice):
+        return _shown_name(value.value)
+    return None
+
+
+def _shown_names(values: list[ast.expr]) -> list[ast.expr]:
+    return [name for value in values if (name := _shown_name(value)) is not None]
 
 
 def _is_text(node: ast.expr) -> bool:
@@ -122,21 +135,21 @@ def _is_identity(node: ast.AST, parents: dict[ast.AST, ast.AST], identity_functi
 def _raw_in_text(node: ast.AST) -> list[ast.expr]:
     """The names an f-string, a `+` / `%` string build or a `.format()` call puts into its text unfiltered."""
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
-        return [arg for arg in [*node.args, *(keyword.value for keyword in node.keywords)] if _is_name(arg)]
+        return _shown_names([*node.args, *(keyword.value for keyword in node.keywords)])
     if isinstance(node, ast.JoinedStr):
-        return [part.value for part in node.values if isinstance(part, ast.FormattedValue) and _is_name(part.value)]
+        return _shown_names([part.value for part in node.values if isinstance(part, ast.FormattedValue)])
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add | ast.Mod):
         if isinstance(node.op, ast.Mod) and _is_text(node.left):
             operands = node.right.elts if isinstance(node.right, ast.Tuple) else [node.right]
-            return [operand for operand in operands if _is_name(operand)]
+            return _shown_names(operands)
         if isinstance(node.op, ast.Add) and (_is_text(node.left) or _is_text(node.right)):
-            return [operand for operand in (node.left, node.right) if _is_name(operand)]
+            return _shown_names([node.left, node.right])
     return []
 
 
 def _raw_in_output(call: ast.Call) -> list[ast.expr]:
     shown = [keyword.value for keyword in call.keywords if keyword.arg not in IDENTITY_KEYS]
-    return [name for value in [*call.args, *shown] if (name := _shown_name(value)) is not None]
+    return _shown_names([*call.args, *shown])
 
 
 def raw_name_outputs(source: str, identity_functions: set[str] | None = None) -> list[tuple[int, str]]:
@@ -185,6 +198,11 @@ def raw_name_outputs(source: str, identity_functions: set[str] | None = None) ->
         ("msg = f\"Web-IO '{expected_cmd_name}' not found\"", [(1, "expected_cmd_name")]),
         ("cmd = webio_commands.get(expected_cmd_name)", []),
         ("msg = f\"Command {item['id']}\"", []),
+        ('msg = f"Plan {plan_name.strip()} gone"', [(1, "plan_name")]),
+        ('msg = f"Plan {str(name)!r} gone"', [(1, "name")]),
+        ('msg = "Plan {}".format(plan_name[:40])', [(1, "plan_name")]),
+        ("_LOGGER.info(\"Plan %s\", fub.get('Name', '?').upper())", [(1, "fub.get('Name', '?')")]),
+        ('msg = f"Plan {one_line(plan_name).strip()} gone"', []),
         ("total = fub_id + name_count", []),
         ("token = vanished_plan_token(fub_id, plan_name)", []),
     ],
@@ -229,3 +247,11 @@ def test_no_log_line_notification_or_message_gets_a_raw_comexio_name(path: Path)
     identity_functions = IDENTITY_FUNCTIONS.get(path.relative_to(COMPONENT).as_posix(), set())
     raw = raw_name_outputs(path.read_text(encoding="utf-8"), identity_functions)
     assert not raw, f"wrap these names in const.one_line before output: {raw}"
+
+
+def test_a_plan_label_is_one_line_and_resolves_back_to_its_plan() -> None:
+    """The selector label shows the name on one line; the "(ID n)" suffix still names the plan."""
+    fub_data = {"7": {"Name": "Hall\nway", "Active": True}, "8": {"Name": "Hall\nway", "Active": False}}
+    labels = [_plan_option_label(fid, fub) for fid, fub in fub_data.items()]
+    assert labels == ["Hall way (ID 7)", "⏸ Hall way (ID 8)"]
+    assert [_resolve_fub_id(label, fub_data) for label in labels] == [7, 8]
