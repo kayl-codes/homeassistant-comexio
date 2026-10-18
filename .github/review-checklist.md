@@ -222,6 +222,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   of a race or timeout switches the state during the await it targets (e.g. inside the mocked call) and proves the
   timeout fired; a quick check is to break the target path (raise the timeout, drop the guard) and see it fail
   (#168).
+- A test that two operations exclude each other through a lock proves the second one actually waits at that lock:
+  while the first holds it, assert the second is queued on it (e.g. the lock's waiter count, `waiting_at=` in
+  `test_plan_watchdog.py`) and has not yet done its work, then release and assert it runs. A test that only checks
+  the final order or outcome also passes when the second operation never takes the lock (#187).
 - Test function parameters carry type annotations.
 
 ## GitHub Actions
