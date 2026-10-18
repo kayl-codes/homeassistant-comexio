@@ -222,6 +222,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   of a race or timeout switches the state during the await it targets (e.g. inside the mocked call) and proves the
   timeout fired; a quick check is to break the target path (raise the timeout, drop the guard) and see it fail
   (#168).
+- A parametrized test of a dispatch names each case's expected handler and asserts that one ran and the others did
+  not; a sum of awaits over several handlers also passes when an action is routed to the wrong one. A test of a
+  second call (a cache, a remembered result, a skipped repeat) first asserts the first call did the work — the
+  lookups, the result — otherwise it passes when the first call never ran the path either (#192).
 - A test that two operations exclude each other through a lock proves the second one actually waits at that lock:
   while the first holds it, assert the second is queued on it (e.g. the lock's waiter count, `waiting_at=` in
   `test_plan_watchdog.py`) and has not yet done its work, then release and assert it runs. A test that only checks
