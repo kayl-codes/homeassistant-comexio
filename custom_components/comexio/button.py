@@ -74,8 +74,15 @@ from .const import (
     webio_class_name,
     webio_range_check_entity_id,
 )
-from .coordinator import PLAN_LOAD_FAILED, ComexioCoordinator, plan_cleanup_outcome, webio_still_present
+from .coordinator import (
+    PLAN_LOAD_FAILED,
+    ComexioCoordinator,
+    _device_ip_mismatch,
+    plan_cleanup_outcome,
+    webio_still_present,
+)
 from .entity import ComexioFunctionPlanEntityMixin, ComexioKnxEntity, ComexioMarkerEntity
+from .ha_address import is_loopback_address
 from .repairs import count_referencing_automations_and_scripts
 from .services import async_resync_io_group_headers, async_sort_function_plan
 
@@ -356,8 +363,27 @@ async def _confirm_webio_device_created(api: Any, class_name: str, old_device_id
         raise RuntimeError(f"Device creation not confirmed ({label}, class created, device instance not found)")
 
 
-class _SyncLoginError(HomeAssistantError):
-    """The sync could not log in to Comexio — reported without a traceback."""
+class _SyncNotStartedError(HomeAssistantError):
+    """The sync stopped before its first write — reported without a traceback."""
+
+
+class _SyncLoginError(_SyncNotStartedError):
+    """The sync could not log in to Comexio."""
+
+
+def _ensure_reachable_ha_address(ha_address: str, classes_without_device: list[str]) -> None:
+    """Refuse to create a Web-IO device that points to a loopback address: Comexio could never push to it.
+
+    The resolver falls back to it only when neither internal_url, the local IP nor a
+    homeassistant.<domain> name is usable. A class without a device would be recreated with it,
+    so the sync stops before its first write; existing devices keep their stored address
+    (no Fast-Track, and the audit reports no IP mismatch for it).
+    """
+    if classes_without_device and is_loopback_address(ha_address):
+        raise _SyncNotStartedError(
+            f"Home Assistant's network address resolved to {ha_address}, which Comexio cannot reach. "
+            "Set the local network URL under Settings → System → Network and run the sync again."
+        )
 
 
 async def _ensure_sync_login(api: Any) -> None:
@@ -748,7 +774,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         Called from the except block of async_handle_press, so the traceback is still available.
         """
-        if isinstance(error, _SyncLoginError):
+        if isinstance(error, _SyncNotStartedError):
             _LOGGER.error("[%s] Sync not started: %s", self.server_id, error)
         else:
             _LOGGER.exception("[%s] Sync failed", self.server_id)
@@ -826,6 +852,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         active_classes = tuple(c for c in WEBIO_CLASSES if c in opted_in or dev_ids.get(c))
         if not active_classes:
             return 0, 0, 0, 0, False, [], 0, {}, [], 0
+        _ensure_reachable_ha_address(ctx.ha_address, [c for c in active_classes if not dev_ids.get(c)])
         # Split the shared progress span evenly across however many classes are active,
         # so the UI bar advances smoothly regardless of len(active_classes).
         pct_span = (SYNC_PROGRESS_END_PCT - SYNC_PROGRESS_START_PCT) / len(active_classes)
@@ -848,7 +875,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 _items_of_class(type_mismatches, cls),
                 _items_of_class(orphans, cls),
                 _items_of_class(dangling_items, cls),
-                ctx.webio_devices_audit.get(cls, {}).get("ip_mismatch", False),
+                # Against this sync's address, not the last audit's: internal_url may have changed since.
+                await _device_ip_mismatch(
+                    self.coordinator.ha_address,
+                    ctx.ha_address,
+                    ctx.webio_devices_audit.get(cls, {}).get("device_ip"),
+                    dev_ids[cls],
+                ),
                 pct_start,
                 pct_end,
             )
@@ -1426,23 +1459,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
             return "update_ip"
         if cls_action_eta > SYNC_DURATION_RECREATE:
-            _LOGGER.info(
-                "[%s] %s ETA (%ds) > Fast-Track (%ds). Attempting Fast-Track.",
-                self.server_id,
-                label,
-                cls_action_eta,
-                SYNC_DURATION_RECREATE,
-            )
-            # Comexio's answer carries no verdict — only the lookup shows the device is gone. A
-            # device left behind would make the recreate upload a second class next to it.
-            error = await ctx.api.webio_device_delete_error(class_dev_id) or await webio_still_present(
-                ctx.api.get_webio_device_info, ctx.class_names[cls]
-            )
-            if not error:
-                _LOGGER.info("[%s] %s Fast-Track enabled: device has been deleted.", self.server_id, label)
-                return "recreate"
-            _LOGGER.info("[%s] %s device not deleted (%s). Falling back to Delta-Sync.", self.server_id, label, error)
-            return action
+            return "recreate" if await self._async_fast_track(ctx, cls, class_dev_id, cls_action_eta) else action
         _LOGGER.info(
             "[%s] %s ETA (%ds) is faster than Fast-Track. Proceeding exactly as requested.",
             self.server_id,
@@ -1450,6 +1467,39 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             cls_action_eta,
         )
         return action
+
+    async def _async_fast_track(self, ctx: _SyncContext, cls: str, class_dev_id: str, cls_action_eta: int) -> bool:
+        """Delete the class's device so it can be recreated; False keeps it (Delta-Sync)."""
+        label = webio_class_label(cls)
+        if is_loopback_address(ctx.ha_address):
+            # The recreate would write an address Comexio cannot reach in place of the stored one.
+            _LOGGER.warning(
+                "[%s] %s ETA (%ds) > Fast-Track (%ds), but recreating would write the unreachable address %s. "
+                "Proceeding with Delta-Sync.",
+                self.server_id,
+                label,
+                cls_action_eta,
+                SYNC_DURATION_RECREATE,
+                ctx.ha_address,
+            )
+            return False
+        _LOGGER.info(
+            "[%s] %s ETA (%ds) > Fast-Track (%ds). Attempting Fast-Track.",
+            self.server_id,
+            label,
+            cls_action_eta,
+            SYNC_DURATION_RECREATE,
+        )
+        # Comexio's answer carries no verdict — only the lookup shows the device is gone. A
+        # device left behind would make the recreate upload a second class next to it.
+        error = await ctx.api.webio_device_delete_error(class_dev_id) or await webio_still_present(
+            ctx.api.get_webio_device_info, ctx.class_names[cls]
+        )
+        if not error:
+            _LOGGER.info("[%s] %s Fast-Track enabled: device has been deleted.", self.server_id, label)
+            return True
+        _LOGGER.info("[%s] %s device not deleted (%s). Falling back to Delta-Sync.", self.server_id, label, error)
+        return False
 
     async def _recreate_class(
         self,
