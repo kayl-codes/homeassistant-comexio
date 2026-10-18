@@ -1524,7 +1524,9 @@ class ComexioAPI:
         for it would silently strip that combination back to the auth-less POST shape,
         reproducing the exact 401 Unauthorized bug the Phase 7 field combination fixes.
         """
-        _LOGGER.info("Applying command: %s (Update: %s)", cmd_payload.get("Name"), existing_cmd_id is not None)
+        _LOGGER.info(
+            "Applying command: %s (Update: %s)", one_line(cmd_payload.get("Name")), existing_cmd_id is not None
+        )
         try:
             await self.client.save_webio_command(
                 device_id,
@@ -1535,7 +1537,7 @@ class ComexioAPI:
             )
         except (ComexioError, ValueError) as err:
             # ValueError: a command id that is no number, rejected before anything is sent.
-            _LOGGER.warning("Saving Web-IO command %s failed: %s", cmd_payload.get("Name"), err)
+            _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
         return True
 
@@ -2838,17 +2840,19 @@ class ComexioAPI:
         else:
             marker_id = await self.create_marker(binary)
             if marker_id is None:
-                _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, k_title)
+                _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, one_line(k_title))
                 return None
 
         # A new, free (blank) or unwired marker: its old default/store flag must not carry over.
         if not await self.rename_marker(marker_id, title, binary, default=0, store=False):
             _LOGGER.error(
-                "create_knx_bridge_marker: rename_marker failed for M%s -> '%s' (K%s)", marker_id, title, k_id
+                "create_knx_bridge_marker: rename_marker failed for M%s -> '%s' (K%s)", marker_id, one_line(title), k_id
             )
             return None
 
-        _LOGGER.info("create_knx_bridge_marker: M%s '%s' created for K%s (binary=%s)", marker_id, title, k_id, binary)
+        _LOGGER.info(
+            "create_knx_bridge_marker: M%s '%s' created for K%s (binary=%s)", marker_id, one_line(title), k_id, binary
+        )
         return marker_id, title
 
     async def wire_knx_bridge_pair(
@@ -4311,12 +4315,14 @@ class ComexioAPI:
         expected_cmd_name = f"HA {source['name']}"
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
-            _LOGGER.warning("function_plan_add_source_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
-            return f"{label}: Web-IO '{expected_cmd_name}' not found after config reload"
+            _LOGGER.warning(
+                "function_plan_add_source_pairs: %s — Web-IO '%s' not found", label, one_line(expected_cmd_name)
+            )
+            return f"{label}: Web-IO '{one_line(expected_cmd_name)}' not found after config reload"
 
         web_ref_id = webio_cmd.get("webIoId")
         if web_ref_id is None:
-            return f"{label}: no webIoId for '{expected_cmd_name}'"
+            return f"{label}: no webIoId for '{one_line(expected_cmd_name)}'"
 
         conn_type = "binary" if source["type"] == "digital" else "analog"
         return await self._function_plan_wire_ref_pair(
@@ -4700,12 +4706,14 @@ class ComexioAPI:
         expected_cmd_name = f"HA IO {ext_name} {ident}"
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
-            _LOGGER.warning("function_plan_add_io_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
-            return f"{label}: Web-IO '{expected_cmd_name}' not found after config reload"
+            _LOGGER.warning(
+                "function_plan_add_io_pairs: %s — Web-IO '%s' not found", label, one_line(expected_cmd_name)
+            )
+            return f"{label}: Web-IO '{one_line(expected_cmd_name)}' not found after config reload"
 
         web_ref_id = webio_cmd.get("webIoId")
         if web_ref_id is None:
-            return f"{label}: no webIoId for '{expected_cmd_name}'"
+            return f"{label}: no webIoId for '{one_line(expected_cmd_name)}'"
 
         try:
             io_ref_id = int(io_entry["id"])

@@ -20,6 +20,7 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
     expand_ignored_marker_ids,
+    one_line,
 )
 from ._context import (
     _ensure_comexio_login,
@@ -249,13 +250,13 @@ async def _connect_marker_to_webio(
     expected_cmd_name = f"HA {marker['name']}"
     webio_cmd = webio_commands.get(expected_cmd_name)
     if not webio_cmd:
-        _LOGGER.warning("Function Plan Connect: M%s — WebIO '%s' not found", marker_id, expected_cmd_name)
-        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' not found"
+        _LOGGER.warning("Function Plan Connect: M%s — WebIO '%s' not found", marker_id, one_line(expected_cmd_name))
+        return None, None, f"M{marker_id}: WebIO '{one_line(expected_cmd_name)}' not found"
 
     # ref_id for type=10 (WebIO) is the local FubModules dict-key (webIoId), not cmdId
     web_ref_id = webio_cmd.get("webIoId")
     if web_ref_id is None:
-        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' has no webIoId"
+        return None, None, f"M{marker_id}: WebIO '{one_line(expected_cmd_name)}' has no webIoId"
 
     conn_type = "binary" if marker["type"] == "digital" else "analog"
 
@@ -276,7 +277,7 @@ async def _connect_marker_to_webio(
         _LOGGER.info("Function Plan Connect: M%s — already connected in plan, skipped", marker_id)
         return (
             None,
-            f"M{marker_id} ({marker['name']}): already connected in plan {fub_id}"
+            f"M{marker_id} ({one_line(marker['name'])}): already connected in plan {fub_id}"
             f" (elem {existing_marker_elem}→{existing_webio_elem})",
             None,
         )
@@ -309,12 +310,13 @@ async def _connect_marker_to_webio(
     if already_wired:
         return (
             None,
-            f"M{marker_id} ({marker['name']}): already wired (elem {elem_marker}→{elem_webio}), no new connection",
+            f"M{marker_id} ({one_line(marker['name'])}): already wired (elem {elem_marker}→{elem_webio}), "
+            "no new connection",
             None,
         )
 
     result = (
-        f"M{marker_id} ({marker['name']}) → elem={elem_marker} | "
+        f"M{marker_id} ({one_line(marker['name'])}) → elem={elem_marker} | "
         f"WebIO webIoId={web_ref_id} → elem={elem_webio} ({conn_type})"
     )
     return result, None, None

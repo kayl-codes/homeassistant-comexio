@@ -1739,7 +1739,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             existing_cmd_id = None if t_type == "create" else item["id"]
             ok = await api.save_single_command(base_id, class_dev_id, item["payload"], existing_cmd_id=existing_cmd_id)
         if not ok:
-            failed_writes.append(f"{t_type} {item['name']}")
+            failed_writes.append(f"{t_type} {one_line(item['name'])}")
             return
         result[_DELTA_RESULT_KEYS[t_type]] += 1
         if t_type == "create":
@@ -2818,11 +2818,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             self.server_id,
             category_label,
             fub_id,
-            expected_name,
+            one_line(expected_name),
             one_line(plan_name),
         )
         return (
-            f"{ICON_WARNING} fub {fub_id}: aborted — expected '{expected_name}' "
+            f"{ICON_WARNING} fub {fub_id}: aborted — expected '{one_line(expected_name)}' "
             f"but plan is now '{one_line(plan_name)}'",
             [],
             [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],

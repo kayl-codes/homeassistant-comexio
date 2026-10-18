@@ -19,7 +19,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from ..const import DOMAIN, MarkerKind, webio_class_name
+from ..const import DOMAIN, MarkerKind, one_line, webio_class_name
 from ..coordinator import ComexioCoordinator
 from ..plan_preview import PreviewStoppedError, async_render_opened_preview, preview_selection_available
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator, service_flag
@@ -474,7 +474,7 @@ async def _search_plan_labels(
             login_state["ok"] = await api.login()
         plan_data = await api.function_plan_load_elements(int(fid)) if login_state["ok"] else None
     if not plan_data:
-        return None, f"{fub.get('Name', '?')} (fub {fid})"
+        return None, f"{one_line(fub.get('Name', '?'))} (fub {fid})"
     hits: set[str] = set()
     for elem in plan_data.get("elements", {}).values():
         # Comments carry multi-line text — flatten like the text visualization does.

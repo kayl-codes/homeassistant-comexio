@@ -470,7 +470,7 @@ def _log_audit_items(icon: str, label: str, items: list[dict[str, Any]]) -> None
     """One audit summary category: its count, then one line per item."""
     _LOGGER.info("%s %s (%d):", icon, label, len(items))
     for item in items:
-        _LOGGER.info("   -> %s", item["name"])
+        _LOGGER.info("   -> %s", one_line(item["name"]))
 
 
 async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:

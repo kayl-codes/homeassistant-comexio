@@ -102,7 +102,8 @@ def _available_plans_str(fub_data: dict) -> str:
     if not fub_data:
         return "no plans loaded — reload the integration"
     return ", ".join(
-        f"'{fub.get('Name', '?')}' (ID {fid})" for fid, fub in sorted(fub_data.items(), key=lambda x: int(x[0]))
+        f"'{one_line(fub.get('Name', '?'))}' (ID {fid})"
+        for fid, fub in sorted(fub_data.items(), key=lambda x: int(x[0]))
     )
 
 
