@@ -19,7 +19,6 @@ read in a nested function, or reassigned to `one_line(...)`, is still flagged: r
 
 import ast
 from pathlib import Path
-import re
 
 import pytest
 
@@ -77,6 +76,8 @@ IDENTITY_FUNCTIONS = {
         "update_io_by_name",  # the event label the plan card matches with the plan's element labels
     },
 }
+# Keyword arguments whose dict values a repair issue or a flow step shows as text.
+PLACEHOLDER_KEYWORDS = {"translation_placeholders", "description_placeholders"}
 STRING_WRAPPERS = {"str", "repr"}
 # String methods that keep a name's line breaks: name.strip(), name.upper().
 STRING_METHODS = {"strip", "lstrip", "rstrip", "upper", "lower", "title", "capitalize", "casefold", "replace"}
@@ -167,7 +168,10 @@ def _raw_in_text(node: ast.AST) -> list[ast.expr]:
         return _shown_names([part.value for part in node.values if isinstance(part, ast.FormattedValue)])
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add | ast.Mod):
         if isinstance(node.op, ast.Mod) and _is_text(node.left):
-            operands = node.right.elts if isinstance(node.right, ast.Tuple) else [node.right]
+            right = node.right
+            operands = (
+                right.elts if isinstance(right, ast.Tuple) else right.values if isinstance(right, ast.Dict) else [right]
+            )
             return _shown_names(operands)
         if isinstance(node.op, ast.Add) and (_is_text(node.left) or _is_text(node.right)):
             return _shown_names([node.left, node.right])
@@ -177,6 +181,12 @@ def _raw_in_text(node: ast.AST) -> list[ast.expr]:
 def _raw_in_output(call: ast.Call) -> list[ast.expr]:
     shown = [keyword.value for keyword in call.keywords if keyword.arg not in IDENTITY_KEYS]
     return _shown_names([*call.args, *shown])
+
+
+def _raw_in_placeholders(call: ast.Call) -> list[ast.expr]:
+    """The names a repair issue or a flow step puts into its text through a placeholders dict."""
+    dicts = [kw.value for kw in call.keywords if kw.arg in PLACEHOLDER_KEYWORDS and isinstance(kw.value, ast.Dict)]
+    return _shown_names([value for placeholders in dicts for value in placeholders.values])
 
 
 def _name_aliases(scope: ast.AST) -> dict[str, int]:
@@ -216,6 +226,8 @@ def raw_name_outputs(source: str, identity_functions: set[str] | None = None) ->
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _is_output_call(node):
             found.extend((name.lineno, ast.unparse(name)) for name in _raw_in_output(node))
+        elif isinstance(node, ast.Call) and _raw_in_placeholders(node):
+            found.extend((name.lineno, ast.unparse(name)) for name in _raw_in_placeholders(node))
         elif not _is_identity(node, parents, identity_functions or set()):
             found.extend((name.lineno, ast.unparse(name)) for name in _raw_in_text(node))
     return sorted(found)
@@ -276,6 +288,10 @@ def raw_name_outputs(source: str, identity_functions: set[str] | None = None) ->
         ('def f(m):\n    label = m.get("name") or "M1"\n    _LOGGER.debug("%s", label)', [(3, "label")]),
         ('msg = f"Plan {name if name else fub_id} gone"', [(1, "name")]),
         ('_LOGGER.debug("%s", fallback or item["name"])', [(1, "item['name']")]),
+        ('msg = "Plan %(plan)s gone" % {"plan": plan_name}', [(1, "plan_name")]),
+        ('self.async_show_form(step_id="x", description_placeholders={"name": item["name"]})', [(1, "item['name']")]),
+        ('ir.async_create_issue(hass, DOMAIN, "x", translation_placeholders={"plan": plan_name})', [(1, "plan_name")]),
+        ('self.async_show_form(step_id="x", description_placeholders={"name": one_line(item["name"])})', []),
         ('def f(m):\n    label = one_line(m.get("name") or "M1")\n    _LOGGER.debug("%s", label)', []),
         ('def f(name):\n    msg = f"Plan {one_line(name)}"\n    _LOGGER.info(msg)', []),
         ('_LOGGER.info("Plan %s", self.api.function_plan_name(fid))', [(1, "self.api.function_plan_name(fid)")]),
@@ -341,14 +357,27 @@ def test_a_plan_label_is_one_line_and_resolves_back_to_its_plan() -> None:
     assert [_resolve_fub_id(label, fub_data) for label in labels] == [7, 8]
 
 
-def test_distinct_one_line_tags_only_a_name_one_line_changes_and_the_same_way_every_time() -> None:
-    assert distinct_one_line("Hall way") == "Hall way"
-    assert distinct_one_line(None) == "None"
-    tagged = distinct_one_line("Hall\nway")
-    assert re.fullmatch(r"Hall way #[0-9a-f]{8}", tagged)
-    assert tagged == distinct_one_line("Hall\nway")
-    assert tagged != distinct_one_line("Hall  way")
-    assert distinct_one_line(" Hall").startswith("Hall #")
+@pytest.mark.parametrize(
+    ("name", "label"),
+    [
+        ("Hall way", "Hall way"),
+        (None, "None"),
+        ("Hall\nway", r"Hall\nway"),
+        ("Hall\tway", r"Hall\tway"),
+        ("Hall  way", r"Hall \x20way"),
+        (" Hall ", r"\x20Hall\x20"),
+        ("Hall\\nway", r"Hall\\nway"),
+        ("Hall\ud800", r"Hall\ud800"),
+    ],
+)
+def test_distinct_one_line_escapes_what_one_line_would_hide(name: object, label: str) -> None:
+    assert distinct_one_line(name) == label
+
+
+def test_distinct_one_line_never_gives_two_names_one_label() -> None:
+    """Also not a name that spells another one's escape: the backslash itself is escaped."""
+    names = ["Hall way", "Hall\nway", "Hall\\nway", "Hall  way", "Hall \\x20way", "Hall way ", "Hall way"]
+    assert len({distinct_one_line(name) for name in names}) == len(names)
 
 
 def test_restore_and_snapshot_options_tell_apart_names_that_coincide_on_one_line() -> None:

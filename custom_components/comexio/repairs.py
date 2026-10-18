@@ -1225,7 +1225,7 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_show_form(
                 step_id="knx_dpt_suffix",
                 description_placeholders={
-                    "name": current["name"],
+                    "name": one_line(current["name"]),
                     "remaining": str(len(self._knx_dpt_items) - 1),
                 },
                 data_schema=vol.Schema(

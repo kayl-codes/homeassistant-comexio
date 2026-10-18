@@ -3,7 +3,6 @@ from dataclasses import dataclass
 import logging
 import re
 from typing import Any
-import zlib
 
 # Pure Comexio/KNX domain tables live in aiocomexio and are re-exported here, so the platforms
 # keep importing them from const.
@@ -611,14 +610,26 @@ def one_line(text: object) -> str:
     return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
 
 
-def distinct_one_line(text: object) -> str:
-    """one_line(text) for a selector label: tagged from the raw text when one_line changed it.
+def _label_char(raw: str, index: int) -> str:
+    char = raw[index]
+    if char == "\\":
+        return "\\\\"
+    if char == " ":
+        hidden = index in (0, len(raw) - 1) or raw[index - 1] == " "  # a space the frontend would not show
+        return "\\x20" if hidden else char
+    return char if char.isprintable() else ascii(char)[1:-1]
 
-    Two names that differ only in line breaks or spacing show the same one_line text; the tag tells them apart
-    and is the same on every rebuild, so a label resolved back by equality keeps naming the same raw name.
+
+def distinct_one_line(text: object) -> str:
+    """A name on one line for a selector label, different for every different name.
+
+    one_line would show two names that differ only in line breaks or spacing alike, and a label is resolved
+    back by equality. Here a control character, a space the frontend would not show (leading, trailing or
+    repeated) and a backslash are written as escapes instead (`Hall\\nway`), so the label is the same on every
+    rebuild and no two names share one. A name without such characters is shown unchanged.
     """
-    raw, shown = str(text), one_line(text)
-    return shown if shown == raw else f"{shown} #{zlib.crc32(raw.encode()):08x}"
+    raw = str(text)
+    return "".join(_label_char(raw, index) for index in range(len(raw)))
 
 
 def stable_object_id(unique_id: str) -> str:

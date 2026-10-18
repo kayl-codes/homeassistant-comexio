@@ -5528,7 +5528,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     translation_key="extension_offline",
                     translation_placeholders={
                         "server_id": self.server_id,
-                        "extensions": ", ".join(sorted(new_offline)),
+                        "extensions": ", ".join(sorted(one_line(ext) for ext in new_offline)),
                     },
                 )
             else:
