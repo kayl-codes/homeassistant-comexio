@@ -835,6 +835,25 @@ def test_a_late_search_does_not_undo_a_newer_internal_url(dns) -> None:
     assert resolver._guessed_host is None  # the configured URL outranks the guess, also afterwards
 
 
+def test_the_stored_names_are_looked_up_in_parallel(dns, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(Review) the stored names were checked one after the other, so the DNS timeouts of several
+    unanswered names added up; the first one in order still wins."""
+    names = ("slow1.example.lan", "slow2.example.lan", "slow3.example.lan")
+    dns(slow=set(names), delay=1.0)
+    monkeypatch.setattr(ha_address, "HA_ADDRESS_DNS_TIMEOUT_SEC", 0.2)
+    resolver = HaAddressResolver(_FakeHass())
+
+    async def _run() -> tuple[str, float]:
+        started = time.monotonic()
+        result = await resolver.async_get(*(f"{name}:8123" for name in names))
+        return result, time.monotonic() - started
+
+    result, took = asyncio.run(_run())
+
+    assert result == "slow1.example.lan:8123"
+    assert took < 0.4  # one timeout, not three (0.6 s)
+
+
 @pytest.mark.parametrize(
     ("ha", "stored", "mismatch"),
     [

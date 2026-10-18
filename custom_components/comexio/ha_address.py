@@ -244,14 +244,28 @@ class HaAddressResolver:
         return own_ips
 
     async def _async_known_host(self, hint_hosts: list[str | None], own_ips: frozenset[IPAddress]) -> str | None:
-        """The first known address confirmed to point to this host, else the first unchecked one, else None."""
+        """The first known address confirmed to point to this host, else the first unchecked one, else None.
+
+        The names are looked up in parallel (each bounded by HA_ADDRESS_DNS_TIMEOUT_SEC), so stale names of
+        several Web-IO classes do not add up their timeouts; the verdicts are taken in order.
+        """
+        hosts = list(dict.fromkeys(host for host in (*hint_hosts, self._guessed_host) if host))
+        lookups = {
+            host: asyncio.ensure_future(self._async_lookup(host))
+            for host in hosts
+            if own_ips and _ip(host) is None and not _is_loopback(host)
+        }
         unchecked = None
-        for host in dict.fromkeys(host for host in (*hint_hosts, self._guessed_host) if host):
-            verdict = await self._async_verdict(host, own_ips)
-            if verdict is _Verdict.CONFIRMED:
-                return host
-            if verdict is _Verdict.UNCHECKED and unchecked is None:
-                unchecked = host
+        try:
+            for host in hosts:
+                verdict = await self._async_verdict(host, own_ips, lookups.get(host))
+                if verdict is _Verdict.CONFIRMED:
+                    return host
+                if verdict is _Verdict.UNCHECKED and unchecked is None:
+                    unchecked = host
+        finally:
+            for task in lookups.values():  # only the asyncio side, as in _async_guessed_name
+                task.cancel()
         if unchecked is not None:
             if own_ips:
                 self._notice(
@@ -263,8 +277,10 @@ class HaAddressResolver:
                 )
         return unchecked
 
-    async def _async_verdict(self, host: str, own_ips: frozenset[IPAddress]) -> _Verdict:
-        """Whether host is (an IP literal) or resolves to one of own_ips."""
+    async def _async_verdict(
+        self, host: str, own_ips: frozenset[IPAddress], lookup: asyncio.Future[_Answer] | None = None
+    ) -> _Verdict:
+        """Whether host is (an IP literal) or resolves to one of own_ips; lookup: its lookup, already started."""
         if _is_loopback(host):
             self._notice(host, "loopback", logging.WARNING, "HA address: %s is a loopback address; ignoring it")
             return _Verdict.REJECTED
@@ -273,7 +289,7 @@ class HaAddressResolver:
         if (ip := _ip(host)) is not None:
             addresses = frozenset({ip})
         else:
-            answer = await self._async_lookup(host)
+            answer = await (lookup if lookup is not None else self._async_lookup(host))
             if answer.status is _Lookup.NO_ANSWER:
                 return _Verdict.UNCHECKED
             addresses = answer.addresses
