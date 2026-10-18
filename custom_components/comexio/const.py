@@ -599,6 +599,17 @@ def webio_range_check_entity_id(server_id: str) -> str:
     return f"button.comexio_{slugify(server_id)}_webio_range_check"
 
 
+def one_line(text: object) -> str:
+    """A name from Comexio on one line, for a log line, notification or service response.
+
+    Control characters (newlines included) become spaces and runs of whitespace collapse: a newline in a
+    name set in Comexio would forge extra log lines or break a notification's layout. Only for output, never
+    for an identity (tokens, issue ids, option values keep the raw name). Any value is shown as str() would:
+    a backup's name read back as null must not abort the log line or the work around it.
+    """
+    return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
+
+
 def stable_object_id(unique_id: str) -> str:
     """Object id (entity_id without domain) a Comexio IO/Marker/KNX entity requests for itself.
 
@@ -748,6 +759,8 @@ FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC = 60
 # Minimum gap before a deleted plan's alarm push that reached no notify service is sent again: the
 # checks run every few seconds while a plan card is open, and a removed phone must not get a retry each.
 FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC = 300
+# Longest wait for one notify service to take a watchdog push; a slower one counts as failed (retried like any).
+FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC = 30
 # After Comexio was unreachable (a poll or run-state fetch failed to connect, or HA's own emergency
 # reboot) the watchdog waits this long from the first successful read before judging the plans
 # again: a booting Comexio starts its plans itself, so a stopped plan then is no fault.

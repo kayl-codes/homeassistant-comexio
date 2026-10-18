@@ -16,8 +16,11 @@ state like a stopped one's, so the coordinator re-reads the plan list before it 
 watched plan as newly stopped.
 """
 
-from collections.abc import Awaitable, Callable, Collection, Mapping
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
+from contextlib import asynccontextmanager
 from datetime import datetime
+from enum import StrEnum
 import hashlib
 import logging
 import re
@@ -35,8 +38,10 @@ from .const import (
     DOMAIN,
     FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS,
     FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC,
+    FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC,
     FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+    one_line,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -176,6 +181,15 @@ def vanished_plan_token(fub_id: int, name: str) -> str:
 # vanished_plan_token: the plan id (group) and the name digest.
 _VANISHED_ID_PATTERN = r"(\d+)_[0-9a-f]{16}"
 
+# Push tag → lock held while a push under it is sent, with the number of pushes holding or waiting for it
+# (see ManagedPlanWatchdog._push_lock). Module-wide, not per watchdog: a reloaded entry's new watchdog sends
+# under the old one's tags (they name the server) while the old one's sends may still be on their way.
+_PUSH_LOCKS: dict[str, tuple[asyncio.Lock, int]] = {}
+# Plan push tags whose last push delivered carries buttons (an alarm, a start reply). Module-wide like _PUSH_LOCKS:
+# a reloaded entry's watchdog has no verdict of its own that would take such a push off (one delivered before the
+# reload, or still on its way), so its checks clear the ones of plans they see running or no longer watch.
+_ACTIONABLE_TAGS: set[str] = set()
+
 
 def unnamed_plan_label(fub_id: int) -> str:
     """Name of a bare-ID pick whose backups carry no single plan name: no backup identity to restore."""
@@ -298,6 +312,22 @@ def newly_stopped_plans(previous: Mapping[int, str], stopped: Mapping[int, str])
     return sorted(fub_id for fub_id, name in stopped.items() if previous.get(fub_id) != name)
 
 
+class _VanishedGuard(StrEnum):
+    """What a deleted plan's push (token) is judged by again once its tag's lock is held (see _no_longer_due)."""
+
+    NONE = "none"
+    # Not once the plan's "restored" push went out: it would replace that confirmation.
+    UNLESS_RESTORED = "unless_restored"
+    # As UNLESS_RESTORED, and only while the plan still is vanished (a reply offering its Restore).
+    WHILE_VANISHED = "while_vanished"
+    # Not once a check ran (a reply before the first check): a listed plan got that check's alarm, same buttons;
+    # one not listed is back or unwatched, its buttons would be turned down.
+    WHILE_PENDING = "while_pending"
+    # Not once a check dropped the plan from vanished and listed it again (a "restored" push: a new episode's
+    # alarm holds the tag).
+    UNLESS_VANISHED_AGAIN = "unless_vanished_again"
+
+
 class ManagedPlanWatchdog:
     """Keeps the repairs, the pushes, the problem sensor and the optional auto-start of the managed plans."""
 
@@ -351,11 +381,21 @@ class ManagedPlanWatchdog:
         self._vanished_push_unsent: dict[str, tuple[float, frozenset[str]]] = {}
         # fub_id → the same for a stopped alarm push.
         self._stopped_push_unsent: dict[int, tuple[float, frozenset[str]]] = {}
+        # Push tag → lock held while a push under it is sent: the phone shows the one sent last, so a stale
+        # push's clear and a stop's alarm (same tag) must not overlap, else the clear may arrive after the alarm.
+        # With the number of pushes holding or waiting for it: removed once none does (deleted-plan tags are many).
+        # Shared with the watchdog of a reload (see _PUSH_LOCKS).
+        self._push_locks = _PUSH_LOCKS
+        self._actionable_tags = _ACTIONABLE_TAGS
         # fub_id → name of the managed plans as of the last check: an ID under another name holds another plan.
         self._names: dict[int, str] = {}
         # Local time of the last check; shown in the repair dialogs and on the problem sensor.
         self.last_check: datetime | None = None
         self._checking = False
+        # Plans started from their repair or push while a check runs: its stopped plans were judged before.
+        self._started_in_check: set[int] = set()
+        # Set once the entry unloads (close): no push or clear is sent from then on.
+        self._closed = False
         # Plans the running check auto-started (see async_plan_started).
         self._auto_started_in_check: set[int] = set()
 
@@ -376,6 +416,7 @@ class ManagedPlanWatchdog:
         if self._checking:
             return False
         self._checking = True
+        self._started_in_check.clear()
         try:
             self.last_check = dt_util.now()
             self._user_plans = frozenset(user_plans)
@@ -393,16 +434,61 @@ class ManagedPlanWatchdog:
             auto_started: dict[int, str] = {}
             if to_start:
                 auto_started = await self._async_auto_start(to_start)
-                stopped = {fub_id: name for fub_id, name in stopped.items() if fub_id not in auto_started}
+            if self._closed:
+                # Unloaded while Auto-Start awaited Comexio: the reloaded watchdog owns the shared repairs now,
+                # this check's snapshot would delete the ones it raised meanwhile.
+                return False
+            # A plan started meanwhile (repair or push, while Auto-Start awaited Comexio) is left out: its
+            # repair and push were already taken care of, writing it back would raise them again.
+            started = self._started_in_check
+            stopped = {
+                fub_id: name for fub_id, name in stopped.items() if fub_id not in auto_started and fub_id not in started
+            }
+            previous = {fub_id: name for fub_id, name in previous.items() if fub_id not in started}
+            # Also one whose Auto-Start answered after it was confirmed running: its "auto-started" push would
+            # replace that confirmation.
+            auto_started = {fub_id: name for fub_id, name in auto_started.items() if fub_id not in started}
             undecided = {fub_id for fub_id, state in states.items() if fub_id not in stopped and state is None}
             self._sync_issues(stopped, undecided)
             changed = self.stopped != stopped or self.suspended != suspended_before
             self.stopped = stopped
-            await self._async_push_transitions(previous, stopped, auto_started, self.suspended - suspended_before)
+            await self._async_push_transitions(
+                previous, stopped, auto_started, self.suspended - suspended_before, self._maybe_actionable(states)
+            )
             return changed
         finally:
             self._checking = False
             self._auto_started_in_check.clear()
+
+    def close(self) -> None:
+        """The entry unloads: send nothing more, judged under the tag's lock.
+
+        A check or push action of this watchdog may still run; what it would send now is stale. A reloaded
+        entry's watchdog sends under the same tags (shared lock: a send already on its way arrives first), so
+        a clear of this one queued behind its alarm would take that alarm off the phone.
+        One on its way arrives still: if it has buttons, the reloaded watchdog takes it off for a plan it sees
+        running or no longer watches (see _maybe_actionable).
+        """
+        self._closed = True
+
+    def _maybe_actionable(self, states: Mapping[int, bool | None]) -> set[int]:
+        """The plans running now whose tag may still show a push with buttons (see _ACTIONABLE_TAGS), and the plans
+        no longer watched whose tag may (e.g. unpicked, then reloaded: no verdict of this watchdog clears it).
+
+        Its last push delivered has them, or a push under it is on its way (one of an unloaded entry's watchdog
+        is judged only once it arrived). Judged again under the tag's lock (see _async_clear_push): the clear then
+        waits for that push.
+        """
+        running = {
+            fub_id
+            for fub_id, state in states.items()
+            if state and ((tag := self._push_tag(fub_id)) in self._actionable_tags or tag in self._push_locks)
+        }
+        prefix = self._push_tag(0).removesuffix("0")
+        shown = {
+            tag.removeprefix(prefix) for tag in {*self._actionable_tags, *self._push_locks} if tag.startswith(prefix)
+        }
+        return running | ({int(fub_id) for fub_id in shown if fub_id.isdecimal() and fub_id.isascii()} - states.keys())
 
     def last_check_text(self) -> str:
         """The last check as local time in the HA language's format, "—" before the first one."""
@@ -445,12 +531,18 @@ class ManagedPlanWatchdog:
 
         confirm replaces the push with a "runs again" one (started from the phone), else the push is removed.
         """
+        if self._closed:
+            # Unloaded while the start awaited Comexio: the reloaded watchdog owns the shared repair now (it may
+            # have raised it again meanwhile); its next check sees the plan running and clears it.
+            return
         # The suspension is not touched here: the run-state fetch right after the start (or the next
         # poll) lifts it once it sees the plan running.
         if fub_id not in self._auto_started_in_check:
             # The user's start: a stop after it is no failed Auto-Start. A tap while the check that auto-started
             # the plan still runs found it started already, so that start keeps its stopped-again window.
             self._auto_started_at.pop(fub_id, None)
+        if self._checking:
+            self._started_in_check.add(fub_id)
         ir.async_delete_issue(self._hass, DOMAIN, stopped_plan_issue_id(self._server_id, fub_id))
         name = (self.stopped or {}).get(fub_id, str(fub_id))
         if self.stopped is not None:
@@ -458,15 +550,23 @@ class ManagedPlanWatchdog:
         if confirm:
             await self._async_push(fub_id, name, "started_title", "started")
         else:
-            await self._async_clear_push(fub_id)
+            # Kept if a check judged the plan stopped again before the tag's lock was free: its alarm is due.
+            await self._async_clear_push(fub_id, keep_stopped=True)
 
     async def async_push_start_failed(self, fub_id: int, name: str) -> None:
-        """Tell the phone a start from its push failed, with the "Start plan" action again."""
-        await self._async_push(fub_id, name, "failed_title", "failed", with_action=True)
+        """Tell the phone a start from its push failed, with the "Start plan" action again.
+
+        Only while the plan is the ID's stopped one: started meanwhile (another phone), the button would start
+        a running plan; not judged stopped (yet), the next check that does pushes its alarm with the button.
+        """
+        await self._async_push(fub_id, name, "failed_title", "failed", with_action=True, while_stopped=True)
 
     async def async_push_start_busy(self, fub_id: int, name: str) -> None:
-        """Tell the phone a start from its push was not sent (something else runs), with the action again."""
-        await self._async_push(fub_id, name, "busy_title", "busy", with_action=True)
+        """Tell the phone a start from its push was not sent (something else runs), with the action again.
+
+        Only while the plan is the ID's stopped one, as async_push_start_failed.
+        """
+        await self._async_push(fub_id, name, "busy_title", "busy", with_action=True, while_stopped=True)
 
     async def async_push_start_outdated(self, fub_id: int, name: str) -> None:
         """Replace a "Start plan" push that names no plan (sent before the update) with one naming the ID's plan.
@@ -474,7 +574,9 @@ class ManagedPlanWatchdog:
         The alarm is pushed on the stop only, so the old push would otherwise keep a button that starts nothing.
         A target that failed to take it gets the plan's alarm again (it names the plan too) while it stays stopped.
         """
-        failed = await self._async_push(fub_id, name, "outdated_title", "outdated", with_action=True)
+        failed = await self._async_push(
+            fub_id, name, "outdated_title", "outdated", with_action=True, while_stopped=True
+        )
         if failed:
             self._stopped_push_unsent[fub_id] = (time.monotonic(), failed)
 
@@ -562,7 +664,7 @@ class ManagedPlanWatchdog:
         _LOGGER.warning(
             "[%s] Auto-start of monitored function plan '%s' (ID %s) failed (%s), attempt %s of %s",
             self._server_id,
-            name,
+            one_line(name),
             fub_id,
             reason,
             failed,
@@ -575,7 +677,7 @@ class ManagedPlanWatchdog:
                 "[%s] Plan Auto-Start gave up on function plan '%s' (ID %s); check the plan in Comexio Studio. "
                 "Auto-Start resumes once the plan is seen running again",
                 self._server_id,
-                name,
+                one_line(name),
                 fub_id,
             )
 
@@ -583,27 +685,20 @@ class ManagedPlanWatchdog:
         """Start the stopped plans Auto-Start has not given up on; returns the ones started."""
         started: dict[int, str] = {}
         for fub_id, name in stopped.items():
+            if self._closed:
+                break  # unloaded while an earlier start awaited Comexio: the reloaded watchdog starts its plans
             # Read per plan: each start awaits Comexio, which serializes requests, so a time taken
             # once before the loop would date the later plans' starts and refusals too early.
             now = time.monotonic()
-            started_at = self._auto_started_at.pop(fub_id, None)
-            if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
-                self._count_failed_start(fub_id, name, "stopped again shortly after its start")
-            # Re-checked per plan: the switch can be turned off while an earlier start awaits Comexio.
-            if fub_id in self.suspended or not self._auto_start_enabled(fub_id):
-                continue
-            if self._retry_too_soon(fub_id, now):
-                _LOGGER.debug(
-                    "[%s] Auto-start of monitored function plan '%s' (ID %s) waits until %s s after its last attempt",
-                    self._server_id,
-                    name,
-                    fub_id,
-                    FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
-                )
+            if not self._auto_start_due(fub_id, name, now):
                 continue
             result = await self._start_plan(fub_id)
             now = time.monotonic()  # the answer's time: the stopped-again window and the retry gap start here
             deferred_before = self._deferred_at.pop(fub_id, None) is not None
+            if fub_id in self._started_in_check:
+                # Started from its repair or push while this start awaited Comexio: not Auto-Start's start (no
+                # notification, no stopped-again window), nor its refusal (no failed attempt).
+                continue
             if result:
                 self._auto_started_at[fub_id] = now
                 self._auto_started_in_check.add(fub_id)
@@ -615,6 +710,26 @@ class ManagedPlanWatchdog:
             else:
                 self._defer_start(fub_id, name, now, logged_before=deferred_before)
         return started
+
+    def _auto_start_due(self, fub_id: int, name: str, now: float) -> bool:
+        """Whether Auto-Start starts this stopped plan now; counts a stop shortly after its own start as a failure."""
+        started_at = self._auto_started_at.pop(fub_id, None)
+        if started_at is not None and now - started_at < FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC:
+            self._count_failed_start(fub_id, name, "stopped again shortly after its start")
+        # Re-checked per plan: the switch can be turned off, or the plan started from its repair or push,
+        # while an earlier start awaits Comexio.
+        if fub_id in self.suspended or fub_id in self._started_in_check or not self._auto_start_enabled(fub_id):
+            return False
+        if self._retry_too_soon(fub_id, now):
+            _LOGGER.debug(
+                "[%s] Auto-start of monitored function plan '%s' (ID %s) waits until %s s after its last attempt",
+                self._server_id,
+                one_line(name),
+                fub_id,
+                FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+            )
+            return False
+        return True
 
     def _defer_start(self, fub_id: int, name: str, now: float, *, logged_before: bool) -> None:
         """A start not sent (a sync/restore runs) or not answered: no failed attempt, but the retry gap applies.
@@ -639,11 +754,12 @@ class ManagedPlanWatchdog:
         )
 
     def _notify_auto_started(self, fub_id: int, name: str) -> None:
-        _LOGGER.warning("[%s] Auto-started monitored function plan '%s' (ID %s)", self._server_id, name, fub_id)
+        shown = one_line(name)
+        _LOGGER.warning("[%s] Auto-started monitored function plan '%s' (ID %s)", self._server_id, shown, fub_id)
         switch = "Plan Auto-Start (user plans)" if self.is_user_plan(fub_id) else "Plan Auto-Start (HA plans)"
         persistent_notification.async_create(
             self._hass,
-            f"The monitored function plan **{name}** (ID {fub_id}) was not running in Comexio and has been "
+            f"The monitored function plan **{shown}** (ID {fub_id}) was not running in Comexio and has been "
             f"started again by the **{switch}** switch.",
             title=f"Comexio {self._server_id}: function plan started",
             notification_id=f"{DOMAIN}_{self._server_id}_plan_auto_start_{fub_id}",
@@ -713,19 +829,28 @@ class ManagedPlanWatchdog:
         stopped: Mapping[int, str],
         auto_started: Mapping[int, str],
         newly_suspended: Collection[int],
+        maybe_actionable: Collection[int] = (),
     ) -> None:
         """Alarm push for a newly stopped plan or one Auto-Start gave up on; the push of a plan running
-        again (or deleted: its vanished push has a tag of its own) is replaced or removed."""
+        again (or deleted: its vanished push has a tag of its own) is replaced or removed, so is one with buttons
+        still shown for a plan running now, or no longer watched, that no verdict of this watchdog clears
+        (maybe_actionable, e.g. after a reload)."""
         alarms = dict.fromkeys(
             {*newly_stopped_plans(previous, stopped), *(set(newly_suspended) & stopped.keys())}, None
         )
         for fub_id, targets in sorted((self._stopped_push_retries_due(stopped) | alarms).items()):
             if self._ignored_issue(fub_id) is None:  # An ignored repair alarms no more until the plan ran again.
                 await self._async_push_stopped(fub_id, stopped[fub_id], targets)
+        # Re-checked per plan: one started from its push while an earlier push was sent has its push already.
         for fub_id, name in sorted(auto_started.items()):
-            await self._async_push(fub_id, name, "started_title", "auto_started")
+            if fub_id not in self._started_in_check:
+                await self._async_push(fub_id, name, "started_title", "auto_started")
         for fub_id in sorted(previous.keys() - stopped.keys() - auto_started.keys()):
-            await self._async_clear_push(fub_id)
+            if fub_id not in self._started_in_check:
+                await self._async_clear_push(fub_id)
+        # A plan cleared just above is skipped under the lock (its tag is no longer actionable).
+        for fub_id in sorted(set(maybe_actionable) - auto_started.keys()):
+            await self._async_clear_push(fub_id, only_actionable=True)
 
     async def _async_push_stopped(self, fub_id: int, name: str, targets: frozenset[str] | None) -> None:
         """The alarm push of a stopped plan: "suspended" once Auto-Start gave up on it.
@@ -734,7 +859,16 @@ class ManagedPlanWatchdog:
         """
         kind = "suspended" if fub_id in self.suspended else "stopped"
         failed = await self._async_push(
-            fub_id, name, f"{kind}_title", kind, with_action=True, alarm=True, targets=targets
+            fub_id,
+            name,
+            f"{kind}_title",
+            kind,
+            with_action=True,
+            alarm=True,
+            targets=targets,
+            while_stopped=True,
+            # Ignored while it waited for the tag's lock: the ignore's clear went out first, the alarm would undo it.
+            unless_ignored=True,
         )
         if failed:
             # Else the plan's last push stays on that phone, maybe one naming the plan that held the ID before.
@@ -771,11 +905,18 @@ class ManagedPlanWatchdog:
         actions: Collection[str] = (),
         alarm: bool = False,
         targets: frozenset[str] | None = None,
+        while_stopped: bool = False,
+        vanished_guard: _VanishedGuard = _VanishedGuard.NONE,
+        unless_ignored: bool = False,
     ) -> frozenset[str]:
         """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
 
         token: a deleted plan's push (vanished_plan_token), with its own tag and actions. targets: only
-        to these notify targets (an alarm's retry, its failures logged quietly). Returns the targets
+        to these notify targets (an alarm's retry, its failures logged quietly). while_stopped: only if the
+        ID still holds this stopped plan (same name) once the tag's lock is held (a push asking to start it):
+        started since, its clear went out first; another plan under the ID has its own alarm. vanished_guard: a
+        deleted plan's push judged by its vanished state (see _VanishedGuard), unless_ignored: not once the plan's
+        stopped repair was ignored (all judged under the lock too). Returns the targets
         that failed to take it (see _async_send). Where it was delivered it replaces (same tag) the
         plan's stopped or vanished alarm still waiting to be sent again, so those targets are dropped.
         """
@@ -793,16 +934,47 @@ class ManagedPlanWatchdog:
         if alarm:
             # Delivered at once and through Do Not Disturb focus (Android: ttl/priority, iOS: interruption-level).
             data |= {"ttl": 0, "priority": "high", "push": {"interruption-level": "time-sensitive"}}
-        delivered, failed = await self._async_send(
-            {
-                "title": texts[title_key],
-                "message": texts[message_key].format(
-                    name=name, fub_id=fub_id, attempts=FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS
-                ),
-                "data": data,
-            },
-            targets=targets,
-        )
+        async with self._push_lock(data["tag"]):
+            if self._closed:
+                _LOGGER.debug("[%s] Watchdog push '%s' not sent: the entry unloads", self._server_id, message_key)
+                return frozenset()
+            reason = self._no_longer_due(
+                fub_id,
+                name,
+                token,
+                while_stopped=while_stopped,
+                vanished_guard=vanished_guard,
+                unless_ignored=unless_ignored,
+            )
+            if reason is not None:
+                _LOGGER.info(
+                    "[%s] Watchdog push '%s' for function plan %s (%s) not sent: %s",
+                    self._server_id,
+                    message_key,
+                    fub_id,
+                    one_line(name),
+                    reason,
+                )
+                return frozenset()
+            delivered, failed = await self._async_send(
+                {
+                    "title": texts[title_key],
+                    "message": texts[message_key].format(
+                        name=one_line(name), fub_id=fub_id, attempts=FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS
+                    ),
+                    "data": data,
+                },
+                targets=targets,
+            )
+            # A deleted plan's push is not tracked: no check judges its token running. One delivered to any target
+            # counts for all (accepted: a phone it failed on keeps the old push until its action is pressed).
+            if delivered and token is None:
+                if buttons:
+                    self._actionable_tags.add(data["tag"])
+                else:
+                    self._actionable_tags.discard(data["tag"])  # replaced
+        # No await from the lock's release to the callers' bookkeeping of the failed targets: a push waiting
+        # for the tag runs only after it, so its delivery drops these failures, never the other way round.
         # Delivered replaces (same tag) the plan's alarm still waiting to be sent again there; a retry's
         # target no longer configured is dropped too, else it would be "retried" forever, reaching no one.
         done = delivered if targets is None else targets - failed
@@ -812,6 +984,37 @@ class ManagedPlanWatchdog:
             _drop_delivered(self._vanished_push_unsent, token, done)
         return failed
 
+    def _no_longer_due(
+        self,
+        fub_id: int,
+        name: str,
+        token: str | None,
+        *,
+        while_stopped: bool,
+        vanished_guard: _VanishedGuard,
+        unless_ignored: bool,
+    ) -> str | None:
+        """Why a push judged due before its tag's lock was free is no longer due (see _async_push); None if it is."""
+        if while_stopped and (self.stopped or {}).get(fub_id) != name:
+            return "the plan no longer is the ID's stopped one (started meanwhile, or the next check pushes its alarm)"
+        if unless_ignored and self._ignored_issue(fub_id) is not None:
+            return "its repair was ignored meanwhile"
+        return None if token is None else self._vanished_push_not_due(token, vanished_guard)
+
+    def _vanished_push_not_due(self, token: str, guard: _VanishedGuard) -> str | None:
+        restored = token in self._restored_pushes
+        if restored and guard in (_VanishedGuard.UNLESS_RESTORED, _VanishedGuard.WHILE_VANISHED):
+            return "it was restored meanwhile"
+        if guard is _VanishedGuard.WHILE_PENDING and self.vanished is not None:
+            return "a check ran meanwhile (its alarm, or the plan is no longer vanished)"
+        listed = self.vanished_name(token) is not None
+        if guard is _VanishedGuard.WHILE_VANISHED and not listed:
+            return "it is no longer vanished (back again, or unwatched)"
+        if guard is _VanishedGuard.UNLESS_VANISHED_AGAIN and listed and not restored:
+            # Marked while vanished (see async_push_restored); the mark gone, a check dropped the plan since.
+            return "it vanished again meanwhile"
+        return None
+
     async def async_sync_vanished(self, vanished: Collection[tuple[int, str]]) -> None:
         """Repair per watched user plan Comexio no longer has, by (fub_id, name); alarm push for a newly vanished one.
 
@@ -819,6 +1022,8 @@ class ManagedPlanWatchdog:
         plan deleted while HA was down is reported. A plan back again (restored under a new ID) or
         unpicked loses its repair and push, except a "restored" confirmation, which stays on the phone.
         """
+        if self._closed:
+            return  # unloaded: the reloaded watchdog owns the shared repairs, this snapshot may predate them
         previous = self.vanished or set()
         self.vanished = set(vanished)
         self._sync_vanished_issues(self.vanished)
@@ -865,12 +1070,17 @@ class ManagedPlanWatchdog:
         """
         if targets is None:
             _LOGGER.warning(
-                "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio", self._server_id, name, fub_id
+                "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio",
+                self._server_id,
+                one_line(name),
+                fub_id,
             )
         token = vanished_plan_token(fub_id, name)
         if token in self._restored_pushes:
             # Its Restore brought it back meanwhile: the alarm would replace the confirmation on its way.
-            _LOGGER.debug("[%s] No alarm push for function plan '%s' (ID %s): restored", self._server_id, name, fub_id)
+            _LOGGER.debug(
+                "[%s] No alarm push for function plan '%s' (ID %s): restored", self._server_id, one_line(name), fub_id
+            )
             self._vanished_push_unsent.pop(token, None)
             return
         failed = await self._async_push(
@@ -882,6 +1092,9 @@ class ManagedPlanWatchdog:
             actions=_vanished_actions(fub_id, name),
             alarm=True,
             targets=targets,
+            # Restored while an earlier plan's push was sent: the alarm would replace that confirmation, and the
+            # next sync keeps the "restored" push (see _restored_pushes), so the stale Restore button would stay.
+            vanished_guard=_VanishedGuard.UNLESS_RESTORED,
         )
         if failed:
             self._vanished_push_unsent[token] = (time.monotonic(), failed)  # the answer's time: the gap starts here
@@ -913,6 +1126,8 @@ class ManagedPlanWatchdog:
             "no_backup",
             token=vanished_plan_token(fub_id, name),
             actions=(ACTION_UNWATCH,),
+            # Its buttons would replace the "restored" push sent meanwhile, or name a plan no longer vanished.
+            vanished_guard=_VanishedGuard.WHILE_VANISHED,
         )
 
     async def async_push_restored(self, fub_id: int, name: str, *, complete: bool = True) -> None:
@@ -929,7 +1144,10 @@ class ManagedPlanWatchdog:
             self._restored_pushes.add(token)
         key = "restored" if complete else "restored_partial"
         try:
-            failed = await self._async_push(fub_id, name, "restored_title", key, token=token)
+            # Vanished again while it waited for the tag: it would replace that episode's alarm with its Restore.
+            failed = await self._async_push(
+                fub_id, name, "restored_title", key, token=token, vanished_guard=_VanishedGuard.UNLESS_VANISHED_AGAIN
+            )
         except BaseException:
             # Cancelled on its way: the alarm is cleared after all, as for a failed send.
             if marked:
@@ -955,8 +1173,10 @@ class ManagedPlanWatchdog:
             self._vanished_push_unsent.pop(token, None)  # as for a failed send: the plan is back
         elif (fub_id, name) not in (self.vanished or ()):
             # A check dropped it meanwhile and kept the alarm for the confirmation: no await in a cancelled task.
+            # Queued once the task runs: a check listing the plan again meanwhile sent that episode's alarm first.
             self._hass.async_create_background_task(
-                self._async_clear_push(fub_id, token), name=f"{DOMAIN}_{self._server_id}_restored_push_cancelled"
+                self._async_clear_push(fub_id, token, unless_vanished=True),
+                name=f"{DOMAIN}_{self._server_id}_restored_push_cancelled",
             )
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
@@ -968,6 +1188,8 @@ class ManagedPlanWatchdog:
             "restore_failed",
             token=vanished_plan_token(fub_id, name),
             actions=_vanished_actions(fub_id, name),
+            # Its buttons would replace the "restored" push sent meanwhile, or name a plan no longer vanished.
+            vanished_guard=_VanishedGuard.WHILE_VANISHED,
         )
 
     async def async_push_check_pending(self, fub_id: int, token: str) -> None:
@@ -979,28 +1201,74 @@ class ManagedPlanWatchdog:
             "check_pending",
             token=token,
             actions=(ACTION_RESTORE, ACTION_UNWATCH),
+            # The first check ran while it waited: it would replace that check's alarm, or offer buttons the
+            # action handler turns down (see _VanishedGuard.WHILE_PENDING).
+            vanished_guard=_VanishedGuard.WHILE_PENDING,
         )
+        # Not listed by a check: the tapped push is stale (nothing else clears it, the first check had no previous).
+        if self.vanished is not None and self.vanished_name(token) is None and token not in self._restored_pushes:
+            await self._async_clear_push(fub_id, token, unless_vanished=True)
 
     async def async_dismiss_push(self, fub_id: int, name: str | None = None) -> None:
         """Remove a plan's push from the phones: its "stopped" one, or with name its deleted-plan one.
 
         E.g. one whose "Start plan" action is no longer honoured, or the alarm of a plan restored meanwhile.
-        The "stopped" one is kept while the ID's plan is stopped, judged when it runs: a stop judged since
-        the clear was asked for pushed that plan's alarm under the same tag, which the clear would take off.
+        The "stopped" one is kept while the ID's plan is stopped, judged when the clear is sent: a stop judged
+        since the clear was asked for pushed that plan's alarm under the same tag, which the clear would take off.
+        A stop judged while the clear is on its way sends its alarm after it (the tag's lock, see _push_locks).
         """
-        if name is None and fub_id in (self.stopped or {}):
-            return
-        await self._async_clear_push(fub_id, None if name is None else vanished_plan_token(fub_id, name))
+        if name is None:
+            await self._async_clear_push(fub_id, keep_stopped=True)
+        else:
+            await self._async_clear_push(fub_id, vanished_plan_token(fub_id, name))
 
     async def async_dismiss_vanished_push(self, fub_id: int, token: str) -> None:
-        """Remove a deleted plan's push by the token its action carried (the name may be unknown by now)."""
-        await self._async_clear_push(fub_id, token)
+        """Remove a deleted plan's push by the token its action carried (the name may be unknown by now).
 
-    async def _async_clear_push(self, fub_id: int, token: str | None = None) -> None:
-        # A companion-app command: any other notify service would deliver it as the text "clear_notification".
-        await self._async_send(
-            {"message": "clear_notification", "data": {"tag": self._push_tag(fub_id, token)}}, mobile_app_only=True
-        )
+        Not once a check listed the plan as vanished again before the clear was sent: that episode's alarm holds
+        the tag (this clear is queued from a background task, after the check found the push stale).
+        """
+        await self._async_clear_push(fub_id, token, unless_vanished=True)
+
+    async def _async_clear_push(
+        self,
+        fub_id: int,
+        token: str | None = None,
+        *,
+        keep_stopped: bool = False,
+        only_actionable: bool = False,
+        unless_vanished: bool = False,
+    ) -> None:
+        """keep_stopped: not while the ID's plan is stopped, judged under the tag's lock, so a stop judged meanwhile
+        sends its alarm after the clear arrived. only_actionable: only while the tag's last push delivered has
+        buttons, judged under the lock too: a push sent since replaced it. unless_vanished: not while the deleted
+        plan (token) is vanished, judged under the lock too: a check listed it again, its new alarm holds the tag."""
+        tag = self._push_tag(fub_id, token)
+        async with self._push_lock(tag):
+            if (
+                self._closed
+                or (keep_stopped and fub_id in (self.stopped or {}))
+                or (only_actionable and tag not in self._actionable_tags)
+                or (unless_vanished and token is not None and self.vanished_name(token) is not None)
+            ):
+                return
+            # A companion-app command: any other notify service would deliver it as the text "clear_notification".
+            await self._async_send({"message": "clear_notification", "data": {"tag": tag}}, mobile_app_only=True)
+            self._actionable_tags.discard(tag)  # a failed clear is logged, not retried (as every clear)
+
+    @asynccontextmanager
+    async def _push_lock(self, tag: str) -> AsyncIterator[None]:
+        lock, users = self._push_locks.get(tag, (asyncio.Lock(), 0))
+        self._push_locks[tag] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, users = self._push_locks[tag]
+            if users > 1:
+                self._push_locks[tag] = (lock, users - 1)
+            else:
+                del self._push_locks[tag]
 
     async def _async_send(
         self,
@@ -1023,7 +1291,9 @@ class ManagedPlanWatchdog:
             if (mobile_app_only and not _is_mobile_app(target)) or (targets is not None and target not in targets):
                 continue
             try:
-                await self._hass.services.async_call(NOTIFY_DOMAIN, service, service_data, blocking=True)
+                # Bounded: a hanging notify service would hold the push tag's lock, and so its clears, too.
+                async with asyncio.timeout(FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC):
+                    await self._hass.services.async_call(NOTIFY_DOMAIN, service, service_data, blocking=True)
                 delivered.add(target)
             except (HomeAssistantError, vol.Invalid) as err:
                 failed.add(target)

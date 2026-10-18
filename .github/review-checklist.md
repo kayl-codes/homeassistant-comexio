@@ -38,7 +38,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Descriptions follow the behaviour:** a change in what an option, service, switch or repair does updates its
   description in the same PR — `services.yaml`, the option and field descriptions in `strings.json` and all
   translation files, and the README/CONFIGURATION sections that describe it. Flag a behaviour change whose
-  descriptions still state the old behaviour (#181).
+  descriptions still state the old behaviour (#181). A description of a protection or eligibility rule names the
+  attribute the code checks (e.g. the marker's CategoryId), not an origin it is assumed to stand for ("created by
+  HA", "created in Studio") — markers from the Studio plan editor carry CategoryId 1 like API-created ones (#186).
 - **Concurrency:** Web-IO syncs run under the coordinator's `_sync_lock`; webhook values arriving during a config
   fetch must win over the stale API snapshot (guard R1). Flag changes that weaken these guards.
 - **Poll timer:** `async_set_updated_data` cancels and reschedules the coordinator's periodic poll. Code that runs
@@ -72,6 +74,34 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   that id now, like any selection stored as a `fub_id` alone — acting on that plan, renamed or not, is intended, do
   not flag it. The exception covers only that bare-ID watch: an HA-managed plan that holds the id is matched by
   name, and a "Start plan" action sent before it carried the token (no name) starts only a bare-ID pick.
+- **Push tags are shared slots:** a live plan's push carries the tag `plan_{fub_id}` (`_push_tag`), and a newer
+  push or a `clear_notification` under that tag replaces or removes whatever the phone shows there — also the
+  current alarm of another plan that holds the ID now. A push whose action is ignored as stale is taken off the
+  phone or replaced, never left with a button that does nothing. Before clearing a `plan_{fub_id}` push, check that
+  the ID's plan is not stopped: while it is, its own alarm holds the tag (`async_dismiss_push` keeps it) — that
+  alarm, pushed on the stop and sent again to a target that did not take it, is what replaced the stale push, so
+  keeping the tag is not leaving the stale push in place. The phone shows the push under a tag that arrived last,
+  so every send under one tag (push or clear) holds the tag's lock (`_push_lock`), and what it depends on is judged
+  under that lock: the clear's "not stopped" check (`keep_stopped=True`), and every push with a "Start plan"
+  button (alarm, busy/failed reply, outdated replacement) only while the ID still holds that stopped plan, same name
+  (`while_stopped=True`) — a stop or start judged while another send waited would else have its alarm taken off,
+  a running plan get a button, or another plan under the ID a push naming the old one (#187). Flag a send under a
+  shared tag outside that lock, a start-button push without `while_stopped`, a deleted plan's push with buttons without a `vanished_guard` (`_VanishedGuard`: not once restored, nor once a check dropped the plan from vanished or listed it again), and a condition judged before waiting
+  for the lock. The locks are dropped once no send holds or waits for them, and are module-wide (`_PUSH_LOCKS`):
+  a reloaded entry's watchdog sends under the old one's tags while its sends may still be on their way, so a lock
+  per instance does not serialize them. The unload closes the old watchdog once the platforms unloaded (`close()`,
+  judged under the lock), so what its still-running check queues behind the new one's alarm is dropped; not before
+  the unload's wait (the awaited restore's push would be lost) nor on a failed unload (alarms silenced for good). After an await, a closed watchdog applies
+  nothing to the server's shared repairs: its snapshot predates the new one's. A plan's last push with buttons, delivered
+  before the reload or still on its way, is the reloaded watchdog's to clear (`_ACTIONABLE_TAGS`, module-wide) for a
+  plan it sees running or no longer watches (tags of its own server only), judged under the lock (`only_actionable`). Flag a post-await write of a closed watchdog. Each notify call is bounded
+  (`FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC`), since a hanging one holds the lock. Clears and replacements reach the notify targets
+  configured now; a phone whose target was removed is out of HA's reach and not a finding. A failed clear is logged
+  and not retried: pressing the stale action again sends it again. A deleted plan's push has its own
+  `vanished_{token}` tag and is removed by that token, not by the `fub_id`. Only `clear_notification` goes to
+  mobile_app notify services alone (`mobile_app_only=True`), since any other service shows it as text; alarms
+  and replacement pushes go to every configured target. Flag a clear or replacement under a shared tag without
+  that check, and a stale push left in place (#185).
 - **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
   plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
   only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
@@ -87,6 +117,16 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   read or parse failure into "entry missing" and acts on it (#158). A failed read is also no fresh reading: the
   steps that do not depend on it still run, and steps that judge by elapsed time do not use the last known values
   as if they were new. Flag an early return on a failed read that skips the independent steps (#181).
+- **Fail closed on every transport error:** `get_raw_config` raises a plain `ComexioConnectionError` when the
+  failure has no aiohttp or timeout cause. A path that must refuse when Comexio cannot be read (a delete gate, a
+  safety check) catches `ComexioConnectionError` next to `aiohttp.ClientError` and `TimeoutError`; otherwise the
+  error escapes the gate and the service ends without a result or notification. Flag a fail-closed `except` behind
+  `get_raw_config` that lacks it (#186).
+- **Names from Comexio are cleaned before output:** plan, marker and IO names come from the Comexio admin and can
+  hold line breaks or control characters. Before a name goes into a log line, a notification or a service response,
+  replace non-printable characters and collapse whitespace to one line (`const.one_line`), so a name cannot
+  split a log entry or break the notification layout. Flag new code that writes a Comexio name to a log line,
+  notification or response unfiltered; entity display names are out of scope (#186).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
@@ -106,6 +146,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   saves it with `async_update_entry` has no `await` in between — another save during that await (options flow,
   watchdog, sync) is otherwise overwritten with the stale copy. Await follow-ups (push dismissal, notifications)
   after the save. Flag an `await` between the read of `entry.options` and its write (#181).
+- **No stale write-back after an await:** the same holds for state judged before an await and assigned after it.
+  The watchdog's check judges the stopped plans, awaits Auto-Start, then writes them back — a plan started from its
+  repair or push meanwhile is left out (`_started_in_check`), else its repair and alarm come back while it runs.
+  Flag state read before an `await` and assigned back after it without merging what changed meanwhile (#187).
+  The same per item in a loop that awaits once per plan (a start, a push): what the loop decided before it began
+  (to start, to push, to clear) is re-checked for each plan right before its own await and its answer — a plan
+  started or restored while an earlier plan's await ran keeps its confirmation (`_started_in_check`,
+  `unless_restored`).
 - **Unload waits for running work:** `async_unload_entry` calls `coordinator.async_wait_before_unload()` before it
   unloads the platforms; the wait is bounded and polls — it never queues on a lock — for every operation that
   writes Comexio, the options or the backup store: a restore, a sync, a vanished-plan restore, a plan edit, a

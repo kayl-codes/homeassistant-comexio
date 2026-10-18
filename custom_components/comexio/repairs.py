@@ -60,6 +60,7 @@ from .const import (
     WebioClass,
     active_webio_classes,
     expand_ignored_marker_ids,
+    one_line,
     prune_import_disabled_ignored,
     source_category,
     uninstall_cleanup_notification_id,
@@ -1490,7 +1491,7 @@ class ComexioRepairFlow(RepairsFlow):
         except Exception:
             # The backups failed to load: the restore below reads them again and reports a failure itself.
             _LOGGER.warning(
-                "Function plan '%s' (ID %s): backups not readable for the repair", name, fub_id, exc_info=True
+                "Function plan '%s' (ID %s): backups not readable for the repair", one_line(name), fub_id, exc_info=True
             )
             has_backup = True
         if not has_backup:

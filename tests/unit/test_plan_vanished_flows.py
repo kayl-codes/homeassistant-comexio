@@ -233,6 +233,25 @@ def test_an_unload_lets_no_restore_or_plan_edit_start_after_its_wait(held_for_re
     assert create.call_args.args[1] == SYNC_RUNNING_MSG
 
 
+@pytest.mark.parametrize("unload_ok", [True, False])
+def test_an_unload_closes_the_watchdog_only_once_the_platforms_unloaded(unload_ok: bool) -> None:
+    """(Sourcery, #187) The reloaded entry's watchdog takes the pushes over; a failed unload keeps them, and the
+    work the unload waited for still sent its own."""
+    order: list[str] = []
+    running = SimpleNamespace(
+        api=MagicMock(),
+        unloading=True,
+        async_wait_before_unload=AsyncMock(side_effect=lambda: order.append("wait")),
+        async_shutdown=AsyncMock(),
+        plan_watchdog=SimpleNamespace(close=lambda: order.append("close")),
+    )
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"e1": running}}
+    hass.config_entries.async_unload_platforms = AsyncMock(side_effect=lambda *_: order.append("unload") or unload_ok)
+    assert asyncio.run(async_unload_entry(hass, SimpleNamespace(entry_id="e1"))) is unload_ok
+    assert order == (["wait", "unload", "close"] if unload_ok else ["wait", "unload"])
+
+
 def test_unload_entry_of_an_entry_that_never_set_up_does_not_wait() -> None:
     hass = MagicMock()
     hass.data = {DOMAIN: {}}
