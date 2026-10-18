@@ -128,9 +128,9 @@ def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
         else:
             cluster_noun, item_noun, item_noun_cap = "Marker cluster plan", "markers", "Markers"
         if gap == total:
-            lines.append(f"* {ICON_PUZZLE} **{cluster_noun} {plan_name} missing:** all {gap} {item_noun}")
+            lines.append(f"* {ICON_PUZZLE} **{cluster_noun} {one_line(plan_name)} missing:** all {gap} {item_noun}")
         else:
-            lines.append(f"* {ICON_LINK} **{item_noun_cap} not wired in {plan_name}:** {gap} of {total}")
+            lines.append(f"* {ICON_LINK} **{item_noun_cap} not wired in {one_line(plan_name)}:** {gap} of {total}")
     for ext, (gap, total) in detail.get("ios_by_ext", {}).items():
         if gap == total:
             lines.append(f"* {ICON_PUZZLE} **Extension {ext} not yet in an IO cluster plan:** all {gap} IOs")

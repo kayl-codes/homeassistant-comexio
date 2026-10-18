@@ -2116,7 +2116,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_omit_streaks = {fid: self._plan_omit_streaks.get(fid, 0) + 1 for fid in omitted}
         # Rendered, not as ids: a reported plan renamed meanwhile updates the notification too.
         names = ", ".join(
-            f"'{self.api.function_plan_name(fid)}' ({fid})"
+            f"'{one_line(self.api.function_plan_name(fid))}' ({fid})"
             for fid, streak in sorted(self._plan_omit_streaks.items())
             if streak >= FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD
         )
@@ -2484,7 +2484,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plan_map = new_options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         if plan_map.get(plan_name) == old_fub_id:
             new_options[CONF_FUNCTION_PLAN_PLAN_MAP] = {**plan_map, plan_name: new_fub_id}
-            updated.append(f"cluster plan map entry '{plan_name}' → fub_id {new_fub_id}")
+            updated.append(f"cluster plan map entry '{one_line(plan_name)}' → fub_id {new_fub_id}")
         if str(new_options.get(CONF_FUNCTION_PLAN_FUB_ID)) == str(old_fub_id):
             if old_id_still_live:
                 # A bare-ID selection whose ID another plan holds now stays with that plan, like a bare-ID pick.
@@ -6509,7 +6509,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
 
         plans_str = "; ".join(
-            f"'{name}' (fub {', '.join(str(fid) for fid in sorted(ids))})" for name, ids in sorted(duplicates.items())
+            f"'{one_line(name)}' (fub {', '.join(str(fid) for fid in sorted(ids))})"
+            for name, ids in sorted(duplicates.items())
         )
         ir.async_create_issue(
             self.hass,

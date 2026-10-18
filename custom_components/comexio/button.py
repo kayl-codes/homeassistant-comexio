@@ -130,7 +130,7 @@ def _failed_writes_note(failed_writes: list[str], retry: str = "run the sync aga
 
 def _plan_failure(plan_name: str, detail: str) -> str:
     """failed_writes entry for a function plan step that did not complete."""
-    return f"function plan '{plan_name}': {detail}"
+    return f"function plan '{one_line(plan_name)}': {detail}"
 
 
 def _flanke_unusable(ctx: "_SyncContext") -> str:
@@ -252,7 +252,7 @@ def _plan_summary_line(
     """One '• <plan>: +n/m pairs in m:ss' line for the sync notification's Function Plan block."""
     err_note = f", {ICON_WARNING} {len(errors)} errors" if errors else ""
     return (
-        f"• '{plan_name}'{' (new)' if is_fresh else ''}: +{n_added}/{n_total} {unit}"
+        f"• '{one_line(plan_name)}'{' (new)' if is_fresh else ''}: +{n_added}/{n_total} {unit}"
         f" in {_mmss(time.monotonic() - t0)} min{note}{err_note}"
     )
 
@@ -284,14 +284,14 @@ def _plan_pair_progress(ctx: "_SyncContext", state: dict, plan_name: str, done: 
         "\n\n---\n"
         f"{ICON_FLAG} **Remaining:** ~{_mmss(remaining)} min",
         pct=_PCT_PLAN_PAIRS + int((_PCT_PLAN_FINALIZE - _PCT_PLAN_PAIRS) * (overall_done / overall_total)),
-        step_info=f"Function Plan '{plan_name}': pair {done}/{total}",
+        step_info=f"Function Plan '{one_line(plan_name)}': pair {done}/{total}",
     )
 
 
 def _plan_step_header(plan_name: str, action: str | None) -> str:
     """Notification header naming the plan and the sub-step currently running on it."""
     step = f"**Step:** {action}\n" if action else ""
-    return f"**Function Plan:** `{plan_name}`\n{step}"
+    return f"**Function Plan:** `{one_line(plan_name)}`\n{step}"
 
 
 def _start_plan_step(ctx: "_SyncContext", state: dict, plan_name: str, action: str, step_info: str) -> None:
@@ -315,7 +315,7 @@ def _loopback_command_progress(
         f"**Progress:** command {n} of {total} (K{k_id} → M{marker_id})\n\n---\n"
         f"{ICON_CLOCK} Comexio needs about {SYNC_DURATION_WRITE} s per command\n"
         f"{ICON_FLAG} **Remaining:** ~{_mmss(remaining)} min",
-        step_info=f"Function Plan '{plan_name}': loopback Web-IO command {n}/{total}",
+        step_info=f"Function Plan '{one_line(plan_name)}': loopback Web-IO command {n}/{total}",
     )
 
 
@@ -1086,12 +1086,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         extra_lines = []
         for plan_name_s, fub_id_s in stopped_plans:
             extra_lines.append(
-                f"{ICON_WARNING} Function Plan '{plan_name_s}' (ID {fub_id_s}) was stopped — "
+                f"{ICON_WARNING} Function Plan '{one_line(plan_name_s)}' (ID {fub_id_s}) was stopped — "
                 "please restart it in Comexio"
             )
             persistent_notification.async_create(
                 self.hass,
-                f"Function Plan **'{plan_name_s}'** (ID {fub_id_s}) was stopped during entity "
+                f"Function Plan **'{one_line(plan_name_s)}'** (ID {fub_id_s}) was stopped during entity "
                 "cleanup and was **not** automatically restarted.\n\n"
                 "Please restart it in Comexio so that live updates "
                 "(webhooks) are sent to Home Assistant again.",
@@ -1105,7 +1105,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         plan_name: str, fub_id: int, kept_ids: list[int], gone_ids: list[int], category: SourceCategory
     ) -> list[str]:
         """Build summary lines for sources a plan kept on purpose or no longer holds."""
-        plan = f"Function Plan '{plan_name}' (ID {fub_id})"
+        plan = f"Function Plan '{one_line(plan_name)}' (ID {fub_id})"
         prefix = category.audit_key_prefix
         return [
             *(
@@ -1124,7 +1124,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Build summary lines for plans that couldn't be stopped, so the failure isn't
         silently indistinguishable from "nothing to clean up" (deleted_elem_count also 0)."""
         return [
-            f"{ICON_ERROR} Function Plan '{plan_name_s}' (ID {fub_id_s}) could not be stopped — "
+            f"{ICON_ERROR} Function Plan '{one_line(plan_name_s)}' (ID {fub_id_s}) could not be stopped — "
             "cleanup skipped for this plan, no changes were made there"
             for plan_name_s, fub_id_s in stop_failures
         ]
@@ -2215,7 +2215,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # resolve/create (e.g. the stale-fub_id guard rejecting a contaminated plan) while
         # other clusters in the same batch succeed, so plan_to_ids alone can't signal it.
         summary: list[str] = [
-            f"{ICON_WARNING} Cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
+            f"{ICON_WARNING} Cluster plan '{one_line(name)}' could not be resolved/created — see log"
+            for name in failed_plans
         ]
         errors = len(failed_plans)
         ctx.failed_writes.extend(_plan_failure(name, _FAILURE_NOT_RESOLVED) for name in failed_plans)
@@ -2326,7 +2327,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         plan_to_ids, created_plans, failed_plans = await self.coordinator.resolve_knx_clusters(sorted(all_k_ids))
         # Surface a resolve failure to the user, not just the log — see _wire_source_clusters.
         summary: list[str] = skipped + [
-            f"{ICON_WARNING} KNX cluster plan '{name}' could not be resolved/created — see log" for name in failed_plans
+            f"{ICON_WARNING} KNX cluster plan '{one_line(name)}' could not be resolved/created — see log"
+            for name in failed_plans
         ]
         ctx.failed_writes.extend(_plan_failure(name, _FAILURE_NOT_RESOLVED) for name in failed_plans)
         if not plan_to_ids:
@@ -2699,7 +2701,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
         err_note = f", {ICON_WARNING} {len(all_errors)} errors" if all_errors else ""
         line = (
-            f"• '{plan_name}'{' (new)' if is_fresh else ''}: {', '.join(parts)}"
+            f"• '{one_line(plan_name)}'{' (new)' if is_fresh else ''}: {', '.join(parts)}"
             f" in {_mmss(time.monotonic() - t0)} min{note}{err_note}"
         )
         return line
@@ -2777,7 +2779,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
         t0 = time.monotonic()
         ctx.update_status(
-            f"Adding {len(cluster_ids)} pair(s) to Function Plan '{plan_name}'...",
+            f"Adding {len(cluster_ids)} pair(s) to Function Plan '{one_line(plan_name)}'...",
             pct=_PCT_PLAN_PAIRS,
             step_info="Function Plan: adding pairs",
         )
@@ -2820,7 +2822,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             one_line(plan_name),
         )
         return (
-            f"{ICON_WARNING} fub {fub_id}: aborted — expected '{expected_name}' but plan is now '{plan_name}'",
+            f"{ICON_WARNING} fub {fub_id}: aborted — expected '{expected_name}' "
+            f"but plan is now '{one_line(plan_name)}'",
             [],
             [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
         )
@@ -2853,7 +2856,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     def _plan_finalize_status(ctx: _SyncContext, plan_name: str, what: str, step: str) -> None:
         """Progress line for the finalize phase of one managed cluster plan."""
         ctx.update_status(
-            f"Finalizing Function Plan '{plan_name}' — {what}...",
+            f"Finalizing Function Plan '{one_line(plan_name)}' — {what}...",
             pct=_PCT_PLAN_FINALIZE,
             step_info=f"Function Plan: {step}",
         )
@@ -2913,7 +2916,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 stale_exts,
             )
             return (
-                f"{ICON_WARNING} fub {fub_id} ('{plan_name}'): aborted — no longer matches "
+                f"{ICON_WARNING} fub {fub_id} ('{one_line(plan_name)}'): aborted — no longer matches "
                 f"expected IO cluster for {stale_exts}",
                 [],
                 [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
@@ -2923,7 +2926,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         n_total = sum(len(by_ext[ext]) for ext, _ in ext_cols)
         t0 = time.monotonic()
         ctx.update_status(
-            f"Adding {n_total} IO pair(s) to Function Plan '{plan_name}'...",
+            f"Adding {n_total} IO pair(s) to Function Plan '{one_line(plan_name)}'...",
             pct=_PCT_PLAN_PAIRS,
             step_info="Function Plan: adding IO pairs",
         )
@@ -2960,7 +2963,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         note = ""
         if is_fresh or was_active:
             ctx.update_status(
-                f"Finalizing Function Plan '{plan_name}' — activating plan...",
+                f"Finalizing Function Plan '{one_line(plan_name)}' — activating plan...",
                 pct=_PCT_PLAN_FINALIZE,
                 step_info="Function Plan: activating",
             )

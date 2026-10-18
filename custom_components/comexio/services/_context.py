@@ -23,6 +23,7 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_X_MARKER as _LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
+    one_line,
 )
 from ..coordinator import ComexioCoordinator
 
@@ -222,7 +223,7 @@ async def _resolve_backup_identity(
         return identities[0][0], None
     if not identities:
         return None, f"No stored backups for plan {fub_id}."
-    names = ", ".join(f"'{name}'" for name, _ in identities)
+    names = ", ".join(f"'{one_line(name)}'" for name, _ in identities)
     return (
         None,
         (

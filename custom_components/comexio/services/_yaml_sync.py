@@ -25,6 +25,7 @@ from ..const import (
     FUNCTION_PLAN_SERVICE_SORT,
     FUNCTION_PLAN_SERVICE_VISUALIZE,
     TIMESTAMP_DISPLAY_FORMAT,
+    one_line,
 )
 from ..coordinator import ComexioCoordinator
 from ._context import format_plan_label
@@ -151,7 +152,7 @@ def _build_restore_options(restore_plans: list[tuple[int, str, bool, int]]) -> l
     return [
         {
             "label": (
-                f"{name} — fub {fub_id} ({'live' if is_live else 'deleted'}, "
+                f"{one_line(name)} — fub {fub_id} ({'live' if is_live else 'deleted'}, "
                 f"{count} snapshot{'s' if count != 1 else ''})"
             ),
             "value": f"{fub_id}:{name}",

@@ -481,9 +481,9 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
             success = await api.function_plan_stop_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
-        f"Plan '{plan_name}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
+        f"Plan '{one_line(plan_name)}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
         if success
-        else f"Stop failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
+        else f"Stop failed (plan '{one_line(plan_name)}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
     _report_run_stop_result(hass, msg, success=success, action="Stop")
 
@@ -504,9 +504,9 @@ async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) 
             success = await api.function_plan_run_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
-        f"Plan '{plan_name}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"
+        f"Plan '{one_line(plan_name)}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"
         if success
-        else f"Activation failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
+        else f"Activation failed (plan '{one_line(plan_name)}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
     _report_run_stop_result(hass, msg, success=success, action="Activate")
 

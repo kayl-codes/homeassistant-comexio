@@ -2301,7 +2301,7 @@ class ComexioAPI:
                 _LOGGER.warning("create_fup: %s — looking the plan up by name once more", err)
                 return await self._find_created_plan(plan_name, known_ids)
 
-        created = await _attempt(f"Creating function plan {plan_name!r}", create, None)
+        created = await _attempt(f"Creating function plan {one_line(plan_name)!r}", create, None)
         if created is None:
             return None
         _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", one_line(plan_name), created.fub_id)

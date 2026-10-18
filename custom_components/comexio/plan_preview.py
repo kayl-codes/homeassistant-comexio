@@ -13,7 +13,7 @@ from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN
+from .const import DOMAIN, one_line
 from .function_plan_backup import format_backup_label, snapshot_paper_format
 from .function_plan_block_settings import snapshot_block_settings
 
@@ -84,7 +84,7 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
         kind, slot = backup_choice
         snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
         if snapshot is None:
-            raise HomeAssistantError(f"The backup {kind}[{slot}] of plan '{plan_name}' was not found.")
+            raise HomeAssistantError(f"The backup {kind}[{slot}] of plan '{one_line(plan_name)}' was not found.")
         await coordinator.async_generate_plan_preview(
             fub_id,
             plan_name,
@@ -99,7 +99,7 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
 
     plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
-        raise HomeAssistantError(f"The plan '{plan_name}' (ID {fub_id}) could not be loaded from Comexio.")
+        raise HomeAssistantError(f"The plan '{one_line(plan_name)}' (ID {fub_id}) could not be loaded from Comexio.")
     await coordinator.async_generate_plan_preview(
         fub_id, plan_name, plan_data.get("elements", {}), plan_data.get("connections", {}), "live"
     )
