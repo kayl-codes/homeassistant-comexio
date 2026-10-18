@@ -877,7 +877,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 _items_of_class(dangling_items, cls),
                 # Against this sync's address, not the last audit's: internal_url may have changed since.
                 await _device_ip_mismatch(
-                    self.hass, ctx.ha_address, ctx.webio_devices_audit.get(cls, {}).get("device_ip"), dev_ids[cls]
+                    self.coordinator.ha_address,
+                    ctx.ha_address,
+                    ctx.webio_devices_audit.get(cls, {}).get("device_ip"),
+                    dev_ids[cls],
                 ),
                 pct_start,
                 pct_end,

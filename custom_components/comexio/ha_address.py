@@ -9,9 +9,9 @@ interface addresses read fresh on every call (a DHCP change must not keep the ol
 - a loopback address never counts,
 - an IP literal must be one of the host's own interface addresses — no DNS at all,
 - a name gets exactly one lookup, and one of its addresses must be an own interface address. A name
-  the lookup gets no answer for (timeout, resolver not reachable yet) is kept: no answer is no
-  evidence that it is wrong. Only a definite miss (the name does not exist) or a foreign address
-  rejects it.
+  the lookup gets no answer for (timeout, resolver not reachable yet) is kept unchecked — no answer
+  is no evidence that it is wrong — but only when no other known address is confirmed. Only a
+  definite miss (the name does not exist) or a foreign address rejects it.
 
 When the own interface addresses cannot be determined (or reading them fails), a known address is kept
 unchecked (warned once).
@@ -26,6 +26,9 @@ Only without a usable known address is a new one searched, in this order:
    HA_ADDRESS_NEGATIVE_CACHE_SEC, timeouts and temporary resolver failures never.
 
 When none of them yields an address, the loopback local IP is the last resort (warned once).
+
+The port is the one of internal_url, else the one HA's HTTP server listens on. Calls are serialized: a
+search finishing late must not overwrite the state a newer call (e.g. a changed internal_url) has set.
 
 Accepted limit: HA must see the address Comexio reaches it under on its own interfaces (host network,
 as HA requires for container installs). Behind NAT or a Docker bridge a stored host address counts as
@@ -61,6 +64,12 @@ class _Lookup(Enum):
     RESOLVED = "resolved"
     NOT_FOUND = "not found"
     NO_ANSWER = "no answer"  # timeout or temporary resolver failure — says nothing about the name
+
+
+class _Verdict(Enum):
+    CONFIRMED = "confirmed"  # an IP literal or a name pointing to one of this host's addresses
+    UNCHECKED = "unchecked"  # own IPs unknown, or no DNS answer: kept only without a confirmed one
+    REJECTED = "rejected"
 
 
 class _Answer(NamedTuple):
@@ -110,11 +119,6 @@ def _lookup(host: str) -> _Answer:
         return _Answer(_Lookup.NOT_FOUND)
     addresses = frozenset(ip for info in infos if (ip := _ip(str(info[4][0]))) is not None)
     return _Answer(_Lookup.RESOLVED, addresses)
-
-
-def resolved_addresses(host: str) -> frozenset[IPAddress]:
-    """Blocking: every IPv4 and IPv6 address host resolves to (an IP literal: itself); empty when none."""
-    return _lookup(host).addresses
 
 
 def _local_ip() -> str:
@@ -196,6 +200,7 @@ class HaAddressResolver:
         self._in_flight: dict[str, asyncio.Future[_Answer]] = {}
         # candidate -> monotonic time until which its definite miss is trusted
         self._misses: dict[str, float] = {}
+        self._lock = asyncio.Lock()
 
     async def async_get(self, *hints: str | None) -> str:
         """The HA address for Comexio webhooks as "host:port".
@@ -203,13 +208,18 @@ class HaAddressResolver:
         hints: the addresses the Web-IO devices already store (see webio_device_hints), checked in
         order before the homeassistant.<domain> name found last time.
         """
-        port = DEFAULT_HA_PORT
+        async with self._lock:
+            return await self._async_get(hints)
+
+    async def _async_get(self, hints: tuple[str | None, ...]) -> str:
+        api = getattr(self.hass.config, "api", None)  # None until HA's http component is set up
+        port = getattr(api, "port", None) or DEFAULT_HA_PORT
         configured_host = None
         if internal_url := self.hass.config.internal_url:
             parsed = urlparse(internal_url)
             configured_host = parsed.hostname
             with suppress(ValueError):
-                port = parsed.port or DEFAULT_HA_PORT
+                port = parsed.port or port
         if configured_host and _is_loopback(configured_host):
             configured_host = None
         if configured_host:
@@ -222,31 +232,42 @@ class HaAddressResolver:
         return format_address(host, port)
 
     async def _async_known_host(self, hint_hosts: list[str | None], own_ips: frozenset[IPAddress]) -> str | None:
-        """The first known address that still points to this host, or None."""
+        """The first known address confirmed to point to this host, else the first unchecked one, else None."""
+        unchecked = None
         for host in dict.fromkeys(host for host in (*hint_hosts, self._guessed_host) if host):
-            if await self._async_points_here(host, own_ips):
+            verdict = await self._async_verdict(host, own_ips)
+            if verdict is _Verdict.CONFIRMED:
                 return host
-        return None
+            if verdict is _Verdict.UNCHECKED and unchecked is None:
+                unchecked = host
+        if unchecked is not None:
+            if own_ips:
+                self._notice(
+                    unchecked, "kept", logging.WARNING, "HA address: DNS lookup of %s got no answer; keeping it"
+                )
+            else:
+                self._notice(
+                    unchecked, "unchecked", logging.WARNING, "HA address: own IPs unknown; keeping %s unchecked"
+                )
+        return unchecked
 
-    async def _async_points_here(self, host: str, own_ips: frozenset[IPAddress]) -> bool:
-        """Whether host is (an IP literal) or resolves to one of own_ips; no answer counts as yes."""
+    async def _async_verdict(self, host: str, own_ips: frozenset[IPAddress]) -> _Verdict:
+        """Whether host is (an IP literal) or resolves to one of own_ips."""
         if _is_loopback(host):
             self._notice(host, "loopback", logging.WARNING, "HA address: %s is a loopback address; ignoring it")
-            return False
+            return _Verdict.REJECTED
         if not own_ips:
-            self._notice(host, "unchecked", logging.WARNING, "HA address: own IPs unknown; keeping %s unchecked")
-            return True
+            return _Verdict.UNCHECKED
         if (ip := _ip(host)) is not None:
             addresses = frozenset({ip})
         else:
             answer = await self._async_lookup(host)
             if answer.status is _Lookup.NO_ANSWER:
-                self._notice(host, "kept", logging.WARNING, "HA address: DNS lookup of %s got no answer; keeping it")
-                return True
+                return _Verdict.UNCHECKED
             addresses = answer.addresses
         if addresses & own_ips:
             self._noticed[host] = "ok"
-            return True
+            return _Verdict.CONFIRMED
         self._notice(
             host,
             "rejected",
@@ -255,7 +276,14 @@ class HaAddressResolver:
             ", ".join(sorted(map(str, addresses))) or "does not resolve",
             ", ".join(sorted(map(str, own_ips))),
         )
-        return False
+        return _Verdict.REJECTED
+
+    async def async_addresses(self, host: str) -> frozenset[IPAddress]:
+        """Every IPv4/IPv6 address of host (an IP literal: itself); empty when it does not resolve or the
+        lookup got no answer. Shares and bounds the lookups like the resolution itself."""
+        if (ip := _ip(host)) is not None:
+            return frozenset({ip})
+        return (await self._async_lookup(host)).addresses
 
     def _notice(self, host: str, kind: str, level: int, message: str, *args: Any) -> None:
         """Log message (host, then args) at level when kind is new for host, else at debug."""

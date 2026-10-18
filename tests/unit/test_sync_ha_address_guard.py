@@ -18,7 +18,7 @@ from custom_components.comexio import button as button_module
 from custom_components.comexio.button import ComexioSyncButton, _SyncContext
 from custom_components.comexio.const import SYNC_DURATION_RECREATE, SYNC_DURATION_WRITE, WEBIO_CLASSES
 from custom_components.comexio.coordinator import _device_ip_mismatch
-from custom_components.comexio.ha_address import is_loopback_address
+from custom_components.comexio.ha_address import HaAddressResolver, is_loopback_address
 
 LOOPBACK = "127.0.0.1:8123"
 REACHABLE = "192.168.0.110:8123"
@@ -61,6 +61,7 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
             webio_device_delete_error=AsyncMock(return_value=None),
         ),
         async_ha_address=AsyncMock(return_value=ha_address),
+        ha_address=HaAddressResolver(MagicMock()),
         active_webio_classes=list(WEBIO_CLASSES),
         last_audit_results={},
         cancel_sync=False,
@@ -70,7 +71,6 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
     button = ComexioSyncButton.__new__(ComexioSyncButton)
     button.coordinator = coordinator  # type: ignore[assignment]
     button.hass = MagicMock()
-    button.hass.async_add_executor_job = AsyncMock(side_effect=lambda func, *args: func(*args))
     button.server_id = "cx1"
     button._async_acquire_sync_lock = AsyncMock(return_value=True)  # type: ignore[method-assign]
     button._finalize_sync = AsyncMock()  # type: ignore[method-assign]
@@ -227,5 +227,6 @@ def _ip_mismatch_per_class(button: ComexioSyncButton) -> dict[str, bool]:
 
 def test_the_audit_reports_no_ip_mismatch_for_a_loopback_address() -> None:
     """Otherwise the repair would keep offering an address update the sync refuses."""
-    assert asyncio.run(_device_ip_mismatch(MagicMock(), LOOPBACK, "192.168.0.110:8123", "7")) is False
-    assert asyncio.run(_device_ip_mismatch(MagicMock(), REACHABLE, "192.168.0.111:8124", "7")) is True
+    resolver = HaAddressResolver(MagicMock())
+    assert asyncio.run(_device_ip_mismatch(resolver, LOOPBACK, "192.168.0.110:8123", "7")) is False
+    assert asyncio.run(_device_ip_mismatch(resolver, REACHABLE, "192.168.0.111:8124", "7")) is True

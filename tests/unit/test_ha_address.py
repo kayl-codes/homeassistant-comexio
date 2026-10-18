@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Callable
 import ipaddress
+import logging
 import socket
 import threading
 import time
@@ -658,7 +659,7 @@ def test_a_value_error_of_the_lookup_is_a_definite_miss(monkeypatch: pytest.Monk
     monkeypatch.setattr(ha_address.socket, "getaddrinfo", _reject)
 
     assert _real_lookup("ha.lan").status is ha_address._Lookup.NOT_FOUND
-    assert ha_address.resolved_addresses("ha.lan") == frozenset()
+    assert asyncio.run(HaAddressResolver(_FakeHass()).async_addresses("ha.lan")) == frozenset()
 
 
 @pytest.mark.parametrize(
@@ -711,13 +712,132 @@ def test_ip_audit_compares_ipv4_and_ipv6_addresses(dns, ha: str, stored: str, mi
     }
     dns(resolving)
 
-    assert asyncio.run(_device_ip_mismatch(_FakeHass(), ha, stored, "7")) is mismatch
+    assert asyncio.run(_device_ip_mismatch(HaAddressResolver(_FakeHass()), ha, stored, "7")) is mismatch
 
 
 def test_ip_audit_survives_an_invalid_stored_hostname() -> None:
     # coordinator._device_ip_mismatch resolves the stored name too; "ha..lan" raised UnicodeError there.
     from custom_components.comexio.coordinator import _device_ip_mismatch
 
-    mismatch = asyncio.run(_device_ip_mismatch(_FakeHass(), f"{OWN_IP}:8123", "ha..lan:8123", "7"))
+    mismatch = asyncio.run(_device_ip_mismatch(HaAddressResolver(_FakeHass()), f"{OWN_IP}:8123", "ha..lan:8123", "7"))
 
     assert mismatch is True
+
+
+def test_a_confirmed_hint_beats_an_earlier_unchecked_one(dns, caplog: pytest.LogCaptureFixture) -> None:
+    """(Review) a stored name without DNS answer was returned before a later hint was even checked."""
+    dns({HA_NAME: OWN_IP}, transient={"stale.example.lan", "stale2.example.lan"})
+    resolver = HaAddressResolver(_FakeHass())
+
+    with caplog.at_level(logging.WARNING, logger=ha_address.__name__):
+        assert asyncio.run(resolver.async_get("stale.example.lan:8123", f"{HA_NAME}:8123")) == f"{HA_NAME}:8123"
+    assert "keeping" not in caplog.text  # nothing is "kept" that was not chosen
+
+    # Without a confirmed one the first unchecked hint is kept, ahead of a search — and only it is warned about.
+    hints = ("stale.example.lan:8123", f"{FOREIGN_IP}:8123", "stale2.example.lan:8123")
+    with caplog.at_level(logging.WARNING, logger=ha_address.__name__):
+        assert asyncio.run(resolver.async_get(*hints)) == "stale.example.lan:8123"
+    assert "stale.example.lan got no answer; keeping it" in caplog.text
+    assert "stale2" not in caplog.text
+
+
+def test_a_confirmed_remembered_name_beats_an_unchecked_hint(dns) -> None:
+    fake = dns({HA_HOST_CANDIDATES[0]: OWN_IP}, transient={"stale.example.lan"}, local_ip="127.0.0.1")
+    resolver = HaAddressResolver(_FakeHass())
+    assert _get(resolver) == f"{HA_HOST_CANDIDATES[0]}:8123"  # found by the search, remembered
+    fake.calls.clear()
+
+    assert _get(resolver, "stale.example.lan:8123") == f"{HA_HOST_CANDIDATES[0]}:8123"
+    assert fake.calls == ["stale.example.lan", HA_HOST_CANDIDATES[0]]  # no new search
+
+
+def test_with_unknown_own_ips_the_first_hint_is_kept(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    async def _none() -> frozenset:
+        return frozenset()
+
+    monkeypatch.setattr(ha_address, "_async_own_ips", _none)
+
+    with caplog.at_level(logging.WARNING, logger=ha_address.__name__):
+        result = asyncio.run(HaAddressResolver(_FakeHass()).async_get("a.example.lan:8123", "b.example.lan:8123"))
+
+    assert result == "a.example.lan:8123"
+    assert "keeping a.example.lan unchecked" in caplog.text
+    assert "b.example.lan" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("internal_url", "expected"),
+    [
+        (None, f"{OWN_IP}:8124"),
+        ("http://ha.example.lan", f"{HA_NAME}:8124"),
+        ("http://ha.example.lan:8125", f"{HA_NAME}:8125"),
+    ],
+)
+def test_the_port_is_internal_urls_else_the_one_ha_listens_on(dns, internal_url: str | None, expected: str) -> None:
+    """(Review) without a port in internal_url the default 8123 was used, even when HA listens elsewhere."""
+    dns(local_ip=OWN_IP)
+    hass = _FakeHass(internal_url)
+    hass.config.api = SimpleNamespace(port=8124)
+
+    assert _get(HaAddressResolver(hass)) == expected
+
+
+def test_without_a_known_listening_port_it_is_8123(dns) -> None:
+    dns(local_ip=OWN_IP)
+    hass = _FakeHass()
+    hass.config.api = SimpleNamespace(port=None)
+
+    assert _get(HaAddressResolver(hass)) == f"{OWN_IP}:8123"
+
+
+def test_a_late_search_does_not_undo_a_newer_internal_url(dns) -> None:
+    """(Review) a search finishing after a call with internal_url re-published its guess over it."""
+    dns(dict.fromkeys(HA_HOST_CANDIDATES, OWN_IP), slow=set(HA_HOST_CANDIDATES), delay=0.2, local_ip="127.0.0.1")
+    hass = _FakeHass()
+    resolver = HaAddressResolver(hass)
+
+    async def _run() -> tuple[str, str]:
+        searching = asyncio.create_task(resolver.async_get())
+        await asyncio.sleep(0)  # the search has read the (empty) internal_url and waits for DNS
+        hass.config.internal_url = INTERNAL_URL
+        configured = await resolver.async_get()
+        return await searching, configured
+
+    guessed, configured = asyncio.run(_run())
+
+    assert guessed == f"{HA_HOST_CANDIDATES[0]}:8123"
+    assert configured == f"{HA_NAME}:8123"
+    assert resolver._guessed_host is None  # the configured URL outranks the guess, also afterwards
+
+
+@pytest.mark.parametrize(
+    ("ha", "stored", "mismatch"),
+    [
+        (f"{OWN_IP}:8123", "slow.example.lan:8123", True),  # only the stored name hangs
+        ("slow.example.lan:8123", f"{FOREIGN_IP}:8123", True),  # only HA's name hangs
+        ("slow.example.lan:8123", "slow2.example.lan:8123", True),  # both hang
+        ("slow.example.lan:8123", "SLOW.example.lan:8123", False),  # no answer, same name
+    ],
+)
+def test_ip_audit_lookups_are_bounded(
+    dns, monkeypatch: pytest.MonkeyPatch, ha: str, stored: str, mismatch: bool
+) -> None:
+    """(Review) a resolver that does not answer stalled the audit and the sync without limit. Without an
+    answer a name only matches itself: the resolver shares these lookups, so a stored name without answer
+    differs from ha_address only when the resolver confirmed another address — the one to write."""
+    from custom_components.comexio.coordinator import _device_ip_mismatch
+
+    fake = dns(slow={"slow.example.lan", "SLOW.example.lan", "slow2.example.lan"}, delay=0.5)
+    monkeypatch.setattr(ha_address, "HA_ADDRESS_DNS_TIMEOUT_SEC", 0.05)
+    resolver = HaAddressResolver(_FakeHass())
+
+    async def _run() -> tuple[bool, float]:
+        started = time.monotonic()
+        result = await _device_ip_mismatch(resolver, ha, stored, "7")
+        return result, time.monotonic() - started
+
+    result, took = asyncio.run(_run())
+
+    assert result is mismatch
+    assert took < 0.4  # both lookups run in parallel, each bounded
+    assert sorted(set(fake.calls)) == sorted({host_of(ha), host_of(stored)} - {OWN_IP, FOREIGN_IP})

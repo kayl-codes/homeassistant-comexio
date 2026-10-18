@@ -186,7 +186,6 @@ from .ha_address import (
     HaAddressResolver,
     host_of,
     is_loopback_address,
-    resolved_addresses,
     webio_device_hints,
 )
 from .orphaned_backups import async_audit_orphaned_backups
@@ -476,7 +475,9 @@ def _log_audit_items(icon: str, label: str, items: list[dict[str, Any]]) -> None
         _LOGGER.info("   -> %s", item["name"])
 
 
-async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
+async def _device_ip_mismatch(
+    resolver: HaAddressResolver, ha_address: str, com_ip: str | None, com_dev_id: str | None
+) -> bool:
     """Whether a Web-IO device's recorded IP/port has drifted from this HA instance's current address.
 
     Never for a loopback ha_address (the resolver's last resort, already warned about): the sync
@@ -491,11 +492,12 @@ async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str 
         return True  # no port: unexpected format
     if ha_port != com_port:
         return True
-    # Same port: the same host when the two share an address (IPv4 or IPv6); a host that resolves
-    # to nothing (no answer, no valid hostname) only matches itself.
+    # Same port: the same host when the two share an address (IPv4 or IPv6); a host that does not
+    # resolve (no valid hostname, no such name, no answer) only matches itself. The lookups are the
+    # resolver's (shared, bounded), so a stored name without answer differs from ha_address only when
+    # the resolver confirmed another address — then that one is the right one to write.
     ha_host, com_host = host_of(ha_address) or "", host_of(com_ip) or ""
-    ha_ips = await hass.async_add_executor_job(resolved_addresses, ha_host)
-    com_ips = await hass.async_add_executor_job(resolved_addresses, com_host)
+    ha_ips, com_ips = await asyncio.gather(resolver.async_addresses(ha_host), resolver.async_addresses(com_host))
     if ha_ips and com_ips:
         return not ha_ips & com_ips
     return ha_host.lower() != com_host.lower()
@@ -1498,7 +1500,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "base_id": dev.get("base_id"),
                 "device_ip": dev.get("device_ip"),
                 "ip_mismatch": await _device_ip_mismatch(
-                    self.hass, ha_address, dev.get("device_ip"), dev.get("device_id")
+                    self.ha_address, ha_address, dev.get("device_ip"), dev.get("device_id")
                 ),
             }
         return webio_device_audit
