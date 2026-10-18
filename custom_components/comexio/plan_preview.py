@@ -60,7 +60,7 @@ async def _async_render_orphaned(coordinator: ComexioCoordinator) -> None:
     )
     if url is None:
         raise HomeAssistantError(
-            f"The backup {choice['kind']}[{choice['slot']}] of deleted plan '{choice['plan_name']}' "
+            f"The backup {choice['kind']}[{choice['slot']}] of deleted plan '{one_line(choice['plan_name'])}' "
             "could not be shown — it was deleted meanwhile or another preview took over."
         )
 

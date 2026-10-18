@@ -443,6 +443,23 @@ def test_orphaned_backup_options_keep_labels_unique_across_plans() -> None:
     assert [rows[3][1]["fub_id"], rows[5][1]["fub_id"]] == [2, 5]
 
 
+def test_orphaned_backup_options_number_names_that_coincide_on_one_line() -> None:
+    """Two deleted plans of one fub_id whose names differ only in a line break show the same name."""
+    same = [{"kind": "auto", "slot": 0, "captured_at": OLD}]
+
+    rows = backup_module.build_orphaned_backup_options([_orphan(4, "Hall\nway", same), _orphan(4, "Hall way", same)])
+
+    labels = [label for label, _choice in rows]
+    snapshot = " " * 4 + backup_module.format_backup_label(same[0])
+    assert labels == [
+        "Hall way (ID 4) — 1 backup",
+        snapshot,
+        "Hall way (ID 4) — 1 backup (2)",
+        snapshot + " · Hall way (ID 4)",
+    ]
+    assert [choice["plan_name"] for _label, choice in rows] == ["Hall\nway", "Hall\nway", "Hall way", "Hall way"]
+
+
 def test_summarize_orphaned_backups_counts_every_snapshot_per_plan() -> None:
     orphans = [_orphan(3, "Garage", [{}], kept=True), _orphan(2, "Pumps", [{}, {}, {}])]
 

@@ -494,7 +494,7 @@ def _build_search_notification_lines(
     max_shown = 15  # a broad wildcard can match hundreds of labels — keep the notification readable
     lines: list[str] = []
     for res in results:
-        lines.append(f"**{res['plan_name']}** (fub {res['fub_id']}) — {len(res['matches'])} match(es):")
+        lines.append(f"**{one_line(res['plan_name'])}** (fub {res['fub_id']}) — {len(res['matches'])} match(es):")
         lines += [f"- {label}" for label in res["matches"][:max_shown]]
         if len(res["matches"]) > max_shown:
             lines.append(f"- … and {len(res['matches']) - max_shown} more (full list in the service response)")
@@ -508,7 +508,7 @@ def _build_search_notification_lines(
     if failed:
         lines.append(f"\n**{len(failed)} plan(s) could not be loaded:** {', '.join(failed)}")
     if selector_set:
-        lines.append(f"\nSingle plan hit — the 'Plan' selector was set to **{results[0]['plan_name']}**.")
+        lines.append(f"\nSingle plan hit — the 'Plan' selector was set to **{one_line(results[0]['plan_name'])}**.")
     elif len(results) == 1:
         lines.append("\nSingle plan hit, but the 'Plan' selector could not be updated — pass fub_id explicitly.")
     lines.append(f"\nDuration: {duration:.1f}s")

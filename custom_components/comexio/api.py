@@ -364,7 +364,7 @@ def _marker_delete_block_reason(
     "new marker" seems to create CategoryId==1 markers just like the admin API (2026-10-16).
     """
     if plans := placements.get(marker_id):
-        return f"placed in function plan{'s' if len(plans) > 1 else ''} {', '.join(plans)}"
+        return f"placed in function plan{'s' if len(plans) > 1 else ''} {', '.join(one_line(plan) for plan in plans)}"
     if record is None or _is_api_created_marker(record):
         return None
     if not _is_studio_marker(record):

@@ -176,10 +176,11 @@ def _snapshot_option_row(kind: str, entry: dict) -> tuple[str, float, dict]:
         operation = operation[: _SNAPSHOT_OPTION_MAX_OP_LEN - 1] + "…"
     op_suffix = f" ({operation})" if kind == "change" and operation else ""
     label = (
-        f"{entry.get('plan_name')} — fub {entry.get('fub_id')} — {kind}[{entry.get('slot')}] — {ts_label}{op_suffix}"
+        f"{one_line(entry.get('plan_name'))} — fub {entry.get('fub_id')} — "
+        f"{kind}[{entry.get('slot')}] — {ts_label}{op_suffix}"
     )
-    value = f"{entry.get('fub_id')}:{kind}:{entry.get('slot')}:{entry.get('plan_name')}"
-    return str(entry.get("plan_name", "")).lower(), -epoch, {"label": label, "value": value}
+    option_value = f"{entry.get('fub_id')}:{kind}:{entry.get('slot')}:{entry.get('plan_name')}"
+    return str(entry.get("plan_name", "")).lower(), -epoch, {"label": label, "value": option_value}
 
 
 def _build_snapshot_options(backups: dict[str, list[dict]]) -> list[dict]:

@@ -4,13 +4,15 @@ A plan, marker, IO or KNX name is edited in the Comexio admin and can hold line 
 which split a log entry or break a notification's layout. The integration's code is read for every place that turns a
 Comexio name - a variable in NAME_VARIABLES, or a mapping read like `item["name"]` / `fub.get("Name")` - into text: a
 value in an f-string, a string built with `+`, `%` or `.format()`, and an argument of a `_LOGGER` call or of
-`persistent_notification.async_create`, directly or through `str()` / `repr()`. So a message built first and output
-later is caught as well as a new raw log argument, without touching this file.
+`persistent_notification.async_create`, directly or through `str()` / `repr()`, a string method or a slice, also
+after it was copied to another variable of the same function. So a message built first and output later is caught as
+well as a new raw log argument, without touching this file.
 
 Text that identifies rather than shows keeps the raw name: a `notification_id` or a `value` (keyword or dict key), an
 f-string assigned to a variable in IDENTITY_TARGETS, and the f-strings of the functions in IDENTITY_FUNCTIONS (their
-output calls are still checked). A name held in a variable named otherwise, or joined into a list first, is not
-followed; the review checklist covers that case.
+output calls are still checked). A name collected into a list and joined, copied by anything but a (possibly
+annotated) assignment, or copied outside a function, is not followed; the review checklist covers that case. An alias
+read in a nested function, or reassigned to `one_line(...)`, is still flagged: rename it rather than exempt it.
 """
 
 import ast
@@ -33,14 +35,15 @@ NAME_VARIABLES = {
     "snapshot_name",
     "live_name",
     "k_title",
+    "option_value",
 }
-# Mapping keys that hold a Comexio name: item["name"], fub.get("Name").
-NAME_KEYS = {"name", "Name"}
+# Mapping keys that hold a Comexio name: item["name"], fub.get("Name"), entry.get("plan_name").
+NAME_KEYS = {"name", "Name", "plan_name"}
 # Keyword arguments and dict keys that identify rather than show: they keep the raw name.
 IDENTITY_KEYS = {"notification_id", "value"}
-# Variables that hold an identity built from a name: the Web-IO command name Comexio must report back. Building
-# them keeps the raw name; they are name variables too, so showing them still needs one_line.
-IDENTITY_TARGETS = {"expected_cmd_name"}
+# Variables that hold an identity built from a name: the Web-IO command name Comexio must report back, an option
+# value parsed back. Building them keeps the raw name; they are name variables too, so showing them needs one_line.
+IDENTITY_TARGETS = {"expected_cmd_name", "option_value"}
 # Functions whose f-strings build an identity from a name, so one_line would change what they match or store,
 # per file of the integration.
 IDENTITY_FUNCTIONS = {
@@ -58,18 +61,22 @@ IDENTITY_FUNCTIONS = {
     "coordinator.py": {
         "async_newest_backup_field",  # the restore action's snapshot value
         "_build_ha_audit_map",  # the command names the audit compares with Comexio's
+        # unique_ids and device identifiers from extension names; the device name matches the one setup gives
+        "_migrate_extension_entities",
     },
 }
 STRING_WRAPPERS = {"str", "repr"}
 # String methods that keep a name's line breaks: name.strip(), name.upper().
 STRING_METHODS = {"strip", "lstrip", "rstrip", "upper", "lower", "title", "capitalize", "casefold", "replace"}
 SOURCE_FILES = sorted(COMPONENT.rglob("*.py"))
+# Set on a variable read that holds a name copied from another one: label = fub.get("Name").
+ALIAS_MARK = "comexio_name_alias"
 
 
 def _is_name(node: ast.AST) -> bool:
-    """A name variable, or a name read from a mapping: item["name"] or fub.get("Name")."""
+    """A name variable or its alias, or a name read from a mapping: item["name"] or fub.get("Name")."""
     if isinstance(node, ast.Name):
-        return node.id in NAME_VARIABLES
+        return node.id in NAME_VARIABLES or getattr(node, ALIAS_MARK, False)
     if isinstance(node, ast.Subscript):
         return isinstance(node.slice, ast.Constant) and node.slice.value in NAME_KEYS
     return (
@@ -152,9 +159,37 @@ def _raw_in_output(call: ast.Call) -> list[ast.expr]:
     return _shown_names([*call.args, *shown])
 
 
+def _name_aliases(scope: ast.AST) -> dict[str, int]:
+    """{variable: first line} of the plain assignments of a name as it is in scope: `label = item["name"]`."""
+    aliases: dict[str, int] = {}
+    for assign in ast.walk(scope):
+        if isinstance(assign, ast.Assign) and len(assign.targets) == 1:
+            target, value = assign.targets[0], assign.value
+        elif isinstance(assign, ast.AnnAssign) and assign.value is not None:
+            target, value = assign.target, assign.value
+        else:
+            continue
+        if isinstance(target, ast.Name) and target.id not in IDENTITY_TARGETS and _shown_name(value) is not None:
+            aliases[target.id] = min(assign.lineno, aliases.get(target.id, assign.lineno))
+    return aliases
+
+
+def _mark_aliases(tree: ast.Module) -> None:
+    """Mark the reads of a name alias after its first assignment, per function, as names themselves."""
+    for scope in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)):
+        aliases: dict[str, int] = {}
+        while (found := _name_aliases(scope)) != aliases:  # an alias of an alias needs another round
+            aliases = found
+            reads = (node for node in ast.walk(scope) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load))
+            for read in reads:
+                if read.id in aliases and read.lineno > aliases[read.id]:
+                    setattr(read, ALIAS_MARK, True)
+
+
 def raw_name_outputs(source: str, identity_functions: set[str] | None = None) -> list[tuple[int, str]]:
     """(line, source) of every name turned into text or output without one_line."""
     tree = ast.parse(source)
+    _mark_aliases(tree)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     found = []
     for node in ast.walk(tree):
@@ -203,6 +238,20 @@ def raw_name_outputs(source: str, identity_functions: set[str] | None = None) ->
         ('msg = "Plan {}".format(plan_name[:40])', [(1, "plan_name")]),
         ("_LOGGER.info(\"Plan %s\", fub.get('Name', '?').upper())", [(1, "fub.get('Name', '?')")]),
         ('msg = f"Plan {one_line(plan_name).strip()} gone"', []),
+        ('def f(fub):\n    label = fub.get("Name")\n    _LOGGER.info("Plan %s", label)', [(3, "label")]),
+        ('def f(item):\n    shown = item["name"]\n    label = shown\n    msg = f"Plan {label} gone"', [(4, "label")]),
+        ('def f(fub):\n    label = one_line(fub.get("Name"))\n    _LOGGER.info("Plan %s", label)', []),
+        ('def f(fub):\n    _LOGGER.info("Plan %s", label)\n    label = fub.get("Name")', []),
+        ('def f(fub):\n    label = fub.get("Name")\ndef g(label):\n    _LOGGER.info("Plan %s", label)', []),
+        (
+            'def f(fub):\n    label = fub["Name"]\n    _LOGGER.info("%s", label)\n    label = fub["Name"]',
+            [(3, "label")],
+        ),
+        ('def f(fub):\n    label: str = fub.get("Name")\n    _LOGGER.info("Plan %s", label)', [(3, "label")]),
+        ('def f(a):\n    b = a["name"]\n    c = b\n    d = c\n    msg = f"Plan {d}"', [(5, "d")]),
+        ("option_value = f\"{fub_id}:{entry.get('plan_name')}\"", []),
+        ('_LOGGER.info("Option %s", option_value)', [(1, "option_value")]),
+        ('value = f"Plan {name} gone"', [(1, "name")]),
         ("total = fub_id + name_count", []),
         ("token = vanished_plan_token(fub_id, plan_name)", []),
     ],

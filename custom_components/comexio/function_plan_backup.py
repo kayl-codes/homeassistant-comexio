@@ -405,7 +405,17 @@ _ORPHAN_SNAPSHOT_INDENT = "\u00a0" * 4
 
 def _orphan_plan_label(orphan: dict[str, Any]) -> str:
     count = len(orphan["backups"])
-    return f"{orphan['plan_name']} (ID {orphan['fub_id']}) — {count} backup{'' if count == 1 else 's'}"
+    return f"{one_line(orphan['plan_name'])} (ID {orphan['fub_id']}) — {count} backup{'' if count == 1 else 's'}"
+
+
+def _unique_label(label: str, seen: set[str]) -> str:
+    """label, numbered while it repeats an earlier row's: plan names shown on one line can coincide."""
+    unique, count = label, 1
+    while unique in seen:
+        count += 1
+        unique = f"{label} ({count})"
+    seen.add(unique)
+    return unique
 
 
 def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
@@ -416,7 +426,8 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
     show; a plan row shows the plan's newest snapshot. Shared by select.py (options) and
     button.py (resolving the chosen label back), like format_backup_label. Labels must be
     unique select options, but two plans changed in the same minute share a snapshot row
-    label — a repeat gets its plan appended.
+    label — a repeat gets its plan appended. Names that differ only in line breaks or spacing
+    still coincide on one line, so any remaining repeat is numbered.
     """
     rows: list[tuple[str, dict[str, Any]]] = []
     seen: set[str] = set()
@@ -425,13 +436,17 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
         backups = orphan["backups"]
         newest = max(backups, key=lambda entry: entry.get("captured_at") or "")
         plan_choice = {**identity, "kind": newest["kind"], "slot": newest["slot"], "plan_row": True}
-        rows.append((_orphan_plan_label(orphan), plan_choice))
+        rows.append((_unique_label(_orphan_plan_label(orphan), seen), plan_choice))
         for entry in backups:
             label = f"{_ORPHAN_SNAPSHOT_INDENT}{format_backup_label(entry)}"
             if label in seen:
-                label += f" · {orphan['plan_name']} (ID {orphan['fub_id']})"
-            seen.add(label)
-            rows.append((label, {**identity, "kind": entry["kind"], "slot": entry["slot"], "plan_row": False}))
+                label += f" · {one_line(orphan['plan_name'])} (ID {orphan['fub_id']})"
+            rows.append(
+                (
+                    _unique_label(label, seen),
+                    {**identity, "kind": entry["kind"], "slot": entry["slot"], "plan_row": False},
+                )
+            )
     return rows
 
 

@@ -3713,7 +3713,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "[%s] Connection-value poll fub=%s plan=%s -> %s",
             self.server_id,
             cache["fub_id"],
-            cache["plan_name"],
+            one_line(cache["plan_name"]),
             connection_values,
         )
         try:
