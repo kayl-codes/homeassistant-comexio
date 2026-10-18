@@ -61,7 +61,10 @@ CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
 DEFAULT_ENABLE_NOTIFICATIONS = True
 
 CONF_COVER_KEYWORDS = "cover_keywords"
-DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
+DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind, markise, awning"
+# Default before markise/awning joined it (#179); entries that saved exactly this list get the new
+# default on migration 1.3 -> 1.4 (see migrate_entry_options), a customised list is kept.
+LEGACY_DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
 
 CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
 CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
@@ -92,7 +95,8 @@ DEFAULT_FUNCTION_PLAN_PLAN_PREFIX = "HA"
 # offers the KNX cleanup as a repair issue. Removed again right after that check.
 # Minor version 3: entries created before DEFAULT_SCHEMA_IO dropped {ExtName} get the old
 # default pinned into their options (see migrate_entry_options).
-CONFIG_ENTRY_MINOR_VERSION = 3
+# Minor version 4: entries that saved the old default cover keywords get the new default.
+CONFIG_ENTRY_MINOR_VERSION = 4
 CONF_KNX_PRERELEASE_CLEANUP_PENDING = "knx_prerelease_cleanup_pending"
 # Repair issue translation keys; the issue id is "{key}_{server_id}".
 ISSUE_UNINSTALL_CLEANUP = "uninstall_cleanup"
@@ -482,6 +486,23 @@ SYNC_DURATION_FUNCTION_PLAN_ELEMENT = (
 MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400
 
+# Range of a temperature marker number (is_temperature_marker_name below, user decision
+# 2026-10-17, #179): down to absolute zero so negative correction offsets and outdoor
+# setpoints are settable, up to a generous ceiling that still blocks gross typos.
+MARKER_TEMPERATURE_MIN_VALUE = -273.15
+MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
+
+# A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
+# word "Grad". A bare "Soll" is no longer enough — it marks any setpoint ("Markise Position SOLL"), not
+# a temperature.
+_MARKER_TEMPERATURE_NAME_RE = re.compile(r"temp|setpoint|°c|\bgrad\b", re.IGNORECASE)
+
+
+def is_temperature_marker_name(name: str) -> bool:
+    """Whether a marker name marks a temperature (number/sensor unit heuristic)."""
+    return _MARKER_TEMPERATURE_NAME_RE.search(name) is not None
+
+
 # Round-boundary size the KNX bridge marker block is aligned to (user decision 2026-09-14,
 # see project_knx_write_path_design memory) — also caps how far _free_marker_ids() looks
 # above an already-established block's start when hunting for a reusable blank marker, so
@@ -644,7 +665,17 @@ def migrate_entry_options(minor_version: int, data: Mapping[str, Any], options: 
         # "Ignore" was given for the old, much narrower doubled-prefix repair; the stable
         # entity_id migration is a different question and must be offered once.
         new_options.pop(CONF_ENTITY_ID_MIGRATION_IGNORED, None)
+    if minor_version < 4:
+        saved = options.get(CONF_COVER_KEYWORDS, data.get(CONF_COVER_KEYWORDS))
+        if saved is not None and parse_keyword_list(saved) == parse_keyword_list(LEGACY_DEFAULT_COVER_KEYWORDS):
+            # Saved the old default unchanged (the options form stores the shown default too).
+            new_options[CONF_COVER_KEYWORDS] = DEFAULT_COVER_KEYWORDS
     return new_options
+
+
+def parse_keyword_list(keywords: Any) -> list[str]:
+    """A comma-separated keyword option as a list: lower-case, stripped, no blanks (coordinator + migration)."""
+    return [kw.strip().lower() for kw in str(keywords).split(",") if kw.strip()]
 
 
 # Result dict keys shared between coordinator._async_webio_range_check_tick and the

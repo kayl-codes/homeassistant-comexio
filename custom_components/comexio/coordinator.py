@@ -166,6 +166,7 @@ from .const import (
     io_audit_key,
     io_column_rows,
     one_line,
+    parse_keyword_list,
     parse_watchdog_user_plan_pick,
     plan_watch_signal,
     repointed_watchdog_user_plan_picks,
@@ -997,8 +998,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         conf = {**self.config_entry.data, **self.config_entry.options}
 
         # Precompute cover keywords once per update
-        kw_str = str(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
-        self.cover_keywords = [kw.strip().lower() for kw in kw_str.split(",") if kw.strip()]
+        self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
 
         raw_config, parsed_data, knx_live_states = await self._async_fetch_parsed_config(conf)
         # Unfiltered per-category counts — parsed_data carries every category regardless of
