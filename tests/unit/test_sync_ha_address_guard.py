@@ -126,15 +126,22 @@ def test_a_sync_runs_when_no_device_gets_a_loopback_address(ha_address: str, dev
     assert button._sync_class.await_count == len(WEBIO_CLASSES)
 
 
-@pytest.mark.parametrize("action", ["cleanup_entities", "function_plan_add_missing", "knx_bridge_add_missing"])
-def test_actions_without_device_writes_still_run_with_a_loopback_address(action: str) -> None:
+@pytest.mark.parametrize(
+    ("action", "handler"),
+    [
+        ("cleanup_entities", "_handle_cleanup_entities"),
+        ("function_plan_add_missing", "_wire_created_pairs"),
+        ("knx_bridge_add_missing", "_wire_knx_full"),
+    ],
+)
+def test_actions_without_device_writes_still_run_with_a_loopback_address(action: str, handler: str) -> None:
     button = _button(LOOPBACK, dev_id=None)
     _press(button, action)
 
     assert button.coordinator.sync_error is False
     button._sync_class.assert_not_awaited()
-    awaited = (button._handle_cleanup_entities, button._wire_created_pairs, button._wire_knx_full)
-    assert sum(m.await_count for m in awaited) == 1
+    for name in ("_handle_cleanup_entities", "_wire_created_pairs", "_wire_knx_full"):
+        assert getattr(button, name).await_count == (name == handler), name
 
 
 def test_a_failed_login_is_still_reported_without_a_traceback() -> None:
