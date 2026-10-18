@@ -100,9 +100,11 @@ def _ip(host: str) -> IPAddress | None:
 
 
 def _is_loopback(host: str) -> bool:
-    """A loopback IP, "localhost", a *.localhost name (RFC 6761) or the common alias localhost.localdomain."""
+    """A loopback or unspecified IP (0.0.0.0, ::), "localhost", a *.localhost name (RFC 6761) or the alias
+    localhost.localdomain: an address that never leads Comexio to HA."""
     if (ip := _ip(host)) is not None:
-        return ip.is_loopback
+        ip = getattr(ip, "ipv4_mapped", None) or ip  # ::ffff:0.0.0.0 is the IPv4 address in disguise
+        return ip.is_loopback or ip.is_unspecified
     name = host.rstrip(".").lower()
     return name in _LOOPBACK_NAMES or name.endswith(".localhost")
 
@@ -174,7 +176,7 @@ def format_address(host: str, port: int) -> str:
 
 
 def is_loopback_address(address: str) -> bool:
-    """Whether a "host:port" address (see format_address) points to the loopback interface.
+    """Whether a "host:port" address (see format_address) points to the loopback interface or is unspecified.
 
     Comexio cannot reach HA there; the resolver returns such an address only as its last resort.
     """

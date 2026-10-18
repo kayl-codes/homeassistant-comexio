@@ -42,6 +42,8 @@ _CLASS_RESULT = {
         ("localhost:8123", True),
         ("[::1]:8123", True),
         ("[::ffff:127.0.0.1]:8123", True),
+        ("0.0.0.0:8123", True),
+        ("[::]:8123", True),
         (REACHABLE, False),
         ("ha.example.lan:8123", False),
         ("[fd00::10]:8123", False),

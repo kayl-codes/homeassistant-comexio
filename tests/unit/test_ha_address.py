@@ -141,10 +141,11 @@ def test_stored_foreign_ip_falls_back_to_internal_url(dns) -> None:
     assert fake.calls == []
 
 
-def test_stored_loopback_ip_is_no_known_address(dns) -> None:
+@pytest.mark.parametrize("hint", ["127.0.0.1:8123", "0.0.0.0:8123", "[::]:8123"])
+def test_stored_loopback_ip_is_no_known_address(dns, hint: str) -> None:
     dns()
 
-    assert _get(HaAddressResolver(_FakeHass(INTERNAL_URL)), hint="127.0.0.1:8123") == f"{HA_NAME}:8123"
+    assert _get(HaAddressResolver(_FakeHass(INTERNAL_URL)), hint=hint) == f"{HA_NAME}:8123"
 
 
 def test_stored_name_pointing_here_costs_exactly_one_lookup(dns) -> None:
@@ -281,11 +282,12 @@ def test_unknown_own_ips_keep_a_stored_name_without_lookup(dns, own_ips: set[str
     assert fake.calls == []
 
 
-def test_stored_loopback_is_rejected_even_when_own_ips_are_unknown(dns, own_ips: set[str]) -> None:
+@pytest.mark.parametrize("hint", ["127.0.0.1:8123", "0.0.0.0:8123", "[::]:8123"])
+def test_stored_loopback_is_rejected_even_when_own_ips_are_unknown(dns, own_ips: set[str], hint: str) -> None:
     own_ips.clear()
     dns()
 
-    assert _get(HaAddressResolver(_FakeHass(INTERNAL_URL)), hint="127.0.0.1:8123") == f"{HA_NAME}:8123"
+    assert _get(HaAddressResolver(_FakeHass(INTERNAL_URL)), hint=hint) == f"{HA_NAME}:8123"
 
 
 def test_unchecked_keep_warns_once(dns, own_ips: set[str], caplog: pytest.LogCaptureFixture) -> None:
@@ -429,8 +431,9 @@ def test_invalid_internal_url_port_falls_back_to_default(dns) -> None:
     assert _get(HaAddressResolver(_FakeHass("http://ha.example.lan:99999"))) == f"{HA_NAME}:8123"
 
 
-def test_guessed_names_come_last_in_known_domains_order(dns) -> None:
-    dns({HA_HOST_CANDIDATES[4]: OWN_IP, HA_HOST_CANDIDATES[1]: OWN_IP}, local_ip="127.0.0.1")
+@pytest.mark.parametrize("local_ip", ["127.0.0.1", "0.0.0.0"])
+def test_guessed_names_come_last_in_known_domains_order(dns, local_ip: str) -> None:
+    dns({HA_HOST_CANDIDATES[4]: OWN_IP, HA_HOST_CANDIDATES[1]: OWN_IP}, local_ip=local_ip)
 
     assert _get(HaAddressResolver(_FakeHass())) == f"{HA_HOST_CANDIDATES[1]}:8123"
 
@@ -477,7 +480,8 @@ def test_hanging_guess_is_capped_by_timeout(dns, monkeypatch: pytest.MonkeyPatch
 def test_definite_misses_of_guessed_names_are_cached(dns) -> None:
     fake = dns(local_ip="127.0.0.1")
     resolver = HaAddressResolver(_FakeHass())
-    _get(resolver)
+    assert _get(resolver) == "127.0.0.1:8123"
+    assert sorted(fake.calls) == sorted(HA_HOST_CANDIDATES)  # every guess was looked up and missed
     fake.calls.clear()
 
     _get(resolver)
@@ -488,7 +492,8 @@ def test_guessed_misses_are_looked_up_again_after_the_cache_expires(dns, monkeyp
     monkeypatch.setattr(ha_address, "HA_ADDRESS_NEGATIVE_CACHE_SEC", 0)
     fake = dns(local_ip="127.0.0.1")
     resolver = HaAddressResolver(_FakeHass())
-    _get(resolver)
+    assert _get(resolver) == "127.0.0.1:8123"
+    assert sorted(fake.calls) == sorted(HA_HOST_CANDIDATES)  # the misses the expired cache must not keep
     fake.resolving = {HA_HOST_CANDIDATES[0]: OWN_IP}
 
     assert _get(resolver) == f"{HA_HOST_CANDIDATES[0]}:8123"
@@ -604,20 +609,34 @@ def test_a_valid_address_of_another_class_beats_a_stale_first_one(dns) -> None:
 
 @pytest.mark.parametrize(
     "host",
-    ["localhost", "LOCALHOST", "localhost.", "localhost.localdomain", "ha.localhost", "127.0.0.2", "::1"],
+    [
+        "localhost",
+        "LOCALHOST",
+        "localhost.",
+        "localhost.localdomain",
+        "ha.localhost",
+        "127.0.0.2",
+        "::1",
+        "0.0.0.0",
+        "::",
+        "::ffff:0.0.0.0",
+    ],
 )
 def test_loopback_names(host: str) -> None:
     assert ha_address._is_loopback(host) is True
 
 
-@pytest.mark.parametrize("host", ["ha.example.lan", "localhost-ha.lan", "mylocalhost", OWN_IP, "fd00::10"])
+@pytest.mark.parametrize("host", ["ha.example.lan", "localhost-ha.lan", "mylocalhost", OWN_IP, "fd00::10", "0.0.0.1"])
 def test_no_loopback_names(host: str) -> None:
     assert ha_address._is_loopback(host) is False
 
 
-@pytest.mark.parametrize("internal_url", ["http://localhost.localdomain:8123", "http://ha.localhost:8123"])
+@pytest.mark.parametrize(
+    "internal_url",
+    ["http://localhost.localdomain:8123", "http://ha.localhost:8123", "http://0.0.0.0:8123", "http://[::]:8123"],
+)
 def test_a_loopback_alias_in_internal_url_is_skipped(dns, internal_url: str) -> None:
-    """(Review) only the exact name "localhost" was caught; the alias reached Comexio."""
+    """(Review) only the exact name "localhost" was caught; the alias or an unspecified address reached Comexio."""
     dns(local_ip=OWN_IP)
 
     assert _get(HaAddressResolver(_FakeHass(internal_url))) == f"{OWN_IP}:8123"
