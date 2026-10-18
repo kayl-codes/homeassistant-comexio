@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 import logging
 import pathlib
 import re
-import socket
 import time
 from typing import Any
 import uuid
@@ -183,7 +182,13 @@ from .function_plan_backup import (
 )
 from .function_plan_block_settings import expand_autohide_blocks, snapshot_block_settings
 from .function_plan_catalog import FunctionPlanCatalogManager
-from .ha_address import HaAddressResolver, is_loopback_address, webio_device_hint
+from .ha_address import (
+    HaAddressResolver,
+    host_of,
+    is_loopback_address,
+    resolved_addresses,
+    webio_device_hints,
+)
 from .orphaned_backups import async_audit_orphaned_backups
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
@@ -480,26 +485,20 @@ async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str 
     if not (com_dev_id and com_ip and com_ip != ha_address) or is_loopback_address(ha_address):
         return False
     try:
-        ha_host, ha_port = ha_address.rsplit(":", 1)
-        com_host, com_port = com_ip.rsplit(":", 1)
-
-        if ha_port != com_port:
-            # Textual deviation detected, check DNS resolution
-            return True
-
-        # Ports are identical, compare resolved IPs
-        def resolve(name: str) -> str:
-            try:
-                return socket.gethostbyname(name)
-            except (OSError, UnicodeError):  # UnicodeError: no valid hostname at all, e.g. "ha..lan"
-                return name
-
-        ha_ip = await hass.async_add_executor_job(resolve, ha_host)
-        com_resolved_ip = await hass.async_add_executor_job(resolve, com_host)
-        return ha_ip != com_resolved_ip
-    except ValueError:
-        # Fallback on unexpected format
+        ha_port = ha_address.rsplit(":", 1)[1]
+        com_port = com_ip.rsplit(":", 1)[1]
+    except IndexError:
+        return True  # no port: unexpected format
+    if ha_port != com_port:
         return True
+    # Same port: the same host when the two share an address (IPv4 or IPv6); a host that resolves
+    # to nothing (no answer, no valid hostname) only matches itself.
+    ha_host, com_host = host_of(ha_address) or "", host_of(com_ip) or ""
+    ha_ips = await hass.async_add_executor_job(resolved_addresses, ha_host)
+    com_ips = await hass.async_add_executor_job(resolved_addresses, com_host)
+    if ha_ips and com_ips:
+        return not ha_ips & com_ips
+    return ha_host.lower() != com_host.lower()
 
 
 BRIDGE_MARKERS_WAIT_FOR_TRIGGER_PLAN = "trigger plan still holds KNX pairs — bridge markers left for the re-run"
@@ -1213,7 +1212,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         # The address a device already stores is kept while it still points to this host (#177),
         # so a fresh resolver after a restart needs at most one lookup instead of a search.
-        ha_address = await self.ha_address.async_get(hint=webio_device_hint(webio_devices))
+        ha_address = await self.ha_address.async_get(*webio_device_hints(webio_devices))
         webio_device_audit = await self._async_audit_webio_devices(webio_devices, ha_address)
         ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
 
@@ -7904,7 +7903,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def async_ha_address(self) -> str:
         """HA webhook address, hinted by the address the Web-IO devices of the last poll store."""
-        return await self.ha_address.async_get(hint=webio_device_hint((self.data or {}).get("webio_devices")))
+        return await self.ha_address.async_get(*webio_device_hints((self.data or {}).get("webio_devices")))
 
     async def async_fresh_trigger_audit(
         self, snapshot: dict[str, Any] | None = None

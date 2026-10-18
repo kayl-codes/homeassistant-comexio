@@ -1,6 +1,6 @@
 """Resolve the address under which Comexio reaches this Home Assistant instance (webhook target).
 
-The known address comes first (#177): the one a Web-IO device already stores (the hint), then — only
+The known address comes first (#177): the ones the Web-IO devices already store (the hints), then — only
 while no usable internal_url is set — the homeassistant.<domain> name the search found last time
 (step 3 below, the only slow step; the others cost nothing to repeat, so a changed internal_url
 applies at once). It is kept as long as it still points to this HA host, judged against the host's
@@ -13,7 +13,8 @@ interface addresses read fresh on every call (a DHCP change must not keep the ol
   evidence that it is wrong. Only a definite miss (the name does not exist) or a foreign address
   rejects it.
 
-When the own interface addresses cannot be determined, a known address is kept unchecked (warned once).
+When the own interface addresses cannot be determined (or reading them fails), a known address is kept
+unchecked (warned once).
 
 Only without a usable known address is a new one searched, in this order:
 
@@ -76,6 +77,9 @@ _DEFINITE_MISS_ERRNOS = frozenset(
 )
 
 
+_LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
+
+
 def _ip(host: str) -> IPAddress | None:
     """host as an IP address (an IPv6 zone like "%eth0" dropped), or None when it is a name."""
     try:
@@ -85,7 +89,11 @@ def _ip(host: str) -> IPAddress | None:
 
 
 def _is_loopback(host: str) -> bool:
-    return host == "localhost" or ((ip := _ip(host)) is not None and ip.is_loopback)
+    """A loopback IP, "localhost", a *.localhost name (RFC 6761) or the common alias localhost.localdomain."""
+    if (ip := _ip(host)) is not None:
+        return ip.is_loopback
+    name = host.rstrip(".").lower()
+    return name in _LOOPBACK_NAMES or name.endswith(".localhost")
 
 
 def _lookup(host: str) -> _Answer:
@@ -96,12 +104,17 @@ def _lookup(host: str) -> _Answer:
         return _Answer(_Lookup.NOT_FOUND) if err.errno in _DEFINITE_MISS_ERRNOS else _NO_ANSWER
     except OSError:
         return _NO_ANSWER
-    except UnicodeError:
+    except ValueError:  # UnicodeError included
         # Not a valid hostname at all (empty or over-long label, e.g. a typo "ha..lan" in Comexio):
         # it can never resolve, so it is a definite miss, not an error that aborts the poll.
         return _Answer(_Lookup.NOT_FOUND)
     addresses = frozenset(ip for info in infos if (ip := _ip(str(info[4][0]))) is not None)
     return _Answer(_Lookup.RESOLVED, addresses)
+
+
+def resolved_addresses(host: str) -> frozenset[IPAddress]:
+    """Blocking: every IPv4 and IPv6 address host resolves to (an IP literal: itself); empty when none."""
+    return _lookup(host).addresses
 
 
 def _local_ip() -> str:
@@ -127,7 +140,11 @@ async def _async_own_ips() -> frozenset[IPAddress]:
 
     Not network.async_get_adapters: that list is loaded once at HA start and goes stale on a DHCP change.
     """
-    adapters = await async_load_adapters()
+    try:
+        adapters = await async_load_adapters()
+    except OSError as err:  # ifaddr reads the interfaces from the OS
+        _LOGGER.warning("HA address: reading the network adapters failed, own IPs unknown: %s", err)
+        return frozenset()
     configured = (entry["address"] for adapter in adapters for entry in (*adapter["ipv4"], *adapter["ipv6"]))
     return frozenset(ip for address in configured if (ip := _ip(address)) is not None and not ip.is_loopback)
 
@@ -157,9 +174,13 @@ def is_loopback_address(address: str) -> bool:
     return _is_loopback(host_of(address) or "")
 
 
-def webio_device_hint(webio_devices: Mapping[str, Mapping[str, Any]] | None) -> str | None:
-    """The address a Web-IO device already stores (parsed/audited "webio_devices" per class)."""
-    return next((dev["device_ip"] for dev in (webio_devices or {}).values() if dev.get("device_ip")), None)
+def webio_device_hints(webio_devices: Mapping[str, Mapping[str, Any]] | None) -> tuple[str, ...]:
+    """The addresses the Web-IO devices already store (parsed/audited "webio_devices" per class).
+
+    All of them: one class may still store a stale address while another already stores a valid one.
+    """
+    stored = (dev.get("device_ip") for dev in (webio_devices or {}).values())
+    return tuple(dict.fromkeys(address for address in stored if address))
 
 
 class HaAddressResolver:
@@ -167,7 +188,7 @@ class HaAddressResolver:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
-        # homeassistant.<domain> name the last search found — known address next to the hint.
+        # homeassistant.<domain> name the last search found — known address next to the hints.
         self._guessed_host: str | None = None
         # host -> what was last logged about it; a notice is logged at its level only when it changes.
         self._noticed: dict[str, str] = {}
@@ -176,11 +197,11 @@ class HaAddressResolver:
         # candidate -> monotonic time until which its definite miss is trusted
         self._misses: dict[str, float] = {}
 
-    async def async_get(self, hint: str | None = None) -> str:
+    async def async_get(self, *hints: str | None) -> str:
         """The HA address for Comexio webhooks as "host:port".
 
-        hint: the address a Web-IO device already stores (see webio_device_hint). It is checked
-        before the homeassistant.<domain> name found last time.
+        hints: the addresses the Web-IO devices already store (see webio_device_hints), checked in
+        order before the homeassistant.<domain> name found last time.
         """
         port = DEFAULT_HA_PORT
         configured_host = None
@@ -196,14 +217,13 @@ class HaAddressResolver:
             self._guessed_host = None
 
         own_ips = await _async_own_ips()
-        host = await self._async_known_host(host_of(hint), own_ips) or await self._async_search(
-            configured_host, own_ips
-        )
+        hint_hosts = [host_of(hint) for hint in hints]
+        host = await self._async_known_host(hint_hosts, own_ips) or await self._async_search(configured_host, own_ips)
         return format_address(host, port)
 
-    async def _async_known_host(self, hint_host: str | None, own_ips: frozenset[IPAddress]) -> str | None:
+    async def _async_known_host(self, hint_hosts: list[str | None], own_ips: frozenset[IPAddress]) -> str | None:
         """The first known address that still points to this host, or None."""
-        for host in dict.fromkeys(host for host in (hint_host, self._guessed_host) if host):
+        for host in dict.fromkeys(host for host in (*hint_hosts, self._guessed_host) if host):
             if await self._async_points_here(host, own_ips):
                 return host
         return None

@@ -17,7 +17,7 @@ from custom_components.comexio.ha_address import (
     HaAddressResolver,
     format_address,
     host_of,
-    webio_device_hint,
+    webio_device_hints,
 )
 
 OWN_IP = "192.168.0.110"
@@ -578,12 +578,140 @@ def test_format_address_brackets_ipv6() -> None:
     assert format_address("192.168.0.110", 8123) == "192.168.0.110:8123"
 
 
-def test_webio_device_hint_takes_the_first_stored_address() -> None:
-    devices = {"marker": {"device_ip": None}, "io": {"device_ip": "homeassistant.lan:8123"}}
+def test_webio_device_hints_are_every_stored_address() -> None:
+    devices = {
+        "marker": {"device_ip": None},
+        "io": {"device_ip": "homeassistant.lan:8123"},
+        "knx": {"device_ip": f"{OWN_IP}:8123"},
+        "other": {"device_ip": "homeassistant.lan:8123"},
+    }
 
-    assert webio_device_hint(devices) == "homeassistant.lan:8123"
-    assert webio_device_hint({}) is None
-    assert webio_device_hint(None) is None
+    assert webio_device_hints(devices) == ("homeassistant.lan:8123", f"{OWN_IP}:8123")
+    assert webio_device_hints({}) == ()
+    assert webio_device_hints(None) == ()
+
+
+def test_a_valid_address_of_another_class_beats_a_stale_first_one(dns) -> None:
+    """(Review) only the first class's address was checked; a stale one there replaced the valid one."""
+    fake = dns({HA_NAME: OWN_IP})
+
+    result = asyncio.run(HaAddressResolver(_FakeHass(INTERNAL_URL)).async_get(f"{FOREIGN_IP}:8123", f"{OWN_IP}:8123"))
+
+    assert result == f"{OWN_IP}:8123"
+    assert fake.calls == []  # both are IP literals: no DNS, and no search
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["localhost", "LOCALHOST", "localhost.", "localhost.localdomain", "ha.localhost", "127.0.0.2", "::1"],
+)
+def test_loopback_names(host: str) -> None:
+    assert ha_address._is_loopback(host) is True
+
+
+@pytest.mark.parametrize("host", ["ha.example.lan", "localhost-ha.lan", "mylocalhost", OWN_IP, "fd00::10"])
+def test_no_loopback_names(host: str) -> None:
+    assert ha_address._is_loopback(host) is False
+
+
+@pytest.mark.parametrize("internal_url", ["http://localhost.localdomain:8123", "http://ha.localhost:8123"])
+def test_a_loopback_alias_in_internal_url_is_skipped(dns, internal_url: str) -> None:
+    """(Review) only the exact name "localhost" was caught; the alias reached Comexio."""
+    dns(local_ip=OWN_IP)
+
+    assert _get(HaAddressResolver(_FakeHass(internal_url))) == f"{OWN_IP}:8123"
+
+
+def test_unreadable_adapters_count_as_unknown_own_ips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(Review) an adapter read error aborted the whole resolution, and with it the audit or sync."""
+
+    async def _fail() -> list:
+        raise OSError("no interfaces")
+
+    monkeypatch.setattr(ha_address, "async_load_adapters", _fail)
+
+    assert asyncio.run(ha_address._async_own_ips()) == frozenset()
+
+
+@pytest.mark.parametrize(("hint", "expected"), [(f"{OWN_IP}:8123", f"{OWN_IP}:8123"), ("127.0.0.1:8123", None)])
+def test_unreadable_adapters_keep_the_hint(monkeypatch: pytest.MonkeyPatch, hint: str, expected: str | None) -> None:
+    """The resolution goes on: a stored address is kept unchecked, a loopback one is still ignored."""
+
+    async def _fail() -> list:
+        raise OSError("no interfaces")
+
+    monkeypatch.setattr(ha_address, "async_load_adapters", _fail)
+    monkeypatch.setattr(ha_address, "_lookup", lambda host: ha_address._Answer(ha_address._Lookup.NOT_FOUND))
+    monkeypatch.setattr(ha_address, "_local_ip", lambda: OTHER_OWN_IP)
+
+    result = asyncio.run(HaAddressResolver(_FakeHass()).async_get(None, hint))
+
+    assert result == (expected or f"{OTHER_OWN_IP}:8123")
+
+
+def test_a_value_error_of_the_lookup_is_a_definite_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hostname getaddrinfo rejects with ValueError must not abort the audit or the sync."""
+
+    def _reject(host: str, port: None) -> list:
+        raise ValueError("invalid hostname")
+
+    monkeypatch.setattr(ha_address.socket, "getaddrinfo", _reject)
+
+    assert _real_lookup("ha.lan").status is ha_address._Lookup.NOT_FOUND
+    assert ha_address.resolved_addresses("ha.lan") == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("data", "hints"),
+    [
+        (
+            {"webio_devices": {"marker": {"device_ip": "a.lan:8123"}, "io": {"device_ip": f"{OWN_IP}:8123"}}},
+            ("a.lan:8123", f"{OWN_IP}:8123"),
+        ),
+        (None, ()),
+    ],
+)
+def test_the_coordinator_passes_every_stored_address(data: dict | None, hints: tuple[str, ...]) -> None:
+    from unittest.mock import AsyncMock
+
+    from custom_components.comexio.coordinator import ComexioCoordinator
+
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.data = data
+    coordinator.ha_address = SimpleNamespace(async_get=AsyncMock(return_value="x:8123"))
+
+    assert asyncio.run(coordinator.async_ha_address()) == "x:8123"
+    coordinator.ha_address.async_get.assert_awaited_once_with(*hints)
+
+
+@pytest.mark.parametrize(
+    ("ha", "stored", "mismatch"),
+    [
+        ("[fd00::110]:8123", "ha6.example.lan:8123", False),  # name resolving to the same IPv6 address
+        (f"{OWN_IP}:8123", "ha.example.lan:8123", False),  # name resolving to the same IPv4 address
+        (f"{OWN_IP}:8123", "dual.example.lan:8123", False),  # name with v4 + v6, one shared
+        (f"{OWN_IP}:8123", f"{FOREIGN_IP}:8123", True),
+        (f"{OWN_IP}:8123", "gone.example.lan:8123", True),  # does not resolve
+        ("Gone.Example.lan:8123", "gone.example.lan:8123", False),  # neither resolves: same text
+        (f"{OWN_IP}:8123", f"{OWN_IP}:8124", True),  # other port
+        (f"{OWN_IP}:8123", OWN_IP, True),  # no port
+    ],
+)
+def test_ip_audit_compares_ipv4_and_ipv6_addresses(dns, ha: str, stored: str, mismatch: bool) -> None:
+    """(Review) the audit resolved IPv4 only (gethostbyname): a name of an IPv6-only host always mismatched."""
+    from custom_components.comexio.coordinator import _device_ip_mismatch
+
+    resolving = {
+        "ha6.example.lan": "fd00::110",
+        HA_NAME: OWN_IP,
+        "dual.example.lan": f"{OWN_IP},fd00::110",
+        OWN_IP: OWN_IP,
+        FOREIGN_IP: FOREIGN_IP,
+        "fd00::110": "fd00::110",
+    }
+    dns(resolving)
+
+    assert asyncio.run(_device_ip_mismatch(_FakeHass(), ha, stored, "7")) is mismatch
 
 
 def test_ip_audit_survives_an_invalid_stored_hostname() -> None:

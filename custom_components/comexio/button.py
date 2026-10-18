@@ -74,7 +74,13 @@ from .const import (
     webio_class_name,
     webio_range_check_entity_id,
 )
-from .coordinator import PLAN_LOAD_FAILED, ComexioCoordinator, plan_cleanup_outcome, webio_still_present
+from .coordinator import (
+    PLAN_LOAD_FAILED,
+    ComexioCoordinator,
+    _device_ip_mismatch,
+    plan_cleanup_outcome,
+    webio_still_present,
+)
 from .entity import ComexioFunctionPlanEntityMixin, ComexioKnxEntity, ComexioMarkerEntity
 from .ha_address import is_loopback_address
 from .repairs import count_referencing_automations_and_scripts
@@ -869,7 +875,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 _items_of_class(type_mismatches, cls),
                 _items_of_class(orphans, cls),
                 _items_of_class(dangling_items, cls),
-                ctx.webio_devices_audit.get(cls, {}).get("ip_mismatch", False),
+                # Against this sync's address, not the last audit's: internal_url may have changed since.
+                await _device_ip_mismatch(
+                    self.hass, ctx.ha_address, ctx.webio_devices_audit.get(cls, {}).get("device_ip"), dev_ids[cls]
+                ),
                 pct_start,
                 pct_end,
             )

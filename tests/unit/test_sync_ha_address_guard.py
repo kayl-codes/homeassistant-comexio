@@ -7,6 +7,7 @@ IP mismatch in the audit, so no repair offers an address update that cannot work
 """
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -69,6 +70,7 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
     button = ComexioSyncButton.__new__(ComexioSyncButton)
     button.coordinator = coordinator  # type: ignore[assignment]
     button.hass = MagicMock()
+    button.hass.async_add_executor_job = AsyncMock(side_effect=lambda func, *args: func(*args))
     button.server_id = "cx1"
     button._async_acquire_sync_lock = AsyncMock(return_value=True)  # type: ignore[method-assign]
     button._finalize_sync = AsyncMock()  # type: ignore[method-assign]
@@ -182,6 +184,45 @@ def test_fast_track_with_a_reachable_address() -> None:
 
     assert action == "recreate"
     button.coordinator.api.webio_device_delete_error.assert_awaited_once_with("7")
+
+
+@pytest.mark.parametrize(
+    ("ha_address", "stored", "updated"),
+    [
+        (REACHABLE, "192.168.0.111:8123", True),  # internal_url changed after the last audit
+        (LOOPBACK, "192.168.0.111:8123", False),  # the stored address is kept, never replaced by loopback
+        (REACHABLE, REACHABLE, False),
+    ],
+)
+def test_a_sync_judges_the_ip_against_its_own_address(ha_address: str, stored: str, updated: bool) -> None:
+    """(Review) the last audit's ip_mismatch was used: a changed internal_url, or one that fell back
+    to loopback since that audit, was handled as if nothing had changed."""
+    button = _button(ha_address)
+    ctx = _ctx(button, ha_address)
+    # The last audit judged against another address: it says the opposite of what applies now.
+    ctx.webio_devices_audit = {cls: {"device_ip": stored, "ip_mismatch": not updated} for cls in WEBIO_CLASSES}
+
+    asyncio.run(button._sync_all_classes(ctx, {}, dict.fromkeys(WEBIO_CLASSES, "7")))
+
+    assert _ip_mismatch_per_class(button) == dict.fromkeys(WEBIO_CLASSES, updated)
+
+
+def test_a_class_without_a_device_gets_no_ip_update() -> None:
+    button = _button(REACHABLE)
+    ctx = _ctx(button, REACHABLE)
+    ctx.webio_devices_audit = {cls: {"device_ip": "192.168.0.111:8123"} for cls in WEBIO_CLASSES}
+    dev_ids: dict[str, str | None] = {**dict.fromkeys(WEBIO_CLASSES, "7"), WEBIO_CLASSES[0]: None}
+
+    asyncio.run(button._sync_all_classes(ctx, {}, dev_ids))
+
+    assert _ip_mismatch_per_class(button) == {cls: dev_ids[cls] is not None for cls in WEBIO_CLASSES}
+
+
+def _ip_mismatch_per_class(button: ComexioSyncButton) -> dict[str, bool]:
+    """dev_ip_mismatch of every _sync_class call, by class (bound by name, not by position)."""
+    signature = inspect.signature(ComexioSyncButton._sync_class)
+    bound = (signature.bind(button, *call.args, **call.kwargs) for call in button._sync_class.await_args_list)
+    return {args.arguments["cls"]: args.arguments["dev_ip_mismatch"] for args in bound}
 
 
 def test_the_audit_reports_no_ip_mismatch_for_a_loopback_address() -> None:
