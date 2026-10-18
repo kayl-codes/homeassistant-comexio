@@ -61,6 +61,7 @@ from .const import (
     active_webio_classes,
     expand_ignored_marker_ids,
     one_line,
+    one_line_values,
     prune_import_disabled_ignored,
     source_category,
     uninstall_cleanup_notification_id,
@@ -1316,7 +1317,7 @@ class ComexioRepairFlow(RepairsFlow):
             if await api.rename_knx_object(k_id, new_title):
                 renamed_count += 1
             else:
-                failed.append(item["name"])
+                failed.append(one_line(item["name"]))
         return renamed_count, failed, newly_ignored
 
     def _knx_dpt_suffix_result_title(self, renamed_count: int, newly_ignored: set[int], failed: list[str]) -> str:
@@ -1403,9 +1404,9 @@ class ComexioRepairFlow(RepairsFlow):
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
         if coordinator is None:
             return self.async_abort(reason="entry_not_found")
-        placeholders = {
-            key: str(self.issue_data.get(key, "?")) for key in ("plan_name", "fub_id", "attempts", "gave_up_at")
-        }
+        placeholders = one_line_values(
+            {key: self.issue_data.get(key, "?") for key in ("plan_name", "fub_id", "attempts", "gave_up_at")}
+        )
         # Read when the dialog opens, so it is current without rewriting the issue on every check.
         placeholders["last_check"] = coordinator.plan_watchdog.last_check_text()
         fub_id = int(self.issue_data["fub_id"])
@@ -1461,7 +1462,7 @@ class ComexioRepairFlow(RepairsFlow):
 
     async def async_step_function_plan_vanished(self, user_input=None):
         """Restore a deleted watched user plan from its newest backup, or stop watching it."""
-        placeholders = {key: str(self.issue_data.get(key, "?")) for key in ("plan_name", "fub_id")}
+        placeholders = one_line_values({key: self.issue_data.get(key, "?") for key in ("plan_name", "fub_id")})
         fub_id = int(self.issue_data["fub_id"])
         name = str(self.issue_data.get("plan_name", ""))
         # A bare-ID pick its backups name ambiguously has no backup identity to restore by.

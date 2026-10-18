@@ -3130,7 +3130,7 @@ class ComexioFirmwareCheckButton(CoordinatorEntity, ButtonEntity):
         conf = {**self.coordinator.config_entry.data, **self.coordinator.config_entry.options}
         if conf.get(CONF_ENABLE_NOTIFICATIONS, DEFAULT_ENABLE_NOTIFICATIONS):
             if ran:
-                names = ", ".join(sorted(self.coordinator.extension_firmware))
+                names = ", ".join(sorted(one_line(ext) for ext in self.coordinator.extension_firmware))
                 msg = f"{ICON_SUCCESS} Firmware check finished in {duration:.1f}s.\n\nChecked modules: {names}"
             else:
                 msg = f"{ICON_WARNING} Firmware check returned no data ({duration:.1f}s) — see log for details."

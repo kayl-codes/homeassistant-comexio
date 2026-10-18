@@ -7137,7 +7137,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fail_count = self._knx_dpt_autotag_fail_counts.get(k_id, 0) + 1
             self._knx_dpt_autotag_fail_counts[k_id] = fail_count
             if fail_count >= KNX_DPT_AUTOTAG_MAX_RETRIES:
-                newly_failed.append(item["name"])
+                newly_failed.append(one_line(item["name"]))
         if newly_failed:
             _LOGGER.warning(
                 "[%s] Giving up auto-tagging %d KNX object(s) as read-only after %d failed "

@@ -42,6 +42,7 @@ from .const import (
     FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
     one_line,
+    one_line_values,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -795,7 +796,7 @@ class ManagedPlanWatchdog:
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key=self._issue_translation_key(fub_id),
-                translation_placeholders=details,
+                translation_placeholders=one_line_values(details),
                 # The fix flow gets only this data, not the placeholders.
                 data={"entry_id": self._entry_id, **details},
             )
@@ -1055,7 +1056,7 @@ class ManagedPlanWatchdog:
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key=ISSUE_FUNCTION_PLAN_VANISHED,
-                translation_placeholders=details,
+                translation_placeholders=one_line_values(details),
                 data={"entry_id": self._entry_id, **details},
             )
         wanted = {vanished_plan_issue_id(self._server_id, fub_id, name) for fub_id, name in vanished}

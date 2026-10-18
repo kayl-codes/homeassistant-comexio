@@ -550,10 +550,12 @@ def test_a_plan_name_with_line_breaks_is_pushed_and_logged_on_one_line(
     ((_domain, _service, data),) = _pushes(watchdog)
     assert data["message"] == "Der überwachte Logikplan Test 4 x (ID 47) existiert in Comexio nicht mehr."
     assert "'Test 4 x' (ID 47) no longer exists" in caplog.text
-    # Only the output is cleaned: the token and the repair keep the raw name, the plan's identity.
+    # Only the output is cleaned: the token and the repair's data keep the raw name, the plan's identity.
     token = plan_watchdog.vanished_plan_token(47, "Test\n4\x07 x")
     assert data["data"]["actions"][0]["action"] == plan_action_id(ACTION_RESTORE, SERVER_ID, token)
-    assert ir.async_create_issue.call_args.kwargs["translation_placeholders"]["plan_name"] == "Test\n4\x07 x"
+    issue = ir.async_create_issue.call_args.kwargs
+    assert issue["translation_placeholders"]["plan_name"] == "Test 4 x"
+    assert issue["data"]["plan_name"] == "Test\n4\x07 x"
 
 
 def test_a_vanished_alarm_no_service_delivered_is_sent_again(

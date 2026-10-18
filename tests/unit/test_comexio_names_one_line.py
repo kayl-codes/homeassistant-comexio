@@ -84,6 +84,11 @@ STRING_METHODS = {"strip", "lstrip", "rstrip", "upper", "lower", "title", "capit
 SOURCE_FILES = sorted(COMPONENT.rglob("*.py"))
 # Set on a variable read that holds a name copied from another one: label = fub.get("Name").
 ALIAS_MARK = "comexio_name_alias"
+# Set on a variable read that holds a collection of names: names.append(item["name"]).
+COLLECTION_MARK = "comexio_name_collection"
+COLLECTION_ADDERS = {"append", "add"}
+# Calls that hand a collection's items over unchanged: ", ".join(sorted(names)).
+COLLECTION_WRAPPERS = {"sorted", "list", "set", "tuple", "reversed"}
 
 
 def _is_name(node: ast.AST) -> bool:
@@ -160,10 +165,25 @@ def _is_identity(node: ast.AST, parents: dict[ast.AST, ast.AST], identity_functi
     return False
 
 
+def _joined_names(items: ast.expr) -> list[ast.expr]:
+    """The names a `", ".join(items)` puts into its text: a collection of names, or one built in place."""
+    if isinstance(items, ast.Name):
+        return [items] if getattr(items, COLLECTION_MARK, False) else []
+    if isinstance(items, ast.ListComp | ast.SetComp | ast.GeneratorExp):
+        return _shown_names([items.elt])
+    if isinstance(items, ast.List | ast.Tuple | ast.Set):
+        return _shown_names(items.elts)
+    if isinstance(items, ast.Call) and isinstance(items.func, ast.Name) and items.func.id in COLLECTION_WRAPPERS:
+        return _joined_names(items.args[0]) if items.args else []
+    return []
+
+
 def _raw_in_text(node: ast.AST) -> list[ast.expr]:
-    """The names an f-string, a `+` / `%` string build or a `.format()` call puts into its text unfiltered."""
+    """The names an f-string, a `+` / `%` string build, a `.format()` or a `.join()` call puts into its text."""
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
         return _shown_names([*node.args, *(keyword.value for keyword in node.keywords)])
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join":
+        return _joined_names(node.args[0]) if _is_text(node.func.value) and node.args else []
     if isinstance(node, ast.JoinedStr):
         return _shown_names([part.value for part in node.values if isinstance(part, ast.FormattedValue)])
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add | ast.Mod):
@@ -185,8 +205,10 @@ def _raw_in_output(call: ast.Call) -> list[ast.expr]:
 
 def _raw_in_placeholders(call: ast.Call) -> list[ast.expr]:
     """The names a repair issue or a flow step puts into its text through a placeholders dict."""
-    dicts = [kw.value for kw in call.keywords if kw.arg in PLACEHOLDER_KEYWORDS and isinstance(kw.value, ast.Dict)]
-    return _shown_names([value for placeholders in dicts for value in placeholders.values])
+    placeholders = [kw.value for kw in call.keywords if kw.arg in PLACEHOLDER_KEYWORDS]
+    held = [value for value in placeholders if isinstance(value, ast.Name) and getattr(value, COLLECTION_MARK, False)]
+    dicts = [value for value in placeholders if isinstance(value, ast.Dict)]
+    return [*held, *_shown_names([value for literal in dicts for value in literal.values])]
 
 
 def _name_aliases(scope: ast.AST) -> dict[str, int]:
@@ -205,6 +227,35 @@ def _name_aliases(scope: ast.AST) -> dict[str, int]:
     return aliases
 
 
+def _collected_into(node: ast.AST) -> str | None:
+    """The variable a statement fills with names: `names.append(item["name"])`, `names = [f["Name"] for f in fubs]`."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+        return node.func.value.id if node.func.attr in COLLECTION_ADDERS and _shown_names(node.args) else None
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+        value = node.value
+        holds_names = _shown_names(value.values) if isinstance(value, ast.Dict) else _joined_names(value)
+        return node.targets[0].id if not isinstance(value, ast.Name) and holds_names else None
+    return None
+
+
+def _name_collections(scope: ast.AST) -> dict[str, int]:
+    """{variable: first line} of the collections a function fills with names."""
+    collections: dict[str, int] = {}
+    for node in ast.walk(scope):
+        if (name := _collected_into(node)) is not None:
+            collections[name] = min(node.lineno, collections.get(name, node.lineno))
+    return collections
+
+
+def _mark_collections(tree: ast.Module) -> None:
+    """Mark the reads of a collection of names, per function, from the line it is first filled on."""
+    for scope in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)):
+        collections = _name_collections(scope)
+        for read in ast.walk(scope):
+            if isinstance(read, ast.Name) and read.id in collections and read.lineno >= collections[read.id]:
+                setattr(read, COLLECTION_MARK, True)
+
+
 def _mark_aliases(tree: ast.Module) -> None:
     """Mark the reads of a name alias after its first assignment, per function, as names themselves."""
     for scope in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)):
@@ -221,6 +272,7 @@ def raw_name_outputs(source: str, identity_functions: set[str] | None = None) ->
     """(line, source) of every name turned into text or output without one_line."""
     tree = ast.parse(source)
     _mark_aliases(tree)
+    _mark_collections(tree)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     found = []
     for node in ast.walk(tree):
@@ -289,6 +341,28 @@ def raw_name_outputs(source: str, identity_functions: set[str] | None = None) ->
         ('msg = f"Plan {name if name else fub_id} gone"', [(1, "name")]),
         ('_LOGGER.debug("%s", fallback or item["name"])', [(1, "item['name']")]),
         ('msg = "Plan %(plan)s gone" % {"plan": plan_name}', [(1, "plan_name")]),
+        (
+            'def f(items):\n    names = []\n    for i in items:\n        names.append(i["name"])'
+            '\n    msg = ", ".join(names)',
+            [(5, "names")],
+        ),
+        (
+            'def f(items):\n    names = [i["name"] for i in items]\n    _LOGGER.info("%s", ", ".join(sorted(names)))',
+            [(3, "names")],
+        ),
+        ('msg = ", ".join(f["Name"] for f in fubs)', [(1, "f['Name']")]),
+        ('msg = ", ".join(one_line(f["Name"]) for f in fubs)', []),
+        ('def f(items):\n    names = [one_line(i["name"]) for i in items]\n    msg = ", ".join(names)', []),
+        (
+            'def f(n):\n    d = {"plan_name": n["name"]}'
+            '\n    ir.async_create_issue(h, D, "x", translation_placeholders=d)',
+            [(3, "d")],
+        ),
+        (
+            'def f(n):\n    d = {"plan_name": n["name"]}'
+            '\n    ir.async_create_issue(h, D, "x", translation_placeholders=one_line_values(d))',
+            [],
+        ),
         ('self.async_show_form(step_id="x", description_placeholders={"name": item["name"]})', [(1, "item['name']")]),
         ('ir.async_create_issue(hass, DOMAIN, "x", translation_placeholders={"plan": plan_name})', [(1, "plan_name")]),
         ('self.async_show_form(step_id="x", description_placeholders={"name": one_line(item["name"])})', []),

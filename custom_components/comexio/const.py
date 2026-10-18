@@ -610,6 +610,11 @@ def one_line(text: object) -> str:
     return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
 
 
+def one_line_values(placeholders: Mapping[str, object]) -> dict[str, str]:
+    """Translation placeholders shown in a repair, every value on one line: the issue data keeps the raw names."""
+    return {key: one_line(value) for key, value in placeholders.items()}
+
+
 def _label_char(raw: str, index: int) -> str:
     char = raw[index]
     if char == "\\":

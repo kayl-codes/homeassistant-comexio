@@ -560,3 +560,8 @@ def test_purge_with_no_plan_left_deletes_every_expired_plan(manager: FunctionPla
 
     assert [(p["fub_id"], p["plan_name"]) for p in purged] == [(1, "Lights"), (2, "Pumps")]
     assert FakeStore.saved[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"] == {"3": {"Garage": [_snap(RECENT)]}}
+
+
+def test_the_fix_flow_shows_the_plan_names_of_its_issue_data_on_one_line() -> None:
+    placeholders = orphaned_backups.repair_placeholders({"plan_name": "Hall\nway", "current_plan": "Pumps\r\n2"})
+    assert (placeholders["plan_name"], placeholders["current_plan"]) == ("Hall way", "Pumps 2")
