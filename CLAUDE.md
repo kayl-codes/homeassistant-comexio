@@ -142,7 +142,7 @@ The coordinator's `last_audit_results` dict (populated every poll) drives both s
 | Function plan problem sensor | `comexio_{server_id}_managed_plans_problem` | `binary_sensor.{server_id}_managed_plans_problem` |
 | Free storage sensor | `comexio_{server_id}_free_storage_sensor` | `sensor.{server_id}_free_storage_sensor` |
 | Last boot sensor | `comexio_{server_id}_last_boot_sensor` | `sensor.{server_id}_last_boot_sensor` |
-| Time server problem sensor | `comexio_{server_id}_time_server_problem` | `binary_sensor.{server_id}_time_server_problem` |
+| Time server setting sensor | `comexio_{server_id}_time_server_problem` | `binary_sensor.{server_id}_time_server_problem` |
 | Plan Auto-Start switches | `comexio_{server_id}_function_plan_auto_start[_user]` | `switch.{server_id}_function_plan_auto_start[_user]` |
 | Sync button | `comexio_{server_id}_webio_sync_start_btn` | HA-derived |
 | Cancel button | `comexio_{server_id}_webio_sync_cancel_btn` | HA-derived |

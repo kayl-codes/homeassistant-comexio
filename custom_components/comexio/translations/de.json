@@ -257,7 +257,7 @@
         "name": "Problem verwaltete Pläne"
       },
       "time_server_problem": {
-        "name": "Zeitserver-Problem"
+        "name": "Zeitserver-Setting"
       }
     },
     "switch": {

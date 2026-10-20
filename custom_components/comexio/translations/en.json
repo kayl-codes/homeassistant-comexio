@@ -257,7 +257,7 @@
         "name": "Managed Plans Problem"
       },
       "time_server_problem": {
-        "name": "Time server problem"
+        "name": "Time server setting"
       }
     },
     "switch": {

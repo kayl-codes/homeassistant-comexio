@@ -257,7 +257,7 @@
         "name": "Problema planes gestionados"
       },
       "time_server_problem": {
-        "name": "Problema del servidor de hora"
+        "name": "Ajuste del servidor de hora"
       }
     },
     "switch": {
