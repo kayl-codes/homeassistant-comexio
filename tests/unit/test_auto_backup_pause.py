@@ -138,7 +138,8 @@ def test_a_restore_during_the_bulk_load_skips_this_cycles_auto_backup() -> None:
 
 def test_a_failed_restore_resumes_the_auto_backup() -> None:
     coordinator = _coordinator()
-    with pytest.raises(RuntimeError), coordinator.pause_auto_backup():
+    pause = coordinator.pause_auto_backup()
+    with pytest.raises(RuntimeError), pause:
         raise RuntimeError("restore failed")
     _cycle(coordinator)
     coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
