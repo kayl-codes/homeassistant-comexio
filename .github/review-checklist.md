@@ -117,6 +117,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   read or parse failure into "entry missing" and acts on it (#158). A failed read is also no fresh reading: the
   steps that do not depend on it still run, and steps that judge by elapsed time do not use the last known values
   as if they were new. Flag an early return on a failed read that skips the independent steps (#181).
+- **User-entered sizes are never expanded unbounded:** a value the user types that stands for many items — an ID
+  range such as `100-1000000000` in an ignore-list, a count, a span — is checked by membership or arithmetic, never
+  turned into one object per item (a set, a list, a loop over every ID). If such a value is capped, every place
+  that reads it applies the same cap the same way — the options flow, the coordinator, the services and the audit;
+  a cap only the form checks lets an older saved value or a service call through to the expanding path. Flag code
+  that expands a user-entered range or count, and a cap that only some readers apply (#198).
 - **Fail closed on every transport error:** `get_raw_config` raises a plain `ComexioConnectionError` when the
   failure has no aiohttp or timeout cause. A path that must refuse when Comexio cannot be read (a delete gate, a
   safety check) catches `ComexioConnectionError` next to `aiohttp.ClientError` and `TimeoutError`; otherwise the
