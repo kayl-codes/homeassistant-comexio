@@ -1,7 +1,7 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Set as AbstractSet
 import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -158,13 +158,16 @@ from .const import (
     category_by_fub_module_type,
     classify_audit_key,
     entity_id_migration_target,
-    expand_ignored_marker_ids,
+    format_ignored_ids,
     function_plan_ids,
     fw_update_signal,
+    ignored_id_in_ranges,
     import_disabled_issue_id,
+    invalid_ignored_tokens,
     io_audit_key,
     io_column_rows,
     one_line,
+    parse_ignored_ids,
     parse_keyword_list,
     parse_watchdog_user_plan_pick,
     plan_watch_signal,
@@ -172,6 +175,7 @@ from .const import (
     snap_to_grid,
     source_audit_key,
     source_category,
+    split_ignored_ids,
     trigger_pair_categories,
     webio_class_label,
     webio_class_name,
@@ -384,6 +388,11 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
         "webio_devices": parsed_data.get("webio_devices", {}),
         "extensions": parsed_data.get("extensions", {}),
     }
+
+
+def _ignore_list_prefix_chars(category: SourceCategory) -> str:
+    """The letter prefixes an ID in the category's ignore-list may carry, e.g. "Mm"."""
+    return category.audit_key_prefix + category.audit_key_prefix.lower()
 
 
 def _fallback_audit_key(full_name: str) -> str:
@@ -1000,7 +1009,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_poll_and_audit(self) -> dict[str, Any]:
         """Fetch and merge the config, then audit it against Comexio's Web-IO side."""
-        conf = {**self.config_entry.data, **self.config_entry.options}
+        # Taken with conf: the ignore-list audit detects any options save after this point by identity.
+        options_at_poll = self.config_entry.options
+        conf = {**self.config_entry.data, **options_at_poll}
 
         # Precompute cover keywords once per update
         self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
@@ -1058,8 +1069,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # rather than overwriting, so neither category's contribution clobbers the other's.
         self._cleanup_entity_ids = []
         self._cleanup_function_plan_count = 0
-        await self.async_check_ignored_markers(conf, final_data)
-        await self.async_check_ignored_knx(conf, final_data)
+        await self.async_check_ignored_markers(conf, final_data, options_at_poll)
+        # A marker prune writes the options, which the KNX audit then cannot tell from a user save:
+        # its stale pruning waits for the next poll — accepted, a stale K-ID costs nothing meanwhile.
+        await self.async_check_ignored_knx(conf, final_data, options_at_poll)
 
         # A missing Web-IO class ends the audit early: no plan checks, and the counts stay unpublished.
         if await self._async_audit_webio(conf, final_data, parsed_data):
@@ -5623,24 +5636,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._skip_next_listener_reload_options = None
         return options
 
-    def _ignored_ids_for(self, category: WebioClass) -> set[int]:
+    def _ignored_ids_for(self, category: WebioClass) -> AbstractSet[int]:
         """Configured IDs excluded from entity creation and Web-IO command generation for a category.
 
         Registry-driven: resolves the option key via SourceCategory.ignored_conf_key, then
-        parses it with expand_ignored_marker_ids() (comma/semicolon/space separators, optional
-        letter prefix, ranges like '8-12'). Returns an empty set if unset or unsupported.
+        parses it with parse_ignored_ids() (comma/semicolon/space separators, optional
+        letter prefix, ranges like '8-12', kept unexpanded). Empty if unset or unsupported.
         KNX bridge markers are never ignorable (see _unignorable_ids) and never returned.
         """
         return self._configured_ignored_ids(source_category(category)) - self._unignorable_ids(category)
 
-    def _configured_ignored_ids(self, category: SourceCategory) -> set[int]:
+    def _configured_ignored_ids(self, category: SourceCategory) -> AbstractSet[int]:
         """Every id in the category's ignore-list option as currently stored, unignorable ones included."""
         conf_key = category.ignored_conf_key
         if conf_key is None:
-            return set()
+            return frozenset()
         if ignored_raw := self.config_entry.options.get(conf_key, "").strip():
-            return expand_ignored_marker_ids(ignored_raw, category.audit_key_prefix + category.audit_key_prefix.lower())
-        return set()
+            return parse_ignored_ids(ignored_raw, _ignore_list_prefix_chars(category))
+        return frozenset()
 
     def _unignorable_ids(self, category: WebioClass) -> set[int]:
         """Ids of a category the ignore-list must never act on: the KNX bridge markers.
@@ -5652,16 +5665,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return set(self._knx_bridge_marker_ids) if category == WebioClass.MARKER else set()
 
     @property
-    def ignored_marker_ids(self) -> set[int]:
+    def ignored_marker_ids(self) -> AbstractSet[int]:
         """Configured marker IDs excluded from entity creation and Web-IO command generation."""
         return self._ignored_ids_for(WebioClass.MARKER)
 
     @property
-    def ignored_knx_ids(self) -> set[int]:
+    def ignored_knx_ids(self) -> AbstractSet[int]:
         """Configured KNX object IDs excluded from entity creation and Web-IO command generation."""
         return self._ignored_ids_for(WebioClass.KNX)
 
-    def ignored_ids_for(self, webio_class: WebioClass) -> set[int]:
+    def ignored_ids_for(self, webio_class: WebioClass) -> AbstractSet[int]:
         """Registry-driven public accessor for a category's ignore-list (markers/KNX)."""
         return self._ignored_ids_for(webio_class)
 
@@ -5672,7 +5685,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return active_webio_classes(conf)
 
     async def async_check_ignored_sources(
-        self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass
+        self,
+        conf: dict[str, Any],
+        final_data: dict[str, Any],
+        webio_class: WebioClass,
+        options_at_poll: Mapping[str, Any],
     ) -> None:
         """Check ignored source IDs and manage repair issues (registry-driven: markers=2/KNX=11).
 
@@ -5683,6 +5700,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
           self._cleanup_entity_ids / self._cleanup_function_plan_count accumulator (reset once
           per audit cycle by the caller, see the "IGNORED SOURCES AUDIT" block above).
         - IDs whose source exists but has no entities/links are the intended normal state — no action.
+
+        options_at_poll is the options mapping conf was built from; a save since then defers the
+        stale pruning to the next poll (see _ignore_list_saved_since).
         """
         category = source_category(webio_class)
         conf_key = category.ignored_conf_key
@@ -5706,46 +5726,61 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not self._last_poll_scraped:
             return
 
-        stale_ids = await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else set()
+        stale_ids, cleanup_ids, affected_fub_ids = (
+            await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else (set(), [], set())
+        )
+        if self._ignore_list_saved_since(options_at_poll, conf, conf_key):
+            # The verdicts judge the list the audit read, not the one the user saved meanwhile
+            # (which may re-add an ID for a source created since, or unignore a source with
+            # leftovers): the next poll re-judges both.
+            stale_ids, cleanup_ids, affected_fub_ids = set(), [], set()
+        # Extend the shared cleanup accumulator for the combined sync_mismatch repair
+        self._cleanup_entity_ids.extend((webio_class.value, sid) for sid in cleanup_ids)
+        self._cleanup_function_plan_count += len(affected_fub_ids)
         # Bridge markers come from the unfiltered scrape, so they are known (and pruned) even
         # while the category is opted out.
         self._prune_ignored_ids(category, webio_class, conf_key, stale_ids)
 
     async def _audit_ignored_sources(
         self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass, conf_key: str
-    ) -> set[int]:
-        """Audit an active category's ignore-list; return its stale IDs and extend the cleanup accumulator."""
+    ) -> tuple[set[int], list[int], set[int]]:
+        """Audit an active category's ignore-list -> (stale IDs, IDs to clean up, affected plan IDs)."""
         category = source_category(webio_class)
         ignored_raw = conf.get(conf_key, "").strip()
         if not ignored_raw:
             ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
-            return set()
+            return set(), [], set()
 
         sources_by_id = {int(item["id"]): item for item in final_data.get(category.data_key, [])}
         stale_ids: set[int] = set()
         cleanup_ids: list[int] = []
         affected_fub_ids: set[int] = set()
 
-        all_ignored_ids = expand_ignored_marker_ids(
-            ignored_raw, category.audit_key_prefix + category.audit_key_prefix.lower()
-        )
+        single_ids, ranges = split_ignored_ids(ignored_raw, _ignore_list_prefix_chars(category))
+        # A range contributes only the sources Comexio has in it: its gaps are never stale, and
+        # walking every ID of a wide range would cost memory and time on every poll.
+        audited_ids = single_ids | {sid for sid in sources_by_id if ignored_id_in_ranges(sid, ranges)}
         # Only managed plans: the cleanup never touches a user's own plan (e.g. the one the
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
         lp_plans = await self._load_managed_plan_check_data()
         ref_type = int(category.fub_module_type)
-        ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids), category.unique_id_infix).keys())
+        ids_with_entities = set(self.marker_entities_by_id(list(audited_ids), category.unique_id_infix).keys())
         _LOGGER.debug(
-            "[%s] async_check_ignored_sources[%s]: ignored=%s, plans_loaded=%s",
+            "[%s] async_check_ignored_sources[%s]: audited=%s, ranges=%s, plans_loaded=%s",
             self.server_id,
             category.label,
-            sorted(all_ignored_ids),
+            sorted(audited_ids),
+            sorted(ranges),
             sorted(lp_plans.keys()),
         )
-        for source_id in sorted(all_ignored_ids - self._unignorable_ids(webio_class)):
+        for source_id in sorted(audited_ids - self._unignorable_ids(webio_class)):
             source = sources_by_id.get(source_id)
-            if not source or not source.get("name", "").strip():
-                # Source no longer exists in Comexio → stale, auto-remove
-                stale_ids.add(source_id)
+            if not source:
+                # A single ID whose source no longer exists in Comexio → stale, auto-remove (a range
+                # only yields the sources Comexio has). An existing source stays ignored even when it
+                # is unnamed ("#nn"), so its leftover entities and links are checked below.
+                if source_id in single_ids:
+                    stale_ids.add(source_id)
                 continue
 
             # Source exists and is intentionally ignored — only flag if legacy entities/links remain
@@ -5764,28 +5799,41 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if has_entities or function_plan_fub_id is not None:
                 cleanup_ids.append(source_id)
 
-        # Extend the shared cleanup accumulator for the combined sync_mismatch repair
-        self._cleanup_entity_ids.extend((webio_class.value, sid) for sid in cleanup_ids)
-        self._cleanup_function_plan_count += len(affected_fub_ids)
         # Remove legacy ignored_<category>_cleanup issue if it still exists from an older version
         ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
-        return stale_ids
+        return stale_ids, cleanup_ids, affected_fub_ids
+
+    def _ignore_list_saved_since(self, options_at_poll: Mapping[str, Any], conf: dict[str, Any], conf_key: str) -> bool:
+        """True if the options were saved since conf was read, or the ignore-list differs from conf.
+
+        HA replaces the options mapping on every save, so a save that restored the audited
+        string (A -> B -> A) still counts.
+        """
+        current_raw = self.config_entry.options.get(conf_key, "")
+        return self.config_entry.options is not options_at_poll or current_raw.strip() != conf.get(conf_key, "").strip()
 
     def _prune_ignored_ids(
         self, category: SourceCategory, webio_class: WebioClass, conf_key: str, stale_ids: set[int]
     ) -> None:
-        """Drop stale and unignorable IDs from the ignore-list option — one update, separate notifications.
+        """Drop stale and unignorable single IDs from the ignore-list option — one update, separate notifications.
 
         Re-reads the option instead of the poll's conf snapshot: an options-flow save that landed
         while the audit awaited the plan data would otherwise be overwritten, dropping IDs the
         user just added and reactivating their sources.
+
+        Ranges are kept as written: a range covering a bridge marker or a gap would otherwise be
+        flattened into single IDs on every poll. The bridge markers in it stay unignored anyway
+        (_ignored_ids_for leaves them out).
         """
-        current_ids = self._configured_ignored_ids(category)
-        stale = current_ids & stale_ids
-        protected = current_ids & self._unignorable_ids(webio_class)
+        raw = self.config_entry.options.get(conf_key, "")
+        single_ids, ranges = split_ignored_ids(raw, _ignore_list_prefix_chars(category))
+        stale = single_ids & stale_ids
+        protected = single_ids & self._unignorable_ids(webio_class)
         if not (stale or protected):
             return
-        self._remove_ignored_ids(conf_key, current_ids - stale - protected)
+        if invalid := invalid_ignored_tokens(raw, _ignore_list_prefix_chars(category)):
+            _LOGGER.warning("Dropping invalid entries %s from the %s option", invalid, conf_key)
+        self._write_ignored_ids(conf_key, format_ignored_ids(single_ids - stale - protected, ranges))
         if stale:
             self._notify_removed_ignored_ids(
                 category,
@@ -5803,11 +5851,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "and can never be ignored.",
             )
 
-    def _remove_ignored_ids(self, conf_key: str, remaining_ids: set[int]) -> None:
-        """Rewrite an ignore-list option to remaining_ids (dropping the key when empty), without a reload."""
+    def _write_ignored_ids(self, conf_key: str, ignored_raw: str) -> None:
+        """Rewrite an ignore-list option to ignored_raw (dropping the key when empty), without a reload."""
         new_options = {**self.config_entry.options}
-        if remaining_ids:
-            new_options[conf_key] = ",".join(str(i) for i in sorted(remaining_ids))
+        if ignored_raw:
+            new_options[conf_key] = ignored_raw
         else:
             new_options.pop(conf_key, None)
         self.request_options_update_without_reload(new_options)
@@ -5827,13 +5875,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             notification_id=f"comexio_{reason_key}_ignored_{category.key.value}_{self.server_id}",
         )
 
-    async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
+    async def async_check_ignored_markers(
+        self, conf: dict[str, Any], final_data: dict[str, Any], options_at_poll: Mapping[str, Any]
+    ) -> None:
         """Check ignored marker IDs and manage repair issues (thin wrapper, see async_check_ignored_sources)."""
-        await self.async_check_ignored_sources(conf, final_data, WebioClass.MARKER)
+        await self.async_check_ignored_sources(conf, final_data, WebioClass.MARKER, options_at_poll)
 
-    async def async_check_ignored_knx(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
+    async def async_check_ignored_knx(
+        self, conf: dict[str, Any], final_data: dict[str, Any], options_at_poll: Mapping[str, Any]
+    ) -> None:
         """Check ignored KNX object IDs and manage repair issues (thin wrapper, see async_check_ignored_sources)."""
-        await self.async_check_ignored_sources(conf, final_data, WebioClass.KNX)
+        await self.async_check_ignored_sources(conf, final_data, WebioClass.KNX, options_at_poll)
 
     async def async_detect_orphaned_statistics(self) -> list[str]:
         """Return statistic_ids for this integration that no longer have a matching entity.
@@ -7093,7 +7145,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "webio_class": WEBIO_CLASS_KNX,
         }
 
-    def _knx_dpt_suffix_ignored_ids(self) -> set[int]:
+    def _knx_dpt_suffix_ignored_ids(self) -> AbstractSet[int]:
         """Ids the user chose "leave as writable switch" for in the knx_dpt_ambiguous repair
         flow (CONF_KNX_DPT_SUFFIX_IGNORED) — shared by both the auto-tag and the audit below
         so a manual opt-out (added by hand to the option, e.g. for an unambiguous DPT the
@@ -7101,7 +7153,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
         raw = self.config_entry.options.get(CONF_KNX_DPT_SUFFIX_IGNORED, "").strip()
-        return expand_ignored_marker_ids(raw, knx_prefix + knx_prefix.lower())
+        return parse_ignored_ids(raw, knx_prefix + knx_prefix.lower())
 
     async def _auto_suffix_unambiguous_knx(self, knx_items: list[dict[str, Any]]) -> None:
         """Auto-append "[RO]" to a digital KNX object whose DPT is semantically unambiguous

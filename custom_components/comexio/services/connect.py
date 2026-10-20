@@ -6,6 +6,7 @@ connects markers to their matching WebIO commands on the plan canvas, reusing ex
 canvas elements where possible and claiming free grid slots (via ._grid) for new ones.
 """
 
+from collections.abc import Set as AbstractSet
 import logging
 import time
 
@@ -19,8 +20,9 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_X_WEBIO as _LAYOUT_X_WEBIO,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
-    expand_ignored_marker_ids,
+    IgnoredIds,
     one_line,
+    parse_ignored_ids,
 )
 from ._context import (
     _ensure_comexio_login,
@@ -34,17 +36,17 @@ from ._grid import _find_first_free_grid_position, _get_occupied_grid_slots
 _LOGGER = logging.getLogger(__name__)
 
 
-def _parse_ignored_marker_ids(conf: dict) -> set[int]:
-    """Parse the ignored_markers option string into a set of marker IDs.
+def _parse_ignored_marker_ids(conf: dict) -> IgnoredIds:
+    """Parse the ignored_markers option string into the marker IDs it covers.
 
-    Delegates entirely to expand_ignored_marker_ids (see its docstring for separator/
+    Delegates entirely to parse_ignored_ids (see its docstring for separator/
     whitespace/range/invalid-token handling) so this wrapper can't drift from it.
     """
-    return expand_ignored_marker_ids(conf.get(CONF_IGNORED_MARKERS, ""))
+    return parse_ignored_ids(conf.get(CONF_IGNORED_MARKERS, ""))
 
 
 def _resolve_requested_marker_ids(
-    raw_input: str, all_markers: bool, markers_by_id: dict, ignored_ids: set[int]
+    raw_input: str, all_markers: bool, markers_by_id: dict, ignored_ids: AbstractSet[int]
 ) -> tuple[list[int], list[str]]:
     """Resolve the requested marker IDs from the service call's `marker_id`/`all_markers` input.
 

@@ -1,7 +1,7 @@
 # Version: 0.7.5
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
 import logging
 import math
@@ -62,6 +62,7 @@ from .const import (
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
+    WEBIO_CLASSES,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     category_by_fub_module_type,
     function_plan_id,
@@ -1287,6 +1288,10 @@ class ComexioAPI:
             knx_live_states=knx_live_states,
             knx_dpt_catalog=knx_dpt_catalog,
         )
+        # HA does not import Quickbus IOs (Multitouch, motion sensors) yet (#86): no entities and no
+        # Web-IO commands for them, and no QUICKBUS Web-IO class. io_all keeps them for plan labels.
+        data["io"] = [io for io in data["io"] if io.get("quickbus") is None]
+        data["webio_devices"] = {cls: dev for cls, dev in data.get("webio_devices", {}).items() if cls in WEBIO_CLASSES}
         _LOGGER.info(
             "Audit: %d Markers, %d IOs, %d KNX, %d Webhooks in Comexio for %s",
             len(data["markers"]),
@@ -1575,8 +1580,8 @@ class ComexioAPI:
         server_id: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the list of Web-IO command dicts for the given parsed configuration.
 
@@ -1611,8 +1616,8 @@ class ComexioAPI:
         webio_name: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> str:
         """Generate the upload-ready JSON string for the Comexio Web-IO importer.
 
@@ -5033,7 +5038,7 @@ class ComexioAPI:
             else:
                 await self.client.set_io_value(ext, identifier, value)
         except (ComexioError, ValueError) as err:
-            # ValueError: a target id that is no number, rejected before anything is sent.
+            # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, err)
             return False
         return True
