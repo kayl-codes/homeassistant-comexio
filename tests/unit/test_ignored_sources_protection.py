@@ -571,8 +571,9 @@ def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
     coordinator.async_check_ignored_markers = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_check_ignored_knx = AsyncMock(side_effect=_AuditReached)  # type: ignore[method-assign]
 
+    poll = coordinator._async_poll_and_audit()
     with pytest.raises(_AuditReached):
-        asyncio.run(coordinator._async_poll_and_audit())
+        asyncio.run(poll)
 
     for audit in (coordinator.async_check_ignored_markers, coordinator.async_check_ignored_knx):
         conf, _final_data, options_at_poll = audit.await_args.args

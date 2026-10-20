@@ -266,7 +266,9 @@ def test_wide_ranges_combine_and_compare_without_being_expanded() -> None:
         assert wider - wide == IgnoredIds({0}, {(100000000000000000000, 199999999999999999999)})
         assert (wide & wider) == wide
         assert (wide | wider) == wider
-        assert wide < wider and wider > wide and wide != wider
+        assert wide < wider
+        assert wider > wide
+        assert wide != wider
         assert not wide.isdisjoint(wider)
         assert wide != {1, 2}
         assert not wide <= {1, 2}
@@ -282,8 +284,12 @@ def test_wide_range_minus_bridge_markers_and_xor_stay_unexpanded() -> None:
 
     with patch.object(IgnoredIds, "__iter__", _no_expansion), patch.object(IgnoredIds, "__len__", _no_expansion):
         holed = wide - {333, 5}
-        assert holed and 4 in holed and 6 in holed and 334 in holed
-        assert 5 not in holed and 333 not in holed
+        assert holed
+        assert 4 in holed
+        assert 6 in holed
+        assert 334 in holed
+        assert 5 not in holed
+        assert 333 not in holed
         assert wide ^ holed == IgnoredIds({5, 333})
 
 
