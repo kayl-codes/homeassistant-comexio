@@ -1,4 +1,4 @@
-"""The user step of the config flow."""
+"""The user and reauth steps of the config flow."""
 
 from collections.abc import Generator
 from typing import Any
@@ -12,9 +12,18 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 import voluptuous as vol
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import CONF_HOST, CONF_PASSWORD, CONF_SERVER_ID, CONF_USERNAME, DOMAIN
+from custom_components.comexio.const import (
+    CONF_API_PASSWORD,
+    CONF_API_USERNAME,
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_SCHEMA_MARKER,
+    CONF_SERVER_ID,
+    CONF_USERNAME,
+    DOMAIN,
+)
 
-from .conftest import HOST
+from .conftest import HOST, SERVER_ID
 
 USER_INPUT = {
     CONF_SERVER_ID: " IOSRV2 ",
@@ -60,13 +69,27 @@ async def test_user_flow_creates_entry(hass: HomeAssistant, mock_comexio_api: li
     mock_comexio_api[0].close.assert_called_once()
 
 
-@pytest.mark.logged_exception  # _test_connection logs the failed login with its traceback
-@pytest.mark.parametrize(
-    ("login", "error"),
-    [(False, "invalid_auth"), (OSError("unreachable"), "cannot_connect")],
+# (login result, ComexioAPI attributes after it, form error): Comexio refusing, not answering, transport error.
+LOGIN_ERROR_CASES = pytest.mark.parametrize(
+    ("login", "api_attributes", "error"),
+    [
+        (False, {"last_login_error": "rejected"}, "invalid_auth"),
+        (False, {"last_login_error": "connection"}, "cannot_connect"),
+        (OSError("unreachable"), {}, "cannot_connect"),
+    ],
+    ids=["rejected", "unreachable", "transport_error"],
 )
+
+
+@pytest.mark.logged_exception  # _test_connection logs the failed login with its traceback
+@LOGIN_ERROR_CASES
 async def test_user_flow_login_errors(
-    hass: HomeAssistant, mock_comexio_api: list[ComexioAPI], api_returns: dict, login: Any, error: str
+    hass: HomeAssistant,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    login: Any,
+    error: str,
 ) -> None:
     """A rejected or failed login shows the form again with the matching error and closes the session."""
     api_returns["login"] = login
@@ -106,3 +129,121 @@ async def test_user_form_suggests_lowest_free_server_id(hass: HomeAssistant) -> 
 
     defaults = {str(key): key.default() for key in result["data_schema"].schema if key.default is not vol.UNDEFINED}
     assert defaults[CONF_SERVER_ID] == "iosrv2"
+
+
+REAUTH_INPUT = {CONF_USERNAME: "admin2", CONF_PASSWORD: "new-secret"}
+
+
+async def _submit_reauth(hass: HomeAssistant, entry: MockConfigEntry, user_input: dict[str, Any]) -> dict[str, Any]:
+    result = await entry.start_reauth_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    return await hass.config_entries.flow.async_configure(result["flow_id"], user_input)
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_reauth_updates_the_credentials_and_reloads(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """New credentials are tested, replace the stored ones (other data stays) and reload the entry."""
+    mock_config_entry.add_to_hass(hass)
+    data_before = dict(mock_config_entry.data)
+    hass.config_entries.async_update_entry(
+        mock_config_entry, options={CONF_PASSWORD: "stale", CONF_SCHEMA_MARKER: "M{MarkerId}"}
+    )
+
+    with patch.object(hass.config_entries, "async_schedule_reload") as reload:
+        result = await _submit_reauth(hass, mock_config_entry, dict(REAUTH_INPUT))
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert dict(mock_config_entry.data) == {**data_before, **REAUTH_INPUT}
+    # A password left in options from an older version would shadow the new one; real options stay.
+    assert dict(mock_config_entry.options) == {CONF_SCHEMA_MARKER: "M{MarkerId}"}
+    reload.assert_called_once_with(mock_config_entry.entry_id)
+    api = mock_comexio_api[0]
+    assert (api.username, api.password) == ("admin2", "new-secret")
+    api.close.assert_called_once()
+
+
+@pytest.mark.logged_exception  # _test_connection logs the failed login with its traceback
+@LOGIN_ERROR_CASES
+async def test_reauth_login_errors_keep_the_stored_credentials(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    login: Any,
+    error: str,
+) -> None:
+    """A failed test login shows the form again with the matching error and changes nothing."""
+    api_returns["login"] = login
+    mock_config_entry.add_to_hass(hass)
+    data_before = dict(mock_config_entry.data)
+
+    result = await _submit_reauth(hass, mock_config_entry, dict(REAUTH_INPUT))
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": error}
+    assert dict(mock_config_entry.data) == data_before
+    mock_comexio_api[0].close.assert_called_once()
+
+
+RECONFIGURE_INPUT = {CONF_HOST: "192.168.1.20", CONF_USERNAME: "admin2", CONF_API_USERNAME: "api"}
+
+
+async def _submit_reconfigure(
+    hass: HomeAssistant, entry: MockConfigEntry, user_input: dict[str, Any]
+) -> dict[str, Any]:
+    result = await entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+    return await hass.config_entries.flow.async_configure(result["flow_id"], user_input)
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_reconfigure_keeps_blank_passwords_and_cleans_options(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Left-blank passwords keep the stored ones; the login test uses them; credentials leave the options."""
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_config_entry, options={CONF_PASSWORD: "stale", CONF_SCHEMA_MARKER: "M{MarkerId}"}
+    )
+    data_before = dict(mock_config_entry.data)
+
+    result = await _submit_reconfigure(hass, mock_config_entry, dict(RECONFIGURE_INPUT))
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert dict(mock_config_entry.data) == {**data_before, **RECONFIGURE_INPUT, CONF_API_PASSWORD: ""}
+    assert dict(mock_config_entry.options) == {CONF_SCHEMA_MARKER: "M{MarkerId}"}
+    assert mock_config_entry.title == f"Comexio {SERVER_ID} (192.168.1.20)"
+    api = mock_comexio_api[0]
+    assert (api.host, api.username, api.password) == ("192.168.1.20", "admin2", data_before[CONF_PASSWORD])
+
+
+@pytest.mark.logged_exception  # _test_connection logs the failed login with its traceback
+@LOGIN_ERROR_CASES
+async def test_reconfigure_login_errors_keep_the_stored_settings(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    login: Any,
+    error: str,
+) -> None:
+    """A failed test login shows the form again with the matching error and changes nothing."""
+    api_returns["login"] = login
+    mock_config_entry.add_to_hass(hass)
+    data_before = dict(mock_config_entry.data)
+
+    result = await _submit_reconfigure(hass, mock_config_entry, dict(RECONFIGURE_INPUT))
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": error}
+    assert dict(mock_config_entry.data) == data_before
+    mock_comexio_api[0].close.assert_called_once()

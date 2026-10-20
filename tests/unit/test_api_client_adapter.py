@@ -256,6 +256,20 @@ def test_get_raw_config_failed_re_login_is_empty(comexio_api: ComexioAPI, client
     assert asyncio.run(comexio_api.get_raw_config()) == {}
     assert comexio_api.last_login_error == "rejected"
     assert comexio_api.config_relogin_unreachable is False  # Comexio answered
+    assert comexio_api.config_relogin_rejected is True  # the poll asks for reauth
+
+
+def test_get_raw_config_rejected_flag_is_for_this_fetch_only(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """A refused re-login flags its own fetch; the next good fetch clears it although last_login_error stays."""
+    _fail(client, "get_raw_config", ComexioAuthenticationError("lapsed"))
+    _fail(client, "login", ComexioAuthenticationError("rejected"))
+    asyncio.run(comexio_api.get_raw_config())
+    assert comexio_api.config_relogin_rejected is True
+
+    client.get_raw_config = AsyncMock(return_value=RawConfig({"FubModules": {"2": {}}}, {}, {}, None))
+    asyncio.run(comexio_api.get_raw_config())
+    assert comexio_api.config_relogin_rejected is False
+    assert comexio_api.last_login_error == "rejected"
 
 
 def test_get_raw_config_unanswered_re_login_is_flagged_for_this_fetch_only(
@@ -266,6 +280,7 @@ def test_get_raw_config_unanswered_re_login_is_flagged_for_this_fetch_only(
     _fail(client, "login", _connection_error())
     assert asyncio.run(comexio_api.get_raw_config()) == {}
     assert comexio_api.config_relogin_unreachable is True
+    assert comexio_api.config_relogin_rejected is False  # no answer is no refusal: no reauth
 
     client.get_raw_config = AsyncMock(return_value=RawConfig({"FubModules": {"2": {}}}, {}, {}, None))
     asyncio.run(comexio_api.get_raw_config())

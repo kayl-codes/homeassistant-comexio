@@ -800,6 +800,8 @@ FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC = 600
 SETUP_UNREACHABLE_ENTRIES = f"{DOMAIN}_setup_unreachable"
 # ComexioAPI.last_login_error when the server could not be reached or answered garbage.
 LOGIN_ERROR_CONNECTION = "connection"
+# ComexioAPI.last_login_error when Comexio answered and refused the credentials (setup and poll ask for reauth).
+LOGIN_ERROR_REJECTED = "rejected"
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"

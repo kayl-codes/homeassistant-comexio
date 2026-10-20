@@ -18,7 +18,7 @@ import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, State, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
@@ -126,6 +126,7 @@ from .const import (
     ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     LOGIN_ERROR_CONNECTION,
+    LOGIN_ERROR_REJECTED,
     MARKER_READ_ONLY_SUFFIX,
     PLAN_TRANSITION_STARTING,
     PREVIEW_CARD_ALIVE_SEC,
@@ -1003,6 +1004,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         try:
             return await self._async_poll_and_audit()
+        except ConfigEntryAuthFailed:
+            raise  # No fault of the poll: get_raw_config logged the refused re-login.
         except Exception as e:
             _LOGGER.exception("[%s] Data fetch failed: %s", self.server_id, e)
             raise
@@ -1095,6 +1098,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self.api.config_relogin_unreachable:
             # The re-login after a lapsed session (e.g. a reboot) got no reply.
             self.note_comexio_unreachable()
+        if self.api.config_relogin_rejected:
+            # Changed credentials: HA starts the reauth flow and stops polling until it updates the entry.
+            raise ConfigEntryAuthFailed(f"Comexio at {self.api.host} rejected the stored credentials")
         # aiocomexio decodes each page variable on its own, so $FubModules alone does not
         # prove $Fubs was read; an empty plan list still decodes to a dict.
         if isinstance(fubs := raw_config.get("Fubs"), dict):
@@ -5181,7 +5187,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self.api.last_login_error == LOGIN_ERROR_CONNECTION:
             # The fetch's own error was the lapsed session, but the re-login got no reply: an outage too.
             self.note_comexio_unreachable()
-        if self.api.last_login_error == "rejected":
+        if self.api.last_login_error == LOGIN_ERROR_REJECTED:
             self._plan_run_state_relogin_refused = True
             _LOGGER.warning(
                 "[%s] Comexio refused the re-login for the function plan run states; waiting for the next full poll",

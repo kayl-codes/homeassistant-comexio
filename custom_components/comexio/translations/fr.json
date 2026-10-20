@@ -37,10 +37,19 @@
           "password": "Laisser vide pour conserver le mot de passe existant.",
           "api_password": "Laisser vide pour conserver le mot de passe existant."
         }
+      },
+      "reauth_confirm": {
+        "title": "Réauthentifier Comexio",
+        "description": "Comexio à {host} a refusé les identifiants administrateur enregistrés. Saisissez les identifiants actuels.",
+        "data": {
+          "username": "Nom d'utilisateur (Admin)",
+          "password": "Mot de passe (Admin)"
+        }
       }
     },
     "abort": {
-      "reconfigure_successful": "Paramètres de connexion mis à jour avec succès."
+      "reconfigure_successful": "Paramètres de connexion mis à jour avec succès.",
+      "reauth_successful": "Réauthentification réussie."
     }
   },
   "selector": {

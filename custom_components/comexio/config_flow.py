@@ -24,6 +24,7 @@ from .const import (
     DEFAULT_HOST,
     DOMAIN,
     KNOWN_DOMAINS,
+    LOGIN_ERROR_CONNECTION,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
 )
@@ -190,16 +191,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not user_input.get(CONF_API_PASSWORD):
                 merged[CONF_API_PASSWORD] = entry.data.get(CONF_API_PASSWORD, "")
 
-            try:
-                await self._test_connection(merged)
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
-            except Exception:
-                _LOGGER.exception("Unexpected error during reconfigure")
-                errors["base"] = "unknown"
-            else:
+            errors = await self._connection_errors(merged)
+            if not errors:
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
                 return self.async_update_reload_and_abort(
                     entry,
@@ -223,6 +216,47 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reauth(self, entry_data):
+        """Start when Comexio refuses the stored admin credentials (at setup or on a poll)."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None):
+        """Ask for new admin credentials, test them and reload the entry with them."""
+        entry = self._get_reauth_entry()
+        errors = {}
+
+        if user_input is not None:
+            errors = await self._connection_errors({**entry.data, **user_input})
+            if not errors:
+                # Like reconfigure: credentials left in options from older versions would shadow the new ones.
+                clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
+                return self.async_update_reload_and_abort(entry, data_updates=user_input, options=clean_options)
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME, default=entry.data.get(CONF_USERNAME, "admin")): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
+            description_placeholders={"host": entry.data[CONF_HOST]},
+            errors=errors,
+        )
+
+    async def _connection_errors(self, user_input) -> dict[str, str]:
+        """Form errors of a login test with these credentials; empty when it succeeds.
+
+        _test_connection turns every other failure into CannotConnect (and logs it).
+        """
+        try:
+            await self._test_connection(user_input)
+        except CannotConnect:
+            return {"base": "cannot_connect"}
+        except InvalidAuth:
+            return {"base": "invalid_auth"}
+        return {}
+
     async def _test_connection(self, user_input):
         """Test if the login works using UI credentials."""
         api = None
@@ -238,10 +272,13 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.debug("Testing login credentials for %s", user_input[CONF_HOST])
             success = await api.login()
             if not success:
+                if api.last_login_error == LOGIN_ERROR_CONNECTION:
+                    _LOGGER.error("Login test could not reach Comexio at %s", user_input[CONF_HOST])
+                    raise CannotConnect
                 _LOGGER.error("Login test failed for user %s", user_input[CONF_USERNAME])
                 raise InvalidAuth
         except Exception as e:
-            if not isinstance(e, InvalidAuth):
+            if not isinstance(e, InvalidAuth | CannotConnect):
                 _LOGGER.exception("Connection test failed: %s", e)
                 raise CannotConnect from e
             raise

@@ -37,10 +37,19 @@
           "password": "Leave blank to keep the existing password.",
           "api_password": "Leave blank to keep the existing password."
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Comexio",
+        "description": "Comexio at {host} rejected the stored admin credentials. Enter the current ones.",
+        "data": {
+          "username": "Username (Admin UI)",
+          "password": "Password (Admin UI)"
+        }
       }
     },
     "abort": {
-      "reconfigure_successful": "Connection settings updated successfully."
+      "reconfigure_successful": "Connection settings updated successfully.",
+      "reauth_successful": "Re-authentication successful."
     }
   },
   "selector": {

@@ -37,10 +37,19 @@
           "password": "Leer lassen, um das bestehende Passwort beizubehalten.",
           "api_password": "Leer lassen, um das bestehende Passwort beizubehalten."
         }
+      },
+      "reauth_confirm": {
+        "title": "Comexio erneut anmelden",
+        "description": "Comexio unter {host} hat die gespeicherten Admin-Zugangsdaten abgelehnt. Gib die aktuellen ein.",
+        "data": {
+          "username": "Benutzername (Admin-Oberfläche)",
+          "password": "Passwort (Admin-Oberfläche)"
+        }
       }
     },
     "abort": {
-      "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert."
+      "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert.",
+      "reauth_successful": "Erneute Anmeldung erfolgreich."
     }
   },
   "selector": {

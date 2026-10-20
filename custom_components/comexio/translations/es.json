@@ -37,10 +37,19 @@
           "password": "Dejar en blanco para mantener la contraseña existente.",
           "api_password": "Dejar en blanco para mantener la contraseña existente."
         }
+      },
+      "reauth_confirm": {
+        "title": "Volver a autenticar Comexio",
+        "description": "Comexio en {host} rechazó las credenciales de administrador guardadas. Introduce las actuales.",
+        "data": {
+          "username": "Usuario (Administrador)",
+          "password": "Contraseña (Administrador)"
+        }
       }
     },
     "abort": {
-      "reconfigure_successful": "Configuración de conexión actualizada correctamente."
+      "reconfigure_successful": "Configuración de conexión actualizada correctamente.",
+      "reauth_successful": "Reautenticación correcta."
     }
   },
   "selector": {
