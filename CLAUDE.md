@@ -47,7 +47,7 @@ pytest tests/ha -o asyncio_mode=auto
 ## Code quality rules
 
 - Line length: 120 (see `pyproject.toml`)
-- Ruff rule sets: B, C4, E, F, I, SIM, UP, W
+- Ruff rule sets: B, C4, E, F, I, SIM, UP, W, plus PT012/PT018 (one raising call per `pytest.raises`, no composite asserts — SonarCloud S5778/S9073)
 - Sourcery enabled for all files except `.github/` and `tests/`
 - Cognitive complexity ≤ 15; no duplicated string literals (extract constants)
 - **Tests alongside ruff:** every change runs `pytest tests/unit` (and, for HA-facing code, `pytest tests/ha` in WSL) in addition to `ruff check` / `ruff format` before it counts as done (the pre-commit hook `pytest-unit` and the CI job `tests` enforce the same). A red test is a finding, not an obstacle — never delete or loosen an assertion to make it pass.
