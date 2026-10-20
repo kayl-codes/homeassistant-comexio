@@ -65,7 +65,9 @@ IDENTITY_FUNCTIONS = {
         "hub_era_object_id",  # an entity's object id
         "io_audit_key",  # the audit map's key of an IO
         "extension_firmware_update_unique_id",  # an entity's unique_id
+        "extension_firmware_object_id",  # an entity's object id
     },
+    "entity.py": {"extension_device_identifier"},  # a device registry identifier
     "function_plan_block_keys.py": {"_unresolved_element"},  # the element name written into the plan
     "function_plan_block_settings.py": {"block_settings_form"},  # the form field names Comexio's editor sends
     "coordinator.py": {

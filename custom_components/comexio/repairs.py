@@ -17,6 +17,7 @@ from .cleanup_scope import (
     CLEANUP_SCOPE_IO,
     CLEANUP_SCOPE_KNX,
     CLEANUP_SCOPE_MARKER,
+    CLEANUP_SCOPE_QUICKBUS,
     CLEANUP_SCOPES,
     SKIPPED_KNX_BRIDGE_MARKERS,
     count_placeholder,
@@ -179,6 +180,7 @@ _CLEANUP_SCOPE_LABELS = {
     CLEANUP_SCOPE_MARKER: f"{ICON_DELETE} Markers only",
     CLEANUP_SCOPE_IO: f"{ICON_DELETE} IOs only",
     CLEANUP_SCOPE_KNX: f"{ICON_DELETE} KNX only",
+    CLEANUP_SCOPE_QUICKBUS: f"{ICON_DELETE} Quickbus only",
 }
 
 
@@ -909,7 +911,7 @@ class ComexioRepairFlow(RepairsFlow):
         """Handle the uninstall/cleanup repair flow (cleanup button + KNX pre-release cleanup issue).
 
         Tears down what the integration created in Comexio for the chosen scope
-        (full / marker / io / knx, see cleanup_scope): HA-managed Function Plans, then the
+        (full / marker / io / knx / quickbus, see cleanup_scope): HA-managed Function Plans, then the
         Web-IO device instances, then the Web-IO device classes; knx/full also reset the
         KNX bridge markers. This is destructive and not reversible, so — unlike the other
         fix flows — the default choice is 'ignore' unless the issue names a default scope

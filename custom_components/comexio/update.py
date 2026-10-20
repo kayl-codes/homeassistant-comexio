@@ -1,4 +1,5 @@
 # Version: 0.1.2
+import asyncio
 from typing import Any
 
 from homeassistant.components.update import UpdateDeviceClass, UpdateEntity
@@ -7,11 +8,20 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback, EntityPlatform
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, extension_firmware_update_unique_id, fw_update_signal
+from .const import (
+    BASE_EXTENSION_NAME,
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    DOMAIN,
+    extension_device_name,
+    extension_firmware_object_id,
+    extension_firmware_update_unique_id,
+    fw_update_signal,
+    is_base_extension,
+)
 from .coordinator import ComexioCoordinator
-from .entity import build_device_info
+from .entity import build_device_info, extension_device_identifier
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -27,7 +37,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         {
             io["ext_name"]
             for io in coordinator.data.get("io", [])
-            if (not io.get("offline") or include_offline) and io["ext_name"].upper() != "BASE"
+            if (not io.get("offline") or include_offline) and not is_base_extension(io["ext_name"])
         }
     )
     entities: list[UpdateEntity] = [ComexioBaseFirmwareUpdate(coordinator, coordinator.server_id)]
@@ -107,7 +117,7 @@ class ComexioBaseFirmwareUpdate(ComexioFirmwareUpdateBase):
         return build_device_info(
             self.coordinator,
             identifiers={(DOMAIN, f"{self.coordinator.server_id}_BASE".lower())},
-            name=f"{self.coordinator.server_id} BASE",
+            name=extension_device_name(self.coordinator.server_id, BASE_EXTENSION_NAME),
             model="Extension Module",
         )
 
@@ -120,11 +130,18 @@ class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
         self._ext_name = ext_name
         self._attr_unique_id = extension_firmware_update_unique_id(server_id, ext_name)
 
+    def add_to_platform_start(
+        self, hass: HomeAssistant, platform: EntityPlatform, parallel_updates: asyncio.Semaphore | None
+    ) -> None:
+        # The device name carries an "EXT - " tag now; a new install keeps the id HA derived before it.
+        super().add_to_platform_start(hass, platform, parallel_updates)
+        self.entity_id = f"{platform.domain}.{extension_firmware_object_id(self.server_id, self._ext_name)}"
+
     @property
     def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            identifiers={(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            name=f"{self.coordinator.server_id} {self._ext_name}",
+            identifiers={(DOMAIN, extension_device_identifier(self.coordinator.server_id, self._ext_name))},
+            name=extension_device_name(self.coordinator.server_id, self._ext_name),
             model="Extension Module",
         )
