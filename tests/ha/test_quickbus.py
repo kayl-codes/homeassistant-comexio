@@ -64,7 +64,7 @@ async def test_quickbus_ios_become_read_only_entities_on_their_own_device(
     quickbus_domains = {e.domain for e in _entries(hass, mock_config_entry) if "_qb" in e.entity_id}
     assert quickbus_domains == {"binary_sensor", "sensor"}
     device = dr.async_get(hass).async_get(gesture.device_id)
-    assert device.name == f"{SERVER_ID} [QB] MT Flur"
+    assert device.name == f"{SERVER_ID} QB - MT Flur"
     assert (DOMAIN, f"{SERVER_ID}_qb1") in device.identifiers
     host = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")})
     assert host.name == f"{SERVER_ID} BASE"

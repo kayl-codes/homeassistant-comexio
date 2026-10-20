@@ -881,18 +881,37 @@ BASE_EXTENSION_NAME = "BASE"
 
 
 def extension_device_name(server_id: str, ext_name: str) -> str:
-    """HA device name of an extension module: "<server> [EXT] <name>", so all modules list together.
+    """HA device name of an extension module: "<server> EXT - <name>", so all modules list together.
 
     The IO-Server's onboard IOs (BASE) stay "<server> BASE" — the main unit, not an add-on module.
     """
-    if ext_name == BASE_EXTENSION_NAME:
+    if is_base_extension(ext_name):
         return f"{server_id} {BASE_EXTENSION_NAME}"
-    return f"{server_id} [EXT] {one_line(ext_name)}"
+    return f"{server_id} EXT - {one_line(ext_name)}"
+
+
+def is_base_extension(ext_name: str) -> bool:
+    """True for the IO-Server's onboard IOs — case-insensitive, like their lower-cased device identifier."""
+    return ext_name.upper() == BASE_EXTENSION_NAME
+
+
+def marker_device_name(server_id: str) -> str:
+    """HA device name of the marker group: "<server> Markers"."""
+    return f"{server_id} Markers"
+
+
+def extension_firmware_object_id(server_id: str, ext_name: str) -> str:
+    """Object id of an extension's firmware entity, as HA derived it before the device got its "EXT - " tag.
+
+    The entity names itself "Firmware" on the extension device, so HA would now derive
+    "<server> EXT - <ext> Firmware"; requesting the old id keeps new installs on the same ids.
+    """
+    return slugify(f"{server_id} {ext_name} Firmware")
 
 
 def quickbus_device_name(server_id: str, device_name: str) -> str:
-    """HA device name of a Quickbus device: "<server> [QB] <name>", so all Quickbus devices list together."""
-    return f"{server_id} [QB] {one_line(device_name)}"
+    """HA device name of a Quickbus device: "<server> QB - <name>", so all Quickbus devices list together."""
+    return f"{server_id} QB - {one_line(device_name)}"
 
 
 def quickbus_io_platform(io: Mapping[str, Any]) -> str:

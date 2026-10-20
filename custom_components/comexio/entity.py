@@ -18,6 +18,8 @@ from .const import (
     WebioClass,
     extension_device_name,
     hub_era_object_id,
+    marker_device_name,
+    one_line,
     quickbus_device_name,
     quickbus_io_platform,
     quickbus_io_unique_id,
@@ -61,7 +63,8 @@ def build_device_info(
 
     The parent is the device of via_identifier (a Quickbus device's host extension) once that is
     registered, else the hub — the platforms set up in parallel, so on the very first setup the
-    host may not exist yet; the next setup links it.
+    host may not exist yet; the next setup links it. A host with no entities of its own (only
+    Quickbus IOs) never gets a device, so its Quickbus devices stay on the hub.
     """
     info: DeviceInfo = {
         "identifiers": identifiers,
@@ -72,6 +75,8 @@ def build_device_info(
     parent = via_identifier and dr.async_get(coordinator.hass).async_get_device_by_identifier(
         (DOMAIN, via_identifier), coordinator.config_entry.entry_id
     )
+    if via_identifier and not parent:
+        _LOGGER.debug("Parent device %s not registered yet, linking %s to the hub", via_identifier, one_line(name))
     if via_id := parent.id if parent else hub_device_id(coordinator):
         info["via_device_id"] = via_id
     return info
@@ -259,7 +264,7 @@ class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
         return build_device_info(
             self.coordinator,
             identifiers={(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            name=f"{self.coordinator.server_id} [M] Markers",
+            name=marker_device_name(self.coordinator.server_id),
             model="Marker Group",
         )
 

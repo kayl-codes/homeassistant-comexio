@@ -150,14 +150,14 @@ The entity_id is `const.stable_object_id(unique_id)`, requested by `entity.Comex
 
 ### Device names
 
-Sub-devices are tagged by kind so each kind lists together (`const.extension_device_name` / `quickbus_device_name`): `<server> BASE` (onboard IOs, no tag), `<server> [EXT] <ext>`, `<server> [QB] <device>` (linked via_device to its host extension's device once that exists, else to the hub), `<server> [M] Markers`. Device names are display only — identifiers stay `{server_id}_{ext}` / `{server_id}_qb{device_id}`.
+Sub-devices are tagged by kind so each kind lists together (`const.extension_device_name` / `quickbus_device_name` / `marker_device_name`): `<server> BASE` (onboard IOs, no tag, matched case-insensitively), `<server> EXT - <ext>`, `<server> QB - <device>` (linked via_device to its host extension's device once that exists, else to the hub), `<server> Markers` (no tag). Plain letter tags, no brackets: the HA frontend sorts with ICU, where `[` would sort before `#` and push `<server> # Function plans` away from the hub. Device names are display only — identifiers stay `{server_id}_{ext}` / `{server_id}_qb{device_id}`. An entity whose entity_id HA derives from its device name must not pick up a tag: the extension firmware entity requests its pre-tag id `const.extension_firmware_object_id` (`update.{server}_{ext}_firmware`).
 
 ### Entity naming (configurable)
 
 Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templates. `SafeDict` (in `aiocomexio.config`) leaves unknown `{keys}` unchanged. Default schemas:
 
 - Marker: `"M{MarkerId} {MarkerTitle}"`
-- IO: `"{IoId} {IoTitle}"` — no `{ExtName}`: IO entities sit on one device per extension and use `has_entity_name`, so the friendly name is already "`<server> [EXT] <ext>` + entity name" (`<server> BASE` for the onboard IOs). The old default `"{ExtName} {IoId} {IoTitle}"` (`LEGACY_DEFAULT_SCHEMA_IO`) is pinned into config entries that never saved a schema (entry migration 1.2 → 1.3), so existing installs keep their names.
+- IO: `"{IoId} {IoTitle}"` — no `{ExtName}`: IO entities sit on one device per extension and use `has_entity_name`, so the friendly name is already "`<server> EXT - <ext>` + entity name" (`<server> BASE` for the onboard IOs). The old default `"{ExtName} {IoId} {IoTitle}"` (`LEGACY_DEFAULT_SCHEMA_IO`) is pinned into config entries that never saved a schema (entry migration 1.2 → 1.3), so existing installs keep their names.
 - Available placeholders: `ServerAlias`, `MarkerId`, `MarkerTitle`, `ExtName`, `IoId`, `IoTitle`
 - An unnamed marker, and an IO whose description is empty or merely repeats its identifier, gets the title `#nn` — the title is never empty, so no schema renders an empty name or a dangling separator. Accepted limit: a schema of only `{IoTitle}` names all unnamed IOs of an extension `#nn`.
 
