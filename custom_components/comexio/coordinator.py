@@ -865,6 +865,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._bus_load_fail_streak = 0
         # Free storage, time server settings, boot time (see async_start_system_info_poll).
         self.system_info = SystemInfoState()
+        self._system_info_task: asyncio.Task[None] | None = None
         # Function plan run states (see async_start_plan_run_state_poll): the fetched states go
         # into api.fub_data's Active flags; the api reports the changes HA itself causes
         # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
@@ -3753,6 +3754,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # (e.g. an in-progress async_generate_plan_preview) could commit its cache after
         # HA has already moved on, one of the disarm paths missed by the original fix (#77).
         self._disarm_preview_cache()
+        if self._system_info_task is not None:
+            self._system_info_task.cancel()
         await super().async_shutdown()
 
     def _fire_plan_system_event(self, message: str) -> None:
@@ -4186,11 +4189,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Fires one immediate tick, like async_start_bus_load_poll, so the readings are there right after setup.
         """
-        self.hass.async_create_task(
-            self._async_system_info_tick(), name=f"comexio_{self.server_id}_system_info_initial_tick"
-        )
+        self._async_schedule_system_info_tick()
         return async_track_time_interval(
-            self.hass, self._async_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
+            self.hass, self._async_schedule_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
+        )
+
+    @callback
+    def _async_schedule_system_info_tick(self, _now: datetime | None = None) -> None:
+        """Start a system info poll, unless one still runs or the entry unloads.
+
+        One poll at a time, so an older one never overwrites a newer one's readings; async_shutdown
+        cancels the running one before the API session closes under it.
+        """
+        if self.unloading:
+            return
+        if self._system_info_task is not None and not self._system_info_task.done():
+            _LOGGER.debug("[%s] System info poll still running, skipping this tick", self.server_id)
+            return
+        self._system_info_task = self.hass.async_create_task(
+            self._async_system_info_tick(), name=f"comexio_{self.server_id}_system_info_tick"
         )
 
     async def _async_system_info_tick(self, _now: datetime | None = None) -> None:

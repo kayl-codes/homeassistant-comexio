@@ -28,6 +28,8 @@ class SystemInfoState:
     boot_time: datetime | None = None
     _info_fail_streak: int = 0
     _uptime_fail_streak: int = 0
+    # The last uptime read: one that went down since is a reboot, however close to the known boot time.
+    _last_uptime: timedelta | None = None
 
     def apply(self, info: SystemInfo | None, uptime: timedelta | None, now: datetime) -> list[str]:
         """Take one poll's results (None = that fetch failed); the parts whose readings just turned unknown."""
@@ -49,7 +51,9 @@ class SystemInfoState:
                 dropped.append(PART_UPTIME)
         else:
             self._uptime_fail_streak = 0
-            self.boot_time = stable_boot_time(self.boot_time, now - uptime)
+            rebooted = self._last_uptime is not None and uptime < self._last_uptime
+            self.boot_time = now - uptime if rebooted else stable_boot_time(self.boot_time, now - uptime)
+            self._last_uptime = uptime
         return dropped
 
     @property

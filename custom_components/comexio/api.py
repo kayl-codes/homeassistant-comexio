@@ -5069,18 +5069,23 @@ class ComexioAPI:
         session is logged in again once per call, like the config poll does: this poll runs more
         often, and its readings would otherwise go unknown until the next config poll.
         """
-        info, info_error = await self._system_info_part(lambda: self.client.get_system_info())
-        uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime())
+        relogin: list[bool] = []  # the outcome of this call's one re-login, shared by both fetches
+        info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)
+        uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime(), relogin)
         return SystemInfoReading(info, uptime, info_error, uptime_error)
 
-    async def _system_info_part[T](self, fetch: Callable[[], Awaitable[T]]) -> tuple[T | None, str | None]:
-        """fetch()'s result, or None and the failure cause; one re-login and retry on a lapsed session."""
+    async def _system_info_part[T](
+        self, fetch: Callable[[], Awaitable[T]], relogin: list[bool]
+    ) -> tuple[T | None, str | None]:
+        """fetch()'s result, or None and the failure cause; a lapsed session is logged in again once per relogin."""
         try:
             try:
                 return await fetch(), None
             except ComexioAuthenticationError:
-                _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
-                if not await self._full_login():
+                if not relogin:
+                    _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
+                    relogin.append(await self._full_login())
+                if not relogin[0]:
                     return None, f"re-login failed ({self.last_login_error})"
                 return await fetch(), None
         except ComexioError as err:

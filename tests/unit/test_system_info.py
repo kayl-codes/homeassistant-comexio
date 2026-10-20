@@ -32,6 +32,13 @@ TIME_SERVER = TimeServerSettings(enabled=True, server="pool.ntp.org", update_int
 INFO = SystemInfo(free_storage_percent=42.5, time_server=TIME_SERVER)
 
 
+def test_advertised_limits() -> None:
+    """The documented cadence and tolerances, pinned on their own: the tests below derive from the constants."""
+    assert SYSTEM_INFO_POLL_INTERVAL_SEC == 300
+    assert SYSTEM_INFO_FAIL_STREAK_THRESHOLD == 2
+    assert SYSTEM_BOOT_TIME_TOLERANCE_SEC == 60
+
+
 def _state_with_readings() -> SystemInfoState:
     state = SystemInfoState()
     assert state.apply(INFO, UPTIME, NOW) == []
@@ -133,6 +140,40 @@ def test_boot_time_follows_a_reboot() -> None:
     assert state.boot_time == NOW - timedelta(minutes=3)
 
 
+def test_a_reboot_within_the_tolerance_is_seen_by_the_uptime_going_down() -> None:
+    """Review (Sourcery, #204): a reboot under SYSTEM_BOOT_TIME_TOLERANCE_SEC after the last one moves the boot time."""
+    state = SystemInfoState()
+    state.apply(INFO, timedelta(seconds=10), NOW)
+    rebooted_at = NOW + timedelta(seconds=SYSTEM_BOOT_TIME_TOLERANCE_SEC // 2)
+    uptime = timedelta(seconds=5)
+
+    state.apply(INFO, uptime, rebooted_at + uptime)
+
+    assert state.boot_time == rebooted_at
+
+
+def test_an_unchanged_uptime_is_no_reboot() -> None:
+    state = SystemInfoState()
+    state.apply(INFO, timedelta(hours=1), NOW)
+
+    # Read again within the tolerance (a quick retry): an equal uptime keeps the boot time, it is no reboot.
+    state.apply(INFO, timedelta(hours=1), NOW + timedelta(seconds=SYSTEM_BOOT_TIME_TOLERANCE_SEC // 2))
+
+    assert state.boot_time == NOW - timedelta(hours=1)
+
+
+def test_a_reboot_is_seen_across_a_failed_uptime_poll() -> None:
+    state = SystemInfoState()
+    state.apply(INFO, timedelta(seconds=10), NOW)
+    state.apply(INFO, None, NOW + timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC))
+    rebooted_at = NOW + timedelta(seconds=SYSTEM_BOOT_TIME_TOLERANCE_SEC // 2)
+    uptime = timedelta(seconds=5)
+
+    state.apply(INFO, uptime, rebooted_at + uptime)
+
+    assert state.boot_time == rebooted_at
+
+
 def test_boot_time_without_a_known_one_is_the_estimate() -> None:
     assert stable_boot_time(None, NOW) == NOW
 
@@ -160,6 +201,8 @@ def _coordinator(info: SystemInfo | None, uptime: timedelta | None) -> ComexioCo
         return_value=SystemInfoReading(info, uptime, None if info else "HTTP 500", None if uptime else "timed out")
     )
     coordinator.system_info = SystemInfoState()
+    coordinator.unloading = False
+    coordinator._system_info_task = None
     return coordinator
 
 
@@ -229,10 +272,79 @@ def test_start_poll_ticks_now_and_on_the_interval(monkeypatch: pytest.MonkeyPatc
     assert coordinator.async_start_system_info_poll() == "cancel"
 
     coordinator.hass.async_create_task.assert_called_once()
-    assert coordinator.hass.async_create_task.call_args.kwargs["name"] == "comexio_srv_system_info_initial_tick"
+    assert coordinator.hass.async_create_task.call_args.kwargs["name"] == "comexio_srv_system_info_tick"
     track.assert_called_once_with(
-        coordinator.hass, coordinator._async_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
+        coordinator.hass, coordinator._async_schedule_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
     )
+
+
+def _running_poll(coordinator: ComexioCoordinator) -> asyncio.Event:
+    """Let the coordinator's polls run on the current loop, each one blocked until the returned event is set."""
+    release = asyncio.Event()
+    reading = SystemInfoReading(INFO, UPTIME)
+
+    async def blocked() -> SystemInfoReading:
+        await release.wait()
+        return reading
+
+    coordinator.api.get_system_info = AsyncMock(side_effect=blocked)
+    loop = asyncio.get_running_loop()
+    coordinator.hass.async_create_task = MagicMock(side_effect=lambda coro, name: loop.create_task(coro, name=name))
+    return release
+
+
+def test_a_tick_while_a_poll_runs_starts_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (Sourcery, #204): overlapping polls could apply an older poll's readings after a newer one's."""
+    monkeypatch.setattr(coordinator_module, "async_dispatcher_send", MagicMock())
+    coordinator = _coordinator(INFO, UPTIME)
+
+    async def scenario() -> None:
+        release = _running_poll(coordinator)
+        coordinator._async_schedule_system_info_tick()
+        await asyncio.sleep(0)
+        coordinator._async_schedule_system_info_tick()
+        assert coordinator.api.get_system_info.await_count == 1
+        release.set()
+        assert coordinator._system_info_task is not None
+        await coordinator._system_info_task
+        coordinator._async_schedule_system_info_tick()  # the poll is done: the next tick polls again
+        await coordinator._system_info_task
+
+    asyncio.run(scenario())
+
+    assert coordinator.api.get_system_info.await_count == 2
+
+
+def test_no_poll_starts_while_the_entry_unloads() -> None:
+    coordinator = _coordinator(INFO, UPTIME)
+    coordinator.unloading = True
+
+    coordinator._async_schedule_system_info_tick()
+
+    coordinator.hass.async_create_task.assert_not_called()
+
+
+def test_shutdown_cancels_a_running_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (Sourcery, #204): a poll in flight must not outlive the API session async_unload_entry closes."""
+    coordinator = _coordinator(INFO, UPTIME)
+    for helper in ("_stop_connection_poll", "_cancel_preview_card_sweep", "_disarm_preview_cache"):
+        monkeypatch.setattr(coordinator, helper, MagicMock(), raising=False)
+    coordinator._knx_dpt_reload_cancel = None
+    coordinator._preview_refresh_cancel = None
+    monkeypatch.setattr(coordinator_module.DataUpdateCoordinator, "async_shutdown", AsyncMock())
+
+    async def scenario() -> asyncio.Task[None]:
+        _running_poll(coordinator)
+        coordinator._async_schedule_system_info_tick()
+        await asyncio.sleep(0)
+        await coordinator.async_shutdown()
+        task = coordinator._system_info_task
+        assert task is not None
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return task
+
+    assert asyncio.run(scenario()).cancelled()
 
 
 @pytest.mark.parametrize(
