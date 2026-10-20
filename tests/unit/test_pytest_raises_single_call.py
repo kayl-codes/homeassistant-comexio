@@ -6,8 +6,10 @@ expected one and hides a failure of the tested call. Ruff's PT012 only counts st
 so the nested form is caught as well. Build the arguments before the `with` and keep only the tested call inside it.
 
 A function or lambda defined in the block is not run by defining it, so the calls in its body do not count (its
-decorators and defaults do). Not followed: a `pytest.raises(...)` bound to a name or a parametrize argument first and
-entered as `with expectation:`, and a local function called in the block - the review checklist covers those.
+decorators, defaults and annotations do); a lambda passed as a callback runs inside the tested call and is part of
+it. A generator expression's calls do count - stricter than needed, but it fails loudly. Not followed: a
+`pytest.raises(...)` bound to a name or a parametrize argument first and entered as `with expectation:`, and a local
+function called in the block - the review checklist covers those.
 """
 
 import ast
@@ -41,13 +43,17 @@ def _is_raises_call(node: ast.AST, raises_names: set[str]) -> bool:
 def _executed_calls(node: ast.AST) -> int:
     """Count the calls run when `node` runs, skipping the bodies of functions and lambdas it only defines.
 
-    Their decorators and default values do run at definition, and a lambda called on the spot runs its body.
+    Their decorators, default values and annotations do run at definition, and a lambda called on the spot runs
+    its body.
     """
     if isinstance(node, _DEFERRED):
         run_now = [*node.args.defaults, *(default for default in node.args.kw_defaults if default)]
         applied = 0
         if not isinstance(node, ast.Lambda):
-            run_now += node.decorator_list
+            args = node.args
+            params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+            annotations = [param.annotation for param in params if param and param.annotation]
+            run_now += [*node.decorator_list, *annotations, *([node.returns] if node.returns else [])]
             applied = len(node.decorator_list)  # applying a decorator is a call too
         return applied + sum(_executed_calls(expr) for expr in run_now)
     calls = sum(_executed_calls(child) for child in ast.iter_child_nodes(node))
@@ -106,6 +112,7 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     called_lambda = "with pytest.raises(ValueError):\n    (lambda: build(1))()\n"
     default_arg = "with pytest.raises(ValueError):\n    def g(x=build(1)):\n        pass\n    check(g)\n"
     decorated = "with pytest.raises(ValueError):\n    @wrap(1)\n    def g():\n        pass\n"
+    annotated = "with pytest.raises(ValueError):\n    def g(x: kind(1)) -> kind(2):\n        pass\n"
     other_context = "with patch('a.b'):\n    check(build(1))\n"
 
     assert _extra_call_blocks(nested) == [(1, "check(build(1))")]
@@ -118,6 +125,7 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert _extra_call_blocks(called_lambda) == [(1, "(lambda: build(1))()")]
     assert [line for line, _ in _extra_call_blocks(default_arg)] == [1]
     assert [line for line, _ in _extra_call_blocks(decorated)] == [1]
+    assert [line for line, _ in _extra_call_blocks(annotated)] == [1]
     assert not _extra_call_blocks(single)
     assert not _extra_call_blocks(earlier_item)
     assert not _extra_call_blocks(deferred)
