@@ -3,6 +3,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
+from datetime import timedelta
 import logging
 import math
 import time
@@ -19,6 +20,7 @@ from aiocomexio import (
     ComexioResponseError,
     CreatedFunctionPlan,
     RawConfig,
+    SystemInfo,
     config as comexio_config,
     webio as comexio_webio,
 )
@@ -5049,6 +5051,25 @@ class ComexioAPI:
         except ComexioError as err:
             _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
+
+    async def get_system_info(self) -> tuple[SystemInfo | None, timedelta | None]:
+        """System info (free storage, time server settings) and uptime; None for a part whose fetch failed.
+
+        Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
+        failures and warns — so they are logged at debug level here. A lapsed admin session fails
+        too; the next config poll logs in again.
+        """
+        info: SystemInfo | None = None
+        uptime: timedelta | None = None
+        try:
+            info = await self.client.get_system_info()
+        except ComexioError as err:
+            _LOGGER.debug("System info fetch failed: %s", err)
+        try:
+            uptime = await self.client.get_uptime()
+        except ComexioError as err:
+            _LOGGER.debug("Uptime fetch failed: %s", err)
+        return info, uptime
 
     async def system_emergency_reboot(self) -> bool:
         """Trigger an IMMEDIATE, unconfirmed full Comexio system reboot.

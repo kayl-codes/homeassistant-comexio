@@ -177,6 +177,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
     # cancelled automatically on unload/reload.
     entry.async_on_unload(coordinator.async_start_bus_load_poll())
+    # Free storage, time server settings, uptime: own slow poll (see const.SYSTEM_INFO_POLL_INTERVAL_SEC).
+    entry.async_on_unload(coordinator.async_start_system_info_poll())
     # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
     entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
     # After the platforms: the auto-start switches have restored the user's choice by now.
@@ -327,6 +329,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             "plan_backup_selector",
             "bus_load_sensor",
             "sd_card_sensor",
+            "free_storage_sensor",
+            "last_boot_sensor",
+            "time_server_problem",
             "plan_preview_sensor",
             "plan_preview_image",
             "function_plan_toggle_btn",

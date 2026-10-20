@@ -58,6 +58,9 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `switch` (config) | Integration | `Plan Auto-Start (HA plans)` / `(user plans)` (Function plans device) — start a stopped watched plan again on their own. |
 | `sensor` (diagnostic) | Integration | `Bus Workload` — internal Comexio bus/CPU load in %, polled independently every 10 s. |
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
+| `sensor` (diagnostic) | Integration | `Free storage` — free space of the Comexio's internal storage in %, polled every 5 min. |
+| `sensor` (diagnostic) | Integration | `Last boot` — when the Comexio system last started (from its uptime), polled every 5 min. |
+| `binary_sensor` (diagnostic, problem) | Integration | `Time server problem` — on while Comexio does not set its clock from a time server (disabled or no server entered); a wrong clock breaks timers and schedules in the function plans. Off only means a server is configured, not that Comexio reaches it. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
 | `button` (diagnostic) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
 | `button` (diagnostic) | Integration | `Fix Entity IDs` — moves existing entities to the stable, address-based entity IDs. History and statistics move along; automations, scripts and dashboards are not rewritten. |
@@ -290,6 +293,9 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `switch` (Konfiguration) | Integration | `Plan Auto-Start (HA-Pläne)` / `(User-Pläne)` (Gerät „Function plans“) — starten einen gestoppten überwachten Plan selbst wieder. |
 | `sensor` (Diagnose) | Integration | `Bus Workload` — interne Comexio Bus-/CPU-Auslastung in %, unabhängig alle 10 s abgefragt. |
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
+| `sensor` (Diagnose) | Integration | `Freier Speicher` — freier Platz im internen Speicher des Comexio in %, alle 5 min abgefragt. |
+| `sensor` (Diagnose) | Integration | `Letzter Start` — wann das Comexio-System zuletzt gestartet ist (aus seiner Laufzeit), alle 5 min abgefragt. |
+| `binary_sensor` (Diagnose, Problem) | Integration | `Zeitserver-Problem` — an, solange Comexio seine Uhr nicht von einem Zeitserver stellt (deaktiviert oder kein Server eingetragen); eine falsche Uhr bringt Zeitglieder und Zeitpläne in den Logikplänen durcheinander. Aus heißt nur, dass ein Server eingetragen ist, nicht dass Comexio ihn erreicht. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
 | `button` (Diagnose) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
 | `button` (Diagnose) | Integration | `Entity-IDs korrigieren` — stellt bestehende Entitäten auf die stabilen, adressbasierten Entity-IDs um. Verlauf und Statistiken ziehen mit um; Automationen, Skripte und Dashboards werden nicht umgeschrieben. |

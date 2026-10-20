@@ -138,6 +138,8 @@ from .const import (
     SOURCE_CATEGORIES,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
+    SYSTEM_INFO_POLL_INTERVAL_SEC,
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
@@ -172,6 +174,7 @@ from .const import (
     snap_to_grid,
     source_audit_key,
     source_category,
+    system_info_signal,
     trigger_pair_categories,
     webio_class_label,
     webio_class_name,
@@ -205,6 +208,7 @@ from .plan_watchdog import (
     vanished_plan_token,
 )
 from .reference_monitor import ReferenceCatalogMonitor
+from .system_info import SystemInfoState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -859,6 +863,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.bus_workload: int | None = None
         self.bus_sd_card: bool | None = None
         self._bus_load_fail_streak = 0
+        # Free storage, time server settings, boot time (see async_start_system_info_poll).
+        self.system_info = SystemInfoState()
         # Function plan run states (see async_start_plan_run_state_poll): the fetched states go
         # into api.fub_data's Active flags; the api reports the changes HA itself causes
         # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
@@ -4174,6 +4180,29 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return async_track_time_interval(
             self.hass, self._async_bus_load_tick, timedelta(seconds=BUS_LOAD_POLL_INTERVAL_SEC)
         )
+
+    def async_start_system_info_poll(self):
+        """Start the system info poll (free storage, time server, uptime); returns the cancel callback.
+
+        Fires one immediate tick, like async_start_bus_load_poll, so the readings are there right after setup.
+        """
+        self.hass.async_create_task(
+            self._async_system_info_tick(), name=f"comexio_{self.server_id}_system_info_initial_tick"
+        )
+        return async_track_time_interval(
+            self.hass, self._async_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
+        )
+
+    async def _async_system_info_tick(self, _now: datetime | None = None) -> None:
+        """Fetch the system info and uptime into self.system_info and notify its entities."""
+        info, uptime = await self.api.get_system_info()
+        if self.system_info.apply(info, uptime, dt_util.utcnow()):
+            _LOGGER.warning(
+                "[%s] System info poll failed %s times in a row; the affected diagnostics are reset to unknown",
+                self.server_id,
+                SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
+            )
+        async_dispatcher_send(self.hass, system_info_signal(self.server_id))
 
     def async_start_plan_run_state_poll(self):
         """Start the function plan run-state poll; returns the cancel callback.

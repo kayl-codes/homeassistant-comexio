@@ -244,11 +244,20 @@
       },
       "watchdog_event": {
         "name": "Dernier événement du Watchdog"
+      },
+      "free_storage": {
+        "name": "Stockage libre"
+      },
+      "last_boot": {
+        "name": "Dernier démarrage"
       }
     },
     "binary_sensor": {
       "managed_plans_problem": {
         "name": "Problème plans gérés"
+      },
+      "time_server_problem": {
+        "name": "Problème de serveur de temps"
       }
     },
     "switch": {

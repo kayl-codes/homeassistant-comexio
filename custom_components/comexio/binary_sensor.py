@@ -20,6 +20,7 @@ from .const import (
     MarkerKind,
     bus_load_signal,
     plan_watch_signal,
+    system_info_signal,
 )
 from .coordinator import ComexioCoordinator
 from .entity import (
@@ -28,6 +29,7 @@ from .entity import (
     ComexioMarkerEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
+    hub_device_info,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,6 +78,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         (
             ComexioSdCardSensor(coordinator, coordinator.server_id),
             ComexioManagedPlansProblemSensor(coordinator, coordinator.server_id),
+            ComexioTimeServerProblemSensor(coordinator, coordinator.server_id),
         )
     )
 
@@ -212,6 +215,46 @@ class ComexioManagedPlansProblemSensor(ComexioStableEntityIdMixin, CoordinatorEn
             async_dispatcher_connect(
                 self.hass, plan_watch_signal(self.coordinator.server_id), self._handle_coordinator_update
             )
+        )
+
+
+class ComexioTimeServerProblemSensor(ComexioStableEntityIdMixin, BinarySensorEntity):
+    """On while Comexio does not set its clock from a time server (disabled, or no server entered).
+
+    A clock that drifts or jumps breaks time-based logic (timers, schedules) on the server. Fed by
+    the system info poll via system_info_signal, like the free storage sensor (sensor.py). Off says
+    only that a server is configured, not that Comexio reaches it — the dashboard shows no sync state.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_translation_key = "time_server_problem"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_time_server_problem"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return hub_device_info(self.coordinator)
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.coordinator.system_info.time_server_problem
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        settings = self.coordinator.system_info.time_server
+        if settings is None:
+            return {}
+        return {"enabled": settings.enabled, "server": settings.server, "update_interval": settings.update_interval}
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, system_info_signal(self.server_id), self.async_write_ha_state)
         )
 
 

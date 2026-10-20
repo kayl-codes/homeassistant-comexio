@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from datetime import timedelta
 import logging
 from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock
@@ -16,6 +17,8 @@ from aiocomexio import (
     CreatedFunctionPlan,
     LiveStates,
     RawConfig,
+    SystemInfo,
+    TimeServerSettings,
     WebioBaseInfo,
 )
 import aiohttp
@@ -1029,6 +1032,27 @@ def test_misc_reads_fall_back_on_failure(
 ) -> None:
     _fail(client, method, _connection_error())
     assert asyncio.run(call(comexio_api)) == expected
+
+
+SYSTEM_INFO = SystemInfo(free_storage_percent=42.5, time_server=TimeServerSettings(True, "pool.ntp.org", 3600))
+
+
+def test_system_info_returns_both_parts(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3))
+
+
+@pytest.mark.parametrize("err", [ComexioAuthenticationError("login form"), _connection_error(), HTTP_ERROR])
+def test_system_info_failure_drops_only_its_part(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
+    # One failed fetch must not cost the other reading: both are tried, each failure is its own None.
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+    _fail(client, "get_system_info", err)
+    assert asyncio.run(comexio_api.get_system_info()) == (None, timedelta(days=3))
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    _fail(client, "get_uptime", err)
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, None)
 
 
 # --- Web-IO ---

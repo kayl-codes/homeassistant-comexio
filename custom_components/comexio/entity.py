@@ -37,6 +37,16 @@ def hub_device_id(coordinator: ComexioCoordinator) -> str | None:
         return None
 
 
+def hub_device_info(coordinator: ComexioCoordinator) -> DeviceInfo:
+    """The hub device (the IO-Server itself), which carries the server-level diagnostics."""
+    return {
+        "identifiers": {(DOMAIN, coordinator.server_id)},
+        "name": coordinator.server_id,
+        "manufacturer": "Comexio",
+        "model": "IO-Server",
+    }
+
+
 def build_device_info(
     coordinator: ComexioCoordinator, *, identifiers: set[tuple[str, str]], name: str, model: str
 ) -> DeviceInfo:
