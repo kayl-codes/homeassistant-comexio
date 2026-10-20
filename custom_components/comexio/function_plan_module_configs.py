@@ -43,6 +43,8 @@ _MODULE_ID = "CombinedModuleId"
 _RULE_FIELDS_NOT_DIFFED = frozenset({"Id", _MODULE_ID, "RandomId"})
 # The field that keys a row of each Quantum sub-table in a module's config.
 _ROW_KEYS = {"settings": "Name", "rules": "Id"}
+# A row field that is missing, null or empty names nothing.
+_BLANK = (None, "")
 
 # {element type: {key: config}} — scenes by element id, Quantum modules by module id. A type whose
 # table the page did not carry (readably) is absent.
@@ -60,13 +62,8 @@ def _rows(raw: Any) -> Iterable[Any] | None:
 def parse_module_config_tables(variables: Mapping[str, Any]) -> ModuleConfigTables:
     """The scene and Quantum module tables of a config page (see the module docstring)."""
     tables: ModuleConfigTables = {}
-    scenes = variables.get(_SCENE_TABLE)
-    if isinstance(scenes, list) and not scenes:
-        scenes = {}
-    if isinstance(scenes, Mapping) and all(isinstance(scene, Mapping) for scene in scenes.values()):
-        tables[SCENE_TYPE] = {str(elem_id): dict(scene) for elem_id, scene in scenes.items()}
-    elif _SCENE_TABLE in variables:
-        _LOGGER.warning("Module configs: $%s has an unknown format — scene blocks are not backed up", _SCENE_TABLE)
+    if (scenes := _scene_table(variables)) is not None:
+        tables[SCENE_TYPE] = scenes
     fub_modules = variables.get("FubModules")
     if not isinstance(fub_modules, Mapping):
         # Without the module list no Quantum element can be matched to its config.
@@ -84,11 +81,26 @@ def parse_module_config_tables(variables: Mapping[str, Any]) -> ModuleConfigTabl
     return tables
 
 
+def _scene_table(variables: Mapping[str, Any]) -> dict[str, dict[str, Any]] | None:
+    """{element id: scene config} of $CurrentSceneConfig; None when the page lacks it or it is malformed."""
+    scenes = variables.get(_SCENE_TABLE)
+    if isinstance(scenes, list) and not scenes:
+        scenes = {}
+    if isinstance(scenes, Mapping) and all(isinstance(scene, Mapping) for scene in scenes.values()):
+        return {str(elem_id): dict(scene) for elem_id, scene in scenes.items()}
+    if _SCENE_TABLE in variables:
+        _LOGGER.warning("Module configs: $%s has an unknown format — scene blocks are not backed up", _SCENE_TABLE)
+    return None
+
+
 def _module_list(modules: Any, elem_type: str) -> dict[str, dict[str, Any]] | None:
     """{module id: config without settings and rules yet} of one type's $FubModules rows; None when malformed."""
     # A type $FubModules does not list has no modules, like an empty one.
     rows = [] if modules is None else _rows(modules)
-    if rows is None or not all(isinstance(row, Mapping) and row.get("Id") is not None for row in rows):
+    # Id keys the module, TypeId is part of its config: a row without either is not a readable module.
+    if rows is None or not all(
+        isinstance(row, Mapping) and all(row.get(field) not in _BLANK for field in ("Id", "TypeId")) for row in rows
+    ):
         _LOGGER.warning(
             "Module configs: $FubModules[%s] has an unknown format — Quantum modules are not backed up", elem_type
         )
@@ -125,8 +137,9 @@ def _sub_tables(data: Any) -> tuple[Iterable[Any] | None, Iterable[Any] | None]:
         return [], []
     if not isinstance(data, Mapping):
         return None, None
-    # A missing sub-table is empty (the central table may carry no rules); a malformed one is unreadable.
-    return _rows(data.get("settings", [])), _rows(data.get("rules", []))
+    # A missing rules sub-table is empty (the central table may carry no rules); settings always come
+    # along, so a table without them is unreadable rather than settings-free.
+    return _rows(data.get("settings")), _rows(data.get("rules", []))
 
 
 def _add_rows(configs: dict[str, dict[str, Any]], rows: Iterable[Any], part: str, table: str) -> bool:
@@ -138,7 +151,7 @@ def _add_rows(configs: dict[str, dict[str, Any]], rows: Iterable[Any], part: str
     key_field = _ROW_KEYS[part]
     orphans = 0
     for row in rows:
-        if (missing := _missing_field(row, key_field)) is not None:
+        if (missing := _missing_field(row, key_field, part)) is not None:
             _LOGGER.warning(
                 "Module configs: $%s has a %s row without %s — Quantum modules are not backed up",
                 table,
@@ -158,11 +171,14 @@ def _add_rows(configs: dict[str, dict[str, Any]], rows: Iterable[Any], part: str
     return True
 
 
-def _missing_field(row: Any, key_field: str) -> str | None:
-    """The field a Quantum row lacks to be filed (its key, or its module id); None for a complete row."""
+def _missing_field(row: Any, key_field: str, part: str) -> str | None:
+    """The field a Quantum row lacks to be filed (its key, its module id, a setting's Value); None if complete."""
     if not isinstance(row, Mapping):
         return key_field
-    return next((field for field in (key_field, _MODULE_ID) if row.get(field) in (None, "")), None)
+    if (missing := next((field for field in (key_field, _MODULE_ID) if row.get(field) in _BLANK), None)) is not None:
+        return missing
+    # A setting's value may be empty, but a row without the field is truncated, not a setting set to nothing.
+    return "Value" if part == "settings" and "Value" not in row else None
 
 
 def plan_module_configs(tables: Mapping[str, Mapping[str, Any]], elements: Mapping[str, Any]) -> ModuleConfigs | None:
@@ -288,7 +304,8 @@ def _flatten_scene(config: Mapping[str, Any]) -> dict[str, str]:
 
 def _flatten_combined(config: Mapping[str, Any]) -> dict[str, str]:
     fields = {"type": _text(config.get("type_id")), "default value": _text(config.get("default_value"))}
-    for setting, value in (config.get("settings") or {}).items():
+    settings = config.get("settings")
+    for setting, value in (settings if isinstance(settings, Mapping) else {}).items():
         fields[f"setting {setting}"] = _text(value)
     for rule_id, rule in _items(config.get("rules")):
         for key, value in rule.items():

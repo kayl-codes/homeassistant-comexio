@@ -102,6 +102,7 @@ def test_parse_reads_scenes_by_element_and_quantum_modules_by_module(caplog: pyt
         ("settings", {"Id": 4, "CombinedModuleId": 9, "Value": "no name"}, "Name"),
         ("settings", {"Id": 4, "Name": "no module", "Value": "1"}, "CombinedModuleId"),
         ("settings", "x", "Name"),
+        ("settings", {"Id": 4, "CombinedModuleId": 1, "Name": "no value"}, "Value"),
         ("rules", {"CombinedModuleId": 1, "Name": "no id"}, "Id"),
         ("rules", {"Id": 9, "Name": "no module"}, "CombinedModuleId"),
         ("rules", "x", "Id"),
@@ -123,8 +124,13 @@ def test_a_malformed_row_makes_the_table_unreadable(
     assert f"${table} has a {part} row without {missing}" in caplog.text
 
 
-@pytest.mark.parametrize("module", [{"TypeId": 1}, "x"])
-def test_a_module_row_without_id_makes_the_type_unreadable(module: Any, caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize(
+    "module",
+    [{"TypeId": 1}, {"Id": "", "TypeId": 1}, {"Id": 9}, {"Id": 9, "TypeId": ""}, {"Id": 9, "TypeId": None}, "x"],
+)
+def test_a_module_row_without_id_or_type_makes_the_type_unreadable(
+    module: Any, caplog: pytest.LogCaptureFixture
+) -> None:
     raw = load_json_fixture("module_configs_raw.json")
     raw["FubModules"]["20"]["9"] = module
 
@@ -175,6 +181,38 @@ def test_a_malformed_sub_table_is_not_read_as_empty(part: str, caplog: pytest.Lo
 
     assert "20" not in parse_module_config_tables(raw)
     assert "$CombinedModuleSettingData has an unknown format" in caplog.text
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_a_setting_set_to_nothing_is_read(value: Any, caplog: pytest.LogCaptureFixture) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    raw["CombinedModuleSettingData"]["settings"]["9"] = {
+        "Id": 9,
+        "CombinedModuleId": 1,
+        "Name": "blank",
+        "Value": value,
+    }
+
+    assert parse_module_config_tables(raw)["20"]["1"]["settings"]["blank"] == value
+    assert not caplog.text
+
+
+def test_a_table_without_settings_is_not_read_as_settings_free(caplog: pytest.LogCaptureFixture) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    del raw["CombinedModuleSettingData"]["settings"]
+
+    assert "20" not in parse_module_config_tables(raw)
+    assert "$CombinedModuleSettingData has an unknown format" in caplog.text
+
+
+def test_a_table_without_rules_has_no_rules(caplog: pytest.LogCaptureFixture) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    del raw["CombinedModuleCentralSettingData"]["rules"]
+
+    central = parse_module_config_tables(raw)["21"]
+    assert all(config["rules"] == {} for config in central.values())
+    assert any(config["settings"] for config in central.values())
+    assert not caplog.text
 
 
 def test_a_missing_table_of_listed_modules_is_logged(caplog: pytest.LogCaptureFixture) -> None:
@@ -302,6 +340,16 @@ def test_a_damaged_stored_entry_is_compared_not_raised(configs: dict[str, Any]) 
     damaged = _snapshot(configs)
     damaged[SNAPSHOT_MODULE_CONFIGS]["31"] = None
     assert module_configs_changed(damaged, configs)
+
+
+@pytest.mark.parametrize(("part", "value"), [("settings", "x"), ("settings", ["x"])])
+def test_damaged_stored_settings_or_rules_are_compared_not_raised(
+    configs: dict[str, Any], part: str, value: Any
+) -> None:
+    damaged = _snapshot(configs)
+    damaged[SNAPSHOT_MODULE_CONFIGS]["32"]["config"][part] = value
+    assert module_configs_changed(damaged, configs)
+    assert module_configs_diff(_snapshot(configs), damaged)
 
 
 # ---------------------------------------------------------------------------
