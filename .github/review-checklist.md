@@ -28,6 +28,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   description. Flag any change that would let a renamed description or naming schema alter a unique_id or entity_id.
 - **Persisted identifiers:** the lowercase `logikplan_*` option keys, `Store` storage keys and the plan-selector
   unique_id are frozen legacy spellings. Flag renames without migration code.
+- **Changed defaults reach saved entries:** the config and options forms store the shown default together with the
+  user's input, so an entry that ever saved its options holds the old default as if the user had typed it. A
+  changed `DEFAULT_*` value whose new behaviour should also apply to existing installs needs a config entry migration
+  (`CONFIG_ENTRY_MINOR_VERSION` + `migrate_entry_options`). The migration replaces a saved value equal to the old
+  default, compared the way the code reads it, and keeps a customised one. Flag a changed default without that
+  migration, or state in the PR that only new installs get it.
 - **Terminology:** "function plan" is the English term in code, services, logs, notifications and en/fr/es
   translations; "Logikplan" is the German translation, used in `de.json` and the German sections of the Markdown
   docs (and as a parenthetical gloss such as "function plan (Logikplan)"), never in English UI text or code. Never
