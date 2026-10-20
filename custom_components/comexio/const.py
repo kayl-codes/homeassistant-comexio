@@ -1224,6 +1224,11 @@ def split_ignored_ids(raw: str, prefix_chars: str = "Mm") -> tuple[set[int], set
     return {i for i in singles if not ignored_id_in_ranges(i, ranges)}, ranges
 
 
+def invalid_ignored_tokens(raw: str, prefix_chars: str = "Mm") -> list[str]:
+    """The tokens of an ignored-ids string that are no ID or range — a rewrite of the string drops them."""
+    return [token for token, parsed in parse_ignored_marker_tokens(raw, prefix_chars) if parsed is None]
+
+
 def ignored_id_in_ranges(source_id: int, ranges: Iterable[tuple[int, int]]) -> bool:
     """True if one of the inclusive ranges covers source_id — without expanding the ranges."""
     return any(start <= source_id <= end for start, end in ranges)

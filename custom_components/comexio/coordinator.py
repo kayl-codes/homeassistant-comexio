@@ -163,6 +163,7 @@ from .const import (
     fw_update_signal,
     ignored_id_in_ranges,
     import_disabled_issue_id,
+    invalid_ignored_tokens,
     io_audit_key,
     io_column_rows,
     one_line,
@@ -1069,6 +1070,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._cleanup_entity_ids = []
         self._cleanup_function_plan_count = 0
         await self.async_check_ignored_markers(conf, final_data, options_at_poll)
+        # A marker prune writes the options, which the KNX audit then cannot tell from a user save:
+        # its stale pruning waits for the next poll — accepted, a stale K-ID costs nothing meanwhile.
         await self.async_check_ignored_knx(conf, final_data, options_at_poll)
 
         # A missing Web-IO class ends the audit early: no plan checks, and the counts stay unpublished.
@@ -5818,13 +5821,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         flattened into single IDs on every poll. The bridge markers in it stay unignored anyway
         (_ignored_ids_for leaves them out).
         """
-        single_ids, ranges = split_ignored_ids(
-            self.config_entry.options.get(conf_key, ""), _ignore_list_prefix_chars(category)
-        )
+        raw = self.config_entry.options.get(conf_key, "")
+        single_ids, ranges = split_ignored_ids(raw, _ignore_list_prefix_chars(category))
         stale = single_ids & stale_ids
         protected = single_ids & self._unignorable_ids(webio_class)
         if not (stale or protected):
             return
+        if invalid := invalid_ignored_tokens(raw, _ignore_list_prefix_chars(category)):
+            _LOGGER.warning("Dropping invalid entries %s from the %s option", invalid, conf_key)
         self._write_ignored_ids(conf_key, format_ignored_ids(single_ids - stale - protected, ranges))
         if stale:
             self._notify_removed_ignored_ids(

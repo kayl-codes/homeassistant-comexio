@@ -18,3 +18,8 @@ from custom_components.comexio.repairs import _add_knx_dpt_suffix_ignored_ids
 )
 def test_added_ids_keep_existing_ranges(existing: str, new_ids: set[int], expected: str) -> None:
     assert _add_knx_dpt_suffix_ignored_ids(existing, new_ids) == expected
+
+
+def test_an_invalid_hand_edited_entry_is_dropped_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    assert _add_knx_dpt_suffix_ignored_ids("K5, abc", {7}) == "K5,K7"
+    assert "'abc'" in caplog.text

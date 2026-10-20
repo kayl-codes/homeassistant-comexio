@@ -1,6 +1,7 @@
 """Pure module-level and static helpers of api.py."""
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -10,7 +11,13 @@ from custom_components.comexio.api import (
     _blank_marker_id_candidates,
     _placed_marker_ids,
 )
-from custom_components.comexio.const import WEBIO_CLASS_IO, WEBIO_CLASS_KNX, WEBIO_MARKER_ANALOG_MIN
+from custom_components.comexio.const import (
+    WEBIO_CLASS_IO,
+    WEBIO_CLASS_KNX,
+    WEBIO_MARKER_ANALOG_MIN,
+    IgnoredIds,
+    parse_ignored_ids,
+)
 from tests.common import load_json_fixture
 
 
@@ -74,6 +81,24 @@ def test_build_webio_commands_targets_the_servers_webhook(comexio_api: ComexioAP
     assert [c["Name"] for c in commands] == ["HA M5 Licht", "HA IO BASE Q1", "HA K8 Temp"]
     assert {c["Parameter"] for c in commands} == {"/api/webhook/comexio_srv"}
     assert (commands[2]["Min"], commands[2]["Max"]) == (-273, 670760)
+
+
+def _no_expansion(*_args: object) -> None:
+    raise AssertionError("ignore range expanded")
+
+
+def test_webio_commands_skip_a_wide_ignore_range_without_expanding_it(comexio_api: ComexioAPI) -> None:
+    # aiocomexio gets the lazy IgnoredIds: truth and membership only, never len() or iteration.
+    wide = parse_ignored_ids("1-99999999999999999999")
+
+    with patch.object(IgnoredIds, "__iter__", _no_expansion), patch.object(IgnoredIds, "__len__", _no_expansion):
+        commands = comexio_api.build_webio_commands("srv", PARSED, ignored_marker_ids=wide, ignored_knx_ids=wide)
+        payload = json.loads(
+            comexio_api.generate_webio_json("srv", "HomeAssistant", PARSED, None, ignored_marker_ids=wide)
+        )
+
+    assert [c["Name"] for c in commands] == ["HA IO BASE Q1"]
+    assert [c["Name"] for c in payload["commands"]] == ["HA IO BASE Q1", "HA K8 Temp"]
 
 
 def test_build_webio_commands_restricts_to_one_class(comexio_api: ComexioAPI) -> None:

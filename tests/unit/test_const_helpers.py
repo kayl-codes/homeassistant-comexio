@@ -201,9 +201,13 @@ def test_a_wide_range_ignores_its_ids_without_expanding_them() -> None:
         # Overlapping and adjacent ranges merge; a single a range covers counts once.
         (IgnoredIds({4, 9}, {(1, 5), (3, 6), (7, 7)}), {1, 2, 3, 4, 5, 6, 7, 9}),
         (IgnoredIds({1, 7}, {(3, 5)}) - {4, 7, 99}, {1, 3, 5}),
+        # A second exclusion keeps the first one.
+        (IgnoredIds({1, 7}, {(3, 5)}) - {4} - {7}, {1, 3, 5}),
+        # A range narrower than the exclusions is walked: one ID is left.
+        (IgnoredIds(ranges={(1, 3)}) - {1, 2}, {3}),
         (IgnoredIds(), set()),
     ],
-    ids=["singles_and_range", "overlap_merged", "excluded", "empty"],
+    ids=["singles_and_range", "overlap_merged", "excluded", "excluded_twice", "narrow_range_one_left", "empty"],
 )
 def test_ignored_ids_iterate_and_count_every_covered_id(ignored: IgnoredIds, expected: set[int]) -> None:
     assert sorted(ignored) == sorted(expected)

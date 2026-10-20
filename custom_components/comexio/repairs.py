@@ -60,6 +60,7 @@ from .const import (
     WebioClass,
     active_webio_classes,
     format_ignored_ids,
+    invalid_ignored_tokens,
     one_line,
     one_line_values,
     prune_import_disabled_ignored,
@@ -106,7 +107,10 @@ def _add_knx_dpt_suffix_ignored_ids(existing_raw: str, new_ids: set[int]) -> str
     by the shared const helpers so the two stay in sync — ranges the user wrote stay ranges.
     """
     knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
-    singles, ranges = split_ignored_ids(existing_raw, knx_prefix + knx_prefix.lower())
+    prefix_chars = knx_prefix + knx_prefix.lower()
+    if invalid := invalid_ignored_tokens(existing_raw, prefix_chars):
+        _LOGGER.warning("Dropping invalid entries %s from the KNX DPT suffix ignore list", invalid)
+    singles, ranges = split_ignored_ids(existing_raw, prefix_chars)
     return format_ignored_ids(singles | new_ids, ranges, knx_prefix)
 
 

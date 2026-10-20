@@ -16,6 +16,7 @@ from custom_components.comexio.const import (
     CONF_IGNORED_KNX,
     CONF_IGNORED_MARKERS,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    IgnoredIds,
     WebioClass,
     source_category,
 )
@@ -445,6 +446,29 @@ def test_the_audit_walks_only_the_sources_a_range_covers_not_every_id_in_it() ->
     assert sorted(ids) == [BRIDGE_MARKER_ID, 335]
 
 
+def _no_expansion(*_args: object) -> None:
+    raise AssertionError("ignore range expanded")
+
+
+def test_a_user_typed_wide_range_passes_the_whole_audit_without_being_expanded() -> None:
+    # Every coordinator reader of the ignore-list (filter, audit, pruning) must stay on membership:
+    # expanding "100-1000000000" would hang or exhaust HA on every poll.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,100-1000000000"}, {BRIDGE_MARKER_ID})
+
+    with (
+        patch.object(IgnoredIds, "__iter__", _no_expansion),
+        patch.object(coordinator_module, "range", _no_expansion, create=True),
+    ):
+        notify = _check_ignored(coordinator, {"markers": [*MARKERS, {"id": 5000, "name": "Rollo"}]})
+        ignored = coordinator.ignored_marker_ids
+
+        assert {33, 5000, 1000000000} <= ignored
+        assert BRIDGE_MARKER_ID not in ignored
+
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+
+
 def test_an_unnamed_source_in_a_range_still_gets_its_leftovers_cleaned_up() -> None:
     # The range keeps ignoring the unnamed marker, so its old entity must be cleaned up — as a
     # single it would be pruned as stale instead, and the range is never written back.
@@ -458,3 +482,12 @@ def test_an_unnamed_source_in_a_range_still_gets_its_leftovers_cleaned_up() -> N
     assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 335), (WebioClass.MARKER.value, 336)]
     coordinator.request_options_update_without_reload.assert_not_called()
     notify.assert_not_called()
+
+
+def test_a_rewrite_that_drops_an_invalid_hand_edited_entry_logs_it(caplog: pytest.LogCaptureFixture) -> None:
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,abc,999"})
+
+    _check_ignored(coordinator, {"markers": MARKERS})
+
+    coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33"})
+    assert "'abc'" in caplog.text
