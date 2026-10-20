@@ -8,6 +8,7 @@ from custom_components.comexio.const import (
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     expand_ignored_marker_ids,
+    format_ignored_ids,
     import_disabled_issue_id,
     io_column_rows,
     io_group_headers,
@@ -15,6 +16,7 @@ from custom_components.comexio.const import (
     one_line,
     parse_ignored_marker_tokens,
     prune_import_disabled_ignored,
+    split_ignored_ids,
     webio_class_name,
 )
 
@@ -63,6 +65,42 @@ def test_expand_ignored_marker_ids_skips_invalid_tokens() -> None:
 
 def test_expand_ignored_ids_with_knx_prefix() -> None:
     assert expand_ignored_marker_ids("K3, k5-K6", prefix_chars="Kk") == {3, 5, 6}
+
+
+def test_split_ignored_ids_keeps_singles_and_ranges_apart() -> None:
+    assert split_ignored_ids("M1, 4-6, junk, m9") == ({1, 9}, {(4, 6)})
+
+
+def test_split_ignored_ids_orders_a_reversed_range() -> None:
+    assert split_ignored_ids("12-10") == (set(), {(10, 12)})
+
+
+def test_split_ignored_ids_leaves_out_a_single_a_range_covers() -> None:
+    # Pruned as a single, 5 would be reported as removed while the range still ignores it.
+    assert split_ignored_ids("1-10,5,12") == ({12}, {(1, 10)})
+
+
+@pytest.mark.parametrize(
+    ("singles", "ranges", "prefix", "expected"),
+    [
+        ({20, 3, 1}, {(8, 12)}, "", "1,3,8-12,20"),
+        # A single a range covers is redundant; a one-ID range reads as a single.
+        ({2, 9}, {(1, 3), (9, 9)}, "", "1-3,9"),
+        # Same start: the shorter range first, so the output does not depend on set order.
+        (set(), {(5, 12), (5, 9)}, "", "5-9,5-12"),
+        ({3}, {(5, 6)}, "K", "K3,K5-6"),
+        (set(), set(), "", ""),
+    ],
+    ids=["sorted_by_start", "redundant_single_dropped", "same_start", "prefix", "empty"],
+)
+def test_format_ignored_ids(singles: set[int], ranges: set[tuple[int, int]], prefix: str, expected: str) -> None:
+    assert format_ignored_ids(singles, ranges, prefix) == expected
+
+
+def test_formatted_ignored_ids_parse_back_to_the_same_ids() -> None:
+    raw = format_ignored_ids({1, 7}, {(3, 5)}, "K")
+
+    assert expand_ignored_marker_ids(raw, prefix_chars="Kk") == {1, 3, 4, 5, 7}
 
 
 def test_webio_class_name_suffixes() -> None:

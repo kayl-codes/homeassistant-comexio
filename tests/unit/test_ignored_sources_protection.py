@@ -108,12 +108,13 @@ def _check_ignored(
     plans: dict[int, Any] | None = None,
     import_flags: dict[str, bool] | None = None,
     load_plans: AsyncMock | None = None,
+    entities_by_id: dict[int, list[str]] | None = None,
 ) -> MagicMock:
     """Run async_check_ignored_sources with every HA side effect stubbed; returns the notification mock."""
     coordinator._cleanup_entity_ids = []
     coordinator._cleanup_function_plan_count = 0
     coordinator._load_managed_plan_check_data = load_plans or AsyncMock(return_value=plans or {})  # type: ignore[method-assign]
-    coordinator.marker_entities_by_id = MagicMock(return_value={})  # type: ignore[method-assign]
+    coordinator.marker_entities_by_id = MagicMock(return_value=entities_by_id or {})  # type: ignore[method-assign]
     coordinator.request_options_update_without_reload = MagicMock()  # type: ignore[method-assign]
     conf = {**(import_flags or IMPORT_ALL), **coordinator.config_entry.options}
     with (
@@ -278,3 +279,91 @@ def test_stale_id_removed_by_the_user_during_the_audit_is_not_reported() -> None
 
     coordinator.request_options_update_without_reload.assert_not_called()
     notify.assert_not_called()
+
+
+def test_ranges_survive_the_pruning_with_gaps_and_bridge_markers_in_them() -> None:
+    # 330-340 covers a bridge marker and IDs no source has (yet): the pruning flattened such a
+    # range into single IDs on every poll and dropped the gaps, so a marker created there later
+    # was no longer ignored.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,330-340"}, {BRIDGE_MARKER_ID})
+
+    notify = _check_ignored(coordinator, {"markers": MARKERS})
+
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+    # The bridge marker in the range stays unignored all the same.
+    assert BRIDGE_MARKER_ID not in coordinator.ignored_marker_ids
+    assert {33, 330, 340} <= coordinator.ignored_marker_ids
+
+
+def test_only_single_ids_are_pruned_and_ranges_are_written_back_as_ranges() -> None:
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: f"33,400-410,999,{BRIDGE_MARKER_ID}"}, {BRIDGE_MARKER_ID})
+
+    notify = _check_ignored(coordinator, {"markers": MARKERS})
+
+    coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33,400-410"})
+    notifications = _notifications(notify)
+    assert "**M999**" in notifications[STALE_ID]
+    assert f"**M{BRIDGE_MARKER_ID}**" in notifications[PROTECTED_ID]
+
+
+def test_a_stale_single_inside_a_range_is_not_reported_as_removed() -> None:
+    # Hand-edited "330-340,335": the range keeps ignoring 335, so no "removed" notification.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "330-340,335"})
+
+    notify = _check_ignored(coordinator, {"markers": MARKERS})
+
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+
+
+def test_an_existing_source_in_a_range_is_still_cleaned_up() -> None:
+    # Gaps in a range are skipped, its existing sources are not: leftover entities get cleaned up.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "330-340"})
+    markers = [*MARKERS, {"id": 335, "name": "Rollo"}]
+    _check_ignored(coordinator, {"markers": markers}, entities_by_id={335: ["switch.iosrv1_m335"]})
+
+    assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 335)]
+    coordinator.request_options_update_without_reload.assert_not_called()
+
+
+def test_a_source_created_later_in_a_range_is_ignored() -> None:
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "330-340"}, {BRIDGE_MARKER_ID})
+
+    assert 337 in coordinator.ignored_marker_ids
+
+
+def test_knx_ranges_survive_and_only_stale_k_singles_are_pruned() -> None:
+    coordinator = _coordinator({CONF_IGNORED_KNX: "K5,K10-12,K999"})
+
+    notify = _check_ignored(coordinator, {"knx": [{"id": 5, "name": "Licht"}]}, WebioClass.KNX)
+
+    coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_KNX: "5,10-12"})
+    assert "**K999**" in next(iter(_notifications(notify).values()))
+
+
+def test_a_stale_single_turned_into_a_range_during_the_audit_is_kept() -> None:
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
+
+    async def _options_saved_meanwhile() -> dict[int, Any]:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,990-1000"}  # type: ignore[misc]
+        return {}
+
+    notify = _check_ignored(
+        coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile)
+    )
+
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+
+
+def test_a_range_saved_during_the_audit_survives_the_pruning_of_a_stale_single() -> None:
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
+
+    async def _options_saved_meanwhile() -> dict[int, Any]:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,400-410,999"}  # type: ignore[misc]
+        return {}
+
+    _check_ignored(coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile))
+
+    coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33,400-410"})

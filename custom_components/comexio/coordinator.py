@@ -159,6 +159,7 @@ from .const import (
     classify_audit_key,
     entity_id_migration_target,
     expand_ignored_marker_ids,
+    format_ignored_ids,
     function_plan_ids,
     fw_update_signal,
     import_disabled_issue_id,
@@ -172,6 +173,7 @@ from .const import (
     snap_to_grid,
     source_audit_key,
     source_category,
+    split_ignored_ids,
     trigger_pair_categories,
     webio_class_label,
     webio_class_name,
@@ -384,6 +386,11 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
         "webio_devices": parsed_data.get("webio_devices", {}),
         "extensions": parsed_data.get("extensions", {}),
     }
+
+
+def _ignore_list_prefix_chars(category: SourceCategory) -> str:
+    """The letter prefixes an ID in the category's ignore-list may carry, e.g. "Mm"."""
+    return category.audit_key_prefix + category.audit_key_prefix.lower()
 
 
 def _fallback_audit_key(full_name: str) -> str:
@@ -5636,7 +5643,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if conf_key is None:
             return set()
         if ignored_raw := self.config_entry.options.get(conf_key, "").strip():
-            return expand_ignored_marker_ids(ignored_raw, category.audit_key_prefix + category.audit_key_prefix.lower())
+            return expand_ignored_marker_ids(ignored_raw, _ignore_list_prefix_chars(category))
         return set()
 
     def _unignorable_ids(self, category: WebioClass) -> set[int]:
@@ -5723,9 +5730,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cleanup_ids: list[int] = []
         affected_fub_ids: set[int] = set()
 
-        all_ignored_ids = expand_ignored_marker_ids(
-            ignored_raw, category.audit_key_prefix + category.audit_key_prefix.lower()
-        )
+        all_ignored_ids = expand_ignored_marker_ids(ignored_raw, _ignore_list_prefix_chars(category))
+        single_ids, _ranges = split_ignored_ids(ignored_raw, _ignore_list_prefix_chars(category))
         # Only managed plans: the cleanup never touches a user's own plan (e.g. the one the
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
         lp_plans = await self._load_managed_plan_check_data()
@@ -5741,8 +5747,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for source_id in sorted(all_ignored_ids - self._unignorable_ids(webio_class)):
             source = sources_by_id.get(source_id)
             if not source or not source.get("name", "").strip():
-                # Source no longer exists in Comexio → stale, auto-remove
-                stale_ids.add(source_id)
+                # A single ID whose source no longer exists in Comexio → stale, auto-remove. A gap
+                # in a range is not: the range also covers sources created there later.
+                if source_id in single_ids:
+                    stale_ids.add(source_id)
                 continue
 
             # Source exists and is intentionally ignored — only flag if legacy entities/links remain
@@ -5771,18 +5779,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _prune_ignored_ids(
         self, category: SourceCategory, webio_class: WebioClass, conf_key: str, stale_ids: set[int]
     ) -> None:
-        """Drop stale and unignorable IDs from the ignore-list option — one update, separate notifications.
+        """Drop stale and unignorable single IDs from the ignore-list option — one update, separate notifications.
 
         Re-reads the option instead of the poll's conf snapshot: an options-flow save that landed
         while the audit awaited the plan data would otherwise be overwritten, dropping IDs the
         user just added and reactivating their sources.
+
+        Ranges are kept as written: a range covering a bridge marker or a gap would otherwise be
+        flattened into single IDs on every poll. The bridge markers in it stay unignored anyway
+        (_ignored_ids_for leaves them out).
         """
-        current_ids = self._configured_ignored_ids(category)
-        stale = current_ids & stale_ids
-        protected = current_ids & self._unignorable_ids(webio_class)
+        single_ids, ranges = split_ignored_ids(
+            self.config_entry.options.get(conf_key, ""), _ignore_list_prefix_chars(category)
+        )
+        stale = single_ids & stale_ids
+        protected = single_ids & self._unignorable_ids(webio_class)
         if not (stale or protected):
             return
-        self._remove_ignored_ids(conf_key, current_ids - stale - protected)
+        self._write_ignored_ids(conf_key, format_ignored_ids(single_ids - stale - protected, ranges))
         if stale:
             self._notify_removed_ignored_ids(
                 category,
@@ -5800,11 +5814,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "and can never be ignored.",
             )
 
-    def _remove_ignored_ids(self, conf_key: str, remaining_ids: set[int]) -> None:
-        """Rewrite an ignore-list option to remaining_ids (dropping the key when empty), without a reload."""
+    def _write_ignored_ids(self, conf_key: str, ignored_raw: str) -> None:
+        """Rewrite an ignore-list option to ignored_raw (dropping the key when empty), without a reload."""
         new_options = {**self.config_entry.options}
-        if remaining_ids:
-            new_options[conf_key] = ",".join(str(i) for i in sorted(remaining_ids))
+        if ignored_raw:
+            new_options[conf_key] = ignored_raw
         else:
             new_options.pop(conf_key, None)
         self.request_options_update_without_reload(new_options)

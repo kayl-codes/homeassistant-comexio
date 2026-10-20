@@ -1205,20 +1205,44 @@ def parse_ignored_marker_tokens(
                 yield display_token, None
 
 
+def split_ignored_ids(raw: str, prefix_chars: str = "Mm") -> tuple[set[int], set[tuple[int, int]]]:
+    """Split an ignored-ids config string into its single IDs and its inclusive (start, end) ranges.
+
+    A single ID a range also covers (a hand-edited '1-10,5') is left out: it is redundant, and
+    pruning it as a single would report a removal while the range still ignores it.
+    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    """
+    singles: set[int] = set()
+    ranges: set[tuple[int, int]] = set()
+    for _token, parsed in parse_ignored_marker_tokens(raw, prefix_chars):
+        if isinstance(parsed, tuple):
+            ranges.add(parsed)
+        elif parsed is not None:
+            singles.add(parsed)
+    return singles - _ids_in_ranges(ranges), ranges
+
+
+def _ids_in_ranges(ranges: set[tuple[int, int]]) -> set[int]:
+    return set().union(*(range(start, end + 1) for start, end in ranges))
+
+
 def expand_ignored_marker_ids(raw: str, prefix_chars: str = "Mm") -> set[int]:
     """Expand an ignored-ids config string (markers or KNX) to a set of integer IDs.
 
     Invalid tokens are silently ignored (runtime use; options_flow validates separately).
     """
-    result: set[int] = set()
-    for _token, parsed in parse_ignored_marker_tokens(raw, prefix_chars):
-        if parsed is None:
-            continue
-        if isinstance(parsed, tuple):
-            result.update(range(parsed[0], parsed[1] + 1))
-        else:
-            result.add(parsed)
-    return result
+    singles, ranges = split_ignored_ids(raw, prefix_chars)
+    return singles | _ids_in_ranges(ranges)
+
+
+def format_ignored_ids(singles: set[int], ranges: set[tuple[int, int]], prefix: str = "") -> str:
+    """The ignored-ids option string: singles and ranges sorted by start, e.g. '1,3,8-12'.
+
+    The one writer of the format, so a rewrite never flattens the user's ranges into single IDs.
+    A single ID a range already covers (e.g. '1-3,2') is dropped as redundant.
+    """
+    items = sorted([*ranges, *((i, i) for i in singles - _ids_in_ranges(ranges))])
+    return ",".join(f"{prefix}{start}" if start == end else f"{prefix}{start}-{end}" for start, end in items)
 
 
 def is_valid_entity_name_schema(schema: Any) -> bool:
