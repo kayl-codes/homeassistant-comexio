@@ -62,6 +62,7 @@ from .const import (
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
+    WEBIO_CLASSES,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     category_by_fub_module_type,
     function_plan_id,
@@ -660,6 +661,10 @@ class ComexioAPI:
         self.io_input_types: dict[str, Any] = {}
         # Function plan + paper metadata (populated by parse_config)
         self._fub_data: dict[str, Any] = {}  # fub_id_str → {Id, Name, Paper, ...}
+        # Unnamed-but-wired marker ids the last poll parsed with (set by the coordinator). A
+        # parse_config call without its own referenced_markers (every mid-sync reload) uses
+        # them, so it sees the same markers as the poll instead of one fewer per such marker.
+        self.referenced_markers: set[str] = set()
         # Called with no arguments when set_fub_active changed a plan's cached Active flag or
         # create_fup added a plan, so the coordinator can refresh the entities showing the plans
         # (see ComexioCoordinator.__init__) — a new plan gets its run-state sensor right away.
@@ -1248,6 +1253,7 @@ class ComexioAPI:
         caused since then over the older Active flags in conf; the mark get_raw_config()
         remembered for conf counts instead if it is later or run_state_mark is missing. A conf
         from an older fetch than the cached plan list leaves the plan and paper caches alone.
+        referenced_markers=None falls back to self.referenced_markers (the last poll's set).
         """
         # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection).
         # aiocomexio decodes each page variable on its own: a config whose $Fubs/$Paper did not
@@ -1272,10 +1278,14 @@ class ComexioAPI:
                 schema_knx=schema_knx,
             ),
             live_states=live_states,
-            referenced_markers=referenced_markers,
+            referenced_markers=self.referenced_markers if referenced_markers is None else referenced_markers,
             knx_live_states=knx_live_states,
             knx_dpt_catalog=knx_dpt_catalog,
         )
+        # HA does not import Quickbus IOs (Multitouch, motion sensors) yet (#86): no entities and no
+        # Web-IO commands for them, and no QUICKBUS Web-IO class. io_all keeps them for plan labels.
+        data["io"] = [io for io in data["io"] if io.get("quickbus") is None]
+        data["webio_devices"] = {cls: dev for cls, dev in data.get("webio_devices", {}).items() if cls in WEBIO_CLASSES}
         _LOGGER.info(
             "Audit: %d Markers, %d IOs, %d KNX, %d Webhooks in Comexio for %s",
             len(data["markers"]),
@@ -5022,7 +5032,7 @@ class ComexioAPI:
             else:
                 await self.client.set_io_value(ext, identifier, value)
         except (ComexioError, ValueError) as err:
-            # ValueError: a target id that is no number, rejected before anything is sent.
+            # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, err)
             return False
         return True

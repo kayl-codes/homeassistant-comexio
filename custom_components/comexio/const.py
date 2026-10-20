@@ -150,7 +150,9 @@ CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
 WEBIO_CLASS_MARKER = WebioClass.MARKER
 WEBIO_CLASS_IO = WebioClass.IO
 WEBIO_CLASS_KNX = WebioClass.KNX
-WEBIO_CLASSES = tuple(WebioClass)
+# Listed explicitly, not tuple(WebioClass): aiocomexio 0.7.0 adds WebioClass.QUICKBUS, which
+# HA does not maintain yet (Quickbus IOs are left out of the import until #86).
+WEBIO_CLASSES = (WebioClass.MARKER, WebioClass.IO, WebioClass.KNX)
 
 # Internal audit-map key convention (coordinator._async_update_data): IO entries are keyed
 # as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}" —

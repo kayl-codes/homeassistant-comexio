@@ -52,6 +52,33 @@ def test_unnamed_referenced_marker_gets_placeholder_title(basic_result: dict[str
     assert (marker["title"], marker["name"], marker["no_name"]) == ("#nn", "M5 #nn", True)
 
 
+def test_a_parse_without_referenced_markers_uses_the_last_polls_set(parsing_api: ComexioAPI) -> None:
+    """A mid-sync reload passes no referenced_markers: it must still see the poll's unnamed wired marker."""
+    parsing_api.referenced_markers = {"5"}
+
+    result = parsing_api.parse_config(load_json_fixture("config_basic.json"))
+
+    assert sorted(_by_id(result["markers"]), key=int) == ["1", "2", "3", "4", "5", "7"]
+
+
+@pytest.mark.parametrize(
+    ("last_poll", "explicit", "expected_ids"),
+    [
+        ({"5"}, set(), ["1", "2", "3", "4", "7"]),
+        (set(), {"5"}, ["1", "2", "3", "4", "5", "7"]),
+    ],
+)
+def test_explicit_referenced_markers_override_the_last_polls_set(
+    parsing_api: ComexioAPI, last_poll: set[str], explicit: set[str], expected_ids: list[str]
+) -> None:
+    """An explicit set (even an empty one) wins: the poll itself always passes the set it just computed."""
+    parsing_api.referenced_markers = last_poll
+
+    result = parsing_api.parse_config(load_json_fixture("config_basic.json"), referenced_markers=explicit)
+
+    assert sorted(_by_id(result["markers"]), key=int) == expected_ids
+
+
 @pytest.mark.parametrize(
     ("marker_id", "kind"),
     [("1", MarkerKind.NORMAL), ("3", MarkerKind.READ_ONLY), ("4", MarkerKind.TRIGGER), ("7", MarkerKind.KNX_BRIDGE)],
@@ -183,3 +210,31 @@ def test_io_without_description_gets_placeholder_title(basic_result: dict[str, A
     io = _by_id(basic_result["io"])["13"]
 
     assert (io["ha_name"], io["name"]) == ("AI1 #nn", "BASE AI1")
+
+
+# IO type tables for config_quickbus.json, as Comexio sends them: 134 = Multitouch gesture, 126 = motion (PIR),
+# 12 = temperature, 111 = LED colour channel.
+_QUICKBUS_IO_TYPES = {
+    "1": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "12": {"binary": False, "min": 0, "max": 100, "unit": "°C"},
+    "111": {"binary": False, "min": 0, "max": 100, "unit": "%"},
+    "126": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "134": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+}
+_QUICKBUS_IO_INPUT_TYPES = {"1": {"input": True}, "12": {"input": True}, "111": {"input": True}}
+
+
+def test_quickbus_ios_are_not_imported_yet(parsing_api: ComexioAPI) -> None:
+    """Quickbus IOs get no entity and no Web-IO command until HA supports their class (#86)."""
+    parsing_api.io_types = _QUICKBUS_IO_TYPES
+    parsing_api.io_input_types = _QUICKBUS_IO_INPUT_TYPES
+
+    result = parsing_api.parse_config(load_json_fixture("config_quickbus.json"))
+
+    assert [(io["ext_name"], io["identifier"]) for io in result["io"]] == [("BASE", "I1")]
+    # io_all keeps them, so a plan wired to a Quickbus IO still shows its name.
+    assert {io["identifier"] for io in result["io_all"] if io["quickbus"]} >= {"G1", "G18", "PIR1"}
+    assert set(result["webio_devices"]) == {WEBIO_CLASS_MARKER, WEBIO_CLASS_IO, WEBIO_CLASS_KNX}
+    names = [cmd["Name"] for cmd in parsing_api.build_webio_commands("test", result)]
+    assert "HA IO BASE I1" in names
+    assert not [name for name in names if name.startswith("HA QB")]

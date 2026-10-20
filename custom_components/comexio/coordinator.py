@@ -1114,6 +1114,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if referenced_markers is None:
             referenced_markers = await self.function_plan_backup.async_referenced_marker_ids()
         self._last_referenced_marker_ids = referenced_markers
+        self.api.referenced_markers = referenced_markers
         # Only fetched when KNX import is enabled — an extra HTTP round-trip nobody without
         # KNX objects needs. get_knx_dpt_catalog() never raises (own contract, {} on
         # failure), so an unreachable/failed fetch just leaves every KNX analog item on its
@@ -8006,10 +8007,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         existing (possibly stale) self.data as-is whenever self.in_sync is True, which covers
         the whole duration of a manual sync — the exact window this needs a fresh picture for.
         So this bypasses the coordinator update machinery entirely and fetches raw config
-        straight from the API. live_states/referenced_markers are omitted deliberately: marker
-        kind depends only on its title, and a trigger marker always has a real name (a suffix
-        needs something to be suffixed to), so it's never affected by the referenced-marker
-        cold-start fallback that only concerns unnamed markers.
+        straight from the API. live_states is omitted deliberately: marker kind depends only on
+        its title. referenced_markers is omitted too, so parse_config falls back to the last
+        poll's set (api.referenced_markers) and the marker list matches the poll's; trigger
+        markers are unaffected either way, as a trigger marker always has a real name (a suffix
+        needs something to be suffixed to) and the set only concerns unnamed markers.
 
         get_raw_config() returns {} on an HTTP failure rather than raising — indistinguishable
         from a genuinely empty config by shape alone. Proceeding anyway would derive empty
