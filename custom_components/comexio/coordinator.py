@@ -380,10 +380,14 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
     import_ios = conf.get("import_ios", True)
     import_knx = conf.get("import_knx", False)
     import_quickbus = conf.get("import_quickbus", True)
+    io_all = parsed_data.get("io_all", [])
+    if not import_ios:
+        # io_all labels plan elements: imported Quickbus IOs keep theirs without the physical IOs.
+        io_all = [io for io in io_all if import_quickbus and io.get("quickbus")]
     return {
         "markers": parsed_data["markers"] if import_markers else [],
         "io": parsed_data["io"] if import_ios else [],
-        "io_all": parsed_data.get("io_all", []) if import_ios else [],
+        "io_all": io_all,
         "knx": parsed_data.get("knx", []) if import_knx else [],
         QUICKBUS_IO_DATA_KEY: parsed_data.get(QUICKBUS_IO_DATA_KEY, []) if import_quickbus else [],
         "webio_commands": parsed_data.get("webio_commands", {}),

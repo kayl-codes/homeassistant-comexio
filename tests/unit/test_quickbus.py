@@ -127,6 +127,27 @@ def test_import_quickbus_defaults_to_on(quickbus_result: dict[str, Any]) -> None
     assert len(_imported_data(quickbus_result, {})[QUICKBUS_IO_DATA_KEY]) == 8
 
 
+@pytest.mark.parametrize(("import_quickbus", "keeps_quickbus_labels"), [(True, True), (False, False)])
+def test_plan_labels_of_imported_quickbus_ios_survive_import_ios_off(
+    quickbus_result: dict[str, Any], import_quickbus: bool, keeps_quickbus_labels: bool
+) -> None:
+    imported = _imported_data(quickbus_result, {"import_ios": False, "import_quickbus": import_quickbus})
+
+    quickbus_labels = [io for io in quickbus_result["io_all"] if io.get("quickbus")]
+    assert quickbus_labels
+    assert len(quickbus_labels) < len(quickbus_result["io_all"])  # the physical labels are dropped
+    assert imported["io_all"] == (quickbus_labels if keeps_quickbus_labels else [])
+    assert imported["io"] == []
+
+
+@pytest.mark.parametrize("import_quickbus", [True, False])
+def test_import_ios_keeps_every_plan_label(quickbus_result: dict[str, Any], import_quickbus: bool) -> None:
+    imported = _imported_data(quickbus_result, {"import_ios": True, "import_quickbus": import_quickbus})
+
+    assert any(not io.get("quickbus") for io in quickbus_result["io_all"])
+    assert imported["io_all"] == quickbus_result["io_all"]
+
+
 def _webhook_coordinator(quickbus_ios: list[dict[str, Any]]) -> ComexioCoordinator:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator._quickbus_index = {str(io["id"]): io for io in quickbus_ios}
