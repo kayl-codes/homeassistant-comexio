@@ -367,3 +367,13 @@ def test_a_range_saved_during_the_audit_survives_the_pruning_of_a_stale_single()
     _check_ignored(coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile))
 
     coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33,400-410"})
+
+
+def test_the_audit_walks_only_the_sources_a_range_covers_not_every_id_in_it() -> None:
+    # A wide range must not be expanded per poll: only sources Comexio has in it are inspected.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "330-340"}, {BRIDGE_MARKER_ID})
+
+    _check_ignored(coordinator, {"markers": [*MARKERS, {"id": 335, "name": "Rollo"}]})
+
+    (ids, _infix), _kwargs = coordinator.marker_entities_by_id.call_args
+    assert sorted(ids) == [BRIDGE_MARKER_ID, 335]

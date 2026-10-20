@@ -162,6 +162,7 @@ from .const import (
     format_ignored_ids,
     function_plan_ids,
     fw_update_signal,
+    ignored_id_in_ranges,
     import_disabled_issue_id,
     io_audit_key,
     io_column_rows,
@@ -5730,21 +5731,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cleanup_ids: list[int] = []
         affected_fub_ids: set[int] = set()
 
-        all_ignored_ids = expand_ignored_marker_ids(ignored_raw, _ignore_list_prefix_chars(category))
-        single_ids, _ranges = split_ignored_ids(ignored_raw, _ignore_list_prefix_chars(category))
+        single_ids, ranges = split_ignored_ids(ignored_raw, _ignore_list_prefix_chars(category))
+        # A range contributes only the sources Comexio has in it: its gaps are never stale, and
+        # walking every ID of a wide range would cost memory and time on every poll.
+        audited_ids = single_ids | {sid for sid in sources_by_id if ignored_id_in_ranges(sid, ranges)}
         # Only managed plans: the cleanup never touches a user's own plan (e.g. the one the
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
         lp_plans = await self._load_managed_plan_check_data()
         ref_type = int(category.fub_module_type)
-        ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids), category.unique_id_infix).keys())
+        ids_with_entities = set(self.marker_entities_by_id(list(audited_ids), category.unique_id_infix).keys())
         _LOGGER.debug(
-            "[%s] async_check_ignored_sources[%s]: ignored=%s, plans_loaded=%s",
+            "[%s] async_check_ignored_sources[%s]: audited=%s, ranges=%s, plans_loaded=%s",
             self.server_id,
             category.label,
-            sorted(all_ignored_ids),
+            sorted(audited_ids),
+            sorted(ranges),
             sorted(lp_plans.keys()),
         )
-        for source_id in sorted(all_ignored_ids - self._unignorable_ids(webio_class)):
+        for source_id in sorted(audited_ids - self._unignorable_ids(webio_class)):
             source = sources_by_id.get(source_id)
             if not source or not source.get("name", "").strip():
                 # A single ID whose source no longer exists in Comexio → stale, auto-remove. A gap

@@ -1,14 +1,19 @@
 """Pure helper functions in const.py (IO layout order, ignore-list parsing, Web-IO class names)."""
 
+from unittest.mock import patch
+
 import pytest
 
+from custom_components.comexio import const
 from custom_components.comexio.const import (
     CONF_IMPORT_DISABLED_IGNORED,
+    IGNORED_RANGE_MAX_IDS,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     expand_ignored_marker_ids,
     format_ignored_ids,
+    ignored_id_in_ranges,
     import_disabled_issue_id,
     io_column_rows,
     io_group_headers,
@@ -73,6 +78,13 @@ def test_split_ignored_ids_keeps_singles_and_ranges_apart() -> None:
 
 def test_split_ignored_ids_orders_a_reversed_range() -> None:
     assert split_ignored_ids("12-10") == (set(), {(10, 12)})
+
+
+def test_wide_ranges_are_split_and_formatted_without_expanding_them() -> None:
+    # Only the runtime ignore set expands a range; parsing and writing one must stay cheap.
+    with patch(f"{const.__name__}.range", side_effect=AssertionError("range expanded"), create=True):
+        singles, ranges = split_ignored_ids("5, 1-1000000000, 2000000000")
+        assert format_ignored_ids(singles, ranges) == "1-1000000000,2000000000"
 
 
 def test_split_ignored_ids_leaves_out_a_single_a_range_covers() -> None:
@@ -152,3 +164,22 @@ def test_prune_import_disabled_ignored(options: dict, data: dict, expected: list
 )
 def test_one_line_cleans_a_comexio_name_for_output(raw: str | None, expected: str) -> None:
     assert one_line(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("source_id", "expected"),
+    [(4, False), (5, True), (9, True), (10, False), (20, True)],
+    ids=["below", "start", "end", "above", "second_range"],
+)
+def test_ignored_id_in_ranges_is_inclusive(source_id: int, expected: bool) -> None:
+    assert ignored_id_in_ranges(source_id, {(5, 9), (20, 20)}) is expected
+
+
+def test_a_stored_range_wider_than_the_limit_is_skipped_at_runtime(caplog: pytest.LogCaptureFixture) -> None:
+    # A range stored before the options flow capped it must not be expanded on every poll.
+    raw = f"3, 10-12, 100-{100 + IGNORED_RANGE_MAX_IDS}"
+
+    assert expand_ignored_marker_ids(raw) == {3, 10, 11, 12}
+    assert expand_ignored_marker_ids(raw) == {3, 10, 11, 12}
+    warnings = [r for r in caplog.records if "spans more than" in r.getMessage()]
+    assert len(warnings) == 1

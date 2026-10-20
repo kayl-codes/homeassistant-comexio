@@ -71,6 +71,10 @@ CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
 CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
 CONF_IGNORED_MARKERS = "ignored_markers"
 CONF_IGNORED_KNX = "ignored_knx"
+# Widest range one ignore-list entry may span. The runtime ignore set expands every range into
+# single IDs, so an unbounded range ('1-100000000') would exhaust memory on every poll: the
+# options flow rejects a wider one, the runtime expansion skips it (expand_ignored_marker_ids).
+IGNORED_RANGE_MAX_IDS = 10_000
 
 # Ids the user explicitly chose "leave as writable switch" for in the knx_dpt_ambiguous
 # repair flow (see repairs.py) — distinct from CONF_IGNORED_KNX (excludes a KNX object from
@@ -1219,20 +1223,39 @@ def split_ignored_ids(raw: str, prefix_chars: str = "Mm") -> tuple[set[int], set
             ranges.add(parsed)
         elif parsed is not None:
             singles.add(parsed)
-    return singles - _ids_in_ranges(ranges), ranges
+    return {i for i in singles if not ignored_id_in_ranges(i, ranges)}, ranges
 
 
-def _ids_in_ranges(ranges: set[tuple[int, int]]) -> set[int]:
-    return set().union(*(range(start, end + 1) for start, end in ranges))
+def ignored_id_in_ranges(source_id: int, ranges: set[tuple[int, int]]) -> bool:
+    """True if one of the inclusive ranges covers source_id — without expanding the ranges."""
+    return any(start <= source_id <= end for start, end in ranges)
 
 
 def expand_ignored_marker_ids(raw: str, prefix_chars: str = "Mm") -> set[int]:
     """Expand an ignored-ids config string (markers or KNX) to a set of integer IDs.
 
-    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    Invalid tokens are silently ignored (runtime use; options_flow validates separately). A range
+    wider than IGNORED_RANGE_MAX_IDS (stored before the options flow capped it, or edited by hand)
+    is skipped with a one-time warning instead of being expanded on every poll.
     """
     singles, ranges = split_ignored_ids(raw, prefix_chars)
-    return singles | _ids_in_ranges(ranges)
+    result = set(singles)
+    for start, end in ranges:
+        if end - start < IGNORED_RANGE_MAX_IDS:
+            result.update(range(start, end + 1))
+        elif (start, end) not in _warned_wide_ranges:
+            _warned_wide_ranges.add((start, end))
+            _LOGGER.warning(
+                "Ignore-list range %s-%s spans more than %s IDs and is not applied; shorten it in the options",
+                start,
+                end,
+                IGNORED_RANGE_MAX_IDS,
+            )
+    return result
+
+
+# Wide ranges already warned about — expand_ignored_marker_ids runs several times per poll.
+_warned_wide_ranges: set[tuple[int, int]] = set()
 
 
 def format_ignored_ids(singles: set[int], ranges: set[tuple[int, int]], prefix: str = "") -> str:
@@ -1241,7 +1264,7 @@ def format_ignored_ids(singles: set[int], ranges: set[tuple[int, int]], prefix: 
     The one writer of the format, so a rewrite never flattens the user's ranges into single IDs.
     A single ID a range already covers (e.g. '1-3,2') is dropped as redundant.
     """
-    items = sorted([*ranges, *((i, i) for i in singles - _ids_in_ranges(ranges))])
+    items = sorted([*ranges, *((i, i) for i in singles if not ignored_id_in_ranges(i, ranges))])
     return ",".join(f"{prefix}{start}" if start == end else f"{prefix}{start}-{end}" for start, end in items)
 
 
