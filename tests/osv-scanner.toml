@@ -114,6 +114,25 @@ id = "GHSA-gvp8-978c-rx2q"
 ignoreUntil = 2027-03-31
 reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-103001); no fixed release yet"
 
+# --- aiohttp 3.14.3: Home Assistant Core's own exact pin (homeassistant==2026.8.3 requires
+# aiohttp==3.14.3; still pinned in 2026.9.0), so it cannot be raised here without breaking HA's
+# resolver. At runtime the integration uses the aiohttp of the user's HA install, never this pin.
+# All three are fixed in 3.14.4.
+[[IgnoredVulns]]
+id = "GHSA-2g87-pp6c-29x5"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-494j-54xm-rwp3"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-5wr8-gcqf-gqf3"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
 # --- anyio / idna / pygments: false positives. OSV-Scanner reports the dependency *lower bounds*
 # from HA's metadata (anyio 4.9.0, idna 3.9.0, pygments 2.9.0) as if they were installed versions;
 # pip actually resolves anyio 4.15.1, idna 3.20, pygments 2.21.0 (CI job log, PR #90), all past
