@@ -1288,7 +1288,13 @@ class IgnoredIds(AbstractSet[int]):
         return covered - sum(1 for i in self._excluded if self._covers(i))
 
     def __sub__(self, other: AbstractSet[object]) -> "IgnoredIds":
-        """Exclude other's IDs without expanding a range (e.g. the unignorable bridge markers)."""
+        """Exclude other's IDs without expanding a range (e.g. the unignorable bridge markers).
+
+        other is iterated, so it must be a finite ID collection: another IgnoredIds may hold a
+        range of any width and is refused instead of expanded.
+        """
+        if isinstance(other, IgnoredIds):
+            raise TypeError("IgnoredIds - IgnoredIds would expand the subtracted ranges")
         return IgnoredIds(self._singles, self._ranges, self._excluded | {i for i in other if isinstance(i, int)})
 
     def __repr__(self) -> str:

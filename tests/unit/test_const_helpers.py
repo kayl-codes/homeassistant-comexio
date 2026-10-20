@@ -223,3 +223,10 @@ def test_ignored_ids_beyond_sys_maxsize_are_truthy_without_len() -> None:
     assert ignored
     assert 99999999999999999999 in ignored
     assert not IgnoredIds({5}, {(1, 2)}) - {1, 2, 5}
+
+
+def test_subtracting_an_ignored_ids_is_refused_instead_of_expanding_its_ranges() -> None:
+    wide = parse_ignored_ids("1-99999999999999999999")
+
+    with pytest.raises(TypeError):
+        IgnoredIds({5}) - wide
