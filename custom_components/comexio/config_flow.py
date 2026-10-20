@@ -11,9 +11,17 @@ from homeassistant.util import slugify
 import voluptuous as vol
 
 from .api import ComexioAPI
+from .certificate import (
+    async_read_fingerprint,
+    async_replaced_fingerprint,
+    async_report_certificate_changed,
+    notify_https_disabled,
+    notify_https_enabled,
+)
 from .const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_COVER_KEYWORDS,
     CONF_HOST,
     CONF_PASSWORD,
@@ -24,6 +32,8 @@ from .const import (
     DEFAULT_HOST,
     DOMAIN,
     KNOWN_DOMAINS,
+    LOGIN_ERROR_CERTIFICATE,
+    LOGIN_ERROR_CONNECTION,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
 )
@@ -47,6 +57,19 @@ class InvalidAuth(HomeAssistantError):
 
 class ServerIdExists(HomeAssistantError):
     """Error to indicate the Server ID is already in use."""
+
+
+class CertificateChanged(HomeAssistantError):
+    """Error to indicate Comexio presents another certificate than the pinned one."""
+
+    def __init__(self, actual: str | None) -> None:
+        super().__init__("Comexio presents another certificate than the pinned one")
+        self.actual = actual
+
+
+# What a reconfigure did to the entry's HTTPS (see _async_pin_for_host).
+_HTTPS_ENABLED = "enabled"
+_HTTPS_DROPPED = "dropped"
 
 
 class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -115,12 +138,17 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors[CONF_SERVER_ID] = "server_id_exists"
                         raise ServerIdExists
 
-                # 2. Validation: Test connection with the provided UI credentials
-                await self._test_connection(user_input)
+                # 2. Validation: Test connection with the provided UI credentials — over HTTPS
+                # with the certificate pinned when Comexio serves it, else plain HTTP.
+                fingerprint = await async_read_fingerprint(user_input[CONF_HOST])
+                await self._test_connection(user_input, fingerprint)
 
                 # Store the cleaned server ID and coerce scan_interval to int
                 user_input[CONF_SERVER_ID] = chosen_id
                 user_input["scan_interval"] = int(user_input["scan_interval"])
+                if fingerprint is not None:
+                    user_input[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+                    notify_https_enabled(self.hass, chosen_id, user_input[CONF_HOST], fingerprint)
                 _LOGGER.info("Config entry created for server: %s", chosen_id)
 
                 return self.async_create_entry(
@@ -135,6 +163,9 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
+            except CertificateChanged:
+                # Read a moment ago, refused at the login: there is no entry (and no repair) yet.
+                errors["base"] = "certificate_unstable"
             except Exception as e:
                 _LOGGER.exception("Unexpected error during setup: %s", e)
                 errors["base"] = "unknown"
@@ -191,15 +222,19 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 merged[CONF_API_PASSWORD] = entry.data.get(CONF_API_PASSWORD, "")
 
             try:
-                await self._test_connection(merged)
+                https_change = await self._async_pin_for_host(entry, merged)
+                await self._test_connection(merged, merged.get(CONF_CERTIFICATE_FINGERPRINT))
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
+            except CertificateChanged as err:
+                errors["base"] = self._certificate_error(entry, merged, err.actual)
             except Exception:
                 _LOGGER.exception("Unexpected error during reconfigure")
                 errors["base"] = "unknown"
             else:
+                self._notify_https_change(entry, merged, https_change)
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
                 return self.async_update_reload_and_abort(
                     entry,
@@ -223,8 +258,46 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def _test_connection(self, user_input):
-        """Test if the login works using UI credentials."""
+    @staticmethod
+    async def _async_pin_for_host(entry, merged) -> str | None:
+        """Read the certificate of the reconfigured host into merged; _HTTPS_ENABLED / _HTTPS_DROPPED / None.
+
+        The pinned host keeps its pin — a changed certificate there raises CertificateChanged before any
+        login (the certificate_changed repair's business, never accepted along with other settings). A host that
+        serves no HTTPS (any more) goes to plain HTTP, which the login test then has to get through;
+        this is the way out for a Comexio whose HTTPS was switched off. A new host is a new server:
+        its certificate is pinned like at setup.
+        """
+        pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+        fingerprint = await async_read_fingerprint(merged[CONF_HOST])
+        if fingerprint is None:
+            return None if merged.pop(CONF_CERTIFICATE_FINGERPRINT, None) is None else _HTTPS_DROPPED
+        if pinned is not None and merged[CONF_HOST] == entry.data.get(CONF_HOST):
+            if fingerprint != pinned:
+                raise CertificateChanged(fingerprint)
+            return None
+        merged[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+        return None if fingerprint == pinned else _HTTPS_ENABLED
+
+    def _certificate_error(self, entry, merged, actual: str | None) -> str:
+        """Error key of a login test refused for the certificate; raises the repair for the pinned one."""
+        if actual is None or merged.get(CONF_CERTIFICATE_FINGERPRINT) != entry.data.get(CONF_CERTIFICATE_FINGERPRINT):
+            # A certificate read a moment ago and refused at the login: nothing pinned to compare with.
+            return "certificate_unstable"
+        async_report_certificate_changed(self.hass, entry, actual)
+        return "certificate_changed"
+
+    def _notify_https_change(self, entry, merged, https_change: str | None) -> None:
+        """Tell the user when a reconfigure switched the entry to HTTPS or back to plain HTTP."""
+        server_id = entry.data[CONF_SERVER_ID]
+        if https_change == _HTTPS_ENABLED:
+            notify_https_enabled(self.hass, server_id, merged[CONF_HOST], merged[CONF_CERTIFICATE_FINGERPRINT])
+        elif https_change == _HTTPS_DROPPED:
+            _LOGGER.warning("Comexio at %s serves no HTTPS — the entry is back on plain HTTP", merged[CONF_HOST])
+            notify_https_disabled(self.hass, server_id, merged[CONF_HOST])
+
+    async def _test_connection(self, user_input, fingerprint: str | None = None):
+        """Test if the login works using UI credentials, over HTTPS with fingerprint pinned if given."""
         api = None
 
         try:
@@ -233,18 +306,27 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input[CONF_HOST],
                 user_input[CONF_USERNAME],
                 user_input[CONF_PASSWORD],
+                fingerprint=fingerprint,
             )
 
             _LOGGER.debug("Testing login credentials for %s", user_input[CONF_HOST])
             success = await api.login()
             if not success:
+                if api.last_login_error == LOGIN_ERROR_CERTIFICATE:
+                    mismatch = api.certificate_mismatch
+                    raise CertificateChanged(mismatch.actual if mismatch is not None else None)
+                if api.last_login_error == LOGIN_ERROR_CONNECTION:
+                    # aiohttp reports a foreign certificate on a host name with several addresses as one.
+                    if (actual := await async_replaced_fingerprint(api)) is not None:
+                        raise CertificateChanged(actual)
+                    raise CannotConnect
                 _LOGGER.error("Login test failed for user %s", user_input[CONF_USERNAME])
                 raise InvalidAuth
-        except Exception as e:
-            if not isinstance(e, InvalidAuth):
-                _LOGGER.exception("Connection test failed: %s", e)
-                raise CannotConnect from e
+        except (InvalidAuth, CannotConnect, CertificateChanged):
             raise
+        except Exception as e:
+            _LOGGER.exception("Connection test failed: %s", e)
+            raise CannotConnect from e
         finally:
             if api is not None:
                 api.close()

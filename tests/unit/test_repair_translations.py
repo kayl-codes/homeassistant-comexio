@@ -33,6 +33,7 @@ ENTRY_STEP_BY_ISSUE = {
     "function_plan_auto_start_suspended": "async_step_function_plan_stopped",
     "function_plan_vanished": "async_step_function_plan_vanished",
     "import_disabled": "async_step_import_disabled",
+    "certificate_changed": "async_step_certificate_changed",
 }
 
 # Call-site arguments that only hand an already raised issue's own translation_key back (the repair

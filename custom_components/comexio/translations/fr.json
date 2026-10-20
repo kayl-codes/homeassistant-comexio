@@ -4,7 +4,9 @@
       "server_id_exists": "Ce nom d'instance est déjà utilisé.",
       "cannot_connect": "La connexion à Comexio a échoué.",
       "invalid_auth": "Identifiants invalides (Interface Utilisateur/Mot de passe).",
-      "unknown": "Une erreur inattendue s'est produite."
+      "unknown": "Une erreur inattendue s'est produite.",
+      "certificate_changed": "Comexio présente un autre certificat que celui enregistré. Vérifiez-le sous Paramètres → Réparations.",
+      "certificate_unstable": "Comexio a présenté lors du test de connexion un autre certificat qu'un instant auparavant. Quelque chose dans le réseau répond peut-être à sa place — vérifiez-le et réessayez."
     },
     "step": {
       "user": {
@@ -498,6 +500,23 @@
           "import_enabled": "L'import de cette catégorie est de nouveau activé. Rien n'a été modifié.",
           "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois terminé.",
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
+        }
+      }
+    },
+    "certificate_changed": {
+      "title": "Comexio {server_id} : certificat modifié",
+      "fix_flow": {
+        "step": {
+          "certificate_changed": {
+            "title": "Certificat Comexio modifié",
+            "description": "Comexio **{server_id}** ({host}) présente un autre certificat TLS que celui enregistré lors de la configuration. Tant que vous n'avez pas décidé, Home Assistant ne lui envoie rien.\n\nEnregistré (SHA-256) :\n`{pinned}`\n\nPrésenté maintenant (SHA-256) :\n`{actual}`\n\nComparez la nouvelle valeur avec la valeur SHA-256 que la page d'administration de Comexio affiche parmi les empreintes du certificat. Si elle correspond — par exemple parce qu'un nouveau certificat a été généré dans Comexio —, confirmez pour l'enregistrer ; l'intégration est rechargée. Si elle ne correspond pas, autre chose répond à la place de Comexio : ne confirmez pas, fermez ce dialogue et vérifiez votre réseau."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "cannot_connect": "Le certificat de Comexio n'a pas pu être relu ({host}). Rien n'a été modifié — réessayez quand Comexio sera joignable.",
+          "certificate_restored": "Comexio présente de nouveau le certificat enregistré. Rien n'a été modifié.",
+          "certificate_changed_again": "Comexio présente maintenant encore un autre certificat :\n`{actual}`\n\nRien n'a été modifié. Rouvrez la réparation pour comparer celui-ci."
         }
       }
     }

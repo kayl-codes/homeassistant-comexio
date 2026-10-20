@@ -4,7 +4,9 @@
       "server_id_exists": "This instance name is already in use.",
       "cannot_connect": "Connection to Comexio failed.",
       "invalid_auth": "Invalid credentials (UI User/Pass).",
-      "unknown": "An unexpected error occurred."
+      "unknown": "An unexpected error occurred.",
+      "certificate_changed": "Comexio presents another certificate than the pinned one. Check it under Settings → Repairs.",
+      "certificate_unstable": "Comexio presented another certificate at the login test than a moment before. Something in the network may answer in its place — check it and try again."
     },
     "step": {
       "user": {
@@ -498,6 +500,23 @@
           "import_enabled": "The import of this category is switched on again. Nothing was changed.",
           "sync_running": "A sync, Web-IO range check or integration reload is running right now. Nothing was changed — open this repair again once it has finished.",
           "entry_not_found": "The associated config entry could not be found — it may have been removed."
+        }
+      }
+    },
+    "certificate_changed": {
+      "title": "Comexio {server_id}: certificate changed",
+      "fix_flow": {
+        "step": {
+          "certificate_changed": {
+            "title": "Comexio certificate changed",
+            "description": "Comexio **{server_id}** ({host}) presents another TLS certificate than the one pinned at setup. Until you decide, Home Assistant sends nothing to it.\n\nPinned (SHA-256):\n`{pinned}`\n\nPresented now (SHA-256):\n`{actual}`\n\nCompare the new value with the SHA-256 value Comexio's admin page lists under its certificate hashes. If it matches — for example because a new certificate was generated in Comexio — confirm to pin it; the integration reloads. If it does not match, something else answers in Comexio's place: do not confirm, close this dialog and check your network."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "cannot_connect": "Comexio's certificate could not be read again ({host}). Nothing was changed — try again once Comexio is reachable.",
+          "certificate_restored": "Comexio presents the pinned certificate again. Nothing was changed.",
+          "certificate_changed_again": "Comexio now presents yet another certificate:\n`{actual}`\n\nNothing was changed. Open the repair again to compare that one."
         }
       }
     }

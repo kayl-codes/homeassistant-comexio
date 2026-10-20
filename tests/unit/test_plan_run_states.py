@@ -8,7 +8,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioResponseError
+from aiocomexio import (
+    ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
+    ComexioConnectionError,
+    ComexioResponseError,
+)
+from homeassistant.helpers.update_coordinator import UpdateFailed
 import pytest
 
 from custom_components.comexio import coordinator as coordinator_module, plan_watchdog, sensor as sensor_module
@@ -240,6 +246,8 @@ class _FakeCoordinator(SimpleNamespace):
     _async_report_vanished_restored = ComexioCoordinator._async_report_vanished_restored
     comexio_unreachable = ComexioCoordinator.comexio_unreachable
     _async_bus_load_emergency_reboot = ComexioCoordinator._async_bus_load_emergency_reboot
+    _report_certificate_changed = ComexioCoordinator._report_certificate_changed
+    _clear_certificate_changed = ComexioCoordinator._clear_certificate_changed
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
@@ -286,7 +294,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _unresolved_watch_picks=frozenset(),
         _comexio_unreachable=False,
         _plan_watch_grace_until=None,
-        config_entry=SimpleNamespace(options={}),
+        config_entry=SimpleNamespace(options={}, entry_id="entry1"),
         plan_watchdog=SimpleNamespace(
             async_check=AsyncMock(return_value=False),
             async_sync_vanished=AsyncMock(),
@@ -2215,3 +2223,78 @@ def test_a_plan_restored_while_the_check_awaits_is_not_synced_as_vanished(api: C
     coordinator.plan_watchdog.async_check.side_effect = restored_meanwhile
     asyncio.run(coordinator._async_refresh_plan_run_states())
     coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with(set())
+
+
+# (db) A certificate other than the pinned one raises the certificate_changed repair.
+
+PINNED_CERT = "a" * 64
+OTHER_CERT = "b" * 64
+
+
+@pytest.fixture(autouse=True)
+def certificate_repair(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The repair's issue-registry calls, recorded instead of run (every scraped poll drops the repair)."""
+    report, clear = MagicMock(), MagicMock()
+    monkeypatch.setattr(coordinator_module, "async_report_certificate_changed", report)
+    monkeypatch.setattr(coordinator_module, "async_clear_certificate_changed", clear)
+    return SimpleNamespace(report=report, clear=clear)
+
+
+def _certificate_coordinator(api: ComexioAPI) -> _FakeCoordinator:
+    coordinator = _coordinator(api)
+    coordinator.config_entry = SimpleNamespace(options={}, entry_id="entry1")
+    return coordinator
+
+
+def test_a_config_fetch_meeting_another_certificate_fails_the_poll(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    coordinator = _certificate_coordinator(api)
+    api.get_raw_config = AsyncMock(return_value={})
+    api.certificate_mismatch = ComexioCertificateMismatchError("foreign", expected=PINNED_CERT, actual=OTHER_CERT)
+    api.get_live_states = AsyncMock()
+    with pytest.raises(UpdateFailed):
+        asyncio.run(ComexioCoordinator._async_fetch_parsed_config(coordinator, {}))
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    api.get_live_states.assert_not_awaited()  # nothing more goes to a server that is not the pinned one
+
+
+def test_a_run_state_fetch_meeting_another_certificate_raises_the_repair(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    coordinator = _certificate_coordinator(api)
+    api.client.get_function_plan_run_states = AsyncMock(
+        side_effect=ComexioCertificateMismatchError("foreign", expected=PINNED_CERT, actual=OTHER_CERT)
+    )
+    asyncio.run(coordinator._async_refresh_plan_run_states())
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+
+
+@pytest.mark.parametrize(("replaced", "reported"), [(OTHER_CERT, True), (None, False)])
+def test_an_unreachable_poll_checks_for_a_replaced_certificate(
+    api: ComexioAPI, certificate_repair: SimpleNamespace, replaced: str | None, reported: bool
+) -> None:
+    # A foreign certificate on a host name with several addresses arrives as a connection error.
+    coordinator = _certificate_coordinator(api)
+    coordinator._async_fetch_and_audit = AsyncMock(side_effect=ComexioConnectionError("down"))
+    api.fetch_replaced_fingerprint = AsyncMock(return_value=replaced)
+    with pytest.raises(ComexioConnectionError):
+        asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    assert certificate_repair.report.called is reported
+    assert coordinator.comexio_unreachable is True  # still counted as an outage
+
+
+def test_a_scraped_poll_drops_the_repair_whoever_raised_it(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    # Also one raised by the reconfigure flow or an earlier coordinator: the pinned certificate got through.
+    coordinator = _certificate_coordinator(api)
+
+    async def answering() -> dict:
+        coordinator._last_poll_scraped = True
+        coordinator._polled_plan_ids = None
+        return {}
+
+    coordinator._async_fetch_and_audit = answering
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    certificate_repair.clear.assert_called_once_with(coordinator.hass, "entry1")

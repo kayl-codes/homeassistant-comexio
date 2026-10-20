@@ -56,6 +56,10 @@ DEFAULT_SCHEMA_KNX = "K{KnxId} {KnxTitle}"
 # keys for API access
 CONF_API_USERNAME = "api_username"
 CONF_API_PASSWORD = "api_password"  # nosec B105
+# SHA-256 fingerprint (64 lowercase hex digits) of Comexio's TLS certificate, pinned at setup (see
+# certificate.py). Present: every request goes over HTTPS with that pin. Absent: plain HTTP, and
+# each setup tries to switch the entry over.
+CONF_CERTIFICATE_FINGERPRINT = "certificate_fingerprint"
 
 CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
 DEFAULT_ENABLE_NOTIFICATIONS = True
@@ -799,6 +803,13 @@ FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC = 600
 SETUP_UNREACHABLE_ENTRIES = f"{DOMAIN}_setup_unreachable"
 # ComexioAPI.last_login_error when the server could not be reached or answered garbage.
 LOGIN_ERROR_CONNECTION = "connection"
+# ComexioAPI.last_login_error when the server presented another certificate than the pinned one.
+LOGIN_ERROR_CERTIFICATE = "certificate"
+# What a user action learns when its login met LOGIN_ERROR_CERTIFICATE.
+CERTIFICATE_CHANGED_MSG = (
+    "Comexio presents another certificate than the pinned one — nothing is sent to it until you decide "
+    "in Settings → Repairs."
+)
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"

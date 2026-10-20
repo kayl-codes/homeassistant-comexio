@@ -12,7 +12,13 @@ import time
 from typing import Any
 import uuid
 
-from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
+from aiocomexio import (
+    ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
+    ComexioConnectionError,
+    ComexioDataError,
+    ComexioError,
+)
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -23,10 +29,11 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er, 
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
 
 from .api import ComexioAPI
+from .certificate import async_clear_certificate_changed, async_report_certificate_changed
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
     CLEANUP_SCOPE_KNX,
@@ -60,6 +67,7 @@ from .const import (
     CONF_API_USERNAME,
     CONF_BUS_WATCHDOG_AUTO_REBOOT,
     CONF_BUS_WATCHDOG_ENABLED,
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_COVER_KEYWORDS,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
@@ -607,6 +615,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         self.api: ComexioAPI = api
         self.api.config_entry = entry
+        self.api.on_certificate_mismatch = self._report_certificate_changed
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
         self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id, listed_plans=self.live_plan_list)
@@ -933,11 +942,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             data = await self._async_fetch_and_audit()
         except UNREACHABLE_ERRORS:
             self.note_comexio_unreachable()
+            # A foreign certificate on a host name with several addresses arrives as a connection error.
+            if (actual := await self.api.fetch_replaced_fingerprint()) is not None:
+                self._report_certificate_changed(actual)
             raise
         finally:
             self._full_poll_running = False
         if self._last_poll_scraped:
             self._note_comexio_reachable()
+            self._clear_certificate_changed()
         # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
         # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
         if self._polled_plan_ids is not None:
@@ -994,6 +1007,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         try:
             return await self._async_poll_and_audit()
+        except UpdateFailed:
+            raise
         except Exception as e:
             _LOGGER.exception("[%s] Data fetch failed: %s", self.server_id, e)
             raise
@@ -1078,6 +1093,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # while this poll runs keeps that state over the older Active flag in raw_config.
         run_state_mark = self.api.run_state_mark()
         raw_config = await self.api.get_raw_config()
+        if (mismatch := self.api.certificate_mismatch) is not None:
+            # Nothing more goes out to a server that is not the pinned one; the repair asks the user.
+            self._report_certificate_changed(mismatch.actual)
+            raise UpdateFailed(f"Comexio presents another certificate than the pinned one — see Repairs: {mismatch}")
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
         if self.api.config_relogin_unreachable:
             # The re-login after a lapsed session (e.g. a reboot) got no reply.
@@ -4533,6 +4552,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._plan_watch_backups_unloadable = False
         return self._vanished_user_plans()
 
+    def _report_certificate_changed(self, actual: str) -> None:
+        """Comexio presents `actual` instead of the pinned certificate: raise the certificate_changed repair."""
+        async_report_certificate_changed(self.hass, self.config_entry, actual)
+
+    def _clear_certificate_changed(self) -> None:
+        """A poll got through with the pinned certificate: drop the repair, whoever raised it."""
+        async_clear_certificate_changed(self.hass, self.config_entry.entry_id)
+
     def note_comexio_unreachable(self) -> None:
         """Comexio could not be reached (or HA rebooted it): the next successful read starts the boot grace."""
         self._comexio_unreachable = True
@@ -5148,6 +5175,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Count a failed run-state fetch, log it once per outage and heal a lapsed main session."""
         self._plan_run_state_fail_streak += 1
         self._plan_run_state_stale_count += 1
+        if isinstance(err, ComexioCertificateMismatchError):
+            # Raised right away rather than at the next full poll, which may be 15 min off.
+            self._report_certificate_changed(err.actual)
         level = logging.WARNING if self._plan_run_state_fail_streak == 1 else logging.DEBUG
         _LOGGER.log(
             level,
@@ -5507,6 +5537,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api.password = data.get(CONF_PASSWORD)
         self.api.api_user = data.get(CONF_API_USERNAME)
         self.api.api_pass = data.get(CONF_API_PASSWORD)
+        self.api.fingerprint = data.get(CONF_CERTIFICATE_FINGERPRINT)
 
         # Re-authenticate with new credentials
         await self.api.login()

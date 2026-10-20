@@ -11,15 +11,17 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady,
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.util import slugify
 
-from .api import ComexioAPI
+from .certificate import (
+    async_clear_certificate_changed,
+    async_create_api,
+    async_replaced_fingerprint,
+    async_report_certificate_changed,
+)
 from .const import (
-    CONF_API_PASSWORD,
-    CONF_API_USERNAME,
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_HOST,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
-    CONF_PASSWORD,
     CONF_SERVER_ID,
-    CONF_USERNAME,
     CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
     LOGIN_ERROR_CONNECTION,
@@ -59,6 +61,10 @@ PLATFORMS = [
 ]
 
 
+# A pinned entry connects over HTTPS only; the reconfigure flow is the way back to plain HTTP.
+_HTTPS_RETRY_HINT = " (over HTTPS — if Comexio no longer serves HTTPS, reconfigure the entry to go back to HTTP)"
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Comexio from a config entry."""
     _LOGGER.info("Comexio__init__: Entered async_setup_entry")
@@ -66,15 +72,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
     server_id = entry.data[CONF_SERVER_ID]
 
-    # Initialize API
-    api = ComexioAPI(
-        hass,
-        entry.data[CONF_HOST],
-        entry.data[CONF_USERNAME],
-        entry.data[CONF_PASSWORD],
-        api_user=entry.data.get(CONF_API_USERNAME),
-        api_pass=entry.data.get(CONF_API_PASSWORD),
-    )
+    # Initialize API (an entry still on plain HTTP is switched to HTTPS here when Comexio serves it)
+    api = await async_create_api(hass, entry)
 
     # Initialize Coordinator (passes config_entry to base class, sets api.config_entry and server_id)
     coordinator = ComexioCoordinator(hass, api, entry)
@@ -96,13 +95,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     try:
         if not await api.login():
-            if api.last_login_error == LOGIN_ERROR_CONNECTION:
-                _LOGGER.warning(
-                    "Comexio login failed due to a connection problem for %s — will retry", entry.data[CONF_HOST]
+            if (actual := await async_replaced_fingerprint(api)) is not None:
+                # Never accepted on its own: the repair shows both fingerprints and asks.
+                async_report_certificate_changed(hass, entry, actual)
+                raise ConfigEntryNotReady(
+                    f"Comexio at {entry.data[CONF_HOST]} presents another certificate than the pinned one — see Repairs"
                 )
-                raise ConfigEntryNotReady(f"Cannot connect to Comexio at {entry.data[CONF_HOST]}")
+            if api.last_login_error == LOGIN_ERROR_CONNECTION:
+                hint = _HTTPS_RETRY_HINT if CONF_CERTIFICATE_FINGERPRINT in entry.data else ""
+                _LOGGER.warning(
+                    "Comexio login failed due to a connection problem for %s — will retry%s",
+                    entry.data[CONF_HOST],
+                    hint,
+                )
+                raise ConfigEntryNotReady(f"Cannot connect to Comexio at {entry.data[CONF_HOST]}{hint}")
             _LOGGER.error("Comexio login rejected for %s — check credentials", entry.data[CONF_HOST])
             raise ConfigEntryAuthFailed
+        async_clear_certificate_changed(hass, entry.entry_id)
         await coordinator.async_config_entry_first_refresh()
     except Exception:
         # Close the session on any setup failure to prevent leaks on retry (ConfigEntryNotReady)
@@ -678,6 +687,11 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
         return
     # e.g. a repair's "Ignore" or an options-flow save during a sync — see async_reload_entry
     await coordinator.async_reload_entry("options changed")
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the entry's certificate_changed repair, which has nothing left to fix."""
+    async_clear_certificate_changed(hass, entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):

@@ -4,7 +4,9 @@
       "server_id_exists": "Este nombre de instancia ya está en uso.",
       "cannot_connect": "Error de conexión con Comexio.",
       "invalid_auth": "Credenciales no válidas (Usuario/Contraseña UI).",
-      "unknown": "Se ha producido un error inesperado."
+      "unknown": "Se ha producido un error inesperado.",
+      "certificate_changed": "Comexio presenta otro certificado distinto del guardado. Revísalo en Ajustes → Reparaciones.",
+      "certificate_unstable": "Comexio presentó en la prueba de inicio de sesión otro certificado distinto del de hace un momento. Puede que otra cosa en la red responda en su lugar; revísala e inténtalo de nuevo."
     },
     "step": {
       "user": {
@@ -498,6 +500,23 @@
           "import_enabled": "La importación de esta categoría vuelve a estar activada. No se ha cambiado nada.",
           "sync_running": "Ahora mismo se está ejecutando una sincronización, una comprobación de rango Web-IO o una recarga de la integración. No se ha cambiado nada — vuelve a abrir esta reparación cuando haya terminado.",
           "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado."
+        }
+      }
+    },
+    "certificate_changed": {
+      "title": "Comexio {server_id}: certificado cambiado",
+      "fix_flow": {
+        "step": {
+          "certificate_changed": {
+            "title": "Certificado de Comexio cambiado",
+            "description": "Comexio **{server_id}** ({host}) presenta otro certificado TLS distinto del guardado en la configuración. Hasta que decidas, Home Assistant no le envía nada.\n\nGuardado (SHA-256):\n`{pinned}`\n\nPresentado ahora (SHA-256):\n`{actual}`\n\nCompara el nuevo valor con el valor SHA-256 que la página de administración de Comexio muestra entre las huellas del certificado. Si coincide — por ejemplo, porque se generó un certificado nuevo en Comexio —, confirma para guardarlo; la integración se recarga. Si no coincide, otra cosa responde en lugar de Comexio: no confirmes, cierra este diálogo y revisa tu red."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
+          "cannot_connect": "No se pudo volver a leer el certificado de Comexio ({host}). No se cambió nada; inténtalo de nuevo cuando Comexio esté accesible.",
+          "certificate_restored": "Comexio vuelve a presentar el certificado guardado. No se cambió nada.",
+          "certificate_changed_again": "Comexio presenta ahora otro certificado más:\n`{actual}`\n\nNo se cambió nada. Vuelve a abrir la reparación para comparar ese."
         }
       }
     }

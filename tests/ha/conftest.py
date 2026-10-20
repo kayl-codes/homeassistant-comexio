@@ -7,6 +7,7 @@ import shutil
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioConnectionError
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -113,7 +114,24 @@ def api_attributes() -> dict[str, Any]:
 
 
 @pytest.fixture
-def mock_comexio_api(api_returns: dict[str, Any], api_attributes: dict[str, Any]) -> Generator[list[ComexioAPI]]:
+def certificate_handshake() -> Generator[AsyncMock]:
+    """The bare TLS handshake reading Comexio's certificate fingerprint; by default Comexio serves no HTTPS.
+
+    A test sets return_value (a fingerprint) or side_effect on it before the setup or flow.
+    """
+    handshake = AsyncMock(name="fetch_certificate_fingerprint", side_effect=ComexioConnectionError("no HTTPS"))
+    with (
+        patch("custom_components.comexio.certificate.fetch_certificate_fingerprint", handshake),
+        patch("custom_components.comexio.repairs.fetch_certificate_fingerprint", handshake),
+        patch("custom_components.comexio.api.fetch_certificate_fingerprint", handshake),
+    ):
+        yield handshake
+
+
+@pytest.fixture
+def mock_comexio_api(
+    api_returns: dict[str, Any], api_attributes: dict[str, Any], certificate_handshake: AsyncMock
+) -> Generator[list[ComexioAPI]]:
     """The one place the HA tests construct a ComexioAPI; yields every instance created.
 
     Pure parsing (parse_config) stays real and runs on the synthetic fixtures; every coroutine
@@ -147,7 +165,7 @@ def mock_comexio_api(api_returns: dict[str, Any], api_attributes: dict[str, Any]
         return api
 
     with (
-        patch("custom_components.comexio.ComexioAPI", side_effect=_factory),
+        patch("custom_components.comexio.certificate.ComexioAPI", side_effect=_factory),
         patch("custom_components.comexio.config_flow.ComexioAPI", side_effect=_factory),
         # DNS is disabled in tests; the resolver's own logic has unit tests (test_ha_address.py).
         patch("custom_components.comexio.ha_address.HaAddressResolver.async_get", return_value=HA_ADDRESS),

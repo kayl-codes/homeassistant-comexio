@@ -4,7 +4,9 @@
       "server_id_exists": "Dieser Instanz-Name wird bereits verwendet.",
       "cannot_connect": "Verbindung zu Comexio fehlgeschlagen.",
       "invalid_auth": "Ungültige Anmeldedaten (UI User/Pass).",
-      "unknown": "Unerwarteter Fehler aufgetreten."
+      "unknown": "Unerwarteter Fehler aufgetreten.",
+      "certificate_changed": "Comexio zeigt ein anderes Zertifikat als das gespeicherte. Bitte unter Einstellungen → Reparaturen prüfen.",
+      "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut."
     },
     "step": {
       "user": {
@@ -498,6 +500,23 @@
           "import_enabled": "Der Import dieser Kategorie ist wieder eingeschaltet. Es wurde nichts geändert.",
           "sync_running": "Gerade läuft ein Sync, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert — öffne diese Reparatur erneut, wenn er abgeschlossen ist.",
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt."
+        }
+      }
+    },
+    "certificate_changed": {
+      "title": "Comexio {server_id}: Zertifikat geändert",
+      "fix_flow": {
+        "step": {
+          "certificate_changed": {
+            "title": "Comexio-Zertifikat geändert",
+            "description": "Comexio **{server_id}** ({host}) zeigt ein anderes TLS-Zertifikat als das bei der Einrichtung gespeicherte. Bis du entscheidest, sendet Home Assistant nichts dorthin.\n\nGespeichert (SHA-256):\n`{pinned}`\n\nJetzt gezeigt (SHA-256):\n`{actual}`\n\nVergleiche den neuen Wert mit dem SHA-256-Wert, den die Comexio-Admin-Seite unter den Zertifikats-Hashes anzeigt. Stimmt er überein — etwa weil in Comexio ein neues Zertifikat erzeugt wurde —, bestätige, um ihn zu speichern; die Integration wird neu geladen. Stimmt er nicht überein, antwortet etwas anderes an Comexios Stelle: nicht bestätigen, Dialog schließen und das Netzwerk prüfen."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde eventuell entfernt.",
+          "cannot_connect": "Das Comexio-Zertifikat konnte nicht erneut gelesen werden ({host}). Nichts wurde geändert — bitte erneut versuchen, sobald Comexio erreichbar ist.",
+          "certificate_restored": "Comexio zeigt wieder das gespeicherte Zertifikat. Nichts wurde geändert.",
+          "certificate_changed_again": "Comexio zeigt jetzt noch ein anderes Zertifikat:\n`{actual}`\n\nNichts wurde geändert. Öffne die Reparatur erneut, um dieses zu vergleichen."
         }
       }
     }

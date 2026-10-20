@@ -10,6 +10,7 @@ from typing import Any, NamedTuple, NoReturn
 
 from aiocomexio import (
     ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
     ComexioClient,
     ComexioConnectionError,
     ComexioCreatedWithoutIdError,
@@ -20,6 +21,7 @@ from aiocomexio import (
     CreatedFunctionPlan,
     RawConfig,
     config as comexio_config,
+    fetch_certificate_fingerprint,
     webio as comexio_webio,
 )
 from aiocomexio.config import ParseOptions, iter_group
@@ -57,6 +59,7 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
+    LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
     MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
@@ -572,14 +575,31 @@ class ComexioAPI:
         password: str,
         api_user: str | None = None,
         api_pass: str | None = None,
+        fingerprint: str | None = None,
     ) -> None:
-        """Initialize the API class with all required credentials."""
+        """Initialize the API class with all required credentials.
+
+        With fingerprint (CONF_CERTIFICATE_FINGERPRINT) every request goes over HTTPS and checks that
+        Comexio presents that certificate; without it plain HTTP.
+        """
         self.hass: HomeAssistant = hass
         self.host: str = host
         self.username: str = username
         self.password: str = password
         self.api_user: str | None = api_user
         self.api_pass: str | None = api_pass
+        self.fingerprint: str | None = fingerprint
+        # The mismatch the last login or config fetch met: Comexio presented another certificate than
+        # the pinned one. Cleared by the next login that gets through and by every config fetch.
+        self.certificate_mismatch: ComexioCertificateMismatchError | None = None
+        # Called with the presented fingerprint on every mismatch met here, so the certificate_changed
+        # repair comes up with the first request that meets it, not only with the next full poll.
+        self.on_certificate_mismatch: Callable[[str], None] | None = None
+        # The presented fingerprint last logged at ERROR: a mismatch that persists is logged once, then
+        # at debug (the repair is up). Cleared by a login or config fetch that gets through.
+        self._mismatch_logged: str | None = None
+        # Whether the handshake for the comparison with the pin failed last time (logged once per outage).
+        self._handshake_failure_logged = False
 
         # This context is vital for the Audit logic to find the configured webio_name
         self.config_entry: ConfigEntry | None = None
@@ -747,18 +767,34 @@ class ComexioAPI:
             return session
 
     def _credentials(self) -> tuple[str, ...]:
-        return (self.host, self.username, self.password, self.api_user or "", self.api_pass or "")
+        return (
+            self.host,
+            self.username,
+            self.password,
+            self.api_user or "",
+            self.api_pass or "",
+            self.fingerprint or "",
+        )
 
     def _new_client(self, session: aiohttp.ClientSession) -> ComexioClient:
-        host, username, password, api_user, api_pass = self._credentials()
-        return ComexioClient(host, username, password, session=session, api_username=api_user, api_password=api_pass)
+        host, username, password, api_user, api_pass, fingerprint = self._credentials()
+        return ComexioClient(
+            host,
+            username,
+            password,
+            session=session,
+            api_username=api_user,
+            api_password=api_pass,
+            fingerprint=fingerprint or None,
+        )
 
     @property
     def client(self) -> ComexioClient:
         """The aiocomexio client on the main session.
 
-        Rebuilt whenever host or credentials change — the coordinator's reconfigure path
-        assigns new values to host / username / password / api_user / api_pass and logs in again.
+        Rebuilt whenever host, credentials or the pinned fingerprint change — the coordinator's
+        reconfigure path assigns new values to host / username / password / api_user / api_pass /
+        fingerprint and logs in again.
         A preview session that logged in with other settings is dropped as well — its client and
         cookie belong to the old ones — so ensure_preview_session opens a new one on the next poll.
         """
@@ -776,12 +812,6 @@ class ComexioAPI:
         self._preview_session.detach()
         self._preview_session = None
         self._preview_client = None
-
-    @property
-    def _base_url(self) -> str:
-        """Return the base URL for the Comexio IO-Server."""
-        # The IO-Server is reached on the local network over plain HTTP; HTTPS would be a new feature.
-        return f"http://{self.host}"  # NOSONAR
 
     @property
     def fub_data(self) -> dict[str, Any]:
@@ -922,8 +952,9 @@ class ComexioAPI:
           broken rather than logged out, that login fails and reports "connection" itself.
 
         Returns False on failure and sets last_login_error to "rejected" (credentials refused
-        — setup asks for reauth) or "connection" (server unreachable or answering garbage —
-        setup retries).
+        — setup asks for reauth), "certificate" (another certificate than the pinned one, see
+        certificate_mismatch — setup raises the certificate_changed repair) or "connection" (server
+        unreachable or answering garbage — setup retries).
         """
         client = self.client
         if client is self._logged_in_client:
@@ -970,13 +1001,55 @@ class ComexioAPI:
             _LOGGER.debug("Comexio login rejected: %s", err)
             self.last_login_error = "rejected"
             return False
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "Comexio login refused")
+            self.last_login_error = LOGIN_ERROR_CERTIFICATE
+            return False
         except ComexioError as err:
             _LOGGER.warning("Comexio login failed: %s", err)
             self.last_login_error = LOGIN_ERROR_CONNECTION
             return False
         _LOGGER.info("Successfully logged into Comexio Admin interface")
+        self.certificate_mismatch = None
+        self._mismatch_logged = None
         self.last_login_error = None
         return True
+
+    def _note_certificate_mismatch(
+        self, err: ComexioCertificateMismatchError, what: str, *, quiet: bool = False
+    ) -> None:
+        """Log that `what` failed for the mismatch, keep it (certificate_mismatch), hand it to on_certificate_mismatch.
+
+        Logged at ERROR once per presented certificate, then at debug — the repair is up; quiet (the fast
+        bus-load poll) always logs at debug.
+        """
+        if quiet or err.actual == self._mismatch_logged:
+            _LOGGER.debug("%s, the certificate changed: %s", what, err)
+        else:
+            _LOGGER.error("%s, the certificate changed: %s", what, err)
+            self._mismatch_logged = err.actual
+        self.certificate_mismatch = err
+        if self.on_certificate_mismatch is not None:
+            self.on_certificate_mismatch(err.actual)
+
+    async def fetch_replaced_fingerprint(self) -> str | None:
+        """The fingerprint Comexio presents now if it is not the pinned one, else None.
+
+        None as well when nothing is pinned or the handshake fails. For a host name with several
+        addresses aiohttp reports a foreign certificate as a connection error (see
+        ComexioCertificateMismatchError); a fresh handshake tells the two apart.
+        """
+        if self.fingerprint is None:
+            return None
+        try:
+            current = await fetch_certificate_fingerprint(self.host)
+        except (ComexioError, ValueError) as err:
+            log = _LOGGER.debug if self._handshake_failure_logged else _LOGGER.info
+            log("Comexio certificate could not be read for the comparison with the pin: %s", err)
+            self._handshake_failure_logged = True
+            return None
+        self._handshake_failure_logged = False
+        return None if current == self.fingerprint else current
 
     async def get_raw_config(self) -> dict[str, Any]:
         """The function module page's config objects ($FubModules, $Fubs, ...), keyed without "$".
@@ -986,7 +1059,8 @@ class ComexioAPI:
         on every coordinator poll, so the main session heals itself here. Returns {} if the
         server answered but the scrape failed (HTTP error status, failed re-login, no parseable
         $FubModules) — callers check for FubModules. A transport failure raises
-        aiohttp.ClientError / TimeoutError.
+        aiohttp.ClientError / TimeoutError. Another certificate than the pinned one returns {} as well
+        and sets certificate_mismatch; every fetch starts with it cleared, so it names this fetch's cause.
 
         Overlapping fetches: only a fetch started after the last applied one updates io_types,
         comexio_version and block_settings. An older one finishing last returns the newest page any
@@ -1000,6 +1074,7 @@ class ComexioAPI:
         self._config_fetches_started += 1
         generation = self._config_fetches_started
         unreachable = False
+        self.certificate_mismatch = None
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -1014,12 +1089,17 @@ class ComexioAPI:
         except ComexioConnectionError as err:
             self._drop_block_settings(generation)
             _raise_transport_error(err)
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "Comexio configuration not fetched")
+            self._drop_block_settings(generation)
+            return {}
         except ComexioError as err:
             _LOGGER.error("Failed to fetch the Comexio configuration: %s", err)
             self._drop_block_settings(generation)
             return {}
         finally:
             self.config_relogin_unreachable = unreachable
+        self._mismatch_logged = None
         return self._finish_config_fetch(raw, generation, saves_before, run_state_mark)
 
     def _finish_config_fetch(
@@ -5031,6 +5111,9 @@ class ComexioAPI:
                 return False
             else:
                 await self.client.set_io_value(ext, identifier, value)
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, f"Comexio API write refused ({target_type} {target_id})")
+            return False
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, err)
@@ -5046,6 +5129,10 @@ class ComexioAPI:
         """
         try:
             return await self.client.get_bus_workload()
+        except ComexioCertificateMismatchError as err:
+            # The fast poll: the first request to meet a changed certificate between full polls.
+            self._note_certificate_mismatch(err, "Bus workload not fetched", quiet=True)
+            return {}
         except ComexioError as err:
             _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
