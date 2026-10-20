@@ -225,8 +225,95 @@ def test_ignored_ids_beyond_sys_maxsize_are_truthy_without_len() -> None:
     assert not IgnoredIds({5}, {(1, 2)}) - {1, 2, 5}
 
 
-def test_subtracting_an_ignored_ids_is_refused_instead_of_expanding_its_ranges() -> None:
+SMALL_IDS = [
+    IgnoredIds({1, 7}, {(3, 5)}),
+    IgnoredIds(ranges={(2, 9)}) - {4},
+    IgnoredIds({20}),
+    IgnoredIds({-3, -1}, {(-2, 2)}),
+    IgnoredIds(),
+]
+
+
+@pytest.mark.parametrize("left", SMALL_IDS, ids=repr)
+@pytest.mark.parametrize(
+    "right_ids", [{1, 7, 3, 4, 5}, {4, 5, 6}, {0, 8, 20}, set(), {1, 2, 3, 4, 5, 6, 7, 8, 9}, {-2, 0, 3}], ids=repr
+)
+@pytest.mark.parametrize("as_ignored_ids", [False, True], ids=["set", "ignored_ids"])
+def test_ignored_ids_operators_match_plain_sets(left: IgnoredIds, right_ids: set[int], as_ignored_ids: bool) -> None:
+    # The interval arithmetic must give what the same plain sets give, for either operand type.
+    right = IgnoredIds(right_ids) if as_ignored_ids else right_ids
+    plain = set(left)
+
+    assert set(left - right) == plain - right_ids
+    assert set(right - left) == right_ids - plain
+    assert set(left & right) == plain & right_ids
+    assert set(left | right) == plain | right_ids
+    assert set(left ^ right) == plain ^ right_ids
+    assert (left == right, left <= right, left < right) == (plain == right_ids, plain <= right_ids, plain < right_ids)
+    assert (left >= right, left > right) == (plain >= right_ids, plain > right_ids)
+    assert left.isdisjoint(right) is plain.isdisjoint(right_ids)
+    assert left.isdisjoint(list(right_ids)) is plain.isdisjoint(right_ids)
+    # Membership right at, before and after every interval edge and in the gaps.
+    assert [i for i in range(-6, 25) if i in left] == sorted(plain)
+
+
+def test_wide_ranges_combine_and_compare_without_being_expanded() -> None:
+    wide = parse_ignored_ids("1-99999999999999999999")
+    wider = parse_ignored_ids("0-199999999999999999999")
+
+    with patch.object(IgnoredIds, "__iter__", _no_expansion), patch.object(IgnoredIds, "__len__", _no_expansion):
+        assert wide - wider == IgnoredIds()
+        assert wider - wide == IgnoredIds({0}, {(100000000000000000000, 199999999999999999999)})
+        assert (wide & wider) == wide
+        assert (wide | wider) == wider
+        assert wide < wider and wider > wide and wide != wider
+        assert not wide.isdisjoint(wider)
+        assert wide != {1, 2}
+        assert not wide <= {1, 2}
+
+
+def _no_expansion(*_args: object) -> None:
+    raise AssertionError("ignore range expanded")
+
+
+def test_wide_range_minus_bridge_markers_and_xor_stay_unexpanded() -> None:
+    # The production path: the user's wide range minus the unignorable bridge markers.
     wide = parse_ignored_ids("1-99999999999999999999")
 
+    with patch.object(IgnoredIds, "__iter__", _no_expansion), patch.object(IgnoredIds, "__len__", _no_expansion):
+        holed = wide - {333, 5}
+        assert holed and 4 in holed and 6 in holed and 334 in holed
+        assert 5 not in holed and 333 not in holed
+        assert wide ^ holed == IgnoredIds({5, 333})
+
+
+def test_ignored_ids_keep_one_canonical_form() -> None:
+    assert IgnoredIds({1, 2}, {(3, 5)}) == IgnoredIds(ranges={(1, 5)})
+    assert IgnoredIds({5}, {(1, 10)}) == IgnoredIds(ranges={(1, 10)})
+    assert IgnoredIds(ranges={(8, 3)}) == IgnoredIds(ranges={(3, 8)})
+    assert len(IgnoredIds(ranges={(8, 3)})) == 6
+    assert repr(IgnoredIds({1, 2}, {(3, 5), (7, 7)})) == "IgnoredIds('1-5,7')"
+    assert not IgnoredIds({1}) - {1}
     with pytest.raises(TypeError):
-        IgnoredIds({5}) - wide
+        hash(IgnoredIds())
+
+
+def test_ignored_ids_with_non_int_or_non_set_operands() -> None:
+    ids = IgnoredIds({1})
+
+    # Like a plain set: a non-int is never covered, so it drops out of - and & and stays in rsub.
+    assert ids - {"x"} == ids
+    assert ids & {1, "x"} == ids
+    assert {1, "x"} - ids == {"x"}
+    assert ids != {1, "x"}
+    assert ids <= {1, "x"}
+    assert not ids >= {"x"}
+    # An IgnoredIds holds only IDs: a union or symmetric difference with a non-int is refused.
+    with pytest.raises(TypeError):
+        ids | {"x"}
+    with pytest.raises(TypeError):
+        ids ^ {"x"}
+    # A non-Set operand is refused like a plain set refuses it.
+    with pytest.raises(TypeError):
+        ids - [1]  # type: ignore[operator]
+    assert ids != [1]

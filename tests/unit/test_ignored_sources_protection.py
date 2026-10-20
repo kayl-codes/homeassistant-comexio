@@ -9,12 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiocomexio.config import MarkerKind
 import pytest
 
-from custom_components.comexio import coordinator as coordinator_module
+from custom_components.comexio import coordinator as coordinator_module, switch
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_IGNORED_KNX,
     CONF_IGNORED_MARKERS,
+    DOMAIN,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
     IgnoredIds,
     WebioClass,
@@ -342,10 +343,24 @@ def test_an_existing_source_in_a_range_is_still_cleaned_up() -> None:
     coordinator.request_options_update_without_reload.assert_not_called()
 
 
-def test_a_source_created_later_in_a_range_is_ignored() -> None:
+def test_a_source_created_later_in_a_range_gets_no_entity() -> None:
+    # The range was saved before marker 337 existed: the platform setup must still skip it.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "330-340"}, {BRIDGE_MARKER_ID})
+    coordinator.data = {
+        "markers": [{"id": str(marker_id), "type": "digital", "kind": MarkerKind.NORMAL} for marker_id in (337, 341)]
+    }
+    entry = SimpleNamespace(entry_id="e1", data={"import_markers": True}, options=coordinator.config_entry.options)
+    hass = SimpleNamespace(data={DOMAIN: {"e1": coordinator}})
+    added: list[Any] = []
 
-    assert 337 in coordinator.ignored_marker_ids
+    with (
+        patch.object(switch, "ComexioMarkerSwitch", lambda _coordinator, _server_id, marker: marker["id"]),
+        patch.object(switch, "ComexioPlanAutoStartSwitch"),
+        patch.object(switch, "ComexioUserPlanAutoStartSwitch"),
+    ):
+        asyncio.run(switch.async_setup_entry(hass, entry, added.extend))  # type: ignore[arg-type]
+
+    assert [entity for entity in added if isinstance(entity, str)] == ["341"]
 
 
 def test_knx_ranges_survive_and_only_stale_k_singles_are_pruned() -> None:

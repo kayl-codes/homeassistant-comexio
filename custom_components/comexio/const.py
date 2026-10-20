@@ -1,3 +1,4 @@
+from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Mapping, Set as AbstractSet
 from dataclasses import dataclass
 import logging
@@ -1234,72 +1235,151 @@ def ignored_id_in_ranges(source_id: int, ranges: Iterable[tuple[int, int]]) -> b
     return any(start <= source_id <= end for start, end in ranges)
 
 
-class IgnoredIds(AbstractSet[int]):
-    """The IDs an ignore-list covers: its single IDs and inclusive ranges, minus excluded IDs.
+def _merged_intervals(intervals: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """Sorted, disjoint, non-adjacent inclusive intervals covering the same IDs."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
 
-    Membership is checked against the ranges themselves, so a range costs no memory however wide
-    it is ('1-1000000000' expanded into a set would exhaust it). Iterating does visit every ID.
+
+def _subtracted_intervals(
+    keep: tuple[tuple[int, int], ...], drop: tuple[tuple[int, int], ...]
+) -> tuple[tuple[int, int], ...]:
+    """keep's IDs minus drop's (both merged) — linear in the number of intervals, never in the IDs."""
+    result: list[tuple[int, int]] = []
+    first = 0
+    for start, end in keep:
+        while first < len(drop) and drop[first][1] < start:
+            first += 1
+        cut = first
+        while cut < len(drop) and drop[cut][0] <= end:
+            if drop[cut][0] > start:
+                result.append((start, drop[cut][0] - 1))
+            start = max(start, drop[cut][1] + 1)
+            cut += 1
+        if start <= end:
+            result.append((start, end))
+    return tuple(result)
+
+
+class IgnoredIds(AbstractSet[int]):
+    """The IDs an ignore-list covers, held as sorted, disjoint inclusive intervals.
+
+    Membership and every set operation work on the intervals themselves, so a range costs no
+    memory or time however wide it is ('1-1000000000' expanded into a set would exhaust it).
+    Only iterating visits every ID; len() raises OverflowError past sys.maxsize, like len(range(...)).
+    The other operand of an operator is iterated only when it is not an IgnoredIds, i.e. finite.
     """
 
-    __slots__ = ("_excluded", "_ranges", "_singles")
+    __slots__ = ("_intervals", "_starts")
 
-    def __init__(
-        self,
-        singles: Iterable[int] = (),
-        ranges: Iterable[tuple[int, int]] = (),
-        excluded: Iterable[int] = (),
-    ) -> None:
-        merged: list[tuple[int, int]] = []
-        for start, end in sorted(ranges):
-            if merged and start <= merged[-1][1] + 1:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-        self._ranges = tuple(merged)
-        self._singles = frozenset(i for i in singles if not ignored_id_in_ranges(i, merged))
-        self._excluded = frozenset(excluded)
+    def __init__(self, singles: Iterable[int] = (), ranges: Iterable[tuple[int, int]] = ()) -> None:
+        bounds = [(min(start, end), max(start, end)) for start, end in ranges]
+        self._intervals = _merged_intervals([*bounds, *((i, i) for i in singles)])
+        self._starts = [start for start, _end in self._intervals]
 
-    def _covers(self, source_id: int) -> bool:
-        return source_id in self._singles or ignored_id_in_ranges(source_id, self._ranges)
+    @staticmethod
+    def _intervals_of(other: AbstractSet[Any]) -> tuple[tuple[int, int], ...]:
+        """other's integer IDs as merged intervals; other's non-integers are never covered here."""
+        if isinstance(other, IgnoredIds):
+            return other._intervals
+        return _merged_intervals((i, i) for i in other if isinstance(i, int))
+
+    @staticmethod
+    def _only_ints(other: AbstractSet[Any]) -> bool:
+        return isinstance(other, IgnoredIds) or all(isinstance(i, int) for i in other)
 
     def __contains__(self, item: object) -> bool:
-        return isinstance(item, int) and item not in self._excluded and self._covers(item)
+        if not isinstance(item, int):
+            return False
+        index = bisect_right(self._starts, item) - 1
+        return index >= 0 and item <= self._intervals[index][1]
 
     def __iter__(self) -> Iterator[int]:
-        for start, end in self._ranges:
-            yield from (i for i in range(start, end + 1) if i not in self._excluded)
-        yield from (i for i in self._singles if i not in self._excluded)
+        for start, end in self._intervals:
+            yield from range(start, end + 1)
 
     def __bool__(self) -> bool:
         # Not via __len__: a range wider than sys.maxsize IDs makes len() raise OverflowError.
-        return any(i not in self._excluded for i in self._singles) or any(
-            self._range_has_unexcluded_id(start, end) for start, end in self._ranges
-        )
-
-    def _range_has_unexcluded_id(self, start: int, end: int) -> bool:
-        # Wider than the excluded IDs, a range keeps one for sure; only a narrower one is walked.
-        if end - start + 1 > len(self._excluded):
-            return True
-        return any(i not in self._excluded for i in range(start, end + 1))
+        return bool(self._intervals)
 
     def __len__(self) -> int:
-        """The number of covered IDs; like len(range(...)), len() raises OverflowError past sys.maxsize."""
-        covered = len(self._singles) + sum(end - start + 1 for start, end in self._ranges)
-        return covered - sum(1 for i in self._excluded if self._covers(i))
+        return sum(end - start + 1 for start, end in self._intervals)
 
-    def __sub__(self, other: AbstractSet[object]) -> "IgnoredIds":
-        """Exclude other's IDs without expanding a range (e.g. the unignorable bridge markers).
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self._only_ints(other) and self._intervals == self._intervals_of(other)
 
-        other is iterated, so it must be a finite ID collection: another IgnoredIds may hold a
-        range of any width and is refused instead of expanded.
-        """
+    __hash__ = None  # type: ignore[assignment]
+
+    def __le__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return not _subtracted_intervals(self._intervals, self._intervals_of(other))
+
+    def __ge__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self._only_ints(other) and not _subtracted_intervals(self._intervals_of(other), self._intervals)
+
+    def __lt__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self <= other and self != other
+
+    def __gt__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self >= other and self != other
+
+    def __sub__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        """Remove other's IDs (e.g. the unignorable bridge markers) without expanding a range."""
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return IgnoredIds(ranges=_subtracted_intervals(self._intervals, self._intervals_of(other)))
+
+    def __rsub__(self, other: AbstractSet[Any]) -> set[Any]:
+        # other is no IgnoredIds here (that one's __sub__ ran first), so it is finite to walk.
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return {i for i in other if i not in self}
+
+    def __and__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self - IgnoredIds(ranges=_subtracted_intervals(self._intervals, self._intervals_of(other)))
+
+    __rand__ = __and__
+
+    def __or__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet) or not self._only_ints(other):
+            return NotImplemented
+        return IgnoredIds(ranges=(*self._intervals, *self._intervals_of(other)))
+
+    __ror__ = __or__
+
+    def __xor__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet) or not self._only_ints(other):
+            return NotImplemented
+        theirs = self._intervals_of(other)
+        return IgnoredIds(
+            ranges=(*_subtracted_intervals(self._intervals, theirs), *_subtracted_intervals(theirs, self._intervals))
+        )
+
+    __rxor__ = __xor__
+
+    def isdisjoint(self, other: Iterable[Any]) -> bool:
         if isinstance(other, IgnoredIds):
-            raise TypeError("IgnoredIds - IgnoredIds would expand the subtracted ranges")
-        return IgnoredIds(self._singles, self._ranges, self._excluded | {i for i in other if isinstance(i, int)})
+            return not self & other
+        return not any(i in self for i in other)
 
     def __repr__(self) -> str:
-        covered = format_ignored_ids(set(self._singles), set(self._ranges))
-        return f"IgnoredIds({covered!r}, excluded={sorted(self._excluded)})"
+        return f"IgnoredIds({format_ignored_ids(set(), set(self._intervals))!r})"
 
 
 def parse_ignored_ids(raw: str, prefix_chars: str = "Mm") -> IgnoredIds:
