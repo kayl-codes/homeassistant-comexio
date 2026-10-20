@@ -5711,10 +5711,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not self._last_poll_scraped:
             return
 
+        options_at_audit = self.config_entry.options
         stale_ids = await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else set()
+        if self._ignore_list_saved_since(options_at_audit, conf, conf_key):
+            # stale_ids judge the list the audit read, not the one the user saved meanwhile (which
+            # may re-add an ID for a source created since): the next poll re-judges it.
+            stale_ids = set()
         # Bridge markers come from the unfiltered scrape, so they are known (and pruned) even
         # while the category is opted out.
-        self._prune_ignored_ids(category, webio_class, conf_key, stale_ids, conf.get(conf_key, ""))
+        self._prune_ignored_ids(category, webio_class, conf_key, stale_ids)
 
     async def _audit_ignored_sources(
         self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass, conf_key: str
@@ -5750,11 +5755,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         for source_id in sorted(audited_ids - self._unignorable_ids(webio_class)):
             source = sources_by_id.get(source_id)
-            if not source or not source.get("name", "").strip():
-                # A single ID whose source no longer exists in Comexio → stale, auto-remove. A gap
-                # in a range is not: the range also covers sources created there later.
-                if source_id in single_ids:
-                    stale_ids.add(source_id)
+            if source_id in single_ids and not (source and source.get("name", "").strip()):
+                # A single ID whose source no longer exists in Comexio → stale, auto-remove. A range
+                # only yields the sources Comexio has; an unnamed one there stays ignored, so its
+                # leftover entities and links are checked below like any other.
+                stale_ids.add(source_id)
+                continue
+            if not source:
                 continue
 
             # Source exists and is intentionally ignored — only flag if legacy entities/links remain
@@ -5780,30 +5787,36 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
         return stale_ids
 
+    def _ignore_list_saved_since(
+        self, options_at_audit: Mapping[str, Any], conf: dict[str, Any], conf_key: str
+    ) -> bool:
+        """True if the options were saved since the audit began, or the ignore-list differs from conf.
+
+        HA replaces the options mapping on every save, so a save that restored the audited
+        string (A -> B -> A) still counts.
+        """
+        current_raw = self.config_entry.options.get(conf_key, "")
+        return (
+            self.config_entry.options is not options_at_audit or current_raw.strip() != conf.get(conf_key, "").strip()
+        )
+
     def _prune_ignored_ids(
-        self,
-        category: SourceCategory,
-        webio_class: WebioClass,
-        conf_key: str,
-        stale_ids: set[int],
-        audited_raw: str,
+        self, category: SourceCategory, webio_class: WebioClass, conf_key: str, stale_ids: set[int]
     ) -> None:
         """Drop stale and unignorable single IDs from the ignore-list option — one update, separate notifications.
 
         Re-reads the option instead of the poll's conf snapshot: an options-flow save that landed
         while the audit awaited the plan data would otherwise be overwritten, dropping IDs the
         user just added and reactivating their sources.
-        Such a save also defers the stale pruning to the next poll: stale_ids were judged against
-        the list the audit read (audited_raw), not the one the user just saved, which may re-add an
-        ID for a source created meanwhile.
 
         Ranges are kept as written: a range covering a bridge marker or a gap would otherwise be
         flattened into single IDs on every poll. The bridge markers in it stay unignored anyway
         (_ignored_ids_for leaves them out).
         """
-        current_raw = self.config_entry.options.get(conf_key, "")
-        single_ids, ranges = split_ignored_ids(current_raw, _ignore_list_prefix_chars(category))
-        stale = single_ids & stale_ids if current_raw.strip() == audited_raw.strip() else set()
+        single_ids, ranges = split_ignored_ids(
+            self.config_entry.options.get(conf_key, ""), _ignore_list_prefix_chars(category)
+        )
+        stale = single_ids & stale_ids
         protected = single_ids & self._unignorable_ids(webio_class)
         if not (stale or protected):
             return

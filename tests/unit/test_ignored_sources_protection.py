@@ -380,6 +380,22 @@ def test_a_save_during_the_audit_defers_the_stale_pruning_to_the_next_poll() -> 
     notify.assert_not_called()
 
 
+def test_a_save_that_restores_the_audited_list_still_defers_the_stale_pruning() -> None:
+    # "33,999" -> "33" -> "33,999" while the audit awaited: the user re-added 999 (e.g. after
+    # creating it in Comexio), so the old verdict must not remove it although the string matches.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
+
+    async def _saved_twice_meanwhile() -> dict[int, Any]:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,999"}  # type: ignore[misc]
+        return {}
+
+    notify = _check_ignored(coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_saved_twice_meanwhile))
+
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+
+
 def test_a_save_during_the_audit_still_drops_a_bridge_marker() -> None:
     # Bridge markers are known from the scrape, not from the audited list: they go regardless.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"}, {BRIDGE_MARKER_ID})
@@ -404,3 +420,18 @@ def test_the_audit_walks_only_the_sources_a_range_covers_not_every_id_in_it() ->
 
     (ids, _infix), _kwargs = coordinator.marker_entities_by_id.call_args
     assert sorted(ids) == [BRIDGE_MARKER_ID, 335]
+
+
+def test_an_unnamed_source_in_a_range_still_gets_its_leftovers_cleaned_up() -> None:
+    # The range keeps ignoring the unnamed marker, so its old entity must be cleaned up — as a
+    # single it would be pruned as stale instead, and the range is never written back.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "330-340,336"})
+    markers = [*MARKERS, {"id": 335, "name": " "}, {"id": 336, "name": ""}]
+
+    notify = _check_ignored(
+        coordinator, {"markers": markers}, entities_by_id={335: ["switch.iosrv1_m335"], 336: ["switch.iosrv1_m336"]}
+    )
+
+    assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 335), (WebioClass.MARKER.value, 336)]
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
