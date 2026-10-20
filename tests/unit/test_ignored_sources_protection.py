@@ -1,6 +1,7 @@
 """Ignore-lists never reach KNX bridge markers, and an ignored [TRIG] source loses its trigger pair (bj)."""
 
 import asyncio
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -109,19 +110,26 @@ def _check_ignored(
     import_flags: dict[str, bool] | None = None,
     load_plans: AsyncMock | None = None,
     entities_by_id: dict[int, list[str]] | None = None,
+    after_poll_read: Callable[[], None] | None = None,
 ) -> MagicMock:
-    """Run async_check_ignored_sources with every HA side effect stubbed; returns the notification mock."""
+    """Run async_check_ignored_sources with every HA side effect stubbed; returns the notification mock.
+
+    after_poll_read runs between the poll reading the options and the audit starting.
+    """
     coordinator._cleanup_entity_ids = []
     coordinator._cleanup_function_plan_count = 0
     coordinator._load_managed_plan_check_data = load_plans or AsyncMock(return_value=plans or {})  # type: ignore[method-assign]
     coordinator.marker_entities_by_id = MagicMock(return_value=entities_by_id or {})  # type: ignore[method-assign]
     coordinator.request_options_update_without_reload = MagicMock()  # type: ignore[method-assign]
-    conf = {**(import_flags or IMPORT_ALL), **coordinator.config_entry.options}
+    options_at_poll = coordinator.config_entry.options
+    conf = {**(import_flags or IMPORT_ALL), **options_at_poll}
+    if after_poll_read:
+        after_poll_read()
     with (
         patch.object(coordinator_module.ir, "async_delete_issue"),
         patch.object(coordinator_module.persistent_notification, "async_create") as notify,
     ):
-        asyncio.run(coordinator.async_check_ignored_sources(conf, final_data, webio_class))
+        asyncio.run(coordinator.async_check_ignored_sources(conf, final_data, webio_class, options_at_poll))
     return notify
 
 
@@ -391,6 +399,21 @@ def test_a_save_that_restores_the_audited_list_still_defers_the_stale_pruning() 
         return {}
 
     notify = _check_ignored(coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_saved_twice_meanwhile))
+
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+
+
+def test_a_save_between_the_poll_read_and_the_audit_still_defers_the_stale_pruning() -> None:
+    # Same restore ("33,999" -> "33" -> "33,999"), but before the audit started: the baseline is
+    # the options the poll built conf from, not the ones present when the audit begins.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
+
+    def _saved_twice_meanwhile() -> None:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,999"}  # type: ignore[misc]
+
+    notify = _check_ignored(coordinator, {"markers": MARKERS}, after_poll_read=_saved_twice_meanwhile)
 
     coordinator.request_options_update_without_reload.assert_not_called()
     notify.assert_not_called()

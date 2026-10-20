@@ -1008,7 +1008,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_poll_and_audit(self) -> dict[str, Any]:
         """Fetch and merge the config, then audit it against Comexio's Web-IO side."""
-        conf = {**self.config_entry.data, **self.config_entry.options}
+        # Taken with conf: the ignore-list audit detects any options save after this point by identity.
+        options_at_poll = self.config_entry.options
+        conf = {**self.config_entry.data, **options_at_poll}
 
         # Precompute cover keywords once per update
         self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
@@ -1066,8 +1068,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # rather than overwriting, so neither category's contribution clobbers the other's.
         self._cleanup_entity_ids = []
         self._cleanup_function_plan_count = 0
-        await self.async_check_ignored_markers(conf, final_data)
-        await self.async_check_ignored_knx(conf, final_data)
+        await self.async_check_ignored_markers(conf, final_data, options_at_poll)
+        await self.async_check_ignored_knx(conf, final_data, options_at_poll)
 
         # A missing Web-IO class ends the audit early: no plan checks, and the counts stay unpublished.
         if await self._async_audit_webio(conf, final_data, parsed_data):
@@ -5677,7 +5679,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return active_webio_classes(conf)
 
     async def async_check_ignored_sources(
-        self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass
+        self,
+        conf: dict[str, Any],
+        final_data: dict[str, Any],
+        webio_class: WebioClass,
+        options_at_poll: Mapping[str, Any],
     ) -> None:
         """Check ignored source IDs and manage repair issues (registry-driven: markers=2/KNX=11).
 
@@ -5688,6 +5694,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
           self._cleanup_entity_ids / self._cleanup_function_plan_count accumulator (reset once
           per audit cycle by the caller, see the "IGNORED SOURCES AUDIT" block above).
         - IDs whose source exists but has no entities/links are the intended normal state — no action.
+
+        options_at_poll is the options mapping conf was built from; a save since then defers the
+        stale pruning to the next poll (see _ignore_list_saved_since).
         """
         category = source_category(webio_class)
         conf_key = category.ignored_conf_key
@@ -5711,9 +5720,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not self._last_poll_scraped:
             return
 
-        options_at_audit = self.config_entry.options
         stale_ids = await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else set()
-        if self._ignore_list_saved_since(options_at_audit, conf, conf_key):
+        if self._ignore_list_saved_since(options_at_poll, conf, conf_key):
             # stale_ids judge the list the audit read, not the one the user saved meanwhile (which
             # may re-add an ID for a source created since): the next poll re-judges it.
             stale_ids = set()
@@ -5787,18 +5795,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
         return stale_ids
 
-    def _ignore_list_saved_since(
-        self, options_at_audit: Mapping[str, Any], conf: dict[str, Any], conf_key: str
-    ) -> bool:
-        """True if the options were saved since the audit began, or the ignore-list differs from conf.
+    def _ignore_list_saved_since(self, options_at_poll: Mapping[str, Any], conf: dict[str, Any], conf_key: str) -> bool:
+        """True if the options were saved since conf was read, or the ignore-list differs from conf.
 
         HA replaces the options mapping on every save, so a save that restored the audited
         string (A -> B -> A) still counts.
         """
         current_raw = self.config_entry.options.get(conf_key, "")
-        return (
-            self.config_entry.options is not options_at_audit or current_raw.strip() != conf.get(conf_key, "").strip()
-        )
+        return self.config_entry.options is not options_at_poll or current_raw.strip() != conf.get(conf_key, "").strip()
 
     def _prune_ignored_ids(
         self, category: SourceCategory, webio_class: WebioClass, conf_key: str, stale_ids: set[int]
@@ -5862,13 +5866,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             notification_id=f"comexio_{reason_key}_ignored_{category.key.value}_{self.server_id}",
         )
 
-    async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
+    async def async_check_ignored_markers(
+        self, conf: dict[str, Any], final_data: dict[str, Any], options_at_poll: Mapping[str, Any]
+    ) -> None:
         """Check ignored marker IDs and manage repair issues (thin wrapper, see async_check_ignored_sources)."""
-        await self.async_check_ignored_sources(conf, final_data, WebioClass.MARKER)
+        await self.async_check_ignored_sources(conf, final_data, WebioClass.MARKER, options_at_poll)
 
-    async def async_check_ignored_knx(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
+    async def async_check_ignored_knx(
+        self, conf: dict[str, Any], final_data: dict[str, Any], options_at_poll: Mapping[str, Any]
+    ) -> None:
         """Check ignored KNX object IDs and manage repair issues (thin wrapper, see async_check_ignored_sources)."""
-        await self.async_check_ignored_sources(conf, final_data, WebioClass.KNX)
+        await self.async_check_ignored_sources(conf, final_data, WebioClass.KNX, options_at_poll)
 
     async def async_detect_orphaned_statistics(self) -> list[str]:
         """Return statistic_ids for this integration that no longer have a matching entity.
