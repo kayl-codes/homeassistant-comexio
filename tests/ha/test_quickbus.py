@@ -64,8 +64,10 @@ async def test_quickbus_ios_become_read_only_entities_on_their_own_device(
     quickbus_domains = {e.domain for e in _entries(hass, mock_config_entry) if "_qb" in e.entity_id}
     assert quickbus_domains == {"binary_sensor", "sensor"}
     device = dr.async_get(hass).async_get(gesture.device_id)
-    assert device.name == f"{SERVER_ID} MT Flur"
+    assert device.name == f"{SERVER_ID} [QB] MT Flur"
     assert (DOMAIN, f"{SERVER_ID}_qb1") in device.identifiers
+    host = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")})
+    assert host.name == f"{SERVER_ID} BASE"
     # Same identifier G1 on two devices: two entities, two devices.
     other = ent_reg.async_get("binary_sensor.iosrv1_qb211")
     assert other is not None
@@ -162,3 +164,20 @@ async def test_quickbus_entities_follow_their_host_going_offline_without_plain_i
 
     assert coordinator.offline_extensions == {"BASE", "Multibridge A6"}
     assert hass.states.get("binary_sensor.iosrv1_qb201").state == "unavailable"
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_quickbus_devices_are_connected_via_their_host_extension(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Once the host extension's device exists (from the second setup on), a Quickbus device links to it."""
+    await _setup(hass, mock_config_entry)
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    dev_reg = dr.async_get(hass)
+    flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
+    diele = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb3")})
+    assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
+    # Multibridge A6 carries only Quickbus IOs, so it has no HA device of its own: BM Diele hangs on the hub.
+    assert diele.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, SERVER_ID)}).id

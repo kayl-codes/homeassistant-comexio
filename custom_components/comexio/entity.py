@@ -16,7 +16,9 @@ from .const import (
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
     WebioClass,
+    extension_device_name,
     hub_era_object_id,
+    quickbus_device_name,
     quickbus_io_platform,
     quickbus_io_unique_id,
     stable_object_id,
@@ -48,16 +50,29 @@ def hub_device_id(coordinator: ComexioCoordinator) -> str | None:
 
 
 def build_device_info(
-    coordinator: ComexioCoordinator, *, identifiers: set[tuple[str, str]], name: str, model: str
+    coordinator: ComexioCoordinator,
+    *,
+    identifiers: set[tuple[str, str]],
+    name: str,
+    model: str,
+    via_identifier: str | None = None,
 ) -> DeviceInfo:
-    """Build a sub-device's device_info, linked to the hub device via via_device_id."""
+    """Build a sub-device's device_info, linked to its parent device via via_device_id.
+
+    The parent is the device of via_identifier (a Quickbus device's host extension) once that is
+    registered, else the hub — the platforms set up in parallel, so on the very first setup the
+    host may not exist yet; the next setup links it.
+    """
     info: DeviceInfo = {
         "identifiers": identifiers,
         "name": name,
         "manufacturer": "Comexio",
         "model": model,
     }
-    if via_id := hub_device_id(coordinator):
+    parent = via_identifier and dr.async_get(coordinator.hass).async_get_device_by_identifier(
+        (DOMAIN, via_identifier), coordinator.config_entry.entry_id
+    )
+    if via_id := parent.id if parent else hub_device_id(coordinator):
         info["via_device_id"] = via_id
     return info
 
@@ -149,7 +164,7 @@ class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
         return build_device_info(
             self.coordinator,
             identifiers={(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            name=f"{self.coordinator.server_id} {self._ext_name}",
+            name=extension_device_name(self.coordinator.server_id, self._ext_name),
             model="Extension Module",
         )
 
@@ -177,8 +192,9 @@ class ComexioQuickbusIOEntity(ComexioIOEntity):
         return build_device_info(
             self.coordinator,
             identifiers={(DOMAIN, f"{self.coordinator.server_id}_qb{self._quickbus_device_id}".lower())},
-            name=f"{self.coordinator.server_id} {self._quickbus_device_name}",
+            name=quickbus_device_name(self.coordinator.server_id, self._quickbus_device_name),
             model="Quickbus Device",
+            via_identifier=f"{self.coordinator.server_id}_{self._ext_name}".lower(),
         )
 
 
@@ -243,7 +259,7 @@ class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
         return build_device_info(
             self.coordinator,
             identifiers={(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            name=f"{self.coordinator.server_id} Markers",
+            name=f"{self.coordinator.server_id} [M] Markers",
             model="Marker Group",
         )
 

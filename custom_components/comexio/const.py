@@ -876,6 +876,25 @@ def quickbus_io_unique_id(server_id: str, io_id: str | int) -> str:
     return f"comexio_{server_id}_{SOURCE_CATEGORIES[WebioClass.QUICKBUS].unique_id_infix}{io_id}".lower()
 
 
+# Comexio's name for the IO-Server's own onboard IOs: its HA device keeps the plain name.
+BASE_EXTENSION_NAME = "BASE"
+
+
+def extension_device_name(server_id: str, ext_name: str) -> str:
+    """HA device name of an extension module: "<server> [EXT] <name>", so all modules list together.
+
+    The IO-Server's onboard IOs (BASE) stay "<server> BASE" — the main unit, not an add-on module.
+    """
+    if ext_name == BASE_EXTENSION_NAME:
+        return f"{server_id} {BASE_EXTENSION_NAME}"
+    return f"{server_id} [EXT] {one_line(ext_name)}"
+
+
+def quickbus_device_name(server_id: str, device_name: str) -> str:
+    """HA device name of a Quickbus device: "<server> [QB] <name>", so all Quickbus devices list together."""
+    return f"{server_id} [QB] {one_line(device_name)}"
+
+
 def quickbus_io_platform(io: Mapping[str, Any]) -> str:
     """Platform of a Quickbus IO's entity: read-only always (no known API write path for its address)."""
     return "binary_sensor" if io.get("is_binary") else "sensor"

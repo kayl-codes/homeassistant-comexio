@@ -162,6 +162,7 @@ from .const import (
     classify_audit_key,
     entity_id_migration_target,
     expand_ignored_marker_ids,
+    extension_device_name,
     function_plan_ids,
     fw_update_signal,
     import_disabled_issue_id,
@@ -4013,7 +4014,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             dev_reg.async_update_device(
                 old_device.id,
                 new_identifiers={(DOMAIN, f"{server_slug}_{new_name}".lower())},
-                name=f"{self.server_id} {new_name}",
+                name=extension_device_name(self.server_id, new_name),
             )
 
         # Keep the firmware cache under the new name so update.* doesn't briefly show

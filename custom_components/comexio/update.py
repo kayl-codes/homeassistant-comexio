@@ -9,7 +9,14 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, extension_firmware_update_unique_id, fw_update_signal
+from .const import (
+    BASE_EXTENSION_NAME,
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    DOMAIN,
+    extension_device_name,
+    extension_firmware_update_unique_id,
+    fw_update_signal,
+)
 from .coordinator import ComexioCoordinator
 from .entity import build_device_info
 
@@ -107,7 +114,7 @@ class ComexioBaseFirmwareUpdate(ComexioFirmwareUpdateBase):
         return build_device_info(
             self.coordinator,
             identifiers={(DOMAIN, f"{self.coordinator.server_id}_BASE".lower())},
-            name=f"{self.coordinator.server_id} BASE",
+            name=extension_device_name(self.coordinator.server_id, BASE_EXTENSION_NAME),
             model="Extension Module",
         )
 
@@ -125,6 +132,6 @@ class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
         return build_device_info(
             self.coordinator,
             identifiers={(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            name=f"{self.coordinator.server_id} {self._ext_name}",
+            name=extension_device_name(self.coordinator.server_id, self._ext_name),
             model="Extension Module",
         )

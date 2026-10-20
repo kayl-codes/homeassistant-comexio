@@ -18,8 +18,10 @@ from custom_components.comexio.const import (
     DEFAULT_SCHEMA_IO,
     LEGACY_DEFAULT_SCHEMA_IO,
     entity_id_migration_target,
+    extension_device_name,
     hub_era_object_id,
     migrate_entry_options,
+    quickbus_device_name,
     stable_object_id,
 )
 from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, ComexioStableEntityIdMixin
@@ -173,7 +175,7 @@ def test_function_plan_device_sorts_right_below_the_hub(monkeypatch: pytest.Monk
 
     assert info["identifiers"] == {("comexio", "iosrv1_function_plans")}
     assert info["via_device_id"] == "hub-device"
-    device_names = ["iosrv1 IOX1", "iosrv1 BASE", "iosrv1 0815", info["name"], "iosrv1 Markers", "iosrv1"]
+    device_names = ["iosrv1 [EXT] IOX1", "iosrv1 BASE", "iosrv1 [QB] MT1", info["name"], "iosrv1 [M] Markers", "iosrv1"]
     assert sorted(device_names, key=str.casefold)[:2] == ["iosrv1", "iosrv1 # Function plans"]
 
 
@@ -318,3 +320,17 @@ def test_ha_derived_entity_id_allowlist_has_no_stale_entries() -> None:
 
     assert sorted(HA_DERIVED_ENTITY_ID_CLASSES - classes.keys()) == []
     assert sorted(key for key in HA_DERIVED_ENTITY_ID_CLASSES if _requests_its_entity_id(classes[key])) == []
+
+
+@pytest.mark.parametrize(
+    ("device_name", "expected"),
+    [
+        (extension_device_name("iosrv1", "BASE"), "iosrv1 BASE"),  # the main unit keeps its plain name
+        (extension_device_name("iosrv1", "IOX2"), "iosrv1 [EXT] IOX2"),
+        (extension_device_name("iosrv1", "Multibridge A6"), "iosrv1 [EXT] Multibridge A6"),
+        (quickbus_device_name("iosrv1", "MT1"), "iosrv1 [QB] MT1"),
+    ],
+)
+def test_sub_device_names_group_by_kind(device_name: str, expected: str) -> None:
+    """Modules and Quickbus devices each list together under their [EXT] / [QB] tag."""
+    assert device_name == expected
