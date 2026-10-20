@@ -52,6 +52,33 @@ def test_unnamed_referenced_marker_gets_placeholder_title(basic_result: dict[str
     assert (marker["title"], marker["name"], marker["no_name"]) == ("#nn", "M5 #nn", True)
 
 
+def test_a_parse_without_referenced_markers_uses_the_last_polls_set(parsing_api: ComexioAPI) -> None:
+    """A mid-sync reload passes no referenced_markers: it must still see the poll's unnamed wired marker."""
+    parsing_api.referenced_markers = {"5"}
+
+    result = parsing_api.parse_config(load_json_fixture("config_basic.json"))
+
+    assert sorted(_by_id(result["markers"]), key=int) == ["1", "2", "3", "4", "5", "7"]
+
+
+@pytest.mark.parametrize(
+    ("last_poll", "explicit", "expected_ids"),
+    [
+        ({"5"}, set(), ["1", "2", "3", "4", "7"]),
+        (set(), {"5"}, ["1", "2", "3", "4", "5", "7"]),
+    ],
+)
+def test_explicit_referenced_markers_override_the_last_polls_set(
+    parsing_api: ComexioAPI, last_poll: set[str], explicit: set[str], expected_ids: list[str]
+) -> None:
+    """An explicit set (even an empty one) wins: the poll itself always passes the set it just computed."""
+    parsing_api.referenced_markers = last_poll
+
+    result = parsing_api.parse_config(load_json_fixture("config_basic.json"), referenced_markers=explicit)
+
+    assert sorted(_by_id(result["markers"]), key=int) == expected_ids
+
+
 @pytest.mark.parametrize(
     ("marker_id", "kind"),
     [("1", MarkerKind.NORMAL), ("3", MarkerKind.READ_ONLY), ("4", MarkerKind.TRIGGER), ("7", MarkerKind.KNX_BRIDGE)],
