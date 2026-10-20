@@ -660,6 +660,10 @@ class ComexioAPI:
         self.io_input_types: dict[str, Any] = {}
         # Function plan + paper metadata (populated by parse_config)
         self._fub_data: dict[str, Any] = {}  # fub_id_str → {Id, Name, Paper, ...}
+        # Unnamed-but-wired marker ids the last poll parsed with (set by the coordinator). A
+        # parse_config call without its own referenced_markers (every mid-sync reload) uses
+        # them, so it sees the same markers as the poll instead of one fewer per such marker.
+        self.referenced_markers: set[str] = set()
         # Called with no arguments when set_fub_active changed a plan's cached Active flag or
         # create_fup added a plan, so the coordinator can refresh the entities showing the plans
         # (see ComexioCoordinator.__init__) — a new plan gets its run-state sensor right away.
@@ -1248,6 +1252,7 @@ class ComexioAPI:
         caused since then over the older Active flags in conf; the mark get_raw_config()
         remembered for conf counts instead if it is later or run_state_mark is missing. A conf
         from an older fetch than the cached plan list leaves the plan and paper caches alone.
+        referenced_markers=None falls back to self.referenced_markers (the last poll's set).
         """
         # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection).
         # aiocomexio decodes each page variable on its own: a config whose $Fubs/$Paper did not
@@ -1272,7 +1277,7 @@ class ComexioAPI:
                 schema_knx=schema_knx,
             ),
             live_states=live_states,
-            referenced_markers=referenced_markers,
+            referenced_markers=self.referenced_markers if referenced_markers is None else referenced_markers,
             knx_live_states=knx_live_states,
             knx_dpt_catalog=knx_dpt_catalog,
         )

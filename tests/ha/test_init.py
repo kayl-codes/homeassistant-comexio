@@ -138,6 +138,23 @@ async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
     assert coordinator._last_referenced_markers_from_snapshot is True
 
 
+async def test_a_mid_sync_reparse_sees_the_polls_unnamed_wired_markers(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Marker 5 is unnamed but wired: a sync's own parse_config (no referenced_markers) must not drop it."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    with patch.object(coordinator, "_referenced_marker_ids", return_value={"5"}):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    polled_ids = {m["id"] for m in coordinator.data["markers"]}
+    resync = coordinator.api.parse_config(await coordinator.api.get_raw_config())
+
+    assert "5" in polled_ids
+    assert {m["id"] for m in resync["markers"]} == polled_ids
+
+
 async def test_the_reference_monitor_judges_findings_by_the_polls_plan_list(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:
