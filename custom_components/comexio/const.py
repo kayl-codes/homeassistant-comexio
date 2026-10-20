@@ -1,4 +1,5 @@
-from collections.abc import Iterator, Mapping
+from bisect import bisect_right
+from collections.abc import Iterable, Iterator, Mapping, Set as AbstractSet
 from dataclasses import dataclass
 import logging
 import re
@@ -75,7 +76,7 @@ CONF_IGNORED_KNX = "ignored_knx"
 # Ids the user explicitly chose "leave as writable switch" for in the knx_dpt_ambiguous
 # repair flow (see repairs.py) — distinct from CONF_IGNORED_KNX (excludes a KNX object from
 # HA entirely); this only suppresses the classification nag for that one id. Same comma/
-# range string format, parsed with expand_ignored_marker_ids().
+# range string format, parsed with parse_ignored_ids().
 CONF_KNX_DPT_SUFFIX_IGNORED = "knx_dpt_suffix_ignored"
 
 # The option-key VALUES below keep the legacy "logikplan" spelling — they are persisted
@@ -1181,8 +1182,8 @@ def parse_ignored_marker_tokens(
     Empty tokens are skipped. `parsed` is an int for a single ID, a (start, end)
     tuple for an inclusive range, or None if the token could not be parsed.
 
-    Shared low-level parser: `expand_ignored_marker_ids` below uses it for lenient runtime
-    expansion, `options_flow._normalize_ignored_ids` uses it for strict UI validation.
+    Shared low-level parser: `split_ignored_ids` below uses it for lenient runtime
+    parsing, `options_flow._normalize_ignored_ids` uses it for strict UI validation.
     """
     for token in raw.replace(";", ",").replace(" ", ",").replace(".", ",").split(","):
         display_token = token.strip()
@@ -1207,20 +1208,197 @@ def parse_ignored_marker_tokens(
                 yield display_token, None
 
 
-def expand_ignored_marker_ids(raw: str, prefix_chars: str = "Mm") -> set[int]:
-    """Expand an ignored-ids config string (markers or KNX) to a set of integer IDs.
+def split_ignored_ids(raw: str, prefix_chars: str = "Mm") -> tuple[set[int], set[tuple[int, int]]]:
+    """Split an ignored-ids config string into its single IDs and its inclusive (start, end) ranges.
+
+    A single ID a range also covers (a hand-edited '1-10,5') is left out: it is redundant, and
+    pruning it as a single would report a removal while the range still ignores it.
+    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    """
+    singles: set[int] = set()
+    ranges: set[tuple[int, int]] = set()
+    for _token, parsed in parse_ignored_marker_tokens(raw, prefix_chars):
+        if isinstance(parsed, tuple):
+            ranges.add(parsed)
+        elif parsed is not None:
+            singles.add(parsed)
+    return {i for i in singles if not ignored_id_in_ranges(i, ranges)}, ranges
+
+
+def invalid_ignored_tokens(raw: str, prefix_chars: str = "Mm") -> list[str]:
+    """The tokens of an ignored-ids string that are no ID or range — a rewrite of the string drops them."""
+    return [token for token, parsed in parse_ignored_marker_tokens(raw, prefix_chars) if parsed is None]
+
+
+def ignored_id_in_ranges(source_id: int, ranges: Iterable[tuple[int, int]]) -> bool:
+    """True if one of the inclusive ranges covers source_id — without expanding the ranges."""
+    return any(start <= source_id <= end for start, end in ranges)
+
+
+def _merged_intervals(intervals: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """Sorted, disjoint, non-adjacent inclusive intervals covering the same IDs."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _subtracted_intervals(
+    keep: tuple[tuple[int, int], ...], drop: tuple[tuple[int, int], ...]
+) -> tuple[tuple[int, int], ...]:
+    """keep's IDs minus drop's (both merged) — linear in the number of intervals, never in the IDs."""
+    result: list[tuple[int, int]] = []
+    first = 0
+    for start, end in keep:
+        while first < len(drop) and drop[first][1] < start:
+            first += 1
+        cut = first
+        while cut < len(drop) and drop[cut][0] <= end:
+            if drop[cut][0] > start:
+                result.append((start, drop[cut][0] - 1))
+            start = max(start, drop[cut][1] + 1)
+            cut += 1
+        if start <= end:
+            result.append((start, end))
+    return tuple(result)
+
+
+class IgnoredIds(AbstractSet[int]):
+    """The IDs an ignore-list covers, held as sorted, disjoint inclusive intervals.
+
+    Membership and every set operation work on the intervals themselves, so a range costs no
+    memory or time however wide it is ('1-1000000000' expanded into a set would exhaust it).
+    Only iterating visits every ID; len() raises OverflowError past sys.maxsize, like len(range(...)).
+    The other operand of an operator is iterated only when it is not an IgnoredIds, i.e. finite.
+    """
+
+    __slots__ = ("_intervals", "_starts")
+
+    def __init__(self, singles: Iterable[int] = (), ranges: Iterable[tuple[int, int]] = ()) -> None:
+        bounds = [(min(start, end), max(start, end)) for start, end in ranges]
+        self._intervals = _merged_intervals([*bounds, *((i, i) for i in singles)])
+        self._starts = [start for start, _end in self._intervals]
+
+    @staticmethod
+    def _intervals_of(other: AbstractSet[Any]) -> tuple[tuple[int, int], ...]:
+        """other's integer IDs as merged intervals; other's non-integers are never covered here."""
+        if isinstance(other, IgnoredIds):
+            return other._intervals
+        return _merged_intervals((i, i) for i in other if isinstance(i, int))
+
+    @staticmethod
+    def _only_ints(other: AbstractSet[Any]) -> bool:
+        return isinstance(other, IgnoredIds) or all(isinstance(i, int) for i in other)
+
+    def __contains__(self, item: object) -> bool:
+        if not isinstance(item, int):
+            return False
+        index = bisect_right(self._starts, item) - 1
+        return index >= 0 and item <= self._intervals[index][1]
+
+    def __iter__(self) -> Iterator[int]:
+        for start, end in self._intervals:
+            yield from range(start, end + 1)
+
+    def __bool__(self) -> bool:
+        # Not via __len__: a range wider than sys.maxsize IDs makes len() raise OverflowError.
+        return bool(self._intervals)
+
+    def __len__(self) -> int:
+        return sum(end - start + 1 for start, end in self._intervals)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self._only_ints(other) and self._intervals == self._intervals_of(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __le__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return not _subtracted_intervals(self._intervals, self._intervals_of(other))
+
+    def __ge__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self._only_ints(other) and not _subtracted_intervals(self._intervals_of(other), self._intervals)
+
+    def __lt__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self <= other and self != other
+
+    def __gt__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self >= other and self != other
+
+    def __sub__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        """Remove other's IDs (e.g. the unignorable bridge markers) without expanding a range."""
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return IgnoredIds(ranges=_subtracted_intervals(self._intervals, self._intervals_of(other)))
+
+    def __rsub__(self, other: AbstractSet[Any]) -> set[Any]:
+        # other is no IgnoredIds here (that one's __sub__ ran first), so it is finite to walk.
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return {i for i in other if i not in self}
+
+    def __and__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self - IgnoredIds(ranges=_subtracted_intervals(self._intervals, self._intervals_of(other)))
+
+    __rand__ = __and__
+
+    def __or__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet) or not self._only_ints(other):
+            return NotImplemented
+        return IgnoredIds(ranges=(*self._intervals, *self._intervals_of(other)))
+
+    __ror__ = __or__
+
+    def __xor__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet) or not self._only_ints(other):
+            return NotImplemented
+        theirs = self._intervals_of(other)
+        return IgnoredIds(
+            ranges=(*_subtracted_intervals(self._intervals, theirs), *_subtracted_intervals(theirs, self._intervals))
+        )
+
+    __rxor__ = __xor__
+
+    def isdisjoint(self, other: Iterable[Any]) -> bool:
+        if isinstance(other, IgnoredIds):
+            return not self & other
+        return not any(i in self for i in other)
+
+    def __repr__(self) -> str:
+        return f"IgnoredIds({format_ignored_ids(set(), set(self._intervals))!r})"
+
+
+def parse_ignored_ids(raw: str, prefix_chars: str = "Mm") -> IgnoredIds:
+    """The IDs an ignored-ids config string (markers or KNX) covers, ranges kept unexpanded.
 
     Invalid tokens are silently ignored (runtime use; options_flow validates separately).
     """
-    result: set[int] = set()
-    for _token, parsed in parse_ignored_marker_tokens(raw, prefix_chars):
-        if parsed is None:
-            continue
-        if isinstance(parsed, tuple):
-            result.update(range(parsed[0], parsed[1] + 1))
-        else:
-            result.add(parsed)
-    return result
+    singles, ranges = split_ignored_ids(raw, prefix_chars)
+    return IgnoredIds(singles, ranges)
+
+
+def format_ignored_ids(singles: set[int], ranges: set[tuple[int, int]], prefix: str = "") -> str:
+    """The ignored-ids option string: singles and ranges sorted by start, e.g. '1,3,8-12'.
+
+    The one writer of the format, so a rewrite never flattens the user's ranges into single IDs.
+    A single ID a range already covers (e.g. '1-3,2') is dropped as redundant.
+    """
+    items = sorted([*ranges, *((i, i) for i in singles if not ignored_id_in_ranges(i, ranges))])
+    return ",".join(f"{prefix}{start}" if start == end else f"{prefix}{start}-{end}" for start, end in items)
 
 
 def is_valid_entity_name_schema(schema: Any) -> bool:
