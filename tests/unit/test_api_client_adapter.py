@@ -337,18 +337,27 @@ def _block_page(value: str, version: str, active: int = 1) -> RawConfig:
         "FubBaseConfig": {"1": {"FubElementId": 104, "Name": "in_0", "Value": value}},
         "Fubs": {"7": {"Id": 7, "Name": f"Plan {value}", "Active": active}},
         "Paper": {"1": {"Id": 1, "Name": f"Paper {value}"}},
+        "CurrentSceneConfig": {"31": {"name": f"Scene {value}"}},
     }
     return RawConfig(variables, {"1": {"unit": version}}, {"2": {"input": version}}, version)
 
 
 def _page_state(page: RawConfig) -> tuple[Any, ...]:
-    """What a fetch that applied page leaves in block_settings, io_types, io_input_types, comexio_version."""
+    """What a fetch that applied page leaves in block_settings, io_types, io_input_types, comexio_version,
+    module_configs."""
     value = page.variables["FubBaseConfig"]["1"]["Value"]
-    return {"104": {"in_0": value}}, page.io_types, page.io_input_types, page.comexio_version
+    scenes = {"13": {"31": {"name": f"Scene {value}"}}}
+    return {"104": {"in_0": value}}, page.io_types, page.io_input_types, page.comexio_version, scenes
 
 
 def _api_state(comexio_api: ComexioAPI) -> tuple[Any, ...]:
-    return comexio_api.block_settings, comexio_api.io_types, comexio_api.io_input_types, comexio_api.comexio_version
+    return (
+        comexio_api.block_settings,
+        comexio_api.io_types,
+        comexio_api.io_input_types,
+        comexio_api.comexio_version,
+        comexio_api.module_configs,
+    )
 
 
 OLDER_PAGE = _block_page("10", "11.0.2")
@@ -513,7 +522,8 @@ def test_a_newest_failure_keeps_the_newer_parsed_page_for_an_overtaken_fetch(
 
     assert (middle, newest) == (NEWER_PAGE.variables, {})
     assert oldest is NEWER_PAGE.variables
-    assert _api_state(comexio_api) == (None, *_page_state(NEWER_PAGE)[1:])
+    # The failure drops both caches; io_types and the version stay those of the middle page.
+    assert _api_state(comexio_api) == (None, *_page_state(NEWER_PAGE)[1:4], None)
 
 
 @pytest.mark.parametrize("older_finishes_first", [False, True], ids=["older-last", "older-first"])
@@ -543,7 +553,7 @@ def test_an_older_config_fetch_after_a_failed_newer_one_changes_nothing(
 
     assert overlap.newer == {}
     assert overlap.older is OLDER_PAGE.variables
-    assert _api_state(comexio_api) == (None, {"1": {"unit": "before"}}, {"2": {"input": "before"}}, "11.0.1")
+    assert _api_state(comexio_api) == (None, {"1": {"unit": "before"}}, {"2": {"input": "before"}}, "11.0.1", None)
 
 
 def test_an_older_config_fetch_finishing_first_applies_until_the_newer_one_does(

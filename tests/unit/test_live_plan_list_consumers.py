@@ -317,6 +317,7 @@ def _full_cycle_coordinator(live_plans: dict | None, bulk_result: dict) -> Comex
     coordinator.api.function_plan_load_all_plans = AsyncMock(return_value=bulk_result)
     coordinator.api.comexio_version = None
     coordinator.api.block_settings = {}
+    coordinator.api.module_configs = {}
     coordinator.function_plan_backup = SimpleNamespace(
         async_auto_backup=AsyncMock(return_value=[]),
         async_backfill_paper_metadata=AsyncMock(),

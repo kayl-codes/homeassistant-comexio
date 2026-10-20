@@ -10,7 +10,8 @@ Two independent stores per server:
 Comexio provides no modification timestamps for plans, so every snapshot carries
 the capture timestamp instead. Every snapshot also freezes the stable keys of the block ids it
 uses, so it stays readable after Comexio shifted those ids (function_plan_block_keys), and the
-block settings of its elements, which Comexio keeps outside the plan (function_plan_block_settings).
+block settings of its elements and the configs of its scene blocks and Quantum modules, which Comexio
+keeps outside the plan (function_plan_block_settings, function_plan_module_configs).
 Snapshots live under .storage/ and are therefore included in Home Assistant's own backups.
 """
 
@@ -51,6 +52,13 @@ from .function_plan_block_settings import (
     block_settings_changed,
     plan_block_settings,
     snapshot_block_settings,
+)
+from .function_plan_module_configs import (
+    SNAPSHOT_MODULE_CONFIGS,
+    ModuleConfigs,
+    module_configs_changed,
+    plan_module_configs,
+    snapshot_module_configs,
 )
 
 if TYPE_CHECKING:
@@ -201,6 +209,9 @@ def _backup_entry(key: str, plan_name: str, slot: int, snap: dict[str, Any]) -> 
     if (settings := snapshot_block_settings(snap)) is not None:
         # How many block values the snapshot carries — the diff only shows the ones that changed.
         entry["block_setting_count"] = sum(len(values) for values in settings.values())
+    if (configs := snapshot_module_configs(snap)) is not None:
+        # How many scene blocks / Quantum modules the snapshot stores a config for.
+        entry["module_config_count"] = len(configs)
     return entry
 
 
@@ -293,6 +304,15 @@ def _plan_settings(
     return plan_block_settings(block_settings, plan_data.get("elements") or {})
 
 
+def _plan_module_configs(
+    module_configs: Mapping[str, Mapping[str, Any]] | None, plan_data: dict[str, Any]
+) -> ModuleConfigs | None:
+    """The scene block / Quantum module configs of one plan, None when they could not be read."""
+    if module_configs is None:
+        return None
+    return plan_module_configs(module_configs, plan_data.get("elements") or {})
+
+
 def snapshot_paper_format(snapshot: Mapping[str, Any]) -> tuple[str, int, str] | None:
     """A snapshot's stored (paper, dpi, orientation), or None when it was captured without them.
 
@@ -335,12 +355,15 @@ def _auto_backup_reason(
     new_hash: str,
     plan_settings: Mapping[str, Any] | None,
     paper_format: tuple[Any, Any, Any],
+    plan_configs: ModuleConfigs | None = None,
 ) -> str | None:
-    """Why a plan needs a new auto backup ('wiring', 'block settings', 'paper format'), None when it does not."""
+    """Why a plan needs a new auto backup ('wiring', 'block settings', ...), None when it does not."""
     if not history or history[0].get("hash") != new_hash:
         return "wiring"
     if block_settings_changed(history[0], plan_settings):
         return "block settings"
+    if module_configs_changed(history[0], plan_configs):
+        return "module configs"
     if _paper_format_changed(history[0], paper_format):
         return "paper format"
     return None
@@ -582,6 +605,7 @@ class FunctionPlanBackupManager:
         comexio_version: str | None = None,
         label_metadata: dict[str, dict[str, str]] | None = None,
         block_settings: dict[str, dict[str, str]] | None = None,
+        module_configs: ModuleConfigs | None = None,
     ) -> dict[str, Any]:
         snapshot = {
             "hash": plan_hash(plan_data),
@@ -605,6 +629,9 @@ class FunctionPlanBackupManager:
         if block_settings is not None:
             # None: the settings could not be read, so the snapshot does not claim to have none.
             snapshot[SNAPSHOT_BLOCK_SETTINGS] = block_settings
+        if module_configs is not None:
+            # None: not read, as for the block settings.
+            snapshot[SNAPSHOT_MODULE_CONFIGS] = module_configs
         if comexio_version is not None:
             # Comexio's own firmware/frontend version at capture time (ComexioAPI.comexio_version,
             # e.g. "11.0.2") — lets a restore warn that this snapshot predates a firmware
@@ -624,8 +651,9 @@ class FunctionPlanBackupManager:
         ios_by_id: dict[str, Any] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
         held_back: Callable[[], bool] | None = None,
+        module_configs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Rotate in snapshots for all plans whose wiring, block settings or paper format changed since the last backup.
+        """Rotate in snapshots for all plans whose wiring, block settings, module configs or paper format changed.
 
         plan_format: optional {fub_id_str: (paper, dpi, orientation)} so the snapshot can
         record the canvas settings needed to recreate the plan identically on restore.
@@ -634,6 +662,7 @@ class FunctionPlanBackupManager:
         referenced_label_metadata.
         block_settings: every element's block settings (ComexioAPI.block_settings); None when they
         could not be read, so only a changed wiring makes a new snapshot then.
+        module_configs: the scene block / Quantum module tables (ComexioAPI.module_configs), None alike.
         held_back: asked once more right before the history changes (after the awaits below); True
         stores nothing — a restore started meanwhile (see ComexioCoordinator.pause_auto_backup).
         Returns one {fub_id, plan_name, captured_at} entry per plan that produced a new
@@ -654,8 +683,9 @@ class FunctionPlanBackupManager:
             plan_name = fub_data.get(key, {}).get("Name", key)
             history = self._auto_data.setdefault(key, {}).setdefault(plan_name, [])
             plan_settings = _plan_settings(block_settings, plan_data)
+            plan_configs = _plan_module_configs(module_configs, plan_data)
             paper, dpi, orientation = (plan_format or {}).get(key, (None, None, None))
-            reason = _auto_backup_reason(history, new_hash, plan_settings, (paper, dpi, orientation))
+            reason = _auto_backup_reason(history, new_hash, plan_settings, (paper, dpi, orientation), plan_configs)
             if reason is None:
                 continue
             label_metadata = referenced_label_metadata(
@@ -670,6 +700,7 @@ class FunctionPlanBackupManager:
                 comexio_version=comexio_version,
                 label_metadata=label_metadata,
                 block_settings=plan_settings,
+                module_configs=plan_configs,
             )
             _freeze_block_keys(snapshot, fub_base)
             rollback.append((history, list(history), snapshot))
@@ -725,11 +756,12 @@ class FunctionPlanBackupManager:
         webio_by_id: dict[str, Any] | None = None,
         ios_by_id: dict[str, Any] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
+        module_configs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Rotate in a pre-mutation snapshot for one plan (call BEFORE HA modifies it).
 
         markers_by_id/webio_by_id/ios_by_id: live label maps at capture time — see
-        async_auto_backup / referenced_label_metadata. block_settings: see async_auto_backup.
+        async_auto_backup / referenced_label_metadata. block_settings / module_configs: see async_auto_backup.
         """
         await self._async_ensure_loaded()
         history = self._change_data.setdefault(str(fub_id), {}).setdefault(plan_name, [])
@@ -744,6 +776,7 @@ class FunctionPlanBackupManager:
             comexio_version,
             label_metadata,
             _plan_settings(block_settings, plan_data),
+            _plan_module_configs(module_configs, plan_data),
         )
         _freeze_block_keys(snapshot, await self._async_fub_base())
         history.insert(0, snapshot)

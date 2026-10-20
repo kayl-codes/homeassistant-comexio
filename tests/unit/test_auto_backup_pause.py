@@ -44,6 +44,7 @@ def _coordinator(load: AsyncMock | None = None) -> ComexioCoordinator:
         fub_data={"7": {"Name": "Pumps"}},
         comexio_version="11.1.4",
         block_settings={},
+        module_configs={},
     )
     coordinator.function_plan_plans = {}
     coordinator._drop_plans_deleted_meanwhile = lambda plans: plans  # type: ignore[method-assign]
@@ -74,6 +75,26 @@ def test_a_cycle_backs_up_the_loaded_plans() -> None:
     _cycle(coordinator)
     coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
     assert coordinator.function_plan_backup.async_auto_backup.await_args.args[0] == PLANS
+
+
+def test_both_backups_get_the_block_settings_and_module_configs_of_the_api() -> None:
+    """Each table reaches its own keyword — the backup stores what the last config fetch read."""
+    coordinator = _coordinator()
+    coordinator.api.block_settings = {"4": {"in_0": "1"}}
+    coordinator.api.module_configs = {"13": {"31": {"name": "Scene"}}}
+    coordinator.api.get_fub_known_format = lambda fub_id: None
+    coordinator.function_plan_backup.async_change_backup = AsyncMock()
+
+    _cycle(coordinator)
+    asyncio.run(coordinator.async_function_plan_change_backup(7, "sort", PLANS[7]))
+
+    for backup_call in (
+        coordinator.function_plan_backup.async_auto_backup,
+        coordinator.function_plan_backup.async_change_backup,
+    ):
+        backup_call.assert_awaited_once()
+        assert backup_call.await_args.kwargs["block_settings"] is coordinator.api.block_settings
+        assert backup_call.await_args.kwargs["module_configs"] is coordinator.api.module_configs
 
 
 def test_a_cycle_during_a_restore_loads_and_backs_up_nothing() -> None:
