@@ -1,7 +1,7 @@
 # Version: 0.7.5
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
 import logging
 import math
@@ -1564,8 +1564,8 @@ class ComexioAPI:
         server_id: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the list of Web-IO command dicts for the given parsed configuration.
 
@@ -1600,8 +1600,8 @@ class ComexioAPI:
         webio_name: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> str:
         """Generate the upload-ready JSON string for the Comexio Web-IO importer.
 

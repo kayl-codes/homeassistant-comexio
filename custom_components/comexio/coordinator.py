@@ -1,7 +1,7 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Set as AbstractSet
 import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -158,7 +158,6 @@ from .const import (
     category_by_fub_module_type,
     classify_audit_key,
     entity_id_migration_target,
-    expand_ignored_marker_ids,
     format_ignored_ids,
     function_plan_ids,
     fw_update_signal,
@@ -167,6 +166,7 @@ from .const import (
     io_audit_key,
     io_column_rows,
     one_line,
+    parse_ignored_ids,
     parse_keyword_list,
     parse_watchdog_user_plan_pick,
     plan_watch_signal,
@@ -5628,24 +5628,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._skip_next_listener_reload_options = None
         return options
 
-    def _ignored_ids_for(self, category: WebioClass) -> set[int]:
+    def _ignored_ids_for(self, category: WebioClass) -> AbstractSet[int]:
         """Configured IDs excluded from entity creation and Web-IO command generation for a category.
 
         Registry-driven: resolves the option key via SourceCategory.ignored_conf_key, then
-        parses it with expand_ignored_marker_ids() (comma/semicolon/space separators, optional
-        letter prefix, ranges like '8-12'). Returns an empty set if unset or unsupported.
+        parses it with parse_ignored_ids() (comma/semicolon/space separators, optional
+        letter prefix, ranges like '8-12', kept unexpanded). Empty if unset or unsupported.
         KNX bridge markers are never ignorable (see _unignorable_ids) and never returned.
         """
         return self._configured_ignored_ids(source_category(category)) - self._unignorable_ids(category)
 
-    def _configured_ignored_ids(self, category: SourceCategory) -> set[int]:
+    def _configured_ignored_ids(self, category: SourceCategory) -> AbstractSet[int]:
         """Every id in the category's ignore-list option as currently stored, unignorable ones included."""
         conf_key = category.ignored_conf_key
         if conf_key is None:
-            return set()
+            return frozenset()
         if ignored_raw := self.config_entry.options.get(conf_key, "").strip():
-            return expand_ignored_marker_ids(ignored_raw, _ignore_list_prefix_chars(category))
-        return set()
+            return parse_ignored_ids(ignored_raw, _ignore_list_prefix_chars(category))
+        return frozenset()
 
     def _unignorable_ids(self, category: WebioClass) -> set[int]:
         """Ids of a category the ignore-list must never act on: the KNX bridge markers.
@@ -5657,16 +5657,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return set(self._knx_bridge_marker_ids) if category == WebioClass.MARKER else set()
 
     @property
-    def ignored_marker_ids(self) -> set[int]:
+    def ignored_marker_ids(self) -> AbstractSet[int]:
         """Configured marker IDs excluded from entity creation and Web-IO command generation."""
         return self._ignored_ids_for(WebioClass.MARKER)
 
     @property
-    def ignored_knx_ids(self) -> set[int]:
+    def ignored_knx_ids(self) -> AbstractSet[int]:
         """Configured KNX object IDs excluded from entity creation and Web-IO command generation."""
         return self._ignored_ids_for(WebioClass.KNX)
 
-    def ignored_ids_for(self, webio_class: WebioClass) -> set[int]:
+    def ignored_ids_for(self, webio_class: WebioClass) -> AbstractSet[int]:
         """Registry-driven public accessor for a category's ignore-list (markers/KNX)."""
         return self._ignored_ids_for(webio_class)
 
@@ -7108,7 +7108,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "webio_class": WEBIO_CLASS_KNX,
         }
 
-    def _knx_dpt_suffix_ignored_ids(self) -> set[int]:
+    def _knx_dpt_suffix_ignored_ids(self) -> AbstractSet[int]:
         """Ids the user chose "leave as writable switch" for in the knx_dpt_ambiguous repair
         flow (CONF_KNX_DPT_SUFFIX_IGNORED) — shared by both the auto-tag and the audit below
         so a manual opt-out (added by hand to the option, e.g. for an unambiguous DPT the
@@ -7116,7 +7116,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
         raw = self.config_entry.options.get(CONF_KNX_DPT_SUFFIX_IGNORED, "").strip()
-        return expand_ignored_marker_ids(raw, knx_prefix + knx_prefix.lower())
+        return parse_ignored_ids(raw, knx_prefix + knx_prefix.lower())
 
     async def _auto_suffix_unambiguous_knx(self, knx_items: list[dict[str, Any]]) -> None:
         """Auto-append "[RO]" to a digital KNX object whose DPT is semantically unambiguous

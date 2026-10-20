@@ -33,7 +33,6 @@ from .const import (
     DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DEFAULT_SCHEMA_IO,
     DOMAIN,
-    IGNORED_RANGE_MAX_IDS,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
     SourceCategory,
@@ -58,8 +57,7 @@ def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", cate
     (`prefix_chars` — "Mm" for markers, "Kk" for KNX objects), ranges like '8-12'.
     Returns sorted, deduplicated comma-separated string (e.g. '1,3,4,6,20-25'). A single ID
     already covered by a range (e.g. '1-3,2') is dropped rather than kept as a redundant entry.
-    Raises vol.Invalid if any token is not a valid integer or range, or a range spans more
-    than IGNORED_RANGE_MAX_IDS IDs.
+    Raises vol.Invalid if any token is not a valid integer or range.
     """
     if not raw_input or not isinstance(raw_input, str):
         return ""
@@ -81,12 +79,6 @@ def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", cate
         raise vol.Invalid(
             f"Ungültige {category_label}-IDs: {', '.join(repr(t) for t in invalid_tokens[:3])}. "
             f"Zahlen (z.B. '3', '{example_prefix}12'), Bereiche (z.B. '8-12') oder Listen (z.B. '1, 3, 5') eingeben."
-        )
-
-    if too_wide := sorted(f"{start}-{end}" for start, end in ranges if end - start >= IGNORED_RANGE_MAX_IDS):
-        raise vol.Invalid(
-            f"{category_label}-Bereich zu groß: {', '.join(too_wide[:3])}. "
-            f"Ein Bereich darf höchstens {IGNORED_RANGE_MAX_IDS} IDs umfassen."
         )
 
     return format_ignored_ids(ints, ranges)

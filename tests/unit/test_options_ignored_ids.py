@@ -3,7 +3,6 @@
 import pytest
 import voluptuous as vol
 
-from custom_components.comexio.const import IGNORED_RANGE_MAX_IDS
 from custom_components.comexio.options_flow import _normalize_ignored_ids
 
 
@@ -31,8 +30,6 @@ def test_invalid_ignored_ids_are_rejected() -> None:
         _normalize_ignored_ids("3, abc")
 
 
-def test_a_range_wider_than_the_limit_is_rejected() -> None:
-    # The runtime ignore set expands every range: an unbounded one would exhaust memory per poll.
-    assert _normalize_ignored_ids(f"1-{IGNORED_RANGE_MAX_IDS}") == f"1-{IGNORED_RANGE_MAX_IDS}"
-    with pytest.raises(vol.Invalid, match=f"0-{IGNORED_RANGE_MAX_IDS}"):
-        _normalize_ignored_ids(f"0-{IGNORED_RANGE_MAX_IDS}")
+def test_a_wide_range_is_saved_as_written() -> None:
+    # Ranges are never expanded into single IDs, so their width needs no limit.
+    assert _normalize_ignored_ids("1-1000000000, 5") == "1-1000000000"

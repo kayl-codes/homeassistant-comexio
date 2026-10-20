@@ -7,11 +7,10 @@ import pytest
 from custom_components.comexio import const
 from custom_components.comexio.const import (
     CONF_IMPORT_DISABLED_IGNORED,
-    IGNORED_RANGE_MAX_IDS,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
-    expand_ignored_marker_ids,
+    IgnoredIds,
     format_ignored_ids,
     ignored_id_in_ranges,
     import_disabled_issue_id,
@@ -19,6 +18,7 @@ from custom_components.comexio.const import (
     io_group_headers,
     io_sort_key,
     one_line,
+    parse_ignored_ids,
     parse_ignored_marker_tokens,
     prune_import_disabled_ignored,
     split_ignored_ids,
@@ -65,11 +65,11 @@ def test_parse_ignored_marker_tokens(raw: str, expected: list) -> None:
 
 
 def test_expand_ignored_marker_ids_skips_invalid_tokens() -> None:
-    assert expand_ignored_marker_ids("M1, 4-6, junk, m9") == {1, 4, 5, 6, 9}
+    assert parse_ignored_ids("M1, 4-6, junk, m9") == {1, 4, 5, 6, 9}
 
 
 def test_expand_ignored_ids_with_knx_prefix() -> None:
-    assert expand_ignored_marker_ids("K3, k5-K6", prefix_chars="Kk") == {3, 5, 6}
+    assert parse_ignored_ids("K3, k5-K6", prefix_chars="Kk") == {3, 5, 6}
 
 
 def test_split_ignored_ids_keeps_singles_and_ranges_apart() -> None:
@@ -81,7 +81,7 @@ def test_split_ignored_ids_orders_a_reversed_range() -> None:
 
 
 def test_wide_ranges_are_split_and_formatted_without_expanding_them() -> None:
-    # Only the runtime ignore set expands a range; parsing and writing one must stay cheap.
+    # Expanding '1-1000000000' into single IDs would exhaust memory; parsing and writing must not.
     with patch(f"{const.__name__}.range", side_effect=AssertionError("range expanded"), create=True):
         singles, ranges = split_ignored_ids("5, 1-1000000000, 2000000000")
         assert format_ignored_ids(singles, ranges) == "1-1000000000,2000000000"
@@ -112,7 +112,7 @@ def test_format_ignored_ids(singles: set[int], ranges: set[tuple[int, int]], pre
 def test_formatted_ignored_ids_parse_back_to_the_same_ids() -> None:
     raw = format_ignored_ids({1, 7}, {(3, 5)}, "K")
 
-    assert expand_ignored_marker_ids(raw, prefix_chars="Kk") == {1, 3, 4, 5, 7}
+    assert parse_ignored_ids(raw, prefix_chars="Kk") == {1, 3, 4, 5, 7}
 
 
 def test_webio_class_name_suffixes() -> None:
@@ -175,11 +175,38 @@ def test_ignored_id_in_ranges_is_inclusive(source_id: int, expected: bool) -> No
     assert ignored_id_in_ranges(source_id, {(5, 9), (20, 20)}) is expected
 
 
-def test_a_stored_range_wider_than_the_limit_is_skipped_at_runtime(caplog: pytest.LogCaptureFixture) -> None:
-    # A range stored before the options flow capped it must not be expanded on every poll.
-    raw = f"3, 10-12, 100-{100 + IGNORED_RANGE_MAX_IDS}"
+def test_a_wide_range_ignores_its_ids_without_expanding_them() -> None:
+    # Every range stays effective however wide; membership must not build the range's IDs.
+    with patch(f"{const.__name__}.range", side_effect=AssertionError("range expanded"), create=True):
+        ignored = parse_ignored_ids("3, 100-1000000000") - {500}
 
-    assert expand_ignored_marker_ids(raw) == {3, 10, 11, 12}
-    assert expand_ignored_marker_ids(raw) == {3, 10, 11, 12}
-    warnings = [r for r in caplog.records if "spans more than" in r.getMessage()]
-    assert len(warnings) == 1
+        assert [i in ignored for i in (3, 99, 100, 499, 500, 501, 1000000000, 1000000001)] == [
+            True,
+            False,
+            True,
+            True,
+            False,
+            True,
+            True,
+            False,
+        ]
+        assert len(ignored) == 1 + 999999901 - 1
+        assert "100" not in ignored
+
+
+@pytest.mark.parametrize(
+    ("ignored", "expected"),
+    [
+        (IgnoredIds({1, 7}, {(3, 5)}), {1, 3, 4, 5, 7}),
+        # Overlapping and adjacent ranges merge; a single a range covers counts once.
+        (IgnoredIds({4, 9}, {(1, 5), (3, 6), (7, 7)}), {1, 2, 3, 4, 5, 6, 7, 9}),
+        (IgnoredIds({1, 7}, {(3, 5)}) - {4, 7, 99}, {1, 3, 5}),
+        (IgnoredIds(), set()),
+    ],
+    ids=["singles_and_range", "overlap_merged", "excluded", "empty"],
+)
+def test_ignored_ids_iterate_and_count_every_covered_id(ignored: IgnoredIds, expected: set[int]) -> None:
+    assert sorted(ignored) == sorted(expected)
+    assert len(ignored) == len(expected)
+    assert bool(ignored) is bool(expected)
+    assert ignored == expected
