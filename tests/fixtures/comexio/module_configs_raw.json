@@ -48,8 +48,7 @@
     "settings": {
       "1": {"Id": 1, "CombinedModuleId": 1, "Name": "inverted_output", "Value": "true"},
       "2": {"Id": 2, "CombinedModuleId": 2, "Name": "local_lock", "Value": "false"},
-      "3": {"Id": 3, "CombinedModuleId": 9, "Name": "orphan", "Value": "1"},
-      "4": {"Id": 4, "CombinedModuleId": 1, "Value": "no name"}
+      "3": {"Id": 3, "CombinedModuleId": 9, "Name": "orphan", "Value": "1"}
     },
     "rules": {
       "1": {
@@ -61,7 +60,8 @@
         "Id": 2, "Name": "Window", "Start": "", "End": "", "Active": 1, "Freq": "EVENT",
         "ByDay": "window", "DtEnd": 0, "CombinedModuleId": 2, "Value": "5;0;1",
         "ValueType": "0;0;0", "CentralId": 0, "Priority": 102, "RandomId": 555, "CentralGroupId": null
-      }
+      },
+      "3": {"Id": 3, "Name": "Orphan", "Freq": "EVENT", "CombinedModuleId": 9, "Value": "1;0;0"}
     }
   },
   "CombinedModuleCentralSettingData": {

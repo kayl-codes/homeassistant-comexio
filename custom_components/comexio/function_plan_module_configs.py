@@ -41,6 +41,8 @@ _MODULE_ID = "CombinedModuleId"
 # Rule fields the diff leaves out: the row id is the key, the module id is the element's
 # ref_id, and RandomId is an internal token, not something a user set.
 _RULE_FIELDS_NOT_DIFFED = frozenset({"Id", _MODULE_ID, "RandomId"})
+# The field that keys a row of each Quantum sub-table in a module's config.
+_ROW_KEYS = {"settings": "Name", "rules": "Id"}
 
 # {element type: {key: config}} — scenes by element id, Quantum modules by module id. A type whose
 # table the page did not carry (readably) is absent.
@@ -66,70 +68,130 @@ def parse_module_config_tables(variables: Mapping[str, Any]) -> ModuleConfigTabl
     elif _SCENE_TABLE in variables:
         _LOGGER.warning("Module configs: $%s has an unknown format — scene blocks are not backed up", _SCENE_TABLE)
     fub_modules = variables.get("FubModules")
-    modules: Mapping[str, Any] = fub_modules if isinstance(fub_modules, Mapping) else {}
+    if not isinstance(fub_modules, Mapping):
+        # Without the module list no Quantum element can be matched to its config.
+        if any(table in variables for table in _COMBINED_TABLES.values()):
+            _LOGGER.warning(
+                "Module configs: $FubModules is %s — Quantum modules are not backed up",
+                "missing" if fub_modules is None else "of an unknown format",
+            )
+        return tables
     for elem_type, table in _COMBINED_TABLES.items():
-        if (parsed := _parse_combined(modules.get(elem_type), variables.get(table), table)) is not None:
+        if (configs := _module_list(fub_modules.get(elem_type), elem_type)) is None:
+            continue
+        if (parsed := _parse_combined(configs, variables.get(table), table)) is not None:
             tables[elem_type] = parsed
     return tables
 
 
-def _parse_combined(modules: Any, data: Any, table: str) -> dict[str, dict[str, Any]] | None:
-    """{module id: {"type_id", "default_value", "settings": {name: value}, "rules": {row id: row}}}."""
+def _module_list(modules: Any, elem_type: str) -> dict[str, dict[str, Any]] | None:
+    """{module id: config without settings and rules yet} of one type's $FubModules rows; None when malformed."""
     # A type $FubModules does not list has no modules, like an empty one.
-    module_rows = [] if modules is None else _rows(modules)
-    if isinstance(data, list) and not data:
-        data = {}
-    # A missing sub-table is empty (the central table may carry no rules); a malformed one is unreadable.
-    settings = _rows(data.get("settings", [])) if isinstance(data, Mapping) else None
-    rules = _rows(data.get("rules", [])) if isinstance(data, Mapping) else None
-    if module_rows is None or settings is None or rules is None:
-        if data is not None:
-            _LOGGER.warning("Module configs: $%s has an unknown format — Quantum modules are not backed up", table)
-        elif module_rows:
-            _LOGGER.warning("Module configs: $%s is missing — Quantum modules are not backed up", table)
+    rows = [] if modules is None else _rows(modules)
+    if rows is None or not all(isinstance(row, Mapping) and row.get("Id") is not None for row in rows):
+        _LOGGER.warning(
+            "Module configs: $FubModules[%s] has an unknown format — Quantum modules are not backed up", elem_type
+        )
         return None
-    configs: dict[str, dict[str, Any]] = {
-        str(module["Id"]): {
-            "type_id": module.get("TypeId"),
-            "default_value": module.get("DefaultValue"),
+    return {
+        str(row["Id"]): {
+            "type_id": row.get("TypeId"),
+            "default_value": row.get("DefaultValue"),
             "settings": {},
             "rules": {},
         }
-        for module in module_rows
-        if isinstance(module, Mapping) and module.get("Id") is not None
+        for row in rows
     }
-    skipped = 0
-    for row in settings:
-        config = configs.get(str(row.get(_MODULE_ID))) if isinstance(row, Mapping) else None
-        if config is None or not row.get("Name"):
-            skipped += 1
-            continue
-        config["settings"][str(row["Name"])] = row.get("Value")
-    for row in rules:
-        config = configs.get(str(row.get(_MODULE_ID))) if isinstance(row, Mapping) else None
-        if config is None or row.get("Id") is None:
-            skipped += 1
-            continue
-        config["rules"][str(row["Id"])] = {key: value for key, value in row.items() if key != _MODULE_ID}
-    if skipped:
-        _LOGGER.warning("Module configs: %d row(s) of $%s without a known module, name or id ignored", skipped, table)
+
+
+def _parse_combined(configs: dict[str, dict[str, Any]], data: Any, table: str) -> dict[str, dict[str, Any]] | None:
+    """{module id: {"type_id", "default_value", "settings": {name: value}, "rules": {row id: row}}}."""
+    settings, rules = _sub_tables(data)
+    if data is not None and (settings is None or rules is None):
+        _LOGGER.warning("Module configs: $%s has an unknown format — Quantum modules are not backed up", table)
+        return None
+    if settings is None or rules is None:
+        if configs:
+            _LOGGER.warning("Module configs: $%s is missing — Quantum modules are not backed up", table)
+        return None
+    if not (_add_rows(configs, settings, "settings", table) and _add_rows(configs, rules, "rules", table)):
+        return None
     return configs
+
+
+def _sub_tables(data: Any) -> tuple[Iterable[Any] | None, Iterable[Any] | None]:
+    """The settings and rules rows of a Quantum table; None for a missing or malformed one."""
+    if isinstance(data, list) and not data:
+        return [], []
+    if not isinstance(data, Mapping):
+        return None, None
+    # A missing sub-table is empty (the central table may carry no rules); a malformed one is unreadable.
+    return _rows(data.get("settings", [])), _rows(data.get("rules", []))
+
+
+def _add_rows(configs: dict[str, dict[str, Any]], rows: Iterable[Any], part: str, table: str) -> bool:
+    """Files each row under its module's config; False when a row is malformed (the table is unreadable).
+
+    A row of a module $FubModules does not list belongs to no plan element (plan_module_configs
+    treats an element naming an unlisted module as unreadable), so it is only logged at debug.
+    """
+    key_field = _ROW_KEYS[part]
+    orphans = 0
+    for row in rows:
+        if (missing := _missing_field(row, key_field)) is not None:
+            _LOGGER.warning(
+                "Module configs: $%s has a %s row without %s — Quantum modules are not backed up",
+                table,
+                part,
+                missing,
+            )
+            return False
+        if (config := configs.get(str(row.get(_MODULE_ID)))) is None:
+            orphans += 1
+            continue
+        key = str(row[key_field])
+        config[part][key] = (
+            row.get("Value") if part == "settings" else {k: v for k, v in row.items() if k != _MODULE_ID}
+        )
+    if orphans:
+        _LOGGER.debug("Module configs: %d %s row(s) of $%s name no listed module, ignored", orphans, part, table)
+    return True
+
+
+def _missing_field(row: Any, key_field: str) -> str | None:
+    """The field a Quantum row lacks to be filed (its key, or its module id); None for a complete row."""
+    if not isinstance(row, Mapping):
+        return key_field
+    return next((field for field in (key_field, _MODULE_ID) if row.get(field) in (None, "")), None)
 
 
 def plan_module_configs(tables: Mapping[str, Mapping[str, Any]], elements: Mapping[str, Any]) -> ModuleConfigs | None:
     """The configs of one plan's scene blocks and Quantum modules; None when one of them was not readable.
 
-    A scene block without a stored config is left out (Comexio creates it on the first save).
+    A scene block without a stored config is left out (Comexio creates it on the first save); a
+    Quantum element whose module Comexio does not list counts as unreadable.
     """
     configs: ModuleConfigs = {}
     for elem_id, elem_type, ref in _module_elements(elements):
         if (table := tables.get(elem_type)) is None:
+            _LOGGER.warning(
+                "Module configs: no readable config table for element %s (type %s) — the plan's scene/Quantum "
+                "configs are not backed up",
+                elem_id,
+                elem_type,
+            )
             return None
         key = str(elem_id) if elem_type == SCENE_TYPE else str(ref.get("ref_id"))
         if (config := table.get(key)) is not None:
             configs[str(elem_id)] = {"type": elem_type, "config": config}
         elif elem_type != SCENE_TYPE:
-            _LOGGER.debug("Module configs: Quantum element %s names module %s, not listed by Comexio", elem_id, key)
+            _LOGGER.warning(
+                "Module configs: Quantum element %s names module %s, not listed by Comexio — the plan's "
+                "scene/Quantum configs are not backed up",
+                elem_id,
+                key,
+            )
+            return None
     return configs
 
 
@@ -155,13 +217,23 @@ def snapshot_module_configs(snapshot: Mapping[str, Any]) -> ModuleConfigs | None
 def module_configs_changed(previous: Mapping[str, Any], current: ModuleConfigs | None) -> bool:
     """Whether today's configs differ from the ones the previous snapshot stored.
 
-    current None (not read this poll) never counts as a change. A previous snapshot without
+    Only the fields the diff shows count. current None (not read this poll) never counts as a
+    change. A previous snapshot without
     configs counts as one without any, so a plan with scene blocks or Quantum modules gets one
     new snapshot that carries them.
     """
     if current is None:
         return False
-    return (snapshot_module_configs(previous) or {}) != current
+    return _comparable(snapshot_module_configs(previous) or {}) != _comparable(current)
+
+
+def _comparable(configs: ModuleConfigs) -> dict[str, tuple[Any, dict[str, str]]]:
+    """Configs as the diff compares them, so ids Comexio regenerates on a save (scene rows, rule
+    RandomId) never count as a change the diff cannot show."""
+    return {
+        elem_id: (entry.get("type") if isinstance(entry, Mapping) else None, _flatten(entry))
+        for elem_id, entry in configs.items()
+    }
 
 
 def module_configs_diff(

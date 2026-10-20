@@ -71,6 +71,7 @@ def _snapshot(configs: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def test_parse_reads_scenes_by_element_and_quantum_modules_by_module(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
     tables = parse_module_config_tables(load_json_fixture("module_configs_raw.json"))
 
     assert set(tables) == {"13", "20", "21"}
@@ -84,7 +85,73 @@ def test_parse_reads_scenes_by_element_and_quantum_modules_by_module(caplog: pyt
     central = tables["21"]["1"]
     assert (central["type_id"], central["settings"]) == (2, {"central_lock": "true"})
     assert central["rules"]["7"]["Name"] == "Night"
-    assert "2 row(s) of $CombinedModuleSettingData" in caplog.text  # unknown module, row without name
+    # A row of an unlisted module belongs to no plan element: logged at debug only.
+    assert "1 settings row(s) of $CombinedModuleSettingData name no listed module" in caplog.text
+    assert "1 rules row(s) of $CombinedModuleSettingData name no listed module" in caplog.text
+    assert "orphan" not in {name for config in tables["20"].values() for name in config["settings"]}
+    assert "3" not in {rule for config in tables["20"].values() for rule in config["rules"]}
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize(
+    ("part", "row", "missing"),
+    [
+        ("settings", {"Id": 4, "CombinedModuleId": 1, "Value": "no name"}, "Name"),
+        ("settings", {"Id": 4, "CombinedModuleId": 1, "Name": "", "Value": "1"}, "Name"),
+        # A malformed row counts even when its module is not listed: it is no orphan.
+        ("settings", {"Id": 4, "CombinedModuleId": 9, "Value": "no name"}, "Name"),
+        ("settings", {"Id": 4, "Name": "no module", "Value": "1"}, "CombinedModuleId"),
+        ("settings", "x", "Name"),
+        ("rules", {"CombinedModuleId": 1, "Name": "no id"}, "Id"),
+        ("rules", {"Id": 9, "Name": "no module"}, "CombinedModuleId"),
+        ("rules", "x", "Id"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("table", "broken", "kept"),
+    [("CombinedModuleSettingData", "20", "21"), ("CombinedModuleCentralSettingData", "21", "20")],
+)
+def test_a_malformed_row_makes_the_table_unreadable(
+    part: str, row: Any, missing: str, table: str, broken: str, kept: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    raw[table][part]["9"] = row
+
+    tables = parse_module_config_tables(raw)
+    assert broken not in tables
+    assert kept in tables  # the other table stays readable
+    assert f"${table} has a {part} row without {missing}" in caplog.text
+
+
+@pytest.mark.parametrize("module", [{"TypeId": 1}, "x"])
+def test_a_module_row_without_id_makes_the_type_unreadable(module: Any, caplog: pytest.LogCaptureFixture) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    raw["FubModules"]["20"]["9"] = module
+
+    tables = parse_module_config_tables(raw)
+    assert "20" not in tables
+    assert "21" in tables
+    assert "$FubModules[20] has an unknown format" in caplog.text
+
+
+def test_a_scene_only_page_without_module_list_warns_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    scenes = load_json_fixture("module_configs_raw.json")["CurrentSceneConfig"]
+    assert set(parse_module_config_tables({"CurrentSceneConfig": scenes})) == {"13"}
+    assert not caplog.text
+
+
+@pytest.mark.parametrize(("fub_modules", "problem"), [("x", "of an unknown format"), (None, "missing")])
+def test_an_unreadable_module_list_reads_no_quantum_type(
+    fub_modules: Any, problem: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    if fub_modules is None:
+        del raw["FubModules"]
+    else:
+        raw["FubModules"] = fub_modules
+
+    assert set(parse_module_config_tables(raw)) == {"13"}
+    assert f"$FubModules is {problem}" in caplog.text
 
 
 def test_a_page_without_the_tables_reads_no_type(caplog: pytest.LogCaptureFixture) -> None:
@@ -174,12 +241,25 @@ def test_a_scene_block_never_saved_has_no_config(tables: dict[str, Any]) -> None
     assert plan_module_configs(tables, {"40": _element(40, 13, 3)}) == {}
 
 
-def test_a_quantum_element_without_its_module_is_logged(
+def test_a_quantum_element_without_its_module_makes_the_plan_unreadable(
     tables: dict[str, Any], caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level(logging.DEBUG)
-    assert plan_module_configs(tables, {"41": _element(41, 20, 8)}) == {}
-    assert "Quantum element 41 names module 8" in caplog.text
+    elements = PLAN["elements"] | {"41": _element(41, 20, 8)}
+    assert plan_module_configs(tables, elements) is None
+    assert "Quantum element 41 names module 8, not listed by Comexio" in caplog.text
+
+
+@pytest.mark.parametrize("missing", ["CurrentSceneConfig", "CombinedModuleSettingData"])
+def test_a_plan_whose_table_is_missing_is_logged(missing: str, caplog: pytest.LogCaptureFixture) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    del raw[missing]
+    if missing == "CombinedModuleSettingData":
+        raw["FubModules"]["20"] = []  # no listed module either, so parsing itself has nothing to warn about
+    tables = parse_module_config_tables(raw)
+    caplog.clear()
+
+    assert plan_module_configs(tables, PLAN["elements"]) is None
+    assert "no readable config table for element" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -190,10 +270,38 @@ def test_a_quantum_element_without_its_module_is_logged(
         ({}, {"31": {"type": "13", "config": {}}}, True),
         ({SNAPSHOT_MODULE_CONFIGS: {"31": {"type": "13", "config": {}}}}, {"31": {"type": "13", "config": {}}}, False),
         ({SNAPSHOT_MODULE_CONFIGS: {"31": {"type": "13", "config": {}}}}, {}, True),
+        ({SNAPSHOT_MODULE_CONFIGS: {"31": {"type": "13", "config": {}}}}, {"31": {"type": "20", "config": {}}}, True),
     ],
 )
 def test_module_configs_changed(previous: dict, current: dict | None, changed: bool) -> None:
     assert module_configs_changed(previous, current) is changed
+
+
+def test_ids_comexio_regenerates_are_no_config_change(configs: dict[str, Any]) -> None:
+    regenerated = copy.deepcopy(configs)
+    scene = regenerated["31"]["config"]
+    scene["id"] = 99
+    for row in scene["scene"].values():
+        row["id"] += 50
+        for value in row["data"].values():
+            value["id"] += 50
+    regenerated["34"]["config"]["rules"]["2"]["RandomId"] = 999
+    assert not module_configs_changed(_snapshot(configs), regenerated)
+
+    regenerated["34"]["config"]["rules"]["2"]["Value"] = "6;0;1"
+    assert module_configs_changed(_snapshot(configs), regenerated)
+
+
+def test_a_scene_value_change_still_counts(configs: dict[str, Any]) -> None:
+    edited = copy.deepcopy(configs)
+    edited["31"]["config"]["scene"]["2"]["data"]["2"]["value"] = 60
+    assert module_configs_changed(_snapshot(configs), edited)
+
+
+def test_a_damaged_stored_entry_is_compared_not_raised(configs: dict[str, Any]) -> None:
+    damaged = _snapshot(configs)
+    damaged[SNAPSHOT_MODULE_CONFIGS]["31"] = None
+    assert module_configs_changed(damaged, configs)
 
 
 # ---------------------------------------------------------------------------

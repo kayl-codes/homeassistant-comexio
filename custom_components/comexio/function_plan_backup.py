@@ -1110,7 +1110,7 @@ class FunctionPlanBackupManager:
 
         Shape: {"auto": [...], "change": [...]} with entries
         {fub_id, plan_name, captured_at, hash, operation?, restored_at?, paper?, dpi?, orientation?,
-        comexio_version?, block_setting_count?, slot}.
+        comexio_version?, block_setting_count?, module_config_count?, slot}.
         slot is scoped per (fub_id, plan_name) identity, not per raw fub_id.
         """
         await self._async_ensure_loaded()
