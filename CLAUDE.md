@@ -136,6 +136,7 @@ The coordinator's `last_audit_results` dict (populated every poll) drives both s
 |-------------|-----------|--------------------------|
 | Marker entity | `comexio_{server_id}_m{id}` | `{domain}.{server_id}_m{id}` |
 | KNX entity | `comexio_{server_id}_k{id}` | `{domain}.{server_id}_k{id}` |
+| Quickbus IO entity (read-only) | `comexio_{server_id}_qb{io_id}` | `{binary_sensor|sensor}.{server_id}_qb{io_id}` |
 | IO entity | `comexio_{server_id}_{ext_name}_{identifier}` | `{domain}.{server_id}_{ext_name}_{identifier}` |
 | Function plan run state | `comexio_{server_id}_fub{id}` | `sensor.{server_id}_fub{id}` |
 | Orphaned backups sensor | `comexio_{server_id}_orphaned_backups` | `sensor.{server_id}_orphaned_backups` |

@@ -10,7 +10,17 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, SOURCE_CATEGORIES, WebioClass, hub_era_object_id, stable_object_id
+from .const import (
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    DOMAIN,
+    QUICKBUS_IO_DATA_KEY,
+    SOURCE_CATEGORIES,
+    WebioClass,
+    hub_era_object_id,
+    quickbus_io_platform,
+    quickbus_io_unique_id,
+    stable_object_id,
+)
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -146,6 +156,45 @@ class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
     @property
     def available(self) -> bool:
         return super().available and self._ext_name not in self.coordinator.offline_extensions
+
+
+class ComexioQuickbusIOEntity(ComexioIOEntity):
+    """Shared base for the IO entities of a Quickbus device (multitouch, motion detector, ...).
+
+    Its identifiers (G1, TL1, ...) repeat on every device of the same kind, so the unique_id
+    carries the IO's unique Id instead; each device gets its own HA device. Availability
+    follows the host extension (ext_name) the device hangs on.
+    """
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
+        super().__init__(coordinator, server_id, io)
+        self._attr_unique_id = quickbus_io_unique_id(server_id, io["id"])
+        self._quickbus_device_id: str = str(io["quickbus"]["device_id"])
+        self._quickbus_device_name: str = io["quickbus"]["name"]
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(
+            self.coordinator,
+            identifiers={(DOMAIN, f"{self.coordinator.server_id}_qb{self._quickbus_device_id}".lower())},
+            name=f"{self.coordinator.server_id} {self._quickbus_device_name}",
+            model="Quickbus Device",
+        )
+
+
+def quickbus_ios_for_platform(
+    coordinator: ComexioCoordinator, conf: dict[str, Any], platform: str
+) -> list[dict[str, Any]]:
+    """The imported Quickbus IOs that get an entity on this platform (read-only: binary_sensor/sensor).
+
+    Same platform and offline rule as the entity cleanup in __init__ (_quickbus_entity_uids).
+    """
+    include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
+    return [
+        io
+        for io in coordinator.data.get(QUICKBUS_IO_DATA_KEY, [])
+        if quickbus_io_platform(io) == platform and (not io.get("offline") or include_offline)
+    ]
 
 
 class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):

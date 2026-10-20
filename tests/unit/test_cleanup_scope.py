@@ -7,6 +7,7 @@ from custom_components.comexio.cleanup_scope import (
     CLEANUP_SCOPE_IO,
     CLEANUP_SCOPE_KNX,
     CLEANUP_SCOPE_MARKER,
+    CLEANUP_SCOPE_QUICKBUS,
     TRIGGER_PLAN_DELETE,
     TRIGGER_PLAN_KEEP,
     TRIGGER_PLAN_REMOVE_PAIRS,
@@ -117,6 +118,7 @@ def test_only_full_and_knx_touch_knx_extras() -> None:
     assert scope_includes_knx(CLEANUP_SCOPE_KNX)
     assert not scope_includes_knx(CLEANUP_SCOPE_MARKER)
     assert not scope_includes_knx(CLEANUP_SCOPE_IO)
+    assert not scope_includes_knx(CLEANUP_SCOPE_QUICKBUS)
 
 
 def test_scope_counts() -> None:
@@ -143,7 +145,12 @@ def test_has_knx_artifacts_counts_bridge_markers() -> None:
 
 @pytest.mark.parametrize(
     ("webio_class", "scope"),
-    [(WebioClass.MARKER, CLEANUP_SCOPE_MARKER), ("io", CLEANUP_SCOPE_IO), (WebioClass.KNX, CLEANUP_SCOPE_KNX)],
+    [
+        (WebioClass.MARKER, CLEANUP_SCOPE_MARKER),
+        ("io", CLEANUP_SCOPE_IO),
+        (WebioClass.KNX, CLEANUP_SCOPE_KNX),
+        (WebioClass.QUICKBUS, CLEANUP_SCOPE_QUICKBUS),
+    ],
 )
 def test_scope_of_class_removes_exactly_that_class(webio_class: str, scope: str) -> None:
     assert scope_of_class(webio_class) == scope
