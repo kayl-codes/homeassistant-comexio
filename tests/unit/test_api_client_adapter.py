@@ -1040,19 +1040,41 @@ SYSTEM_INFO = SystemInfo(free_storage_percent=42.5, time_server=TimeServerSettin
 def test_system_info_returns_both_parts(comexio_api: ComexioAPI, client: MagicMock) -> None:
     client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
     client.get_uptime = AsyncMock(return_value=timedelta(days=3))
-    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3))
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
 
 
-@pytest.mark.parametrize("err", [ComexioAuthenticationError("login form"), _connection_error(), HTTP_ERROR])
+@pytest.mark.parametrize("err", [_connection_error(), HTTP_ERROR, ComexioDataError("no duration")])
 def test_system_info_failure_drops_only_its_part(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
-    # One failed fetch must not cost the other reading: both are tried, each failure is its own None.
-    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    # One failed fetch must not cost the other reading: both are tried, each failure is its own None + cause.
     client.get_uptime = AsyncMock(return_value=timedelta(days=3))
     _fail(client, "get_system_info", err)
-    assert asyncio.run(comexio_api.get_system_info()) == (None, timedelta(days=3))
+    assert asyncio.run(comexio_api.get_system_info()) == (None, timedelta(days=3), str(err), None)
     client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
     _fail(client, "get_uptime", err)
-    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, None)
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, None, None, str(err))
+
+
+def test_system_info_logs_in_again_on_a_lapsed_session(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), SYSTEM_INFO])
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    client.login.assert_awaited_once()
+    assert client.get_system_info.await_count == 2
+
+
+def test_system_info_failed_relogin_is_the_cause(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.get_uptime = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.login = AsyncMock(side_effect=_connection_error())
+
+    reading = asyncio.run(comexio_api.get_system_info())
+
+    assert (reading.info, reading.uptime) == (None, None)
+    assert reading.info_error == reading.uptime_error == "re-login failed (connection)"
+    # Without a session the retry would only see the login form again.
+    assert client.get_system_info.await_count == 1
 
 
 # --- Web-IO ---

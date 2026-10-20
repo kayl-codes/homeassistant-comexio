@@ -444,6 +444,15 @@ class KnxBridgeReset(NamedTuple):
     store: bool = False  # in use: its current "store in memory" flag, kept by the rename
 
 
+class SystemInfoReading(NamedTuple):
+    """One system info poll (see ComexioAPI.get_system_info): a part is None if its fetch failed, with the cause."""
+
+    info: SystemInfo | None
+    uptime: timedelta | None
+    info_error: str | None = None
+    uptime_error: str | None = None
+
+
 def _strip_marker_kind_suffixes(name: str) -> str:
     """name without every trailing kind suffix ("Rollo [TRIG] [K3]" -> "Rollo")."""
     while (stripped := MARKER_KIND_SUFFIX_RE.sub("", name)) != name:
@@ -5052,24 +5061,31 @@ class ComexioAPI:
             _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
 
-    async def get_system_info(self) -> tuple[SystemInfo | None, timedelta | None]:
-        """System info (free storage, time server settings) and uptime; None for a part whose fetch failed.
+    async def get_system_info(self) -> SystemInfoReading:
+        """System info (free storage, time server settings) and uptime, each with the cause if its fetch failed.
 
         Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
-        failures and warns — so they are logged at debug level here. A lapsed admin session fails
-        too; the next config poll logs in again.
+        failures and warns with the cause — so they are logged at debug level here. A lapsed admin
+        session is logged in again once per call, like the config poll does: this poll runs more
+        often, and its readings would otherwise go unknown until the next config poll.
         """
-        info: SystemInfo | None = None
-        uptime: timedelta | None = None
+        info, info_error = await self._system_info_part(lambda: self.client.get_system_info())
+        uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime())
+        return SystemInfoReading(info, uptime, info_error, uptime_error)
+
+    async def _system_info_part[T](self, fetch: Callable[[], Awaitable[T]]) -> tuple[T | None, str | None]:
+        """fetch()'s result, or None and the failure cause; one re-login and retry on a lapsed session."""
         try:
-            info = await self.client.get_system_info()
+            try:
+                return await fetch(), None
+            except ComexioAuthenticationError:
+                _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
+                if not await self._full_login():
+                    return None, f"re-login failed ({self.last_login_error})"
+                return await fetch(), None
         except ComexioError as err:
             _LOGGER.debug("System info fetch failed: %s", err)
-        try:
-            uptime = await self.client.get_uptime()
-        except ComexioError as err:
-            _LOGGER.debug("Uptime fetch failed: %s", err)
-        return info, uptime
+            return None, str(err) or type(err).__name__
 
     async def system_emergency_reboot(self) -> bool:
         """Trigger an IMMEDIATE, unconfirmed full Comexio system reboot.

@@ -208,7 +208,7 @@ from .plan_watchdog import (
     vanished_plan_token,
 )
 from .reference_monitor import ReferenceCatalogMonitor
-from .system_info import SystemInfoState
+from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -4195,12 +4195,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_system_info_tick(self, _now: datetime | None = None) -> None:
         """Fetch the system info and uptime into self.system_info and notify its entities."""
-        info, uptime = await self.api.get_system_info()
-        if self.system_info.apply(info, uptime, dt_util.utcnow()):
+        reading = await self.api.get_system_info()
+        causes = {PART_SYSTEM_INFO: reading.info_error, PART_UPTIME: reading.uptime_error}
+        for part in self.system_info.apply(reading.info, reading.uptime, dt_util.utcnow()):
             _LOGGER.warning(
-                "[%s] System info poll failed %s times in a row; the affected diagnostics are reset to unknown",
+                "[%s] System info poll failed %s times in a row, %s reset to unknown: %s",
                 self.server_id,
                 SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
+                part,
+                causes[part],
             )
         async_dispatcher_send(self.hass, system_info_signal(self.server_id))
 

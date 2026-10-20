@@ -59,6 +59,38 @@ PLATFORMS = [
 ]
 
 
+# unique_id suffixes (after "comexio_{server_id}_") of the always-present server-level entities, kept by
+# the orphan cleanup in async_setup_entry — an entity missing here is deleted from the registry on every setup.
+SERVER_LEVEL_UNIQUE_ID_SUFFIXES = (
+    "webio_sync_start_btn",
+    "webio_sync_cancel_btn",
+    "webio_sync_status_sensor",
+    "entity_id_fix_btn",
+    "fw_check_btn",
+    "webio_range_check_btn",
+    "statistics_cleanup_btn",
+    "uninstall_cleanup_btn",
+    "offline_extensions_sensor",
+    "logikplan_plan_selector",
+    "function_plan_backups_sensor",
+    "orphaned_backups",
+    "version_sensor",
+    "plan_changed_sensor",
+    "plan_backup_selector",
+    "bus_load_sensor",
+    "sd_card_sensor",
+    "free_storage_sensor",
+    "last_boot_sensor",
+    "time_server_problem",
+    "plan_preview_sensor",
+    "plan_preview_image",
+    "function_plan_toggle_btn",
+    "managed_plans_problem",
+    "function_plan_auto_start",
+    "function_plan_auto_start_user",
+)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Comexio from a config entry."""
     _LOGGER.info("Comexio__init__: Entered async_setup_entry")
@@ -309,37 +341,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             active_unique_ids.add(f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower())
 
     # Server-level buttons and sensors (these are always active)
-    active_unique_ids.update(
-        f"comexio_{server_id}_{suffix}"
-        for suffix in (
-            "webio_sync_start_btn",
-            "webio_sync_cancel_btn",
-            "webio_sync_status_sensor",
-            "entity_id_fix_btn",
-            "fw_check_btn",
-            "webio_range_check_btn",
-            "statistics_cleanup_btn",
-            "uninstall_cleanup_btn",
-            "offline_extensions_sensor",
-            "logikplan_plan_selector",
-            "function_plan_backups_sensor",
-            "orphaned_backups",
-            "version_sensor",
-            "plan_changed_sensor",
-            "plan_backup_selector",
-            "bus_load_sensor",
-            "sd_card_sensor",
-            "free_storage_sensor",
-            "last_boot_sensor",
-            "time_server_problem",
-            "plan_preview_sensor",
-            "plan_preview_image",
-            "function_plan_toggle_btn",
-            "managed_plans_problem",
-            "function_plan_auto_start",
-            "function_plan_auto_start_user",
-        )
-    )
+    active_unique_ids.update(f"comexio_{server_id}_{suffix}" for suffix in SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
 
     # Function plan run-state sensors (sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
