@@ -14,6 +14,7 @@ import uuid
 
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
+from aiocomexio.webio import quickbus_command_name
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
@@ -129,6 +130,7 @@ from .const import (
     MARKER_READ_ONLY_SUFFIX,
     PLAN_TRANSITION_STARTING,
     PREVIEW_CARD_ALIVE_SEC,
+    QUICKBUS_IO_DATA_KEY,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -141,6 +143,7 @@ from .const import (
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
+    WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
@@ -159,6 +162,7 @@ from .const import (
     classify_audit_key,
     entity_id_migration_target,
     expand_ignored_marker_ids,
+    extension_device_name,
     function_plan_ids,
     fw_update_signal,
     import_disabled_issue_id,
@@ -169,6 +173,7 @@ from .const import (
     parse_watchdog_user_plan_pick,
     plan_watch_signal,
     repointed_watchdog_user_plan_picks,
+    required_webio_classes,
     snap_to_grid,
     source_audit_key,
     source_category,
@@ -374,11 +379,17 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
     import_markers = conf.get("import_markers", True)
     import_ios = conf.get("import_ios", True)
     import_knx = conf.get("import_knx", False)
+    import_quickbus = conf.get("import_quickbus", True)
+    io_all = parsed_data.get("io_all", [])
+    if not import_ios:
+        # io_all labels plan elements: imported Quickbus IOs keep theirs without the physical IOs.
+        io_all = [io for io in io_all if import_quickbus and io.get("quickbus")]
     return {
         "markers": parsed_data["markers"] if import_markers else [],
         "io": parsed_data["io"] if import_ios else [],
-        "io_all": parsed_data.get("io_all", []) if import_ios else [],
+        "io_all": io_all,
         "knx": parsed_data.get("knx", []) if import_knx else [],
+        QUICKBUS_IO_DATA_KEY: parsed_data.get(QUICKBUS_IO_DATA_KEY, []) if import_quickbus else [],
         "webio_commands": parsed_data.get("webio_commands", {}),
         "webio_names": parsed_data.get("webio_names", {}),
         "webio_devices": parsed_data.get("webio_devices", {}),
@@ -403,6 +414,22 @@ def _fallback_audit_key(full_name: str) -> str:
     return full_name
 
 
+def _quickbus_command_ref(full_name: str) -> tuple[str, str] | None:
+    """("QB<device id>", identifier) of a Quickbus command name "HA QB<device id> <device name> <identifier>".
+
+    The device name in the middle may contain spaces and may have been renamed in Comexio; the
+    device id and the identifier (G1, TL1, ...) at both ends still pin the IO.
+    """
+    parts = full_name.split(" ")
+    if (
+        len(parts) < 4
+        or parts[0] != "HA"
+        or not parts[1].startswith(SOURCE_CATEGORIES[WebioClass.QUICKBUS].audit_key_prefix)
+    ):
+        return None
+    return parts[1], parts[-1]
+
+
 def _build_com_audit_map(
     com_commands: dict[str, Any], ha_map: dict[str, dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -415,11 +442,17 @@ def _build_com_audit_map(
     to the positional heuristic, purely for grouping.
     """
     name_to_key = {info["name"]: key for key, info in ha_map.items()}
+    # A renamed Quickbus device changes its command names but not the device id + identifier:
+    # grouped under the IO's key, the audit reports a rename that keeps the command (and the
+    # user's wiring of its webIoId) instead of an orphan to delete plus a new command.
+    quickbus_ref_to_key = {ref: key for key, info in ha_map.items() if (ref := _quickbus_command_ref(info["name"]))}
     com_map: dict[str, list[dict[str, Any]]] = {}
     for full_name, info in com_commands.items():
         key = name_to_key.get(full_name, full_name)
         if key == full_name:
-            key = _fallback_audit_key(full_name)
+            ref = _quickbus_command_ref(full_name)
+            key = quickbus_ref_to_key.get(ref) if ref else None
+            key = key or _fallback_audit_key(full_name)
         com_map.setdefault(key, []).append(
             {
                 "name": full_name,
@@ -688,6 +721,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.knx_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
         self._io_index: dict[tuple[str, str], dict[str, Any]] = {}
+        # Quickbus IOs repeat their identifier per device, so the webhook addresses them by IO Id
+        self._quickbus_index: dict[str, dict[str, Any]] = {}
         self.audit_ignored: bool = False
         self.last_audit_failed: bool = False
         self.last_summary_hash: str | None = None
@@ -1047,7 +1082,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         # Rebuild O(1) lookup index for webhook IO updates
         self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
-        self._track_offline_extensions(final_data["io"])
+        self._quickbus_index = {str(io["id"]): io for io in final_data[QUICKBUS_IO_DATA_KEY]}
+        # Quickbus IOs carry their host extension's offline flag — an extension with only Quickbus IOs
+        # (or import_ios off) must still be tracked, or its Quickbus entities stay available.
+        self._track_offline_extensions([*final_data["io"], *final_data[QUICKBUS_IO_DATA_KEY]])
         self._update_entity_id_mismatch_issue(conf)
 
         # --- ORPHANED STATISTICS DETECTION ---
@@ -1134,7 +1172,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 self.marker_states[m["id"]] = m["value"]
 
-        for io in final_data["io"]:
+        for io in (*final_data["io"], *final_data[QUICKBUS_IO_DATA_KEY]):
             if io["id"] in self._webhook_updated_io_ids:
                 io["value"] = self.io_states.get(io["id"], io["value"])
             else:
@@ -1209,7 +1247,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         webio_devices = parsed_data.get("webio_devices", {})
         marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
         self._update_import_disabled_issues(conf, disabled_commands, webio_devices, marker_titles)
-        if self._report_missing_webio_classes(conf, webio_devices):
+        if self._report_missing_webio_classes(conf, webio_devices, final_data):
             return False
 
         # Reset internal failure flag when the audit is successful
@@ -1332,6 +1370,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             mapped_type = "digital" if io.get("is_binary") else "analog"
             ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
             io_meta_by_key[key] = io
+        # Quickbus IOs: keyed by their IO Id (identifiers repeat per device); no io_meta entry, as
+        # they are not wired into the managed function plans.
+        quickbus_cat = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
+        for io in final_data[QUICKBUS_IO_DATA_KEY]:
+            ha_map[source_audit_key(quickbus_cat, io["id"])] = {
+                "name": quickbus_command_name(io),
+                "type": "digital" if io.get("is_binary") else "analog",
+            }
         return ha_map, io_meta_by_key
 
     def _update_import_disabled_issues(
@@ -1462,7 +1508,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             {int(cat.fub_module_type) for cat in trigger_pair_categories()},
         )
 
-    def _report_missing_webio_classes(self, conf: dict[str, Any], webio_devices: dict[str, Any]) -> bool:
+    def _report_missing_webio_classes(
+        self, conf: dict[str, Any], webio_devices: dict[str, Any], final_data: dict[str, Any]
+    ) -> bool:
         """Raise a repair issue if a Web-IO class is entirely missing on the server; True if one is.
 
         Checked directly against the resolved device_id (not "com_map empty") so a half-missing
@@ -1471,9 +1519,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Only classes the user has opted into (import_conf_key) count as "missing" — an
         opted-out category (e.g. KNX by default) has no Web-IO device on the server by design,
         and flagging that as missing would wipe last_audit_results on every poll (see
-        active_webio_classes docstring).
+        active_webio_classes docstring), and the Quickbus class only with a Quickbus IO
+        (required_webio_classes).
         """
-        missing_classes = [cls for cls in active_webio_classes(conf) if not webio_devices.get(cls, {}).get("device_id")]
+        missing_classes = [
+            cls for cls in required_webio_classes(conf, final_data) if not webio_devices.get(cls, {}).get("device_id")
+        ]
         if not missing_classes:
             return False
         self.last_audit_results = {}
@@ -3853,6 +3904,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
+    def update_quickbus_io(self, io_id: str | int, value: float | int | str) -> None:
+        """Webhook push for an IO of a Quickbus device, addressed by its unique IO Id."""
+        io_id_str = str(io_id)
+        if io := self._quickbus_index.get(io_id_str):
+            previous = self.io_states.get(io["id"])
+            self.io_states[io["id"]] = value
+            io["value"] = value
+            self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
+            label = io.get("name") or io_id_str
+            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "quickbus", one_line(label), value, previous)
+            self._fire_plan_event("io", io_id_str, label, value)
+        else:
+            _LOGGER.warning(WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG, one_line(io_id_str), value)
+        self._async_publish_pushed_value()
+        self.schedule_plan_preview_refresh()
+
     async def async_load_extension_firmware(self) -> None:
         """Restore the last checked firmware snapshot from disk (called once at setup).
 
@@ -3973,7 +4040,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             dev_reg.async_update_device(
                 old_device.id,
                 new_identifiers={(DOMAIN, f"{server_slug}_{new_name}".lower())},
-                name=f"{self.server_id} {new_name}",
+                name=extension_device_name(self.server_id, new_name),
             )
 
         # Keep the firmware cache under the new name so update.* doesn't briefly show
@@ -5668,6 +5735,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Web-IO classes currently opted into (see active_webio_classes() in const.py)."""
         conf = {**self.config_entry.data, **self.config_entry.options}
         return active_webio_classes(conf)
+
+    @property
+    def required_webio_classes(self) -> tuple[WebioClass, ...]:
+        """Opted-in classes that must exist on the server (see required_webio_classes() in const.py)."""
+        conf = {**self.config_entry.data, **self.config_entry.options}
+        return required_webio_classes(conf, self.data or {})
 
     async def async_check_ignored_sources(
         self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass
