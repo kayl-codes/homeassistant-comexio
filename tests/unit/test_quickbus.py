@@ -14,6 +14,7 @@ from custom_components.comexio.const import (
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
     WebioClass,
+    known_extension_names,
     quickbus_io_platform,
     quickbus_io_unique_id,
     required_webio_classes,
@@ -391,3 +392,22 @@ def test_quickbus_cleanup_scope_has_a_label_and_only_its_class() -> None:
     assert set(_CLEANUP_SCOPE_LABELS) == set(CLEANUP_SCOPES)
     assert webio_classes_in_scope(CLEANUP_SCOPE_QUICKBUS) == (WebioClass.QUICKBUS,)
     assert WebioClass.QUICKBUS in webio_classes_in_scope("full")
+
+
+@pytest.mark.parametrize(
+    ("include_offline", "expected"),
+    [(False, {"BASE", "QB-Host"}), (True, {"BASE", "QB-Host", "Offline-Host"})],
+)
+def test_an_extension_hosting_only_quickbus_devices_is_a_known_extension(
+    include_offline: bool, expected: set[str]
+) -> None:
+    """Quickbus IOs leave ``io``: a module hosting only Quickbus devices must still get its firmware entity."""
+    data = {
+        "io": [{"ext_name": "BASE", "identifier": "I1"}],
+        QUICKBUS_IO_DATA_KEY: [
+            {"ext_name": "QB-Host", "identifier": "G1", "quickbus": True},
+            {"ext_name": "Offline-Host", "identifier": "G1", "quickbus": True, "offline": True},
+        ],
+    }
+
+    assert known_extension_names(data, include_offline) == expected

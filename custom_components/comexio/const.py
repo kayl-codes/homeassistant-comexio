@@ -896,6 +896,15 @@ def is_base_extension(ext_name: str) -> bool:
     return ext_name.upper() == BASE_EXTENSION_NAME
 
 
+def known_extension_names(data: Mapping[str, Any], include_offline: bool) -> set[str]:
+    """Names of the extensions the poll reports IOs for, offline ones only with ``include_offline``.
+
+    Counts Quickbus hosts too: a module that only hosts Quickbus devices lists no IO of its own.
+    """
+    ios = (*data.get("io", []), *data.get(QUICKBUS_IO_DATA_KEY, []))
+    return {io["ext_name"] for io in ios if include_offline or not io.get("offline")}
+
+
 def marker_device_name(server_id: str) -> str:
     """HA device name of the marker group: "<server> Markers"."""
     return f"{server_id} Markers"

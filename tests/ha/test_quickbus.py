@@ -11,8 +11,8 @@ from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.comexio import entity
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import DOMAIN
-from custom_components.comexio.entity import update_quickbus_devices
+from custom_components.comexio.const import DOMAIN, extension_firmware_update_unique_id
+from custom_components.comexio.entity import extension_device_identifier, update_quickbus_devices
 from tests.common import load_json_fixture
 
 from .conftest import SERVER_ID
@@ -180,8 +180,11 @@ async def test_quickbus_devices_are_connected_via_their_host_extension(
     flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
     diele = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb3")})
     assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
-    # Multibridge A6 carries only Quickbus IOs, so it has no HA device of its own: BM Diele hangs on the hub.
-    assert diele.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, SERVER_ID)}).id
+    # Multibridge A6 carries only Quickbus IOs: its firmware entity still gives it a device to hang under.
+    multibridge = dev_reg.async_get_device(
+        identifiers={(DOMAIN, extension_device_identifier(SERVER_ID, "Multibridge A6"))}
+    )
+    assert diele.via_device_id == multibridge.id
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
@@ -194,14 +197,23 @@ async def test_update_moves_a_quickbus_device_from_the_hub_to_its_host(
     flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
     hub = dev_reg.async_get_device(identifiers={(DOMAIN, SERVER_ID)})
     diele = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb3")})
-    assert diele.via_device_id == hub.id
     dev_reg.async_update_device(flur.id, via_device_id=hub.id)
+    dev_reg.async_update_device(diele.id, via_device_id=hub.id)
 
     update_quickbus_devices(hass.data[DOMAIN][mock_config_entry.entry_id])
 
     base = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")})
     assert dev_reg.async_get(flur.id).via_device_id == base.id
-    assert dev_reg.async_get(diele.id).via_device_id == hub.id  # its host has no device: stays on the hub
+    multibridge = dev_reg.async_get_device(
+        identifiers={(DOMAIN, extension_device_identifier(SERVER_ID, "Multibridge A6"))}
+    )
+    assert dev_reg.async_get(diele.id).via_device_id == multibridge.id
+
+    # A host without a device leaves the Quickbus device where it is.
+    dev_reg.async_update_device(diele.id, via_device_id=hub.id)
+    dev_reg.async_remove_device(multibridge.id)
+    update_quickbus_devices(hass.data[DOMAIN][mock_config_entry.entry_id])
+    assert dev_reg.async_get(diele.id).via_device_id == hub.id
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
@@ -255,3 +267,21 @@ async def test_a_quickbus_device_renamed_in_comexio_is_renamed_on_the_next_poll(
     assert flur.name == f"{SERVER_ID} QB - MT Eingang"
     assert flur.name_by_user == "Mein Flur"  # the name set in HA stays
     assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_quickbus_only_extension_keeps_its_firmware_entity_through_the_cleanup(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """Multibridge A6 hosts only Quickbus IOs: its firmware entity exists and survives the setup cleanup."""
+    await _setup(hass, mock_config_entry)
+    ent_reg = er.async_get(hass)
+    unique_id = extension_firmware_update_unique_id(SERVER_ID, "Multibridge A6")
+    entity_id = ent_reg.async_get_entity_id("update", DOMAIN, unique_id)
+    assert entity_id is not None
+
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert ent_reg.async_get_entity_id("update", DOMAIN, unique_id) == entity_id
+    assert hass.states.get(entity_id) is not None
