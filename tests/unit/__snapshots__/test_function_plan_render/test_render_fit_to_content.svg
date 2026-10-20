@@ -62,7 +62,8 @@
 <text class="node-comment" x="610.0" y="68.8" font-size="9.8"><tspan x="610.0" dy="0">! Administrated by HomeAssistant, dont delete or rename !</tspan></text>
 </g>
 <g class="node-g" data-label="M1 Licht Wohnen" data-eid="2" data-sid="M1" data-target="M1" data-analog="0" data-writable="1" data-value="1.0">
-<rect class="node" x="34.5" y="82.0" width="161" height="14" rx="7.0" stroke-width="1"><title>M1 Licht Wohnen</title></rect>
+<title>M1 Licht Wohnen</title>
+<rect class="node" x="34.5" y="82.0" width="161" height="14" rx="7.0" stroke-width="1"/>
 <path class="block-head" d="M70.0,82.0 H41.5 Q34.5,82.0 34.5,89.0 V89.0 Q34.5,96.0 41.5,96.0 H70.0 Z"/>
 <text class="block-head-label" x="52.2" y="92.5" text-anchor="middle" font-size="9.8">M1</text>
 <text class="node-label" x="191.5" y="92.5" text-anchor="end" font-size="9.8">1</text>
@@ -71,7 +72,8 @@
 <path class="port-glyph" d="M195.5,85.2 L205.0,89.0 L195.5,92.8 z"/>
 </g>
 <g class="node-g" data-label="BASE I1 Taster Flur" data-eid="3" data-sid="BASE#I1" data-target="BASE#I1" data-analog="0" data-writable="1" data-value="1.0">
-<rect class="node" x="34.5" y="97.0" width="161" height="14" rx="7.0" stroke-width="1"><title>BASE I1 Taster Flur</title></rect>
+<title>BASE I1 Taster Flur</title>
+<rect class="node" x="34.5" y="97.0" width="161" height="14" rx="7.0" stroke-width="1"/>
 <path class="block-head" d="M95.2,97.0 H41.5 Q34.5,97.0 34.5,104.0 V104.0 Q34.5,111.0 41.5,111.0 H95.2 Z"/>
 <text class="block-head-label" x="64.8" y="107.5" text-anchor="middle" font-size="9.8">BASE  #I1</text>
 <text class="node-label" x="191.5" y="107.5" text-anchor="end" font-size="9.8">1</text>
@@ -80,7 +82,8 @@
 <path class="port-glyph" d="M195.5,100.2 L205.0,104.0 L195.5,107.8 z"/>
 </g>
 <g class="node-g" data-label="Oder" data-eid="4">
-<rect class="node" x="229.5" y="82.0" width="41" height="44" rx="7.0" stroke-width="1"><title>Oder</title></rect>
+<title>Oder</title>
+<rect class="node" x="229.5" y="82.0" width="41" height="44" rx="7.0" stroke-width="1"/>
 <path class="block-head" d="M229.5,97.0 V89.0 Q229.5,82.0 236.5,82.0 H263.5 Q270.5,82.0 270.5,89.0 V97.0 Z"/>
 <text class="block-head-label" x="250.0" y="92.8" text-anchor="middle" font-size="10.5" font-weight="bold">Oder</text>
 <text class="port-label" x="232.5" y="107.2" font-size="9.0">a</text>
@@ -91,18 +94,21 @@
 <path class="port-glyph" d="M270.5,107.7 L280.0,111.5 L270.5,115.3 z"/>
 </g>
 <g class="node-g" data-label="30. HA M1 Licht Wohnen" data-eid="5">
-<rect class="node-webio" x="439.5" y="82.0" width="161" height="14" rx="7.0" stroke-width="1"><title>30. HA M1 Licht Wohnen</title></rect>
+<title>30. HA M1 Licht Wohnen</title>
+<rect class="node-webio" x="439.5" y="82.0" width="161" height="14" rx="7.0" stroke-width="1"/>
 <text class="block-head-label" x="444.5" y="92.5" font-size="9.8">30. HA M1 Licht Wohnen</text>
 <path class="port-glyph" d="M430.0,85.2 L439.5,89.0 L430.0,92.8 z"/>
 <path class="port-glyph" d="M600.5,85.2 L610.0,89.0 L600.5,92.8 z"/>
 </g>
 <g class="node-g" data-label="5" data-eid="6">
-<rect class="node" x="34.5" y="172.0" width="41" height="14" rx="7.0" stroke-width="1"><title>5</title></rect>
+<title>5</title>
+<rect class="node" x="34.5" y="172.0" width="41" height="14" rx="7.0" stroke-width="1"/>
 <text class="node-label" x="55.0" y="182.5" text-anchor="middle" font-size="9.8">5</text>
 <circle class="port-glyph" cx="80.25" cy="179.0" r="4.0"/>
 </g>
 <g class="node-g" data-label="Nicht" data-eid="7">
-<rect class="node" x="229.5" y="172.0" width="41" height="29" rx="7.0" stroke-width="1"><title>Nicht</title></rect>
+<title>Nicht</title>
+<rect class="node" x="229.5" y="172.0" width="41" height="29" rx="7.0" stroke-width="1"/>
 <path class="block-head" d="M229.5,187.0 V179.0 Q229.5,172.0 236.5,172.0 H263.5 Q270.5,172.0 270.5,179.0 V187.0 Z"/>
 <text class="block-head-label" x="250.0" y="182.8" text-anchor="middle" font-size="10.5" font-weight="bold">Nicht</text>
 <text class="port-label" x="232.5" y="197.2" font-size="9.0">in</text>
@@ -112,8 +118,9 @@
 </g>
 <g class="node-g" data-label="M4 Klingel [TRIG]
 ⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster" data-eid="8" data-sid="M4" data-target="M4" data-analog="0" data-writable="1" data-value="0.0">
-<rect class="node" x="34.5" y="262.0" width="161" height="14" rx="7.0" stroke-width="1"><title>M4 Klingel [TRIG]
-⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster</title></rect>
+<title>M4 Klingel [TRIG]
+⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster</title>
+<rect class="node" x="34.5" y="262.0" width="161" height="14" rx="7.0" stroke-width="1"/>
 <path class="block-head" d="M70.0,262.0 H41.5 Q34.5,262.0 34.5,269.0 V269.0 Q34.5,276.0 41.5,276.0 H70.0 Z"/>
 <text class="block-head-label" x="52.2" y="272.5" text-anchor="middle" font-size="9.8">M4</text>
 <text class="node-label" x="191.5" y="272.5" text-anchor="end" font-size="9.8">0</text>
@@ -125,10 +132,11 @@
 Typ: Einschaltwischend
 t1: 0,5 Sek.
 ⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster" data-eid="9" data-sid="T1">
-<rect class="node" x="229.5" y="262.0" width="161" height="14" rx="7.0" stroke-width="1"><title>T1 Taster Reset
+<title>T1 Taster Reset
 Typ: Einschaltwischend
 t1: 0,5 Sek.
-⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster</title></rect>
+⟲ virtueller Taster (Self-Reset) — erkanntes, gutartiges Muster</title>
+<rect class="node" x="229.5" y="262.0" width="161" height="14" rx="7.0" stroke-width="1"/>
 <path class="block-head" d="M265.0,262.0 H236.5 Q229.5,262.0 229.5,269.0 V269.0 Q229.5,276.0 236.5,276.0 H265.0 Z"/>
 <text class="block-head-label" x="247.2" y="272.5" text-anchor="middle" font-size="9.8">T1</text>
 <text class="node-label" x="268.0" y="272.5" font-size="9.8">Taster Reset</text>
