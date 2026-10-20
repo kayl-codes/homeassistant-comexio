@@ -1,9 +1,10 @@
 """A `pytest.raises` block makes exactly one call, so only the tested call can satisfy it (SonarCloud S5778).
 
 With a second call in the block - a second statement, but also a nested call like `check(build(x))` or a context
-manager entered after `pytest.raises` in the same `with` - an unexpected exception from the other call satisfies the
-expected one and hides a failure of the tested call. Ruff's PT012 only counts statements; this test counts the calls,
-so the nested form is caught as well. Build the arguments before the `with` and keep only the tested call inside it.
+manager entered (its `__enter__`) after `pytest.raises` in the same `with` - an unexpected exception from the other
+call satisfies the expected one and hides a failure of the tested call. Ruff's PT012 only counts statements; this test
+counts the calls, so the nested form is caught as well. Build the arguments before the `with` and keep only the
+tested call inside it.
 
 A function or lambda defined in the block is not run by defining it, so the calls in its body do not count (its
 decorators, defaults and annotations do); a lambda passed as a callback runs inside the tested call and is part of
@@ -88,7 +89,8 @@ def _raises_blocks(source: str) -> list[tuple[int, int, str]]:
         if raises_at is None:
             continue
         later_items = node.items[raises_at + 1 :]
-        calls = sum(_executed_calls(item.context_expr) for item in later_items)
+        # Entering a later item calls its __enter__, even for a manager built before the `with`.
+        calls = sum(1 + _executed_calls(item.context_expr) for item in later_items)
         calls += sum(_executed_calls(stmt) for stmt in node.body)
         blocks.append((node.lineno, calls, ast.unparse(node.body[0])))
     return blocks
@@ -105,6 +107,7 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     aliased = "from pytest import raises as expect\nwith expect(ValueError):\n    check(build(1))\n"
     conditional = "with pytest.raises(ValueError) if fails else nullcontext():\n    check(build(1))\n"
     later_item = "with pytest.raises(ValueError), pause():\n    check(x)\n"
+    later_prebuilt = "with pytest.raises(ValueError), pause:\n    check(x)\n"
     in_async = "async def t():\n    async with pytest.raises(ValueError):\n        await check(build(1))\n"
     single = "x = build(1)\nwith pytest.raises(ValueError):\n    check(x)\n"
     earlier_item = "with pause(), pytest.raises(ValueError):\n    check(x)\n"
@@ -121,6 +124,7 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert _extra_call_blocks(aliased) == [(2, "check(build(1))")]
     assert _extra_call_blocks(conditional) == [(1, "check(build(1))")]
     assert _extra_call_blocks(later_item) == [(1, "check(x)")]
+    assert _extra_call_blocks(later_prebuilt) == [(1, "check(x)")]
     assert _extra_call_blocks(in_async) == [(2, "await check(build(1))")]
     assert _extra_call_blocks(called_lambda) == [(1, "(lambda: build(1))()")]
     assert [line for line, _ in _extra_call_blocks(default_arg)] == [1]

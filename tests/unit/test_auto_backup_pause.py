@@ -138,9 +138,17 @@ def test_a_restore_during_the_bulk_load_skips_this_cycles_auto_backup() -> None:
 
 def test_a_failed_restore_resumes_the_auto_backup() -> None:
     coordinator = _coordinator()
-    pause = coordinator.pause_auto_backup()
-    with pytest.raises(RuntimeError), pause:
-        raise RuntimeError("restore failed")
+    pauses_during_restore: list[int] = []
+
+    def failing_restore() -> None:
+        with coordinator.pause_auto_backup():
+            pauses_during_restore.append(coordinator._auto_backup_pauses)
+            raise RuntimeError("restore failed")
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        failing_restore()
+    # The RuntimeError came from inside the paused restore, not from entering the pause.
+    assert pauses_during_restore == [1]
     _cycle(coordinator)
     coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
 
