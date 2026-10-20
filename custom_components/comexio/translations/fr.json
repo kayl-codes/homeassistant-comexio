@@ -28,6 +28,7 @@
       },
       "reconfigure": {
         "title": "Reconfigurer la connexion Comexio",
+        "description": "Connexion : **{protocol}**\nCertificat épinglé (SHA-256) : `{fingerprint}`\n\nDès que Comexio propose HTTPS, l’intégration se connecte de manière chiffrée et épingle le certificat automatiquement. HTTP signifie que Comexio ne propose pas HTTPS : la connexion n’est pas chiffrée.",
         "data": {
           "host": "Hôte / Adresse IP",
           "username": "Nom d'utilisateur (Admin)",

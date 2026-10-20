@@ -15,6 +15,7 @@ from .certificate import (
     async_read_fingerprint,
     async_replaced_fingerprint,
     async_report_certificate_changed,
+    connection_placeholders,
     notify_https_disabled,
     notify_https_enabled,
 )
@@ -256,6 +257,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders=connection_placeholders(conf),
         )
 
     @staticmethod

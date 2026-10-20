@@ -113,6 +113,17 @@ def certificate_placeholders(entry: ConfigEntry, actual: str) -> dict[str, str]:
     }
 
 
+def connection_placeholders(data: Any) -> dict[str, str]:
+    """Placeholders of the reconfigure form's connection lines: protocol and the pinned fingerprint.
+
+    The fingerprint is the hash of Comexio's public certificate, shown to anyone who connects — no secret.
+    """
+    pinned = data.get(CONF_CERTIFICATE_FINGERPRINT)
+    if pinned is None:
+        return {"protocol": "HTTP", "fingerprint": "—"}
+    return {"protocol": "HTTPS", "fingerprint": format_fingerprint(pinned)}
+
+
 def _new_api(hass: HomeAssistant, data: Any, fingerprint: str | None) -> ComexioAPI:
     return ComexioAPI(
         hass,

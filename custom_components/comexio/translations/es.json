@@ -28,6 +28,7 @@
       },
       "reconfigure": {
         "title": "Reconfigurar conexión Comexio",
+        "description": "Conexión: **{protocol}**\nCertificado fijado (SHA-256): `{fingerprint}`\n\nEn cuanto Comexio ofrece HTTPS, la integración se conecta cifrada y fija el certificado automáticamente. HTTP significa que Comexio no ofrece HTTPS: la conexión no está cifrada.",
         "data": {
           "host": "Host / Dirección IP",
           "username": "Usuario (Administrador)",

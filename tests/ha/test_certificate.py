@@ -169,6 +169,27 @@ async def _reconfigure(hass: HomeAssistant, entry: MockConfigEntry, host: str) -
     )
 
 
+@pytest.mark.parametrize(
+    ("pin", "placeholders"),
+    [
+        ({CONF_CERTIFICATE_FINGERPRINT: PINNED}, {"protocol": "HTTPS", "fingerprint": ":".join(["AA"] * 32)}),
+        ({}, {"protocol": "HTTP", "fingerprint": "—"}),
+    ],
+    ids=["pinned entry", "entry on plain HTTP"],
+)
+async def test_the_reconfigure_form_shows_the_connection(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, pin: dict, placeholders: dict
+) -> None:
+    # Whether the connection is encrypted, and with which certificate — nothing to set, just shown.
+    mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(mock_config_entry, data={**mock_config_entry.data, **pin})
+
+    result = await mock_config_entry.start_reconfigure_flow(hass)
+
+    assert result["step_id"] == "reconfigure"
+    assert result["description_placeholders"] == placeholders
+
+
 @pytest.mark.usefixtures("mock_setup_entry")
 @pytest.mark.parametrize(
     ("served", "expected_pin", "title"),

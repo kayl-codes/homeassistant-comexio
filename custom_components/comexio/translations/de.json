@@ -28,6 +28,7 @@
       },
       "reconfigure": {
         "title": "Comexio-Verbindung neu konfigurieren",
+        "description": "Verbindung: **{protocol}**\nGepinntes Zertifikat (SHA-256): `{fingerprint}`\n\nSobald Comexio HTTPS anbietet, verbindet sich die Integration verschlüsselt und pinnt das Zertifikat automatisch. HTTP bedeutet: Comexio bietet kein HTTPS an, die Verbindung ist unverschlüsselt.",
         "data": {
           "host": "Host / IP-Adresse",
           "username": "Benutzername (Admin-Oberfläche)",

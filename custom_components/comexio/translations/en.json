@@ -28,6 +28,7 @@
       },
       "reconfigure": {
         "title": "Reconfigure Comexio Connection",
+        "description": "Connection: **{protocol}**\nPinned certificate (SHA-256): `{fingerprint}`\n\nWhenever Comexio serves HTTPS, the integration connects encrypted and pins the certificate automatically. HTTP means Comexio serves no HTTPS: the connection is not encrypted.",
         "data": {
           "host": "Host / IP Address",
           "username": "Username (Admin UI)",

@@ -1,7 +1,10 @@
 """HTTPS with a pinned certificate: ComexioAPI's fingerprint, mismatch reporting and the fresh-handshake check."""
 
 import asyncio
+import json
 import logging
+from pathlib import Path
+import string
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import (
@@ -292,3 +295,14 @@ def test_a_user_action_learns_that_the_certificate_changed(reason: str, certific
     # Not "try again later": nothing reaches Comexio until the repair is decided.
     assert (str(_sync_login_error(reason)) == CERTIFICATE_CHANGED_MSG) is certificate_named
     assert (login_failed_message(MagicMock(last_login_error=reason)) == CERTIFICATE_CHANGED_MSG) is certificate_named
+
+
+@pytest.mark.parametrize("language", ["strings", "en", "de", "fr", "es"])
+def test_every_language_shows_the_connection(language: str) -> None:
+    # HA reads translations with string.Formatter and logs an error for any it cannot parse (an ICU select
+    # with nested braces, say); the placeholders must be the ones connection_placeholders fills.
+    path = Path(certificate.__file__).parent / "translations" / f"{language}.json"
+    text = json.loads(path.read_text(encoding="utf-8"))["config"]["step"]["reconfigure"]["description"]
+    placeholders = {field for _, field, _, _ in string.Formatter().parse(text) if field is not None}
+    for data in ({}, {"certificate_fingerprint": PINNED}):
+        assert placeholders == set(certificate.connection_placeholders(data))
