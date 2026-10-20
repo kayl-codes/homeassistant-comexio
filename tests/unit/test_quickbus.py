@@ -1,5 +1,7 @@
 """Quickbus IOs (#86): own data key, own Web-IO class [QB], read-only entities, webhook by IO Id."""
 
+import json
+import re
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -85,11 +87,23 @@ def test_quickbus_ios_get_web_io_commands_of_their_own_class(
         "HA QB3 BM Diele TL1",
     ]
     quickbus_json = parsing_api.generate_webio_json("test", "HomeAssistant [QB]", quickbus_result, WebioClass.QUICKBUS)
-    assert "HA QB1 MT Flur G1" in quickbus_json
-    assert "HA IO BASE I1" not in quickbus_json
-    # The payload addresses the IO by its unique Id, not by ext + identifier.
-    assert 'id=\\"201\\"' in quickbus_json
-    assert 'type=\\"quickbus\\"' in quickbus_json
+    # Each command addresses its own IO by its unique Id, not by ext + identifier; no physical IO in the class.
+    payloads = {
+        cmd["Name"]: re.search(r"\{ (.*) \}", cmd["Data"]).group(1) for cmd in json.loads(quickbus_json)["commands"]
+    }
+    assert payloads == {
+        name: f'id="{io_id}", value=a, type="quickbus"'
+        for name, io_id in {
+            "HA QB1 MT Flur G1": 201,
+            "HA QB1 MT Flur G18": 202,
+            "HA QB1 MT Flur TL1": 203,
+            "HA QB1 MT Flur R": 204,
+            "HA QB2 MT Bad G1": 211,
+            "HA QB2 MT Bad TL1": 213,
+            "HA QB3 BM Diele PIR1": 301,
+            "HA QB3 BM Diele TL1": 302,
+        }.items()
+    }
 
 
 def test_quickbus_audit_map_names_match_the_web_io_commands(
