@@ -5714,7 +5714,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         stale_ids = await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else set()
         # Bridge markers come from the unfiltered scrape, so they are known (and pruned) even
         # while the category is opted out.
-        self._prune_ignored_ids(category, webio_class, conf_key, stale_ids)
+        self._prune_ignored_ids(category, webio_class, conf_key, stale_ids, conf.get(conf_key, ""))
 
     async def _audit_ignored_sources(
         self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass, conf_key: str
@@ -5781,22 +5781,29 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return stale_ids
 
     def _prune_ignored_ids(
-        self, category: SourceCategory, webio_class: WebioClass, conf_key: str, stale_ids: set[int]
+        self,
+        category: SourceCategory,
+        webio_class: WebioClass,
+        conf_key: str,
+        stale_ids: set[int],
+        audited_raw: str,
     ) -> None:
         """Drop stale and unignorable single IDs from the ignore-list option — one update, separate notifications.
 
         Re-reads the option instead of the poll's conf snapshot: an options-flow save that landed
         while the audit awaited the plan data would otherwise be overwritten, dropping IDs the
         user just added and reactivating their sources.
+        Such a save also defers the stale pruning to the next poll: stale_ids were judged against
+        the list the audit read (audited_raw), not the one the user just saved, which may re-add an
+        ID for a source created meanwhile.
 
         Ranges are kept as written: a range covering a bridge marker or a gap would otherwise be
         flattened into single IDs on every poll. The bridge markers in it stay unignored anyway
         (_ignored_ids_for leaves them out).
         """
-        single_ids, ranges = split_ignored_ids(
-            self.config_entry.options.get(conf_key, ""), _ignore_list_prefix_chars(category)
-        )
-        stale = single_ids & stale_ids
+        current_raw = self.config_entry.options.get(conf_key, "")
+        single_ids, ranges = split_ignored_ids(current_raw, _ignore_list_prefix_chars(category))
+        stale = single_ids & stale_ids if current_raw.strip() == audited_raw.strip() else set()
         protected = single_ids & self._unignorable_ids(webio_class)
         if not (stale or protected):
             return

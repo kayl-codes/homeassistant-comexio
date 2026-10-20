@@ -210,3 +210,12 @@ def test_ignored_ids_iterate_and_count_every_covered_id(ignored: IgnoredIds, exp
     assert len(ignored) == len(expected)
     assert bool(ignored) is bool(expected)
     assert ignored == expected
+
+
+def test_ignored_ids_beyond_sys_maxsize_are_truthy_without_len() -> None:
+    # aiocomexio tests the ignore set's truth; len() of such a range would raise OverflowError.
+    ignored = parse_ignored_ids("1-99999999999999999999")
+
+    assert ignored
+    assert 99999999999999999999 in ignored
+    assert not IgnoredIds({5}, {(1, 2)}) - {1, 2, 5}

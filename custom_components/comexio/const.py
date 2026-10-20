@@ -1263,7 +1263,20 @@ class IgnoredIds(AbstractSet[int]):
             yield from (i for i in range(start, end + 1) if i not in self._excluded)
         yield from (i for i in self._singles if i not in self._excluded)
 
+    def __bool__(self) -> bool:
+        # Not via __len__: a range wider than sys.maxsize IDs makes len() raise OverflowError.
+        return any(i not in self._excluded for i in self._singles) or any(
+            self._range_has_unexcluded_id(start, end) for start, end in self._ranges
+        )
+
+    def _range_has_unexcluded_id(self, start: int, end: int) -> bool:
+        # Wider than the excluded IDs, a range keeps one for sure; only a narrower one is walked.
+        if end - start + 1 > len(self._excluded):
+            return True
+        return any(i not in self._excluded for i in range(start, end + 1))
+
     def __len__(self) -> int:
+        """The number of covered IDs; like len(range(...)), len() raises OverflowError past sys.maxsize."""
         covered = len(self._singles) + sum(end - start + 1 for start, end in self._ranges)
         return covered - sum(1 for i in self._excluded if self._covers(i))
 

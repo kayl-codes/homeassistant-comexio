@@ -248,6 +248,12 @@ def test_ignore_entries_saved_during_the_audit_survive_the_pruning() -> None:
         coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile)
     )
 
+    # The save is not overwritten; 999 was judged against the old list, so its pruning waits.
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+
+    notify = _check_ignored(coordinator, {"markers": [*MARKERS, {"id": 44, "name": "Rollo"}]})
+
     coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33,44"})
     assert set(_notifications(notify)) == {STALE_ID}
 
@@ -357,16 +363,37 @@ def test_a_stale_single_turned_into_a_range_during_the_audit_is_kept() -> None:
     notify.assert_not_called()
 
 
-def test_a_range_saved_during_the_audit_survives_the_pruning_of_a_stale_single() -> None:
+def test_a_save_during_the_audit_defers_the_stale_pruning_to_the_next_poll() -> None:
+    # 999 was stale in the poll's snapshot, but the user saved the list meanwhile (e.g. after
+    # creating marker 999 in Comexio): the audit judged the old list, so it must not prune the new.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
 
     async def _options_saved_meanwhile() -> dict[int, Any]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,400-410,999"}  # type: ignore[misc]
         return {}
 
-    _check_ignored(coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile))
+    notify = _check_ignored(
+        coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile)
+    )
 
-    coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33,400-410"})
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+
+
+def test_a_save_during_the_audit_still_drops_a_bridge_marker() -> None:
+    # Bridge markers are known from the scrape, not from the audited list: they go regardless.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"}, {BRIDGE_MARKER_ID})
+
+    async def _options_saved_meanwhile() -> dict[int, Any]:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: f"33,400-410,999,{BRIDGE_MARKER_ID}"}  # type: ignore[misc]
+        return {}
+
+    notify = _check_ignored(
+        coordinator, {"markers": MARKERS}, load_plans=AsyncMock(side_effect=_options_saved_meanwhile)
+    )
+
+    coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33,400-410,999"})
+    assert set(_notifications(notify)) == {PROTECTED_ID}
 
 
 def test_the_audit_walks_only_the_sources_a_range_covers_not_every_id_in_it() -> None:
