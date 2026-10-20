@@ -5767,13 +5767,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         for source_id in sorted(audited_ids - self._unignorable_ids(webio_class)):
             source = sources_by_id.get(source_id)
-            if source_id in single_ids and not (source and source.get("name", "").strip()):
-                # A single ID whose source no longer exists in Comexio → stale, auto-remove. A range
-                # only yields the sources Comexio has; an unnamed one there stays ignored, so its
-                # leftover entities and links are checked below like any other.
-                stale_ids.add(source_id)
-                continue
             if not source:
+                # A single ID whose source no longer exists in Comexio → stale, auto-remove (a range
+                # only yields the sources Comexio has). An existing source stays ignored even when it
+                # is unnamed ("#nn"), so its leftover entities and links are checked below.
+                if source_id in single_ids:
+                    stale_ids.add(source_id)
                 continue
 
             # Source exists and is intentionally ignored — only flag if legacy entities/links remain

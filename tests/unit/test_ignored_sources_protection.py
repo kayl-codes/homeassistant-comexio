@@ -506,3 +506,16 @@ def test_a_rewrite_that_drops_an_invalid_hand_edited_entry_logs_it(caplog: pytes
 
     coordinator.request_options_update_without_reload.assert_called_once_with({CONF_IGNORED_MARKERS: "33"})
     assert "'abc'" in caplog.text
+
+
+def test_an_unnamed_single_source_stays_ignored_and_is_not_pruned() -> None:
+    # Only a missing source makes a single ID stale: an existing unnamed one ("#nn") must stay
+    # ignored, or its entity would come back after the prune.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,336"})
+    markers = [*MARKERS, {"id": 336, "name": " "}]
+
+    notify = _check_ignored(coordinator, {"markers": markers}, entities_by_id={336: ["switch.iosrv1_m336"]})
+
+    coordinator.request_options_update_without_reload.assert_not_called()
+    notify.assert_not_called()
+    assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 336)]
