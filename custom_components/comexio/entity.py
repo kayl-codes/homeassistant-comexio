@@ -1,5 +1,6 @@
 # Version: 0.7.8
 import asyncio
+from collections.abc import Callable
 import logging
 from typing import Any
 
@@ -63,7 +64,7 @@ def build_device_info(
 
     The parent is the device of via_identifier (a Quickbus device's host extension) once that is
     registered, else the hub — the platforms set up in parallel, so on the very first setup the
-    host may not exist yet; relink_quickbus_devices moves it once all platforms are set up. A host
+    host may not exist yet; update_quickbus_devices moves it once all platforms are set up. A host
     with no entities of its own (only Quickbus IOs) never gets a device, so its Quickbus devices
     stay on the hub.
     """
@@ -214,31 +215,55 @@ def extension_device_identifier(server_id: str, ext_name: str) -> str:
     return f"{server_id}_{ext_name}".lower()
 
 
-def relink_quickbus_devices(coordinator: ComexioCoordinator) -> None:
-    """Move Quickbus devices that build_device_info linked to the hub under their host extension.
+def update_quickbus_devices(coordinator: ComexioCoordinator) -> None:
+    """Bring the registered Quickbus devices in line with the polled data: host extension and name.
 
     The platforms set up in parallel, so on the very first setup a Quickbus device can be
-    registered before its host extension's device and falls back to the hub. Run once all
-    platforms are set up: every host that has a device by then gets its Quickbus devices.
+    registered before its host extension's device and falls back to the hub; every host that has
+    a device by now gets its Quickbus devices. HA applies device_info only when an entity is added,
+    so a device renamed in Comexio is renamed here (a name set in HA wins over it anyway).
     """
     dev_reg = dr.async_get(coordinator.hass)
     entry_id = coordinator.config_entry.entry_id
     server_id = coordinator.server_id
     # One host per Quickbus device: its IOs all hang on the same extension.
-    hosts = {str(io["quickbus"]["device_id"]): io["ext_name"] for io in coordinator.data.get(QUICKBUS_IO_DATA_KEY, [])}
-    for device_id, ext_name in hosts.items():
+    devices = {
+        str(io["quickbus"]["device_id"]): (io["ext_name"], io["quickbus"]["name"])
+        for io in coordinator.data.get(QUICKBUS_IO_DATA_KEY, [])
+    }
+    for device_id, (ext_name, name) in devices.items():
         device = dev_reg.async_get_device_by_identifier(
             (DOMAIN, quickbus_device_identifier(server_id, device_id)), entry_id
         )
         if device is None:
             continue  # no entity of it was added (offline host)
+        changes: dict[str, Any] = {}
+        if device.name != (current_name := quickbus_device_name(server_id, name)):
+            changes["name"] = current_name
         host = dev_reg.async_get_device_by_identifier(
             (DOMAIN, extension_device_identifier(server_id, ext_name)), entry_id
         )
         if host is None:
             _LOGGER.debug("Host %s of %s has no device, it stays on the hub", one_line(ext_name), one_line(device.name))
         elif device.via_device_id != host.id:
-            dev_reg.async_update_device(device.id, via_device_id=host.id)
+            changes["via_device_id"] = host.id
+        if changes:
+            dev_reg.async_update_device(device.id, **changes)
+
+
+def track_quickbus_devices(coordinator: ComexioCoordinator) -> Callable[[], None]:
+    """Run update_quickbus_devices now (all platforms set up) and after every poll; returns the unsubscribe."""
+    update_quickbus_devices(coordinator)
+    last_data = coordinator.data
+
+    def _on_update() -> None:
+        nonlocal last_data
+        # Webhook pushes and the other in-place refreshes keep the data object: no new poll, nothing to update.
+        if coordinator.data is not last_data:
+            last_data = coordinator.data
+            update_quickbus_devices(coordinator)
+
+    return coordinator.async_add_listener(_on_update)
 
 
 def quickbus_ios_for_platform(

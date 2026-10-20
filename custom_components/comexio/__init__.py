@@ -44,7 +44,7 @@ from .const import (
     webio_range_check_entity_id,
 )
 from .coordinator import ComexioCoordinator
-from .entity import relink_quickbus_devices
+from .entity import track_quickbus_devices
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .services import async_setup_services
 
@@ -170,7 +170,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    relink_quickbus_devices(coordinator)
+    entry.async_on_unload(track_quickbus_devices(coordinator))
 
     # Extension firmware check: nightly window, version-gated (see
     # coordinator.async_start_firmware_update_check). Cancelled automatically on unload/reload.

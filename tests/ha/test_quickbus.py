@@ -9,9 +9,10 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
+from custom_components.comexio import entity
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import DOMAIN
-from custom_components.comexio.entity import relink_quickbus_devices
+from custom_components.comexio.entity import update_quickbus_devices
 from tests.common import load_json_fixture
 
 from .conftest import SERVER_ID
@@ -184,7 +185,7 @@ async def test_quickbus_devices_are_connected_via_their_host_extension(
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
-async def test_relink_moves_a_quickbus_device_from_the_hub_to_its_host(
+async def test_update_moves_a_quickbus_device_from_the_hub_to_its_host(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     """A Quickbus device registered before its host (parallel platform setup) is moved under the host."""
@@ -196,7 +197,7 @@ async def test_relink_moves_a_quickbus_device_from_the_hub_to_its_host(
     assert diele.via_device_id == hub.id
     dev_reg.async_update_device(flur.id, via_device_id=hub.id)
 
-    relink_quickbus_devices(hass.data[DOMAIN][mock_config_entry.entry_id])
+    update_quickbus_devices(hass.data[DOMAIN][mock_config_entry.entry_id])
 
     base = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")})
     assert dev_reg.async_get(flur.id).via_device_id == base.id
@@ -204,13 +205,53 @@ async def test_relink_moves_a_quickbus_device_from_the_hub_to_its_host(
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
-async def test_setup_relinks_the_quickbus_devices_once_all_platforms_are_set_up(
+async def test_setup_updates_the_quickbus_devices_once_their_hosts_are_registered(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    def quickbus_device_registered(_coordinator: Any) -> None:
-        assert dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")}) is not None
+    dev_reg = dr.async_get(hass)
+    real_update = entity.update_quickbus_devices
 
-    with patch("custom_components.comexio.relink_quickbus_devices", side_effect=quickbus_device_registered) as relink:
+    def update_after_all_platforms(coordinator: Any) -> None:
+        assert dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")}) is not None
+        assert dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}) is not None
+        real_update(coordinator)
+
+    with patch.object(entity, "update_quickbus_devices", side_effect=update_after_all_platforms) as update:
         await _setup(hass, mock_config_entry)
+        update.assert_called_once_with(hass.data[DOMAIN][mock_config_entry.entry_id])
+        flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
+        assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
 
-    relink.assert_called_once_with(hass.data[DOMAIN][mock_config_entry.entry_id])
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+        coordinator.async_update_listeners()  # a webhook push: same data, no new poll
+        update.assert_called_once()
+        coordinator.async_set_updated_data({**coordinator.data})  # a poll: new data
+        assert update.call_count == 2
+
+        assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        coordinator.async_set_updated_data({**coordinator.data})
+        assert update.call_count == 2  # unsubscribed on unload
+
+
+async def test_a_quickbus_device_renamed_in_comexio_is_renamed_on_the_next_poll(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """HA applies device_info only when an entity is added: the poll renames the registered device."""
+    await _setup(hass, mock_config_entry)
+    dev_reg = dr.async_get(hass)
+    flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
+    assert flur.name == f"{SERVER_ID} QB - MT Flur"
+    dev_reg.async_update_device(flur.id, name_by_user="Mein Flur")
+
+    renamed_config = load_json_fixture("config_quickbus.json")
+    for module in renamed_config["FubModules"]["1"].values():
+        if "1" in module.get("lowcan", {}):
+            module["lowcan"]["1"]["Name"] = "MT Eingang"
+    mock_comexio_api[0].get_raw_config.return_value = renamed_config
+    await hass.data[DOMAIN][mock_config_entry.entry_id].async_refresh()
+    await hass.async_block_till_done()
+
+    flur = dev_reg.async_get(flur.id)
+    assert flur.name == f"{SERVER_ID} QB - MT Eingang"
+    assert flur.name_by_user == "Mein Flur"  # the name set in HA stays
+    assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
