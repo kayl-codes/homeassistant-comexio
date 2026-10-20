@@ -20,6 +20,8 @@ TESTS = Path(__file__).parents[1]
 # pytest's default python_files patterns.
 TEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
 _DEFERRED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+# Entering a context manager calls its __enter__ and leaving it its __exit__.
+_ENTER_EXIT = 2
 
 
 def _raises_names(tree: ast.Module) -> set[str]:
@@ -58,6 +60,8 @@ def _executed_calls(node: ast.AST) -> int:
             applied = len(node.decorator_list)  # applying a decorator is a call too
         return applied + sum(_executed_calls(expr) for expr in run_now)
     calls = sum(_executed_calls(child) for child in ast.iter_child_nodes(node))
+    if isinstance(node, ast.With | ast.AsyncWith):
+        calls += _ENTER_EXIT * len(node.items)
     if isinstance(node, ast.Call):
         calls += 1
         if isinstance(node.func, ast.Lambda):
@@ -89,8 +93,8 @@ def _raises_blocks(source: str) -> list[tuple[int, int, str]]:
         if raises_at is None:
             continue
         later_items = node.items[raises_at + 1 :]
-        # Entering a later item calls its __enter__, even for a manager built before the `with`.
-        calls = sum(1 + _executed_calls(item.context_expr) for item in later_items)
+        # A later item runs its __enter__ and __exit__ inside pytest.raises, even for a manager built before the `with`.
+        calls = sum(_ENTER_EXIT + _executed_calls(item.context_expr) for item in later_items)
         calls += sum(_executed_calls(stmt) for stmt in node.body)
         blocks.append((node.lineno, calls, ast.unparse(node.body[0])))
     return blocks
@@ -108,6 +112,7 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     conditional = "with pytest.raises(ValueError) if fails else nullcontext():\n    check(build(1))\n"
     later_item = "with pytest.raises(ValueError), pause():\n    check(x)\n"
     later_prebuilt = "with pytest.raises(ValueError), pause:\n    check(x)\n"
+    nested_manager = "with pytest.raises(ValueError):\n    with pause:\n        check(x)\n"
     in_async = "async def t():\n    async with pytest.raises(ValueError):\n        await check(build(1))\n"
     single = "x = build(1)\nwith pytest.raises(ValueError):\n    check(x)\n"
     earlier_item = "with pause(), pytest.raises(ValueError):\n    check(x)\n"
@@ -125,6 +130,7 @@ def test_detector_flags_nested_and_sequential_calls() -> None:
     assert _extra_call_blocks(conditional) == [(1, "check(build(1))")]
     assert _extra_call_blocks(later_item) == [(1, "check(x)")]
     assert _extra_call_blocks(later_prebuilt) == [(1, "check(x)")]
+    assert [line for line, _ in _extra_call_blocks(nested_manager)] == [1]
     assert _extra_call_blocks(in_async) == [(2, "await check(build(1))")]
     assert _extra_call_blocks(called_lambda) == [(1, "(lambda: build(1))()")]
     assert [line for line, _ in _extra_call_blocks(default_arg)] == [1]
