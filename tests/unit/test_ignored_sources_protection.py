@@ -539,3 +539,42 @@ def test_a_source_unignored_during_the_audit_is_not_flagged_for_cleanup() -> Non
 
     assert coordinator._cleanup_entity_ids == []
     assert coordinator._cleanup_function_plan_count == 0
+
+
+class _AuditReached(Exception):
+    """Stops the poll once both ignore audits have received their arguments."""
+
+
+def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
+    # A save during the config fetch replaces config_entry.options; the audits must still get the
+    # mapping conf came from, or _ignore_list_saved_since would compare against the post-save one.
+    polled = {CONF_IGNORED_MARKERS: "33,999"}
+    coordinator = _coordinator(polled)
+    coordinator.function_plan_catalog = MagicMock(async_update_from_raw_config=AsyncMock())
+    coordinator.reference_monitor = MagicMock(async_check=AsyncMock())
+    coordinator.api = MagicMock(comexio_version="2.0")
+    coordinator.async_check_orphaned_statistics = AsyncMock()
+    for name in (
+        "_prune_deleted_plans_from_snapshot",
+        "_merge_polled_states",
+        "_merge_polled_knx_states",
+        "_track_offline_extensions",
+        "_update_entity_id_mismatch_issue",
+    ):
+        setattr(coordinator, name, MagicMock())
+
+    async def _fetch_while_the_user_saves(_conf: dict[str, Any]) -> tuple[dict, dict, dict]:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
+        return {}, {"markers": [], "io": [], "knx": []}, {}
+
+    coordinator._async_fetch_parsed_config = _fetch_while_the_user_saves  # type: ignore[method-assign]
+    coordinator.async_check_ignored_markers = AsyncMock()  # type: ignore[method-assign]
+    coordinator.async_check_ignored_knx = AsyncMock(side_effect=_AuditReached)  # type: ignore[method-assign]
+
+    with pytest.raises(_AuditReached):
+        asyncio.run(coordinator._async_poll_and_audit())
+
+    for audit in (coordinator.async_check_ignored_markers, coordinator.async_check_ignored_knx):
+        conf, _final_data, options_at_poll = audit.await_args.args
+        assert options_at_poll is polled
+        assert conf[CONF_IGNORED_MARKERS] == "33,999"
