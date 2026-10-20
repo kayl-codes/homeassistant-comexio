@@ -343,9 +343,7 @@ def test_a_damaged_stored_entry_is_compared_not_raised(configs: dict[str, Any]) 
 
 
 @pytest.mark.parametrize(("part", "value"), [("settings", "x"), ("settings", ["x"])])
-def test_damaged_stored_settings_or_rules_are_compared_not_raised(
-    configs: dict[str, Any], part: str, value: Any
-) -> None:
+def test_damaged_stored_settings_are_compared_not_raised(configs: dict[str, Any], part: str, value: Any) -> None:
     damaged = _snapshot(configs)
     damaged[SNAPSHOT_MODULE_CONFIGS]["32"]["config"][part] = value
     assert module_configs_changed(damaged, configs)
