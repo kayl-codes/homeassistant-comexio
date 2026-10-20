@@ -519,3 +519,23 @@ def test_an_unnamed_single_source_stays_ignored_and_is_not_pruned() -> None:
     coordinator.request_options_update_without_reload.assert_not_called()
     notify.assert_not_called()
     assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 336)]
+
+
+def test_a_source_unignored_during_the_audit_is_not_flagged_for_cleanup() -> None:
+    # The audit read "33,335"; the user removed 335 meanwhile: its leftover entity is wanted now,
+    # so the cleanup must not offer to delete it — the next poll re-judges the saved list.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,335"})
+
+    async def _unignored_meanwhile() -> dict[int, Any]:
+        coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
+        return {}
+
+    _check_ignored(
+        coordinator,
+        {"markers": [*MARKERS, {"id": 335, "name": "Rollo"}]},
+        load_plans=AsyncMock(side_effect=_unignored_meanwhile),
+        entities_by_id={335: ["switch.iosrv1_m335"]},
+    )
+
+    assert coordinator._cleanup_entity_ids == []
+    assert coordinator._cleanup_function_plan_count == 0

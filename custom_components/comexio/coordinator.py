@@ -5724,24 +5724,30 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not self._last_poll_scraped:
             return
 
-        stale_ids = await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else set()
+        stale_ids, cleanup_ids, affected_fub_ids = (
+            await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else (set(), [], set())
+        )
         if self._ignore_list_saved_since(options_at_poll, conf, conf_key):
-            # stale_ids judge the list the audit read, not the one the user saved meanwhile (which
-            # may re-add an ID for a source created since): the next poll re-judges it.
-            stale_ids = set()
+            # The verdicts judge the list the audit read, not the one the user saved meanwhile
+            # (which may re-add an ID for a source created since, or unignore a source with
+            # leftovers): the next poll re-judges both.
+            stale_ids, cleanup_ids, affected_fub_ids = set(), [], set()
+        # Extend the shared cleanup accumulator for the combined sync_mismatch repair
+        self._cleanup_entity_ids.extend((webio_class.value, sid) for sid in cleanup_ids)
+        self._cleanup_function_plan_count += len(affected_fub_ids)
         # Bridge markers come from the unfiltered scrape, so they are known (and pruned) even
         # while the category is opted out.
         self._prune_ignored_ids(category, webio_class, conf_key, stale_ids)
 
     async def _audit_ignored_sources(
         self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass, conf_key: str
-    ) -> set[int]:
-        """Audit an active category's ignore-list; return its stale IDs and extend the cleanup accumulator."""
+    ) -> tuple[set[int], list[int], set[int]]:
+        """Audit an active category's ignore-list -> (stale IDs, IDs to clean up, affected plan IDs)."""
         category = source_category(webio_class)
         ignored_raw = conf.get(conf_key, "").strip()
         if not ignored_raw:
             ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
-            return set()
+            return set(), [], set()
 
         sources_by_id = {int(item["id"]): item for item in final_data.get(category.data_key, [])}
         stale_ids: set[int] = set()
@@ -5791,12 +5797,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if has_entities or function_plan_fub_id is not None:
                 cleanup_ids.append(source_id)
 
-        # Extend the shared cleanup accumulator for the combined sync_mismatch repair
-        self._cleanup_entity_ids.extend((webio_class.value, sid) for sid in cleanup_ids)
-        self._cleanup_function_plan_count += len(affected_fub_ids)
         # Remove legacy ignored_<category>_cleanup issue if it still exists from an older version
         ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
-        return stale_ids
+        return stale_ids, cleanup_ids, affected_fub_ids
 
     def _ignore_list_saved_since(self, options_at_poll: Mapping[str, Any], conf: dict[str, Any], conf_key: str) -> bool:
         """True if the options were saved since conf was read, or the ignore-list differs from conf.
