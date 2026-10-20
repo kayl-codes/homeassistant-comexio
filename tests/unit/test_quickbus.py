@@ -309,6 +309,40 @@ def test_a_quickbus_command_of_a_renamed_device_is_an_orphan(
     assert not found["missing"]
 
 
+def test_a_quickbus_command_of_a_renamed_device_is_renamed_in_place(
+    parsing_api: ComexioAPI, quickbus_result: dict[str, Any]
+) -> None:
+    """Device id + identifier still pin the IO: rename the command, never delete and recreate it."""
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.ignored_ids_for = lambda _cls: set()
+    ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
+    commands = _comexio_commands(parsing_api, quickbus_result)
+    commands["HA QB1 Old Name G1"] = commands.pop("HA QB1 MT Flur G1")
+
+    found = _audit(ha_map, commands)
+
+    assert [(r["id"], r["name"], r["webio_class"]) for r in found["rename"]] == [
+        (commands["HA QB1 Old Name G1"]["cmdId"], "HA QB1 MT Flur G1", WebioClass.QUICKBUS)
+    ]
+    assert not found["orphan"]
+    assert not found["missing"]
+
+
+def test_a_missing_quickbus_command_is_created_in_the_quickbus_class(
+    parsing_api: ComexioAPI, quickbus_result: dict[str, Any]
+) -> None:
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.ignored_ids_for = lambda _cls: set()
+    ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
+    commands = _comexio_commands(parsing_api, quickbus_result)
+    del commands["HA QB1 MT Flur G1"]
+
+    found = _audit(ha_map, commands)
+
+    assert [(m["name"], m["webio_class"]) for m in found["missing"]] == [("HA QB1 MT Flur G1", WebioClass.QUICKBUS)]
+    assert not found["orphan"]
+
+
 def test_quickbus_commands_of_a_disabled_import_are_no_orphans(
     parsing_api: ComexioAPI, quickbus_result: dict[str, Any]
 ) -> None:

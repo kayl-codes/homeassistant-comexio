@@ -410,6 +410,22 @@ def _fallback_audit_key(full_name: str) -> str:
     return full_name
 
 
+def _quickbus_command_ref(full_name: str) -> tuple[str, str] | None:
+    """("QB<device id>", identifier) of a Quickbus command name "HA QB<device id> <device name> <identifier>".
+
+    The device name in the middle may contain spaces and may have been renamed in Comexio; the
+    device id and the identifier (G1, TL1, ...) at both ends still pin the IO.
+    """
+    parts = full_name.split(" ")
+    if (
+        len(parts) < 4
+        or parts[0] != "HA"
+        or not parts[1].startswith(SOURCE_CATEGORIES[WebioClass.QUICKBUS].audit_key_prefix)
+    ):
+        return None
+    return parts[1], parts[-1]
+
+
 def _build_com_audit_map(
     com_commands: dict[str, Any], ha_map: dict[str, dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -422,11 +438,17 @@ def _build_com_audit_map(
     to the positional heuristic, purely for grouping.
     """
     name_to_key = {info["name"]: key for key, info in ha_map.items()}
+    # A renamed Quickbus device changes its command names but not the device id + identifier:
+    # grouped under the IO's key, the audit reports a rename that keeps the command (and the
+    # user's wiring of its webIoId) instead of an orphan to delete plus a new command.
+    quickbus_ref_to_key = {ref: key for key, info in ha_map.items() if (ref := _quickbus_command_ref(info["name"]))}
     com_map: dict[str, list[dict[str, Any]]] = {}
     for full_name, info in com_commands.items():
         key = name_to_key.get(full_name, full_name)
         if key == full_name:
-            key = _fallback_audit_key(full_name)
+            ref = _quickbus_command_ref(full_name)
+            key = quickbus_ref_to_key.get(ref) if ref else None
+            key = key or _fallback_audit_key(full_name)
         com_map.setdefault(key, []).append(
             {
                 "name": full_name,
