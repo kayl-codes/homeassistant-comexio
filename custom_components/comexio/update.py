@@ -21,7 +21,7 @@ from .const import (
     is_base_extension,
 )
 from .coordinator import ComexioCoordinator
-from .entity import build_device_info
+from .entity import build_device_info, extension_device_identifier
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -141,7 +141,7 @@ class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
     def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            identifiers={(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
+            identifiers={(DOMAIN, extension_device_identifier(self.coordinator.server_id, self._ext_name))},
             name=extension_device_name(self.coordinator.server_id, self._ext_name),
             model="Extension Module",
         )

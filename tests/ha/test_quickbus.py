@@ -1,6 +1,7 @@
 """Quickbus devices (#86): read-only entities on their own device, live values via the webhook by IO Id."""
 
 from typing import Any
+from unittest.mock import patch
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -10,6 +11,7 @@ from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.entity import relink_quickbus_devices
 from tests.common import load_json_fixture
 
 from .conftest import SERVER_ID
@@ -170,10 +172,8 @@ async def test_quickbus_entities_follow_their_host_going_offline_without_plain_i
 async def test_quickbus_devices_are_connected_via_their_host_extension(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    """Once the host extension's device exists (from the second setup on), a Quickbus device links to it."""
+    """Already after the first setup a Quickbus device links to its host extension's device."""
     await _setup(hass, mock_config_entry)
-    await hass.config_entries.async_reload(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
 
     dev_reg = dr.async_get(hass)
     flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
@@ -181,3 +181,36 @@ async def test_quickbus_devices_are_connected_via_their_host_extension(
     assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
     # Multibridge A6 carries only Quickbus IOs, so it has no HA device of its own: BM Diele hangs on the hub.
     assert diele.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, SERVER_ID)}).id
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_relink_moves_a_quickbus_device_from_the_hub_to_its_host(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """A Quickbus device registered before its host (parallel platform setup) is moved under the host."""
+    await _setup(hass, mock_config_entry)
+    dev_reg = dr.async_get(hass)
+    flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
+    hub = dev_reg.async_get_device(identifiers={(DOMAIN, SERVER_ID)})
+    diele = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb3")})
+    assert diele.via_device_id == hub.id
+    dev_reg.async_update_device(flur.id, via_device_id=hub.id)
+
+    relink_quickbus_devices(hass.data[DOMAIN][mock_config_entry.entry_id])
+
+    base = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")})
+    assert dev_reg.async_get(flur.id).via_device_id == base.id
+    assert dev_reg.async_get(diele.id).via_device_id == hub.id  # its host has no device: stays on the hub
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_setup_relinks_the_quickbus_devices_once_all_platforms_are_set_up(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    def quickbus_device_registered(_coordinator: Any) -> None:
+        assert dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")}) is not None
+
+    with patch("custom_components.comexio.relink_quickbus_devices", side_effect=quickbus_device_registered) as relink:
+        await _setup(hass, mock_config_entry)
+
+    relink.assert_called_once_with(hass.data[DOMAIN][mock_config_entry.entry_id])

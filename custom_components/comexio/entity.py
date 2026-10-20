@@ -63,8 +63,9 @@ def build_device_info(
 
     The parent is the device of via_identifier (a Quickbus device's host extension) once that is
     registered, else the hub — the platforms set up in parallel, so on the very first setup the
-    host may not exist yet; the next setup links it. A host with no entities of its own (only
-    Quickbus IOs) never gets a device, so its Quickbus devices stay on the hub.
+    host may not exist yet; relink_quickbus_devices moves it once all platforms are set up. A host
+    with no entities of its own (only Quickbus IOs) never gets a device, so its Quickbus devices
+    stay on the hub.
     """
     info: DeviceInfo = {
         "identifiers": identifiers,
@@ -168,7 +169,7 @@ class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
     def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            identifiers={(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
+            identifiers={(DOMAIN, extension_device_identifier(self.coordinator.server_id, self._ext_name))},
             name=extension_device_name(self.coordinator.server_id, self._ext_name),
             model="Extension Module",
         )
@@ -196,11 +197,48 @@ class ComexioQuickbusIOEntity(ComexioIOEntity):
     def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            identifiers={(DOMAIN, f"{self.coordinator.server_id}_qb{self._quickbus_device_id}".lower())},
+            identifiers={(DOMAIN, quickbus_device_identifier(self.coordinator.server_id, self._quickbus_device_id))},
             name=quickbus_device_name(self.coordinator.server_id, self._quickbus_device_name),
             model="Quickbus Device",
-            via_identifier=f"{self.coordinator.server_id}_{self._ext_name}".lower(),
+            via_identifier=extension_device_identifier(self.coordinator.server_id, self._ext_name),
         )
+
+
+def quickbus_device_identifier(server_id: str, device_id: str | int) -> str:
+    """Device registry identifier of a Quickbus device (its Comexio device id, not its name)."""
+    return f"{server_id}_qb{device_id}".lower()
+
+
+def extension_device_identifier(server_id: str, ext_name: str) -> str:
+    """Device registry identifier of an extension module."""
+    return f"{server_id}_{ext_name}".lower()
+
+
+def relink_quickbus_devices(coordinator: ComexioCoordinator) -> None:
+    """Move Quickbus devices that build_device_info linked to the hub under their host extension.
+
+    The platforms set up in parallel, so on the very first setup a Quickbus device can be
+    registered before its host extension's device and falls back to the hub. Run once all
+    platforms are set up: every host that has a device by then gets its Quickbus devices.
+    """
+    dev_reg = dr.async_get(coordinator.hass)
+    entry_id = coordinator.config_entry.entry_id
+    server_id = coordinator.server_id
+    # One host per Quickbus device: its IOs all hang on the same extension.
+    hosts = {str(io["quickbus"]["device_id"]): io["ext_name"] for io in coordinator.data.get(QUICKBUS_IO_DATA_KEY, [])}
+    for device_id, ext_name in hosts.items():
+        device = dev_reg.async_get_device_by_identifier(
+            (DOMAIN, quickbus_device_identifier(server_id, device_id)), entry_id
+        )
+        if device is None:
+            continue  # no entity of it was added (offline host)
+        host = dev_reg.async_get_device_by_identifier(
+            (DOMAIN, extension_device_identifier(server_id, ext_name)), entry_id
+        )
+        if host is None:
+            _LOGGER.debug("Host %s of %s has no device, it stays on the hub", one_line(ext_name), one_line(device.name))
+        elif device.via_device_id != host.id:
+            dev_reg.async_update_device(device.id, via_device_id=host.id)
 
 
 def quickbus_ios_for_platform(
