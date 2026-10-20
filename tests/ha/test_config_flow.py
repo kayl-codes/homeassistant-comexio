@@ -163,6 +163,7 @@ async def test_reauth_updates_the_credentials_and_reloads(
     reload.assert_called_once_with(mock_config_entry.entry_id)
     api = mock_comexio_api[0]
     assert (api.username, api.password) == ("admin2", "new-secret")
+    api.login.assert_awaited_once()  # the new credentials were tested before they were stored
     api.close.assert_called_once()
 
 
@@ -223,6 +224,7 @@ async def test_reconfigure_keeps_blank_passwords_and_cleans_options(
     assert mock_config_entry.title == f"Comexio {SERVER_ID} (192.168.1.20)"
     api = mock_comexio_api[0]
     assert (api.host, api.username, api.password) == ("192.168.1.20", "admin2", data_before[CONF_PASSWORD])
+    api.login.assert_awaited_once()  # the merged settings were tested before they were stored
 
 
 @pytest.mark.logged_exception  # _test_connection logs the failed login with its traceback
