@@ -37,6 +37,7 @@ from .const import (
     SCAN_INTERVAL_OPTIONS,
     SourceCategory,
     WebioClass,
+    format_ignored_ids,
     ignore_list_categories,
     is_valid_entity_name_schema,
     one_line,
@@ -80,19 +81,7 @@ def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", cate
             f"Zahlen (z.B. '3', '{example_prefix}12'), Bereiche (z.B. '8-12') oder Listen (z.B. '1, 3, 5') eingeben."
         )
 
-    ints -= {i for start, end in ranges for i in range(start, end + 1)}
-
-    items: list[int | tuple[int, int]] = [*ranges, *ints]
-    items.sort(key=_ignored_marker_sort_key)
-    return ",".join(_format_ignored_marker_item(item) for item in items)
-
-
-def _ignored_marker_sort_key(item: int | tuple[int, int]) -> int:
-    return item[0] if isinstance(item, tuple) else item
-
-
-def _format_ignored_marker_item(item: int | tuple[int, int]) -> str:
-    return f"{item[0]}-{item[1]}" if isinstance(item, tuple) else str(item)
+    return format_ignored_ids(ints, ranges)
 
 
 def _saved_user_plan_pick(value: Any, candidates: dict[int, str]) -> str:

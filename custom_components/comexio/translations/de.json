@@ -38,10 +38,19 @@
           "password": "Leer lassen, um das bestehende Passwort beizubehalten.",
           "api_password": "Leer lassen, um das bestehende Passwort beizubehalten."
         }
+      },
+      "reauth_confirm": {
+        "title": "Comexio erneut anmelden",
+        "description": "Comexio unter {host} hat die gespeicherten Admin-Zugangsdaten abgelehnt. Gib die aktuellen ein.",
+        "data": {
+          "username": "Benutzername (Admin-Oberfläche)",
+          "password": "Passwort (Admin-Oberfläche)"
+        }
       }
     },
     "abort": {
-      "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert."
+      "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert.",
+      "reauth_successful": "Erneute Anmeldung erfolgreich."
     }
   },
   "selector": {
@@ -154,8 +163,8 @@
           "logikplan_plan_prefix": "Präfix für automatisch angelegte Cluster-Pläne. Pläne heißen dann z. B.: HA - Marker [1-100].",
           "logikplan_max_pairs_per_plan": "Wie viele Web-IO- und Merker-Paare in einen verwalteten Plan passen, bevor ein neuer Cluster-Plan angelegt wird. Für IO-Cluster-Pläne entspricht das 1 (50), 2 (100) bzw. 3 (150) Erweiterungen pro Plan. KNX-Cluster-Pläne ignorieren diese Einstellung und nutzen immer eine feste Größe von 50.",
           "logikplan_io_extensions": "Für jede ausgewählte Erweiterung werden deren IOs in einen verwalteten IO-Cluster-Plan verdrahtet (z. B. HA - IO [Ext]), eine Spalte je Erweiterung. Zum Testen mit einer einzelnen Erweiterung beginnen und die übrigen danach ergänzen.",
-          "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden.",
-          "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden.",
+          "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs.",
+          "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs.",
           "function_plan_backup_retention_months": "Ist das neueste Backup eines direkt in Comexio gelöschten Plans älter als diese Frist, fragt eine Reparaturmeldung, ob seine Backups gelöscht oder behalten werden — ohne deine Bestätigung wird nichts gelöscht. Backups eines noch existierenden Plans sind davon nie betroffen. Die Action 'Function Plan Purge Orphaned Backups' löscht alle abgelaufenen auf einmal.",
           "bus_watchdog_enabled": "Bei anhaltendem Anstieg der Busauslastung werden die von HA verwalteten Cluster-Logikpläne automatisch (von hinten nach vorne) neu gestartet, um die Auslastung zu entlasten. Greift nicht destruktiv in die Comexio-Anlage selbst ein.",
           "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust.",

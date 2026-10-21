@@ -48,6 +48,7 @@ from .const import (
     ICON_UPLOAD,
     ICON_WARNING,
     ISSUE_UNINSTALL_CLEANUP,
+    LOGIN_ERROR_REJECTED,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -398,7 +399,7 @@ async def _ensure_sync_login(api: Any) -> None:
 
 def _sync_login_error(reason: str | None) -> _SyncLoginError:
     """Why a sync could not start, from ComexioAPI.last_login_error."""
-    if reason == "rejected":
+    if reason == LOGIN_ERROR_REJECTED:
         return _SyncLoginError(
             "Comexio rejected the admin login — please check the credentials (reconfigure the integration)."
         )

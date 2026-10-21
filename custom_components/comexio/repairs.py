@@ -60,11 +60,13 @@ from .const import (
     WEBIO_CLASS_KNX,
     WebioClass,
     active_webio_classes,
-    expand_ignored_marker_ids,
+    format_ignored_ids,
+    invalid_ignored_tokens,
     one_line,
     one_line_values,
     prune_import_disabled_ignored,
     source_category,
+    split_ignored_ids,
     uninstall_cleanup_notification_id,
     uninstall_cleanup_pending_notification_id,
 )
@@ -102,13 +104,15 @@ def _is_knx_cluster_plan(plan_name: str) -> bool:
 def _add_knx_dpt_suffix_ignored_ids(existing_raw: str, new_ids: set[int]) -> str:
     """Merge newly-ignored KNX ids into the CONF_KNX_DPT_SUFFIX_IGNORED option string.
 
-    Same comma/range-list format as CONF_IGNORED_MARKERS/CONF_IGNORED_KNX, reusing
-    expand_ignored_marker_ids for parsing so the two stay in sync if that format ever changes.
+    Same comma/range-list format as CONF_IGNORED_MARKERS/CONF_IGNORED_KNX, parsed and written
+    by the shared const helpers so the two stay in sync — ranges the user wrote stay ranges.
     """
     knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
-    ids = expand_ignored_marker_ids(existing_raw, knx_prefix + knx_prefix.lower())
-    ids.update(new_ids)
-    return ",".join(f"{knx_prefix}{i}" for i in sorted(ids))
+    prefix_chars = knx_prefix + knx_prefix.lower()
+    if invalid := invalid_ignored_tokens(existing_raw, prefix_chars):
+        _LOGGER.warning("Dropping invalid entries %s from the KNX DPT suffix ignore list", invalid)
+    singles, ranges = split_ignored_ids(existing_raw, prefix_chars)
+    return format_ignored_ids(singles | new_ids, ranges, knx_prefix)
 
 
 def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:

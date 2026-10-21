@@ -117,6 +117,16 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   read or parse failure into "entry missing" and acts on it (#158). A failed read is also no fresh reading: the
   steps that do not depend on it still run, and steps that judge by elapsed time do not use the last known values
   as if they were new. Flag an early return on a failed read that skips the independent steps (#181).
+- **User-entered sizes are never expanded unbounded:** a value the user types that stands for many items — an ID
+  range such as `100-1000000000` in an ignore-list, a count, a span — is checked by membership or arithmetic; it is
+  turned into one object per item (a set, a list, a loop over every ID) only behind a cap checked before the
+  expansion, so the work stays bounded. An over-cap value is rejected as a whole with a message naming it, never
+  cut off at the cap — a truncated range ignores or acts on only part of what the user asked for, silently. Such a
+  cap holds for every path that expands the value, applied the same way — the options flow, the coordinator, the
+  services and the audit; a cap only the form checks lets an older saved value or a service call through to an
+  expanding path. A reader that only checks membership or does arithmetic needs no cap. Flag code that expands a
+  user-entered range or count without a cap, a cap that truncates instead of rejecting, and a cap that only some
+  expanding paths apply (#198).
 - **Fail closed on every transport error:** `get_raw_config` raises a plain `ComexioConnectionError` when the
   failure has no aiohttp or timeout cause. A path that must refuse when Comexio cannot be read (a delete gate, a
   safety check) catches `ComexioConnectionError` next to `aiohttp.ClientError` and `TimeoutError`; otherwise the
@@ -222,6 +232,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   of a race or timeout switches the state during the await it targets (e.g. inside the mocked call) and proves the
   timeout fired; a quick check is to break the target path (raise the timeout, drop the guard) and see it fail
   (#168).
+- A test of a step that validates before it acts (a config, reauth or reconfigure step that tests the login, a
+  check before a write) asserts whether the validation ran, not only the result (entry created, data unchanged, error
+  shown): the success case and every failure the validation reports assert it ran — e.g.
+  `api.login.assert_awaited_once()`; a path that is meant to reject before validating (a taken server id, a wrong
+  device) asserts it did not — `api.login.assert_not_awaited()`, or that no API was built. A flow that ends in an
+  abort after the validation (`reauth_successful`, `reconfigure_successful`) is a success case. A success test
+  otherwise passes when the step stores unchecked input; a failure test passes when the step rejects before it ever
+  validated (#207).
 - A parametrized test of a dispatch names each case's expected handler(s) and asserts that those ran and the others
   did not (for an exclusive route: exactly one handler; for an intentional fan-out: every expected handler ran and every
   forbidden one did not); a sum of awaits over several handlers also passes when an action is routed to the wrong one. A test of a

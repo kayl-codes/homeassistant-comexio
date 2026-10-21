@@ -19,6 +19,7 @@ from .const import (
     extension_firmware_update_unique_id,
     fw_update_signal,
     is_base_extension,
+    known_extension_names,
 )
 from .coordinator import ComexioCoordinator
 from .entity import build_device_info, extension_device_identifier
@@ -34,11 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     # own built-in IOs, i.e. the same unit ComexioBaseFirmwareUpdate already represents. Creating
     # a second entity for it would collide on unique_id (both lower-case to "..._base_...").
     ext_names = sorted(
-        {
-            io["ext_name"]
-            for io in coordinator.data.get("io", [])
-            if (not io.get("offline") or include_offline) and not is_base_extension(io["ext_name"])
-        }
+        name for name in known_extension_names(coordinator.data, include_offline) if not is_base_extension(name)
     )
     entities: list[UpdateEntity] = [ComexioBaseFirmwareUpdate(coordinator, coordinator.server_id)]
     entities.extend(

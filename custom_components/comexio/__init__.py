@@ -37,6 +37,7 @@ from .const import (
     extension_firmware_update_unique_id,
     function_plan_ids,
     function_plan_run_state_unique_id,
+    known_extension_names,
     migrate_entry_options,
     quickbus_io_platform,
     quickbus_io_unique_id,
@@ -390,9 +391,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # same way as the IO entities above, since extension existence is independent of the
     # firmware check ever having run — entities just stay "unknown" until the first check.
     active_unique_ids.add(f"comexio_{server_id}_base_firmware_update")
-    for ext_name in {
-        io["ext_name"] for io in coordinator.data.get("io", []) if not io.get("offline") or include_offline
-    }:
+    for ext_name in known_extension_names(coordinator.data, include_offline):
         active_unique_ids.add(extension_firmware_update_unique_id(server_id, ext_name))
 
     # Build expected-platform map so that entities which migrated to a different

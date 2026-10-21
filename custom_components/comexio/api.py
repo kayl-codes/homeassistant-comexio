@@ -1,7 +1,7 @@
 # Version: 0.7.5
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
 from datetime import timedelta
 import logging
@@ -60,6 +60,7 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     LOGIN_ERROR_CONNECTION,
+    LOGIN_ERROR_REJECTED,
     MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
@@ -715,6 +716,9 @@ class ComexioAPI:
         # still rebooting). Written as each call ends, with no await before its caller resumes, so
         # the caller reads its own fetch's outcome even while another fetch overlaps.
         self.config_relogin_unreachable = False
+        # Set by get_raw_config, like config_relogin_unreachable, when Comexio refused that re-login's
+        # credentials: the poll then asks the user for new ones.
+        self.config_relogin_rejected = False
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -987,7 +991,7 @@ class ComexioAPI:
             await client.login()
         except ComexioAuthenticationError as err:
             _LOGGER.debug("Comexio login rejected: %s", err)
-            self.last_login_error = "rejected"
+            self.last_login_error = LOGIN_ERROR_REJECTED
             return False
         except ComexioError as err:
             _LOGGER.warning("Comexio login failed: %s", err)
@@ -1018,7 +1022,7 @@ class ComexioAPI:
         saves_before = self._block_settings_saves_confirmed
         self._config_fetches_started += 1
         generation = self._config_fetches_started
-        unreachable = False
+        unreachable = rejected = False
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -1027,6 +1031,7 @@ class ComexioAPI:
                 if not await self._full_login():
                     _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
                     unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
+                    rejected = self.last_login_error == LOGIN_ERROR_REJECTED
                     self._drop_block_settings(generation)
                     return {}
                 raw = await self.client.get_raw_config()
@@ -1039,6 +1044,7 @@ class ComexioAPI:
             return {}
         finally:
             self.config_relogin_unreachable = unreachable
+            self.config_relogin_rejected = rejected
         return self._finish_config_fetch(raw, generation, saves_before, run_state_mark)
 
     def _finish_config_fetch(
@@ -1595,8 +1601,8 @@ class ComexioAPI:
         server_id: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the list of Web-IO command dicts for the given parsed configuration.
 
@@ -1631,8 +1637,8 @@ class ComexioAPI:
         webio_name: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> str:
         """Generate the upload-ready JSON string for the Comexio Web-IO importer.
 
