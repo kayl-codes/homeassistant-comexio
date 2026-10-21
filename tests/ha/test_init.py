@@ -293,11 +293,6 @@ async def test_setup_auth_failed(
     mock_comexio_api[0].close.assert_called_once()
 
 
-@pytest.mark.xfail(
-    raises=AssertionError,
-    strict=True,
-    reason="ComexioConfigFlow has no async_step_reauth: HA aborts the reauth flow it starts",
-)
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "rejected"}])
 async def test_setup_auth_failed_offers_reauth(
     hass: HomeAssistant,
@@ -311,6 +306,33 @@ async def test_setup_auth_failed_offers_reauth(
 
     await _setup(hass, mock_config_entry)
 
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
+
+
+@pytest.mark.logged_exception  # HA's coordinator logs the auth failure's traceback at debug level
+async def test_a_poll_whose_re_login_is_refused_offers_reauth(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Credentials changed while HA runs: the poll fails and leaves a reauth flow instead of empty data."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    api = mock_comexio_api[0]
+    data_before = coordinator.data
+    api.get_live_states.reset_mock()
+
+    async def refused_re_login() -> dict:
+        api.config_relogin_rejected = True
+        return {}
+
+    api.get_raw_config.side_effect = refused_re_login
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is False
+    assert coordinator.data is data_before
+    api.get_live_states.assert_not_awaited()  # the poll stopped at the refusal, nothing parsed from {}
+    assert coordinator.comexio_unreachable is False  # Comexio answered
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
 

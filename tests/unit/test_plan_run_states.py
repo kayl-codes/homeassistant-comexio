@@ -2253,8 +2253,9 @@ def test_a_config_fetch_meeting_another_certificate_fails_the_poll(
     api.get_raw_config = AsyncMock(return_value={})
     api.certificate_mismatch = ComexioCertificateMismatchError("foreign", expected=PINNED_CERT, actual=OTHER_CERT)
     api.get_live_states = AsyncMock()
+    fetch = ComexioCoordinator._async_fetch_parsed_config(coordinator, {})
     with pytest.raises(UpdateFailed):
-        asyncio.run(ComexioCoordinator._async_fetch_parsed_config(coordinator, {}))
+        asyncio.run(fetch)
     certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
     api.get_live_states.assert_not_awaited()  # nothing more goes to a server that is not the pinned one
 
@@ -2278,8 +2279,9 @@ def test_an_unreachable_poll_checks_for_a_replaced_certificate(
     coordinator = _certificate_coordinator(api)
     coordinator._async_fetch_and_audit = AsyncMock(side_effect=ComexioConnectionError("down"))
     api.fetch_replaced_fingerprint = AsyncMock(return_value=replaced)
+    update = ComexioCoordinator._async_update_data(coordinator)
     with pytest.raises(ComexioConnectionError):
-        asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+        asyncio.run(update)
     assert certificate_repair.report.called is reported
     assert coordinator.comexio_unreachable is True  # still counted as an outage
 

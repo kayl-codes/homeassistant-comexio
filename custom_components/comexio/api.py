@@ -1,8 +1,9 @@
 # Version: 0.7.5
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
+from datetime import timedelta
 import logging
 import math
 import time
@@ -20,6 +21,7 @@ from aiocomexio import (
     ComexioResponseError,
     CreatedFunctionPlan,
     RawConfig,
+    SystemInfo,
     config as comexio_config,
     fetch_certificate_fingerprint,
     webio as comexio_webio,
@@ -61,11 +63,12 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
+    LOGIN_ERROR_REJECTED,
     MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
+    QUICKBUS_IO_DATA_KEY,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
-    WEBIO_CLASSES,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     category_by_fub_module_type,
     function_plan_id,
@@ -96,6 +99,14 @@ _LOGGER = logging.getLogger(__name__)
 def _webhook_path(server_id: str) -> str:
     """Path of HA's webhook that the Web-IO commands of this server POST to."""
     return f"/api/webhook/comexio_{server_id}"
+
+
+def _with_quickbus_ios(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
+    """parsed_data with its Quickbus IOs back under "io", where aiocomexio's Web-IO builders expect them.
+
+    The builders tell them apart by their "quickbus" entry (own class, IO Id in the payload).
+    """
+    return {**parsed_data, "io": [*parsed_data.get("io", []), *parsed_data.get(QUICKBUS_IO_DATA_KEY, [])]}
 
 
 def _raise_transport_error(err: ComexioConnectionError) -> NoReturn:
@@ -445,6 +456,15 @@ class KnxBridgeReset(NamedTuple):
     store: bool = False  # in use: its current "store in memory" flag, kept by the rename
 
 
+class SystemInfoReading(NamedTuple):
+    """One system info poll (see ComexioAPI.get_system_info): a part is None if its fetch failed, with the cause."""
+
+    info: SystemInfo | None
+    uptime: timedelta | None
+    info_error: str | None = None
+    uptime_error: str | None = None
+
+
 def _strip_marker_kind_suffixes(name: str) -> str:
     """name without every trailing kind suffix ("Rollo [TRIG] [K3]" -> "Rollo")."""
     while (stripped := MARKER_KIND_SUFFIX_RE.sub("", name)) != name:
@@ -716,6 +736,9 @@ class ComexioAPI:
         # still rebooting). Written as each call ends, with no await before its caller resumes, so
         # the caller reads its own fetch's outcome even while another fetch overlaps.
         self.config_relogin_unreachable = False
+        # Set by get_raw_config, like config_relogin_unreachable, when Comexio refused that re-login's
+        # credentials: the poll then asks the user for new ones.
+        self.config_relogin_rejected = False
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -975,13 +998,15 @@ class ComexioAPI:
                 _LOGGER.debug("Comexio admin session has expired, logging in again")
         return await self._full_login()
 
-    async def _full_login(self) -> bool:
+    async def _full_login(self, seen_generation: int | None = None) -> bool:
         """Full RSA login of the main session's client, one at a time.
 
         A caller that had to wait for a concurrent full login takes over its success instead of
-        logging in again (which would clear the jar of the session just logged in).
+        logging in again (which would clear the jar of the session just logged in). A caller that
+        passes the _login_generation it saw before its failed request also takes over a login that
+        finished between that request and this call.
         """
-        generation = self._login_generation
+        generation = self._login_generation if seen_generation is None else seen_generation
         async with self._login_lock:
             client = self.client
             if self._login_generation != generation and client is self._logged_in_client:
@@ -999,7 +1024,7 @@ class ComexioAPI:
             await client.login()
         except ComexioAuthenticationError as err:
             _LOGGER.debug("Comexio login rejected: %s", err)
-            self.last_login_error = "rejected"
+            self.last_login_error = LOGIN_ERROR_REJECTED
             return False
         except ComexioCertificateMismatchError as err:
             self._note_certificate_mismatch(err, "Comexio login refused")
@@ -1073,7 +1098,7 @@ class ComexioAPI:
         saves_before = self._block_settings_saves_confirmed
         self._config_fetches_started += 1
         generation = self._config_fetches_started
-        unreachable = False
+        unreachable = rejected = False
         self.certificate_mismatch = None
         try:
             try:
@@ -1083,6 +1108,7 @@ class ComexioAPI:
                 if not await self._full_login():
                     _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
                     unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
+                    rejected = self.last_login_error == LOGIN_ERROR_REJECTED
                     self._drop_block_settings(generation)
                     return {}
                 raw = await self.client.get_raw_config()
@@ -1099,6 +1125,7 @@ class ComexioAPI:
             return {}
         finally:
             self.config_relogin_unreachable = unreachable
+            self.config_relogin_rejected = rejected
         self._mismatch_logged = None
         return self._finish_config_fetch(raw, generation, saves_before, run_state_mark)
 
@@ -1362,14 +1389,16 @@ class ComexioAPI:
             knx_live_states=knx_live_states,
             knx_dpt_catalog=knx_dpt_catalog,
         )
-        # HA does not import Quickbus IOs (Multitouch, motion sensors) yet (#86): no entities and no
-        # Web-IO commands for them, and no QUICKBUS Web-IO class. io_all keeps them for plan labels.
-        data["io"] = [io for io in data["io"] if io.get("quickbus") is None]
-        data["webio_devices"] = {cls: dev for cls, dev in data.get("webio_devices", {}).items() if cls in WEBIO_CLASSES}
+        # Quickbus IOs (Multitouch gestures, motion sensors, ...) move to their own key: every IO code
+        # path keys an IO by ext_name + identifier, which their G1/TL1/R repeat per device (see
+        # QUICKBUS_IO_DATA_KEY). io_all keeps them for plan labels.
+        data[QUICKBUS_IO_DATA_KEY] = [io for io in data["io"] if io.get("quickbus")]
+        data["io"] = [io for io in data["io"] if not io.get("quickbus")]
         _LOGGER.info(
-            "Audit: %d Markers, %d IOs, %d KNX, %d Webhooks in Comexio for %s",
+            "Audit: %d Markers, %d IOs, %d Quickbus IOs, %d KNX, %d Webhooks in Comexio for %s",
             len(data["markers"]),
             len(data["io"]),
+            len(data[QUICKBUS_IO_DATA_KEY]),
             len(data["knx"]),
             len(data["webio_commands"]),
             webio_name,
@@ -1654,12 +1683,12 @@ class ComexioAPI:
         server_id: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the list of Web-IO command dicts for the given parsed configuration.
 
-        webio_class restricts the result to one Web-IO class ("marker"/"io"/"knx"), for the
+        webio_class restricts the result to one Web-IO class ("marker"/"io"/"knx"/"quickbus"), for the
         bulk class-upload path (generate_webio_json); None returns all (delta-sync payload
         lookup, where the destination device is chosen separately per command).
         ignored_marker_ids / ignored_knx_ids exclude items the user configured as ignored —
@@ -1667,7 +1696,7 @@ class ComexioAPI:
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
         """
         return comexio_webio.build_webio_commands(
-            _webhook_path(server_id), parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
+            _webhook_path(server_id), _with_quickbus_ios(parsed_data), webio_class, ignored_marker_ids, ignored_knx_ids
         )
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
@@ -1690,18 +1719,23 @@ class ComexioAPI:
         webio_name: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> str:
         """Generate the upload-ready JSON string for the Comexio Web-IO importer.
 
         webio_name here is already the class-specific name (see const.webio_class_name) —
-        callers append the ' [M]'/' [IO]'/' [KNX]' suffix before calling this.
+        callers append the ' [M]'/' [IO]'/' [KNX]'/' [QB]' suffix before calling this.
         ignored_marker_ids / ignored_knx_ids are forwarded to build_webio_commands() to
         exclude ignored items.
         """
         return comexio_webio.generate_webio_json(
-            _webhook_path(server_id), webio_name, parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
+            _webhook_path(server_id),
+            webio_name,
+            _with_quickbus_ios(parsed_data),
+            webio_class,
+            ignored_marker_ids,
+            ignored_knx_ids,
         )
 
     async def upload_web_io(self, server_id: str, webio_name: str, web_io_json: str) -> tuple[bool, str]:
@@ -5136,6 +5170,38 @@ class ComexioAPI:
         except ComexioError as err:
             _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
+
+    async def get_system_info(self) -> SystemInfoReading:
+        """System info (free storage, time server settings) and uptime, each with the cause if its fetch failed.
+
+        Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
+        failures and warns with the cause — so they are logged at debug level here. A lapsed admin
+        session is logged in again once per call, like the config poll does: this poll runs more
+        often, and its readings would otherwise go unknown until the next config poll.
+        """
+        relogin: list[bool] = []  # the outcome of this call's one re-login, shared by both fetches
+        info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)
+        uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime(), relogin)
+        return SystemInfoReading(info, uptime, info_error, uptime_error)
+
+    async def _system_info_part[T](
+        self, fetch: Callable[[], Awaitable[T]], relogin: list[bool]
+    ) -> tuple[T | None, str | None]:
+        """fetch()'s result, or None and the failure cause; a lapsed session is logged in again once per relogin."""
+        generation = self._login_generation
+        try:
+            try:
+                return await fetch(), None
+            except ComexioAuthenticationError:
+                if not relogin:
+                    _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
+                    relogin.append(await self._full_login(generation))
+                if not relogin[0]:
+                    return None, f"re-login failed ({self.last_login_error})"
+                return await fetch(), None
+        except ComexioError as err:
+            _LOGGER.debug("System info fetch failed: %s", err)
+            return None, str(err) or type(err).__name__
 
     async def system_emergency_reboot(self) -> bool:
         """Trigger an IMMEDIATE, unconfirmed full Comexio system reboot.

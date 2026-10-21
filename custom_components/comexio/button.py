@@ -50,6 +50,7 @@ from .const import (
     ICON_WARNING,
     ISSUE_UNINSTALL_CLEANUP,
     LOGIN_ERROR_CERTIFICATE,
+    LOGIN_ERROR_REJECTED,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -400,7 +401,7 @@ async def _ensure_sync_login(api: Any) -> None:
 
 def _sync_login_error(reason: str | None) -> _SyncLoginError:
     """Why a sync could not start, from ComexioAPI.last_login_error."""
-    if reason == "rejected":
+    if reason == LOGIN_ERROR_REJECTED:
         return _SyncLoginError(
             "Comexio rejected the admin login — please check the credentials (reconfigure the integration)."
         )
@@ -516,7 +517,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"comexio_{server_id}_webio_sync_start_btn"
         self._attr_translation_key = "webio_sync"
         self._attr_icon = "mdi:cloud-upload"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -852,8 +853,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # server (a class deselected after a prior sync — only its device IP is kept current;
         # its commands are no orphans and are left to the import_disabled repair). An opted-out class
         # with no server device is skipped entirely — _decide_effective_action force-"recreate"s
-        # any class with no device, so including it would create it on the live server.
-        opted_in = set(self.coordinator.active_webio_classes)
+        # any class with no device, so including it would create it on the live server. The same
+        # holds for the Quickbus class while the server has no Quickbus IO (required_webio_classes).
+        opted_in = set(self.coordinator.required_webio_classes)
         active_classes = tuple(c for c in WEBIO_CLASSES if c in opted_in or dev_ids.get(c))
         if not active_classes:
             return 0, 0, 0, 0, False, [], 0, {}, [], 0
@@ -3123,7 +3125,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         self._attr_translation_key = "cancel_sync"
         self._attr_icon = "mdi:stop-circle-outline"
         # 'diagnostic' ensures the button is grouped under 'Configuration'
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -3163,7 +3165,7 @@ class ComexioFirmwareCheckButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"comexio_{server_id}_fw_check_btn"
         self._attr_translation_key = "fw_check"
         self._attr_icon = "mdi:chip"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -3214,7 +3216,7 @@ class ComexioWebioRangeCheckButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"comexio_{server_id}_webio_range_check_btn"
         self._attr_translation_key = "webio_range_check"
         self._attr_icon = "mdi:ruler"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_category = EntityCategory.CONFIG
         # Pin the object_id instead of leaving it to derive from the translated name —
         # that derivation only runs once, at first registration, so a translation file
         # that's momentarily out of sync with the code (deploy-order race) would freeze
@@ -3277,7 +3279,7 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"comexio_{server_id}_entity_id_fix_btn"
         self._attr_translation_key = "entity_id_fix"
         self._attr_icon = "mdi:identifier"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -3330,7 +3332,7 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"comexio_{server_id}_statistics_cleanup_btn"
         self._attr_translation_key = "statistics_cleanup"
         self._attr_icon = "mdi:database-remove"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -3377,7 +3379,7 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"comexio_{server_id}_uninstall_cleanup_btn"
         self._attr_translation_key = "uninstall_cleanup"
         self._attr_icon = "mdi:delete-sweep"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
     def device_info(self) -> dict[str, Any]:

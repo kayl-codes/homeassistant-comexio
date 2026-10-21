@@ -28,6 +28,22 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   description. Flag any change that would let a renamed description or naming schema alter a unique_id or entity_id.
 - **Persisted identifiers:** the lowercase `logikplan_*` option keys, `Store` storage keys and the plan-selector
   unique_id are frozen legacy spellings. Flag renames without migration code.
+- **Changed defaults reach saved entries:** the initial config flow (into `entry.data`) and the options form (into
+  `entry.options`) store the shown default together with the user's input, so an entry that holds the key in either
+  keeps the old default as if the user had typed it, while an entry that holds it in neither reads the current
+  `DEFAULT_*` at runtime (the code reads `{**entry.data, **entry.options}`, so a migrated option overrides an old data
+  value; a key read straight from `entry.data` instead needs `async_migrate_entry` to pass an updated `data=` as
+  well). A changed default needs a config entry migration (except in the last case below): bump
+  `CONFIG_ENTRY_MINOR_VERSION` and add an `if minor_version < N` branch to `migrate_entry_options`
+  (`async_migrate_entry` and the config flow's `MINOR_VERSION` follow the constant). Flag a changed default without
+  it.
+  - Existing installs should get it, and a form saves the key: the branch replaces a saved value equal to the old
+    default, compared the way the code reads it, and keeps a customised one (accepted trade-off: a user who
+    deliberately chose the old default is migrated too; the PR says so).
+  - Only new installs should get it: the branch pins the old default into entries without a saved value (as
+    1.2 -> 1.3 does with `LEGACY_DEFAULT_SCHEMA_IO`).
+  - Existing installs should get it, and no form ever saves the key: no migration needed, the runtime fallback
+    already delivers it.
 - **Terminology:** "function plan" is the English term in code, services, logs, notifications and en/fr/es
   translations; "Logikplan" is the German translation, used in `de.json` and the German sections of the Markdown
   docs (and as a parenthetical gloss such as "function plan (Logikplan)"), never in English UI text or code. Never
@@ -232,6 +248,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   of a race or timeout switches the state during the await it targets (e.g. inside the mocked call) and proves the
   timeout fired; a quick check is to break the target path (raise the timeout, drop the guard) and see it fail
   (#168).
+- A test of a step that validates before it acts (a config, reauth or reconfigure step that tests the login, a
+  check before a write) asserts whether the validation ran, not only the result (entry created, data unchanged, error
+  shown): the success case and every failure the validation reports assert it ran — e.g.
+  `api.login.assert_awaited_once()`; a path that is meant to reject before validating (a taken server id, a wrong
+  device) asserts it did not — `api.login.assert_not_awaited()`, or that no API was built. A flow that ends in an
+  abort after the validation (`reauth_successful`, `reconfigure_successful`) is a success case. A success test
+  otherwise passes when the step stores unchecked input; a failure test passes when the step rejects before it ever
+  validated (#207).
 - A parametrized test of a dispatch names each case's expected handler(s) and asserts that those ran and the others
   did not (for an exclusive route: exactly one handler; for an intentional fan-out: every expected handler ran and every
   forbidden one did not); a sum of awaits over several handlers also passes when an action is routed to the wrong one. A test of a
@@ -242,6 +266,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   `test_plan_watchdog.py`) and has not yet done its work, then release and assert it runs. A test that only checks
   the final order or outcome also passes when the second operation never takes the lock (#187).
 - Test function parameters carry type annotations.
+- A `pytest.raises` block makes exactly one call, the tested one; build its arguments before the `with`, and enter
+  no other context manager after `pytest.raises` in the same `with` — its `__enter__` is a call too; wrap such a
+  sequence in a local function and call that (SonarCloud S5778). `tests/unit/test_pytest_raises_single_call.py` enforces this for literal
+  `pytest.raises(...)` with-items; check by hand a `pytest.raises` bound to a name or passed as a parametrize argument
+  (`with expectation:`) and a local function called inside the block.
 
 ## GitHub Actions
 

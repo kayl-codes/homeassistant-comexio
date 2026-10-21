@@ -114,6 +114,109 @@ id = "GHSA-gvp8-978c-rx2q"
 ignoreUntil = 2027-03-31
 reason = "PyJWT==2.13.0 is pinned by homeassistant==2026.8.3 (test-only toolchain, CVE-2026-103001); no fixed release yet"
 
+# --- aiohttp 3.14.3: Home Assistant Core's own exact pin (homeassistant==2026.8.3 requires
+# aiohttp==3.14.3; still pinned in 2026.9.0), so it cannot be raised here without breaking HA's
+# resolver. At runtime the integration uses the aiohttp of the user's HA install, never this pin.
+# All fixed in 3.14.4.
+[[IgnoredVulns]]
+id = "GHSA-2g87-pp6c-29x5"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-494j-54xm-rwp3"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-5wr8-gcqf-gqf3"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-6cjc-53gc-5rqm"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-9xw5-w5jj-pvcg"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-f9xw-jh8m-3mwq"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-gx76-c99x-2c96"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-pqxq-w44r-73xw"
+ignoreUntil = 2027-03-31
+reason = "aiohttp==3.14.3 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 3.14.4 by HA's own bump"
+
+# --- Pillow 12.3.0: Home Assistant Core's own exact pin (homeassistant==2026.8.3 requires
+# Pillow==12.3.0). The integration never imports PIL. All fixed in 13.0.0.
+[[IgnoredVulns]]
+id = "GHSA-462x-pgg6-55fp"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-58r4-6rv3-gfh8"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-65qm-jvmh-6pqg"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-8g5g-8vmr-9782"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-c6hw-5grf-ff96"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-p4wg-p73j-c528"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-pchr-8j38-3x4p"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-q45j-58j2-45rg"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-vx6w-vv9f-6gvg"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.8.3 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+# --- uv 0.11.31: Home Assistant Core's own exact pin (homeassistant==2026.8.3 requires uv==0.11.31).
+# Its bundled CA store trusts a compromised emSign root; the test toolchain never runs uv. Fixed in 0.13.4.
+[[IgnoredVulns]]
+id = "PYSEC-2026-4321"
+ignoreUntil = 2027-03-31
+reason = "uv==0.11.31 is pinned by homeassistant==2026.8.3 (test-only toolchain, never run); fixed in 0.13.4 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-hq85-5cpj-mr62"
+ignoreUntil = 2027-03-31
+reason = "Alias of PYSEC-2026-4321 (uv==0.11.31 pinned by homeassistant, test-only)"
+
 # --- anyio / idna / pygments: false positives. OSV-Scanner reports the dependency *lower bounds*
 # from HA's metadata (anyio 4.9.0, idna 3.9.0, pygments 2.9.0) as if they were installed versions;
 # pip actually resolves anyio 4.15.1, idna 3.20, pygments 2.21.0 (CI job log, PR #90), all past

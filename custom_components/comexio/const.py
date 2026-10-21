@@ -1,4 +1,5 @@
-from collections.abc import Iterator, Mapping
+from bisect import bisect_right
+from collections.abc import Iterable, Iterator, Mapping, Set as AbstractSet
 from dataclasses import dataclass
 import logging
 import re
@@ -79,7 +80,7 @@ CONF_IGNORED_KNX = "ignored_knx"
 # Ids the user explicitly chose "leave as writable switch" for in the knx_dpt_ambiguous
 # repair flow (see repairs.py) — distinct from CONF_IGNORED_KNX (excludes a KNX object from
 # HA entirely); this only suppresses the classification nag for that one id. Same comma/
-# range string format, parsed with expand_ignored_marker_ids().
+# range string format, parsed with parse_ignored_ids().
 CONF_KNX_DPT_SUFFIX_IGNORED = "knx_dpt_suffix_ignored"
 
 # The option-key VALUES below keep the legacy "logikplan" spelling — they are persisted
@@ -145,8 +146,8 @@ CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
 
 
 # Web-IO class split: HA maintains separate Web-IO device classes on the Comexio
-# server — one per source category (Marker, physical IO, KNX object) — derived from the
-# single webio_name field in the config/options flow by appending a suffix. The webIoId
+# server — one per source category (Marker, physical IO, KNX object, Quickbus IO) — derived
+# from the single webio_name field in the config/options flow by appending a suffix. The webIoId
 # (the per-command key inside $FubModules["10"]) is a global counter across ALL Web-IO
 # devices on a Comexio server, never reused per-device (verified live 2026-07-27), so
 # commands from every class can share one flat webio_commands lookup without ambiguity.
@@ -154,16 +155,22 @@ CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
 WEBIO_CLASS_MARKER = WebioClass.MARKER
 WEBIO_CLASS_IO = WebioClass.IO
 WEBIO_CLASS_KNX = WebioClass.KNX
-# Listed explicitly, not tuple(WebioClass): aiocomexio 0.7.0 adds WebioClass.QUICKBUS, which
-# HA does not maintain yet (Quickbus IOs are left out of the import until #86).
-WEBIO_CLASSES = (WebioClass.MARKER, WebioClass.IO, WebioClass.KNX)
+WEBIO_CLASS_QUICKBUS = WebioClass.QUICKBUS
+WEBIO_CLASSES = tuple(WebioClass)
 
 # Internal audit-map key convention (coordinator._async_update_data): IO entries are keyed
-# as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}" —
-# centralized here so the build and classify sides can't drift apart.
+# as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}",
+# Quickbus IOs as "QB{io_id}" (their identifier repeats per device, only the IO's Id is
+# unique) — centralized here so the build and classify sides can't drift apart.
 _IO_AUDIT_KEY_PREFIX = "IO_"
 _MARKER_AUDIT_KEY_PREFIX = "M"
 _KNX_AUDIT_KEY_PREFIX = "K"
+_QUICKBUS_AUDIT_KEY_PREFIX = "QB"
+
+# parse_config() output key of the Quickbus IOs (Multitouch gestures, motion sensors, ...). The
+# integration keeps them apart from "io": every IO code path addresses an IO by ext_name +
+# identifier, which a Quickbus IO's G1/TL1/R repeats on every device of the same kind.
+QUICKBUS_IO_DATA_KEY = "quickbus_io"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -174,15 +181,17 @@ class SourceCategory:
     with numeric ids, mirrored 1:1 and clustered into "HA - <label> [n-m]" id-range
     function plans. Physical IOs are the odd one out (ext/identifier composite keys,
     one cluster plan per extension, binary_sensor support) and keep some special
-    handling at the call sites where genericity isn't reachable. Adding a further
-    Comexio module type = one more entry in SOURCE_CATEGORIES.
+    handling at the call sites where genericity isn't reachable. Quickbus IOs share the
+    IOs' $FubModules group but are keyed by their IO Id, read-only and not wired into
+    managed plans (yet). Adding a further Comexio module type = one more entry in
+    SOURCE_CATEGORIES.
     """
 
     key: WebioClass
     fub_module_type: str  # $FubModules key holding the raw source items
-    data_key: str  # parse_config() output-dict key ("markers"/"io"/"knx")
+    data_key: str  # parse_config() output-dict key ("markers"/"io"/"knx"/"quickbus_io")
     audit_key_prefix: str  # coordinator audit-map key prefix
-    webio_name_suffix: str  # appended to the configured webio_name (" [M]"/" [IO]"/" [KNX]")
+    webio_name_suffix: str  # appended to the configured webio_name (" [M]"/" [IO]"/" [KNX]"/" [QB]")
     label: str  # short display label for sync/audit messages (English — used in UI/log text)
     german_label: str  # German equivalent, used only in options_flow.py's German-only inline
     # validation errors ("Merker" is the correct German automation term, distinct from the
@@ -192,8 +201,8 @@ class SourceCategory:
     schema_default: str  # default entity-name schema
     id_placeholder: str  # entity-name schema format key for the id
     title_placeholder: str  # entity-name schema format key for the title
-    unique_id_infix: str  # HA unique_id infix ("m"/""/"k")
-    range_clustered: bool  # True → id-range cluster plans; False → one plan per extension
+    unique_id_infix: str  # HA unique_id infix ("m"/""/"k"/"qb")
+    range_clustered: bool  # True → id-range cluster plans; False → IO: one plan per extension, Quickbus: none
     supports_trigger_pairs: bool  # True → [TRIG]/[TP] items get a shared-trigger-plan self-reset pair
     import_conf_key: str  # entry.options opt-in flag
     import_default: bool  # default for the opt-in flag (KNX ships OFF)
@@ -262,6 +271,30 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         import_default=False,
         ignored_conf_key=CONF_IGNORED_KNX,
     ),
+    # IOs of Quickbus devices (Multitouch gestures, motion sensors, ...): same $FubModules group
+    # as the IOs, so it must stay after IO here — category_by_fub_module_type("1") is the IO
+    # category. Read-only entities (no known API write path), one HA device per Quickbus device,
+    # Web-IO commands in their own class, not wired into managed plans (#86). Named with the IO
+    # schema: aiocomexio renders {ExtName} as the Quickbus device's name.
+    WebioClass.QUICKBUS: SourceCategory(
+        key=WebioClass.QUICKBUS,
+        fub_module_type="1",
+        data_key=QUICKBUS_IO_DATA_KEY,
+        audit_key_prefix=_QUICKBUS_AUDIT_KEY_PREFIX,
+        webio_name_suffix=" [QB]",
+        label="Quickbus",
+        german_label="Quickbus",
+        schema_conf_key=CONF_SCHEMA_IO,
+        schema_default=DEFAULT_SCHEMA_IO,
+        id_placeholder="IoId",
+        title_placeholder="IoTitle",
+        unique_id_infix="qb",
+        range_clustered=False,
+        supports_trigger_pairs=False,
+        import_conf_key="import_quickbus",
+        import_default=True,
+        ignored_conf_key=None,
+    ),
 }
 
 
@@ -288,6 +321,18 @@ def active_webio_classes(conf: Mapping[str, Any]) -> tuple[WebioClass, ...]:
         cls
         for cls in WEBIO_CLASSES
         if conf.get(SOURCE_CATEGORIES[cls].import_conf_key, SOURCE_CATEGORIES[cls].import_default)
+    )
+
+
+def required_webio_classes(conf: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[WebioClass, ...]:
+    """The opted-in Web-IO classes that must exist on the server (audit "missing class", sync create).
+
+    The Quickbus class only once the server has a Quickbus IO: import_quickbus is on by default,
+    so without this every installation without a Quickbus device would get an empty [QB] class
+    created and, until then, a "missing Web-IO class" repair. data: the (imported) parse result.
+    """
+    return tuple(
+        cls for cls in active_webio_classes(conf) if cls != WebioClass.QUICKBUS or data.get(QUICKBUS_IO_DATA_KEY)
     )
 
 
@@ -385,10 +430,10 @@ def io_audit_key(ext_name: str, identifier: str) -> str:
 
 
 def source_audit_key(category: SourceCategory, item_id: object) -> str:
-    """Build the internal audit-map key identifying a range_clustered source item (Marker/KNX).
+    """Build the internal audit-map key identifying a source item keyed by its id (Marker/KNX/Quickbus IO).
 
-    Registry-driven counterpart to io_audit_key(): every range_clustered category keys its
-    audit-map entries by a plain "<prefix><id>" string (e.g. "M5"/"K5"), so one function
+    Registry-driven counterpart to io_audit_key(): every such category keys its audit-map
+    entries by a plain "<prefix><id>" string (e.g. "M5"/"K5"/"QB211"), so one function
     covers all of them via category.audit_key_prefix — classify_audit_key() is the reverse
     lookup (audit key -> WebioClass) for callers that need to go the other way.
     """
@@ -731,6 +776,20 @@ BUS_LOAD_POLL_INTERVAL_SEC = 10
 # silently keeping the last successful reading forever.
 BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
 
+# System info (free storage, time server settings, uptime): own slow poll, independent of the
+# config audit (skipped during a sync) — the values change slowly, a reboot shows within one interval.
+SYSTEM_INFO_POLL_INTERVAL_SEC = 300
+# Consecutive failed polls before the readings fall back to "unknown" (one hiccup keeps the last values).
+SYSTEM_INFO_FAIL_STREAK_THRESHOLD = 2
+# The boot time is now - uptime, which moves by the request latency on every poll: an estimate
+# within this many seconds of the known boot time keeps it (no state change, no recorder row).
+SYSTEM_BOOT_TIME_TOLERANCE_SEC = 60
+
+
+def system_info_signal(server_id: str) -> str:
+    """Dispatcher signal fired after every system info poll (see coordinator._async_system_info_tick)."""
+    return f"{DOMAIN}_{server_id}_system_info_update"
+
 
 def plan_watch_signal(server_id: str) -> str:
     """Dispatcher signal fired after every plan watchdog check (keeps the problem sensor's last_check current)."""
@@ -810,6 +869,8 @@ CERTIFICATE_CHANGED_MSG = (
     "Comexio presents another certificate than the pinned one — nothing is sent to it until you decide "
     "in Settings → Repairs."
 )
+# ComexioAPI.last_login_error when Comexio answered and refused the credentials (setup and poll ask for reauth).
+LOGIN_ERROR_REJECTED = "rejected"
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
@@ -836,6 +897,63 @@ def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
 def extension_firmware_update_unique_id(server_id: str, ext_name: str) -> str:
     """unique_id of an extension module's firmware update entity, from the extension's name as Comexio reports it."""
     return f"comexio_{server_id}_{ext_name}_firmware_update".lower()
+
+
+def quickbus_io_unique_id(server_id: str, io_id: str | int) -> str:
+    """unique_id of a Quickbus IO's entity — its IO Id only: G1/TL1 repeat on every device of a kind."""
+    return f"comexio_{server_id}_{SOURCE_CATEGORIES[WebioClass.QUICKBUS].unique_id_infix}{io_id}".lower()
+
+
+# Comexio's name for the IO-Server's own onboard IOs: its HA device keeps the plain name.
+BASE_EXTENSION_NAME = "BASE"
+
+
+def extension_device_name(server_id: str, ext_name: str) -> str:
+    """HA device name of an extension module: "<server> EXT - <name>", so all modules list together.
+
+    The IO-Server's onboard IOs (BASE) stay "<server> BASE" — the main unit, not an add-on module.
+    """
+    if is_base_extension(ext_name):
+        return f"{server_id} {BASE_EXTENSION_NAME}"
+    return f"{server_id} EXT - {one_line(ext_name)}"
+
+
+def is_base_extension(ext_name: str) -> bool:
+    """True for the IO-Server's onboard IOs — case-insensitive, like their lower-cased device identifier."""
+    return ext_name.upper() == BASE_EXTENSION_NAME
+
+
+def known_extension_names(data: Mapping[str, Any], include_offline: bool) -> set[str]:
+    """Names of the extensions the poll reports IOs for, offline ones only with ``include_offline``.
+
+    Counts Quickbus hosts too: a module that only hosts Quickbus devices lists no IO of its own.
+    """
+    ios = (*data.get("io", []), *data.get(QUICKBUS_IO_DATA_KEY, []))
+    return {io["ext_name"] for io in ios if include_offline or not io.get("offline")}
+
+
+def marker_device_name(server_id: str) -> str:
+    """HA device name of the marker group: "<server> Markers"."""
+    return f"{server_id} Markers"
+
+
+def extension_firmware_object_id(server_id: str, ext_name: str) -> str:
+    """Object id of an extension's firmware entity, as HA derived it before the device got its "EXT - " tag.
+
+    The entity names itself "Firmware" on the extension device, so HA would now derive
+    "<server> EXT - <ext> Firmware"; requesting the old id keeps new installs on the same ids.
+    """
+    return slugify(f"{server_id} {ext_name} Firmware")
+
+
+def quickbus_device_name(server_id: str, device_name: str) -> str:
+    """HA device name of a Quickbus device: "<server> QB - <name>", so all Quickbus devices list together."""
+    return f"{server_id} QB - {one_line(device_name)}"
+
+
+def quickbus_io_platform(io: Mapping[str, Any]) -> str:
+    """Platform of a Quickbus IO's entity: read-only always (no known API write path for its address)."""
+    return "binary_sensor" if io.get("is_binary") else "sensor"
 
 
 def function_plan_id(fid: Any) -> int | None:
@@ -971,6 +1089,9 @@ WEBHOOK_VALUE_LOG_MSG = "Webhook %s push: %s = %r (prev %r)"
 # WARNING emitted when a webhook pushes a value for an IO key that is not in the parsed config
 # index — the value cannot be tracked and is dropped. Args: ext name, identifier, new value.
 WEBHOOK_UNKNOWN_IO_LOG_MSG = "Webhook push for unknown IO %s/%s (value %r) — not tracked, dropped"
+
+# The same for a Quickbus IO, addressed by its IO Id (unknown, or its import is off). Args: IO Id, new value.
+WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (value %r) — not tracked, dropped"
 
 # Marker for a comment element the restore-as-new path adds to a rebuilt plan, so a user
 # opening it in Comexio Studio immediately understands why it exists and shouldn't hand-edit it.
@@ -1192,8 +1313,8 @@ def parse_ignored_marker_tokens(
     Empty tokens are skipped. `parsed` is an int for a single ID, a (start, end)
     tuple for an inclusive range, or None if the token could not be parsed.
 
-    Shared low-level parser: `expand_ignored_marker_ids` below uses it for lenient runtime
-    expansion, `options_flow._normalize_ignored_ids` uses it for strict UI validation.
+    Shared low-level parser: `split_ignored_ids` below uses it for lenient runtime
+    parsing, `options_flow._normalize_ignored_ids` uses it for strict UI validation.
     """
     for token in raw.replace(";", ",").replace(" ", ",").replace(".", ",").split(","):
         display_token = token.strip()
@@ -1218,20 +1339,197 @@ def parse_ignored_marker_tokens(
                 yield display_token, None
 
 
-def expand_ignored_marker_ids(raw: str, prefix_chars: str = "Mm") -> set[int]:
-    """Expand an ignored-ids config string (markers or KNX) to a set of integer IDs.
+def split_ignored_ids(raw: str, prefix_chars: str = "Mm") -> tuple[set[int], set[tuple[int, int]]]:
+    """Split an ignored-ids config string into its single IDs and its inclusive (start, end) ranges.
+
+    A single ID a range also covers (a hand-edited '1-10,5') is left out: it is redundant, and
+    pruning it as a single would report a removal while the range still ignores it.
+    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    """
+    singles: set[int] = set()
+    ranges: set[tuple[int, int]] = set()
+    for _token, parsed in parse_ignored_marker_tokens(raw, prefix_chars):
+        if isinstance(parsed, tuple):
+            ranges.add(parsed)
+        elif parsed is not None:
+            singles.add(parsed)
+    return {i for i in singles if not ignored_id_in_ranges(i, ranges)}, ranges
+
+
+def invalid_ignored_tokens(raw: str, prefix_chars: str = "Mm") -> list[str]:
+    """The tokens of an ignored-ids string that are no ID or range — a rewrite of the string drops them."""
+    return [token for token, parsed in parse_ignored_marker_tokens(raw, prefix_chars) if parsed is None]
+
+
+def ignored_id_in_ranges(source_id: int, ranges: Iterable[tuple[int, int]]) -> bool:
+    """True if one of the inclusive ranges covers source_id — without expanding the ranges."""
+    return any(start <= source_id <= end for start, end in ranges)
+
+
+def _merged_intervals(intervals: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """Sorted, disjoint, non-adjacent inclusive intervals covering the same IDs."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _subtracted_intervals(
+    keep: tuple[tuple[int, int], ...], drop: tuple[tuple[int, int], ...]
+) -> tuple[tuple[int, int], ...]:
+    """keep's IDs minus drop's (both merged) — linear in the number of intervals, never in the IDs."""
+    result: list[tuple[int, int]] = []
+    first = 0
+    for start, end in keep:
+        while first < len(drop) and drop[first][1] < start:
+            first += 1
+        cut = first
+        while cut < len(drop) and drop[cut][0] <= end:
+            if drop[cut][0] > start:
+                result.append((start, drop[cut][0] - 1))
+            start = max(start, drop[cut][1] + 1)
+            cut += 1
+        if start <= end:
+            result.append((start, end))
+    return tuple(result)
+
+
+class IgnoredIds(AbstractSet[int]):
+    """The IDs an ignore-list covers, held as sorted, disjoint inclusive intervals.
+
+    Membership and every set operation work on the intervals themselves, so a range costs no
+    memory or time however wide it is ('1-1000000000' expanded into a set would exhaust it).
+    Only iterating visits every ID; len() raises OverflowError past sys.maxsize, like len(range(...)).
+    The other operand of an operator is iterated only when it is not an IgnoredIds, i.e. finite.
+    """
+
+    __slots__ = ("_intervals", "_starts")
+
+    def __init__(self, singles: Iterable[int] = (), ranges: Iterable[tuple[int, int]] = ()) -> None:
+        bounds = [(min(start, end), max(start, end)) for start, end in ranges]
+        self._intervals = _merged_intervals([*bounds, *((i, i) for i in singles)])
+        self._starts = [start for start, _end in self._intervals]
+
+    @staticmethod
+    def _intervals_of(other: AbstractSet[Any]) -> tuple[tuple[int, int], ...]:
+        """other's integer IDs as merged intervals; other's non-integers are never covered here."""
+        if isinstance(other, IgnoredIds):
+            return other._intervals
+        return _merged_intervals((i, i) for i in other if isinstance(i, int))
+
+    @staticmethod
+    def _only_ints(other: AbstractSet[Any]) -> bool:
+        return isinstance(other, IgnoredIds) or all(isinstance(i, int) for i in other)
+
+    def __contains__(self, item: object) -> bool:
+        if not isinstance(item, int):
+            return False
+        index = bisect_right(self._starts, item) - 1
+        return index >= 0 and item <= self._intervals[index][1]
+
+    def __iter__(self) -> Iterator[int]:
+        for start, end in self._intervals:
+            yield from range(start, end + 1)
+
+    def __bool__(self) -> bool:
+        # Not via __len__: a range wider than sys.maxsize IDs makes len() raise OverflowError.
+        return bool(self._intervals)
+
+    def __len__(self) -> int:
+        return sum(end - start + 1 for start, end in self._intervals)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self._only_ints(other) and self._intervals == self._intervals_of(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __le__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return not _subtracted_intervals(self._intervals, self._intervals_of(other))
+
+    def __ge__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self._only_ints(other) and not _subtracted_intervals(self._intervals_of(other), self._intervals)
+
+    def __lt__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self <= other and self != other
+
+    def __gt__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self >= other and self != other
+
+    def __sub__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        """Remove other's IDs (e.g. the unignorable bridge markers) without expanding a range."""
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return IgnoredIds(ranges=_subtracted_intervals(self._intervals, self._intervals_of(other)))
+
+    def __rsub__(self, other: AbstractSet[Any]) -> set[Any]:
+        # other is no IgnoredIds here (that one's __sub__ ran first), so it is finite to walk.
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return {i for i in other if i not in self}
+
+    def __and__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self - IgnoredIds(ranges=_subtracted_intervals(self._intervals, self._intervals_of(other)))
+
+    __rand__ = __and__
+
+    def __or__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet) or not self._only_ints(other):
+            return NotImplemented
+        return IgnoredIds(ranges=(*self._intervals, *self._intervals_of(other)))
+
+    __ror__ = __or__
+
+    def __xor__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet) or not self._only_ints(other):
+            return NotImplemented
+        theirs = self._intervals_of(other)
+        return IgnoredIds(
+            ranges=(*_subtracted_intervals(self._intervals, theirs), *_subtracted_intervals(theirs, self._intervals))
+        )
+
+    __rxor__ = __xor__
+
+    def isdisjoint(self, other: Iterable[Any]) -> bool:
+        if isinstance(other, IgnoredIds):
+            return not self & other
+        return not any(i in self for i in other)
+
+    def __repr__(self) -> str:
+        return f"IgnoredIds({format_ignored_ids(set(), set(self._intervals))!r})"
+
+
+def parse_ignored_ids(raw: str, prefix_chars: str = "Mm") -> IgnoredIds:
+    """The IDs an ignored-ids config string (markers or KNX) covers, ranges kept unexpanded.
 
     Invalid tokens are silently ignored (runtime use; options_flow validates separately).
     """
-    result: set[int] = set()
-    for _token, parsed in parse_ignored_marker_tokens(raw, prefix_chars):
-        if parsed is None:
-            continue
-        if isinstance(parsed, tuple):
-            result.update(range(parsed[0], parsed[1] + 1))
-        else:
-            result.add(parsed)
-    return result
+    singles, ranges = split_ignored_ids(raw, prefix_chars)
+    return IgnoredIds(singles, ranges)
+
+
+def format_ignored_ids(singles: set[int], ranges: set[tuple[int, int]], prefix: str = "") -> str:
+    """The ignored-ids option string: singles and ranges sorted by start, e.g. '1,3,8-12'.
+
+    The one writer of the format, so a rewrite never flattens the user's ranges into single IDs.
+    A single ID a range already covers (e.g. '1-3,2') is dropped as redundant.
+    """
+    items = sorted([*ranges, *((i, i) for i in singles if not ignored_id_in_ranges(i, ranges))])
+    return ",".join(f"{prefix}{start}" if start == end else f"{prefix}{start}-{end}" for start, end in items)
 
 
 def is_valid_entity_name_schema(schema: Any) -> bool:

@@ -187,6 +187,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required("import_ios", default=ui.get("import_ios", True)): bool,
                 # Opt-in, default OFF — blind implementation, see project_knx_objects memory.
                 vol.Required("import_knx", default=ui.get("import_knx", False)): bool,
+                vol.Required("import_quickbus", default=ui.get("import_quickbus", True)): bool,
                 vol.Required("webio_name", default=ui.get("webio_name", "HomeAssistant")): str,
                 vol.Required(
                     "scan_interval",
@@ -222,19 +223,14 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not user_input.get(CONF_API_PASSWORD):
                 merged[CONF_API_PASSWORD] = entry.data.get(CONF_API_PASSWORD, "")
 
+            https_change = None
             try:
                 https_change = await self._async_pin_for_host(entry, merged)
-                await self._test_connection(merged, merged.get(CONF_CERTIFICATE_FINGERPRINT))
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
             except CertificateChanged as err:
                 errors["base"] = self._certificate_error(entry, merged, err.actual)
-            except Exception:
-                _LOGGER.exception("Unexpected error during reconfigure")
-                errors["base"] = "unknown"
             else:
+                errors = await self._connection_errors(entry, merged)
+            if not errors:
                 self._notify_https_change(entry, merged, https_change)
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
                 return self.async_update_reload_and_abort(
@@ -298,6 +294,50 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.warning("Comexio at %s serves no HTTPS — the entry is back on plain HTTP", merged[CONF_HOST])
             notify_https_disabled(self.hass, server_id, merged[CONF_HOST])
 
+    async def async_step_reauth(self, entry_data):
+        """Start when Comexio refuses the stored admin credentials (at setup or on a poll)."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None):
+        """Ask for new admin credentials, test them and reload the entry with them."""
+        entry = self._get_reauth_entry()
+        errors = {}
+
+        if user_input is not None:
+            errors = await self._connection_errors(entry, {**entry.data, **user_input})
+            if not errors:
+                # Like reconfigure: credentials left in options from older versions would shadow the new ones.
+                clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
+                return self.async_update_reload_and_abort(entry, data_updates=user_input, options=clean_options)
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME, default=entry.data.get(CONF_USERNAME, "admin")): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
+            description_placeholders={"host": entry.data[CONF_HOST]},
+            errors=errors,
+        )
+
+    async def _connection_errors(self, entry, merged) -> dict[str, str]:
+        """Form errors of a login test of entry with the settings merged; empty when it succeeds.
+
+        The test goes over HTTPS with merged's pinned certificate, if any. _test_connection turns every
+        other failure into CannotConnect (and logs it).
+        """
+        try:
+            await self._test_connection(merged, merged.get(CONF_CERTIFICATE_FINGERPRINT))
+        except CannotConnect:
+            return {"base": "cannot_connect"}
+        except InvalidAuth:
+            return {"base": "invalid_auth"}
+        except CertificateChanged as err:
+            return {"base": self._certificate_error(entry, merged, err.actual)}
+        return {}
+
     async def _test_connection(self, user_input, fingerprint: str | None = None):
         """Test if the login works using UI credentials, over HTTPS with fingerprint pinned if given."""
         api = None
@@ -321,14 +361,15 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # aiohttp reports a foreign certificate on a host name with several addresses as one.
                     if (actual := await async_replaced_fingerprint(api)) is not None:
                         raise CertificateChanged(actual)
+                    _LOGGER.error("Login test could not reach Comexio at %s", user_input[CONF_HOST])
                     raise CannotConnect
                 _LOGGER.error("Login test failed for user %s", user_input[CONF_USERNAME])
                 raise InvalidAuth
-        except (InvalidAuth, CannotConnect, CertificateChanged):
-            raise
         except Exception as e:
-            _LOGGER.exception("Connection test failed: %s", e)
-            raise CannotConnect from e
+            if not isinstance(e, InvalidAuth | CannotConnect | CertificateChanged):
+                _LOGGER.exception("Connection test failed: %s", e)
+                raise CannotConnect from e
+            raise
         finally:
             if api is not None:
                 api.close()

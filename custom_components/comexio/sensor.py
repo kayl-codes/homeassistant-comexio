@@ -47,6 +47,7 @@ from .const import (
     function_plan_ids,
     function_plan_run_state_unique_id,
     is_temperature_marker_name,
+    system_info_signal,
 )
 from .coordinator import ComexioCoordinator
 from .entity import (
@@ -54,8 +55,11 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
+    ComexioQuickbusIOEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
+    hub_device_info,
+    quickbus_ios_for_platform,
 )
 from .function_plan_backup import summarize_orphaned_backups
 
@@ -89,6 +93,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             for io in coordinator.data.get("io", [])
             if not io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
         )
+
+    # Quickbus IOs (multitouch, motion detectors, ...) are read-only, outputs included
+    entities.extend(
+        ComexioQuickbusSensor(coordinator, coordinator.server_id, io)
+        for io in quickbus_ios_for_platform(coordinator, conf, "sensor")
+    )
 
     if conf.get("import_markers", True):
         ignored_ids = coordinator.ignored_marker_ids
@@ -129,6 +139,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioFunctionPlanCountSensor(coordinator, coordinator.server_id),
             ComexioWebioCommandCountSensor(coordinator, coordinator.server_id),
             ComexioWatchdogEventSensor(coordinator, coordinator.server_id),
+            ComexioFreeStorageSensor(coordinator, coordinator.server_id),
+            ComexioLastBootSensor(coordinator, coordinator.server_id),
         ]
     )
 
@@ -205,6 +217,10 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
             return int(f) if f == int(f) else f
         except (ValueError, TypeError):
             return val
+
+
+class ComexioQuickbusSensor(ComexioQuickbusIOEntity, ComexioIOSensor):
+    """An analog IO of a Quickbus device (brightness, temperature, ...), read-only."""
 
 
 class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):
@@ -565,6 +581,59 @@ class ComexioBusLoadSensor(SensorEntity):
     @callback
     def _handle_bus_load_update(self) -> None:
         self.async_write_ha_state()
+
+
+class _ComexioSystemInfoSensor(ComexioStableEntityIdMixin, SensorEntity):
+    """Base of the system info sensors: fed by the coordinator's own system info poll.
+
+    Not a CoordinatorEntity, like ComexioBusLoadSensor: the readings arrive via system_info_signal,
+    on their own cadence (const.SYSTEM_INFO_POLL_INTERVAL_SEC), not with the config poll.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _unique_id_suffix: str
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_{self._unique_id_suffix}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return hub_device_info(self.coordinator)
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, system_info_signal(self.server_id), self.async_write_ha_state)
+        )
+
+
+class ComexioFreeStorageSensor(_ComexioSystemInfoSensor):
+    """Free space of the Comexio's internal storage (%), from the system dashboard."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_icon = "mdi:harddisk"
+    _attr_translation_key = "free_storage"
+    _unique_id_suffix = "free_storage_sensor"
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.system_info.free_storage_percent
+
+
+class ComexioLastBootSensor(_ComexioSystemInfoSensor):
+    """When the Comexio system last started: now - its uptime, held steady between polls (see system_info)."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_translation_key = "last_boot"
+    _unique_id_suffix = "last_boot_sensor"
+
+    @property
+    def native_value(self) -> datetime | None:
+        return self.coordinator.system_info.boot_time
 
 
 class ComexioExtensionCountSensor(CoordinatorEntity, SensorEntity):

@@ -19,6 +19,7 @@ from .cleanup_scope import (
     CLEANUP_SCOPE_IO,
     CLEANUP_SCOPE_KNX,
     CLEANUP_SCOPE_MARKER,
+    CLEANUP_SCOPE_QUICKBUS,
     CLEANUP_SCOPES,
     SKIPPED_KNX_BRIDGE_MARKERS,
     count_placeholder,
@@ -63,11 +64,13 @@ from .const import (
     WEBIO_CLASS_KNX,
     WebioClass,
     active_webio_classes,
-    expand_ignored_marker_ids,
+    format_ignored_ids,
+    invalid_ignored_tokens,
     one_line,
     one_line_values,
     prune_import_disabled_ignored,
     source_category,
+    split_ignored_ids,
     uninstall_cleanup_notification_id,
     uninstall_cleanup_pending_notification_id,
 )
@@ -105,13 +108,15 @@ def _is_knx_cluster_plan(plan_name: str) -> bool:
 def _add_knx_dpt_suffix_ignored_ids(existing_raw: str, new_ids: set[int]) -> str:
     """Merge newly-ignored KNX ids into the CONF_KNX_DPT_SUFFIX_IGNORED option string.
 
-    Same comma/range-list format as CONF_IGNORED_MARKERS/CONF_IGNORED_KNX, reusing
-    expand_ignored_marker_ids for parsing so the two stay in sync if that format ever changes.
+    Same comma/range-list format as CONF_IGNORED_MARKERS/CONF_IGNORED_KNX, parsed and written
+    by the shared const helpers so the two stay in sync — ranges the user wrote stay ranges.
     """
     knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
-    ids = expand_ignored_marker_ids(existing_raw, knx_prefix + knx_prefix.lower())
-    ids.update(new_ids)
-    return ",".join(f"{knx_prefix}{i}" for i in sorted(ids))
+    prefix_chars = knx_prefix + knx_prefix.lower()
+    if invalid := invalid_ignored_tokens(existing_raw, prefix_chars):
+        _LOGGER.warning("Dropping invalid entries %s from the KNX DPT suffix ignore list", invalid)
+    singles, ranges = split_ignored_ids(existing_raw, prefix_chars)
+    return format_ignored_ids(singles | new_ids, ranges, knx_prefix)
 
 
 def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
@@ -179,6 +184,7 @@ _CLEANUP_SCOPE_LABELS = {
     CLEANUP_SCOPE_MARKER: f"{ICON_DELETE} Markers only",
     CLEANUP_SCOPE_IO: f"{ICON_DELETE} IOs only",
     CLEANUP_SCOPE_KNX: f"{ICON_DELETE} KNX only",
+    CLEANUP_SCOPE_QUICKBUS: f"{ICON_DELETE} Quickbus only",
 }
 
 
@@ -911,7 +917,7 @@ class ComexioRepairFlow(RepairsFlow):
         """Handle the uninstall/cleanup repair flow (cleanup button + KNX pre-release cleanup issue).
 
         Tears down what the integration created in Comexio for the chosen scope
-        (full / marker / io / knx, see cleanup_scope): HA-managed Function Plans, then the
+        (full / marker / io / knx / quickbus, see cleanup_scope): HA-managed Function Plans, then the
         Web-IO device instances, then the Web-IO device classes; knx/full also reset the
         KNX bridge markers. This is destructive and not reversible, so — unlike the other
         fix flows — the default choice is 'ignore' unless the issue names a default scope

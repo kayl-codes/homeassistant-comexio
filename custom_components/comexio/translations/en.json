@@ -22,6 +22,7 @@
           "import_markers": "Create entities for markers",
           "import_ios": "Create entities for IOs",
           "import_knx": "Create entities for KNX objects",
+          "import_quickbus": "Create entities for Quickbus devices (multitouch, motion detectors, ...)",
           "scan_interval": "Background polling interval (min)",
           "cover_keywords": "Keywords for cover detection"
         }
@@ -40,10 +41,19 @@
           "password": "Leave blank to keep the existing password.",
           "api_password": "Leave blank to keep the existing password."
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Comexio",
+        "description": "Comexio at {host} rejected the stored admin credentials. Enter the current ones.",
+        "data": {
+          "username": "Username (Admin UI)",
+          "password": "Password (Admin UI)"
+        }
       }
     },
     "abort": {
-      "reconfigure_successful": "Connection settings updated successfully."
+      "reconfigure_successful": "Connection settings updated successfully.",
+      "reauth_successful": "Re-authentication successful."
     }
   },
   "selector": {
@@ -155,8 +165,8 @@
           "logikplan_plan_prefix": "Prefix for auto-created cluster plans. Plans are named like: HA - Marker [1-100].",
           "logikplan_max_pairs_per_plan": "How many Web-IO + marker pairs fit into one managed plan before a new cluster plan is created. For IO cluster plans this maps to 1 (50), 2 (100) or 3 (150) extensions per plan. KNX cluster plans ignore this setting and always use a fixed size of 50.",
           "logikplan_io_extensions": "Each selected extension gets its IOs wired into a managed IO cluster plan (e.g. HA - IO [Ext]), one column per extension. Start with a single extension to test, then add the others.",
-          "ignored_markers": "Comma-, semicolon-, space- or dot-separated marker IDs and ranges, with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456' or '8-12'). Only markers with a description can be ignored.",
-          "ignored_knx": "Comma-, semicolon-, space- or dot-separated KNX object IDs and ranges, with or without 'K' prefix (e.g. '123, 456; 789' or 'K123, K456' or '8-12'). Only KNX objects with a description can be ignored.",
+          "ignored_markers": "Comma-, semicolon-, space- or dot-separated marker IDs and ranges, with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456' or '8-12'). Only markers with a description can be ignored. A single ID that no longer exists is removed automatically; a range stays as written and also covers IDs created later.",
+          "ignored_knx": "Comma-, semicolon-, space- or dot-separated KNX object IDs and ranges, with or without 'K' prefix (e.g. '123, 456; 789' or 'K123, K456' or '8-12'). Only KNX objects with a description can be ignored. A single ID that no longer exists is removed automatically; a range stays as written and also covers IDs created later.",
           "cover_keywords": "Comma-separated list (e.g. blind, shutter, roller)",
           "function_plan_backup_retention_months": "Once the newest backup of a plan that was deleted directly in Comexio is older than this, a repair asks whether to delete or keep that plan's backups — nothing is deleted without your confirmation. A live plan's backups are never affected. The 'Function Plan Purge Orphaned Backups' action deletes all expired ones at once.",
           "bus_watchdog_enabled": "On a sustained bus-load rise, automatically restart the HA-managed cluster function plans (back to front) to try to relieve it. Non-destructive to the Comexio system itself.",
@@ -246,12 +256,21 @@
         "name": "Web-IO Command Count"
       },
       "watchdog_event": {
-        "name": "Last Watchdog Event"
+        "name": "Last Bus-Load Watchdog Event"
+      },
+      "free_storage": {
+        "name": "Free storage"
+      },
+      "last_boot": {
+        "name": "Last boot"
       }
     },
     "binary_sensor": {
       "managed_plans_problem": {
         "name": "Managed Plans Problem"
+      },
+      "time_server_problem": {
+        "name": "Time server setting"
       }
     },
     "switch": {
@@ -338,7 +357,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Uninstall Cleanup",
-            "description": "Choose what to remove from Comexio. In total, the integration created {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\n* **Everything** removes all of it.\n* **Markers only / IOs only / KNX only** remove just that part's Function Plans, Web-IO device and class. The shared trigger plan is only removed as a whole if it holds no trigger pairs of the other category — otherwise Markers/KNX remove just their own pairs from it.\n* **KNX only** and **Everything** also clear the titles of unused KNX bridge markers, so they become free markers again. A bridge marker you use in an own Function Plan only loses its [K…], [RO] and [TRIG] suffixes and stays a plain marker with its start value. The markers themselves are not deleted.\n\nThis cannot be undone. Deleted Function Plans lose their wiring permanently."
+            "description": "Choose what to remove from Comexio. In total, the integration created {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\n* **Everything** removes all of it.\n* **Markers only / IOs only / KNX only / Quickbus only** remove just that part's Function Plans, Web-IO device and class. The shared trigger plan is only removed as a whole if it holds no trigger pairs of the other category — otherwise Markers/KNX remove just their own pairs from it.\n* **KNX only** and **Everything** also clear the titles of unused KNX bridge markers, so they become free markers again. A bridge marker you use in an own Function Plan only loses its [K…], [RO] and [TRIG] suffixes and stays a plain marker with its start value. The markers themselves are not deleted.\n\nThis cannot be undone. Deleted Function Plans lose their wiring permanently."
           }
         },
         "abort": {
