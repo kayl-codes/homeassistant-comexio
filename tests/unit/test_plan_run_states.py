@@ -224,6 +224,10 @@ class _FakeCoordinator(SimpleNamespace):
     _watchdog_grace_run_state = ComexioCoordinator._watchdog_grace_run_state
     _watchdog_verified_run_state = ComexioCoordinator._watchdog_verified_run_state
     _vanished_user_plans = ComexioCoordinator._vanished_user_plans
+    vanished_id_holders = ComexioCoordinator.vanished_id_holders
+    plan_rename_suspected = ComexioCoordinator.plan_rename_suspected
+    async_watch_id_holder = ComexioCoordinator.async_watch_id_holder
+    _pick_present = ComexioCoordinator._pick_present
     _handle_vanished_plan_action = ComexioCoordinator._handle_vanished_plan_action
     async_restore_vanished_plan = ComexioCoordinator.async_restore_vanished_plan
     async_newest_backup_field = ComexioCoordinator.async_newest_backup_field
@@ -847,7 +851,11 @@ def test_a_reused_id_picked_as_user_plan_is_watched_as_one(api: ComexioAPI) -> N
 
 
 def test_a_plan_dropping_out_of_the_watchdog_is_warned_once(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
-    """Review (#132): a renamed, deleted or reused pick leaves the watchdog — said once, not with every poll."""
+    """Review (#132): a renamed, deleted or reused HA plan leaves the watchdog — said once, not with every poll.
+
+    (cu) A user pick in that state ("43:Alt": ID 43 holds Licht) is not warned about here: it raises its own
+    repair, which names the plan holding the ID now.
+    """
     options = {
         CONF_FUNCTION_PLAN_PLAN_MAP: {"Test1": 19, "HA - Gone": 99},
         CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt", "43", "x"],
@@ -858,17 +866,17 @@ def test_a_plan_dropping_out_of_the_watchdog_is_warned_once(api: ComexioAPI, cap
         asyncio.run(coordinator.async_watch_managed_plans())
         asyncio.run(coordinator.async_watch_managed_plans())
     warnings = [r.getMessage() for r in caplog.records if "no longer watches" in r.getMessage()]
-    assert len(warnings) == 2
-    assert "'Alt' (ID 43)" in warnings[0]
-    assert "'HA - Gone' (ID 99)" in warnings[1]
-    # Resolved again (picked anew), then lost again: warned anew.
-    options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = ["43:Licht"]
+    assert len(warnings) == 1
+    assert "'HA - Gone' (ID 99)" in warnings[0]
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_with({(43, "Alt")}, {43: "Licht"})
+    # Resolved again (mapped anew), then lost again: warned anew.
+    options[CONF_FUNCTION_PLAN_PLAN_MAP] = {"Test1": 19}
     asyncio.run(coordinator.async_watch_managed_plans())
-    options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = ["43:Alt"]
+    options[CONF_FUNCTION_PLAN_PLAN_MAP] = {"Test1": 19, "HA - Gone": 99}
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         asyncio.run(coordinator.async_watch_managed_plans())
-    assert "'Alt' (ID 43)" in caplog.text
+    assert "'HA - Gone' (ID 99)" in caplog.text
 
 
 def test_the_watchdog_waits_for_the_first_full_plan_list(
@@ -1587,7 +1595,7 @@ def test_the_poll_hands_the_vanished_user_plans_to_the_watchdog(api: ComexioAPI)
     options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4"]}
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
     asyncio.run(coordinator._async_refresh_plan_run_states())
-    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with({(47, "Test4")})
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with({(47, "Test4")}, {})
 
 
 TOKEN = vanished_plan_token(47, "Test4")
@@ -1669,7 +1677,7 @@ def test_the_last_plan_deleted_still_reaches_the_watchdog(api: ComexioAPI) -> No
     coordinator.scraped_plan_ids = set()
     asyncio.run(coordinator._async_refresh_plan_run_states())
     api.client.get_function_plan_run_states.assert_not_awaited()
-    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with({(47, "Test4")})
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with({(47, "Test4")}, {})
     coordinator.function_plan_backup.async_load.assert_awaited()  # (Sourcery) before naming bare-ID picks
 
 
@@ -2209,9 +2217,105 @@ def test_a_plan_restored_while_the_check_awaits_is_not_synced_as_vanished(api: C
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
 
     async def restored_meanwhile(*_args: Any, **_kwargs: Any) -> bool:
-        options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = ["43:Test4"]  # the restore moved the pick
+        api._fub_data["50"] = {**FUBS["43"], "Name": "Test4"}  # restored as a new plan
+        options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = ["50:Test4"]  # the restore moved the pick
         return False
 
     coordinator.plan_watchdog.async_check.side_effect = restored_meanwhile
     asyncio.run(coordinator._async_refresh_plan_run_states())
-    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with(set())
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with(set(), {})
+
+
+# (cu) A named pick whose ID another plan holds now (renamed, or the ID reused) is no longer dropped silently.
+
+
+def test_a_named_pick_whose_id_holds_another_plan_is_vanished_with_its_holder(api: ComexioAPI) -> None:
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt", "43", "19:Test1"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    vanished = coordinator._vanished_user_plans()
+    # The bare "43" watches whatever plan holds the ID: not vanished; "19:Test1" still matches.
+    assert vanished == {(43, "Alt")}
+    assert coordinator.vanished_id_holders(vanished) == {43: "Licht"}
+    assert coordinator.vanished_id_holders({(99, "Gone")}) == {}  # deleted, the ID free: no holder
+
+
+def test_a_rename_is_suspected_only_for_matching_newest_auto_backups(api: ComexioAPI) -> None:
+    coordinator = _coordinator(api)
+    hashes = {(43, "Alt"): "h1", (43, "Licht"): "h1", (43, "Other"): "h2"}
+    coordinator.function_plan_backup = SimpleNamespace(
+        newest_auto_hash_sync=lambda fub_id, name: hashes.get((fub_id, name))
+    )
+    assert coordinator.plan_rename_suspected(43, "Alt", "Licht") is True
+    assert coordinator.plan_rename_suspected(43, "Other", "Licht") is False  # other content
+    assert coordinator.plan_rename_suspected(43, "Gone", "Licht") is False  # no backup of the old plan
+    assert coordinator.plan_rename_suspected(43, "Alt", "New") is False  # none of the new one yet
+    assert coordinator.plan_rename_suspected(43, "Licht", "Licht") is False
+
+
+@pytest.mark.parametrize("rename", [False, True])
+def test_watching_the_id_holder_swaps_the_pick(api: ComexioAPI, rename: bool) -> None:
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt", "19:Test1"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    coordinator.function_plan_backup = SimpleNamespace(
+        async_load=AsyncMock(),
+        plan_names_for_fub_id_sync=MagicMock(return_value=set()),
+        async_rename_identity=AsyncMock(),
+    )
+    assert asyncio.run(coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=rename)) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht", "19:Test1"]
+    if rename:
+        coordinator.function_plan_backup.async_rename_identity.assert_awaited_once_with(43, "Alt", "Licht")
+    else:
+        coordinator.function_plan_backup.async_rename_identity.assert_not_awaited()
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited()  # its repair goes right away
+
+
+def test_watching_the_id_holder_keeps_one_pick_per_plan(api: ComexioAPI) -> None:
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt", "43:Licht"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    assert asyncio.run(coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=False)) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht"]
+
+
+@pytest.mark.parametrize(
+    ("picks", "holder"),
+    [
+        (["43:Alt"], "Other"),  # the ID holds another plan by now than the dialog named
+        (["19:Test1"], "Licht"),  # the pick was removed meanwhile
+    ],
+)
+def test_watching_the_id_holder_changes_nothing_once_it_moved_on(
+    api: ComexioAPI, picks: list[str], holder: str
+) -> None:
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: picks}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    coordinator.function_plan_backup = SimpleNamespace(async_rename_identity=AsyncMock())
+    assert asyncio.run(coordinator.async_watch_id_holder(43, "Alt", holder, rename=True)) is False
+    coordinator.request_options_update_without_reload.assert_not_called()
+    coordinator.function_plan_backup.async_rename_identity.assert_not_awaited()
+
+
+def test_a_rename_whose_backups_fail_to_move_keeps_the_pick(api: ComexioAPI) -> None:
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    coordinator.function_plan_backup = SimpleNamespace(async_rename_identity=AsyncMock(side_effect=OSError("disk")))
+    watch = coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=True)
+    with pytest.raises(OSError, match="disk"):
+        asyncio.run(watch)
+    coordinator.request_options_update_without_reload.assert_not_called()
+
+
+@pytest.mark.parametrize(("new_fub_id", "expected"), [(47, "stays on ID 47"), (50, "moved from ID 47 to ID 50")])
+def test_a_restored_pick_logs_its_move_only_when_the_id_changed(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture, new_fub_id: int, expected: str
+) -> None:
+    """(cu) "moved from ID 45 to ID 45" was logged when Comexio gave the restored plan its old ID again."""
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    with caplog.at_level(logging.INFO):
+        coordinator._repoint_vanished_pick("Test4", 47, new_fub_id)
+    assert expected in caplog.text
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == [f"{new_fub_id}:Test4"]

@@ -23,7 +23,13 @@ from custom_components.comexio.const import (
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
 from custom_components.comexio.plan_watchdog import unnamed_plan_label, vanished_plan_issue_id
-from custom_components.comexio.repairs import ACTION_RESTORE, ACTION_UNWATCH, ComexioRepairFlow
+from custom_components.comexio.repairs import (
+    ACTION_RESTORE,
+    ACTION_TAKE_OVER_RENAME,
+    ACTION_UNWATCH,
+    ACTION_WATCH_HOLDER,
+    ComexioRepairFlow,
+)
 from custom_components.comexio.services import backup
 from custom_components.comexio.services._context import SYNC_RUNNING_MSG, refuse_while_plans_busy
 
@@ -337,6 +343,9 @@ def _vanished_flow(
         async_unwatch_user_plan=AsyncMock(return_value=True),
         async_newest_backup_field=AsyncMock(return_value=backup_field),
         async_restore_vanished_plan=MagicMock(return_value="restore-coroutine"),
+        function_plan_backup=SimpleNamespace(async_load=AsyncMock()),
+        plan_rename_suspected=MagicMock(return_value=False),
+        async_watch_id_holder=AsyncMock(return_value=True),
     )
     issue_id = vanished_plan_issue_id("cx1", int(issue_data["fub_id"]), issue_data["plan_name"])
     flow = ComexioRepairFlow(issue_id, dict(issue_data))
@@ -435,6 +444,69 @@ def test_a_vanished_repair_of_a_removed_entry_aborts() -> None:
     flow.hass.data = {DOMAIN: {}}
     result, _ = _step(flow, {"action": "restore"})
     assert result["reason"] == "entry_not_found"
+
+
+# (cu)/(cq) A watched plan whose ID another plan holds now: watch that plan instead, or take it over as a rename.
+
+REPLACED_DATA = {**ISSUE_DATA, "current_name": "Test 4"}
+
+
+@pytest.mark.parametrize(
+    ("suspected", "expected"),
+    [
+        (False, [ACTION_RESTORE, ACTION_WATCH_HOLDER, ACTION_UNWATCH]),
+        (True, [ACTION_TAKE_OVER_RENAME, ACTION_RESTORE, ACTION_UNWATCH]),
+    ],
+)
+def test_the_replaced_repair_offers_the_id_holder(suspected: bool, expected: list[str]) -> None:
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.plan_rename_suspected.return_value = suspected
+    result, _ = _step(flow, None)
+    assert result["description_placeholders"] == {"plan_name": "Test4", "fub_id": "47", "current_name": "Test 4"}
+    (field,) = result["data_schema"].schema
+    assert result["data_schema"].schema[field].config["options"] == expected
+    assert field.default() == expected[0]  # a likely rename comes first
+    coordinator.plan_rename_suspected.assert_called_once_with(47, "Test4", "Test 4")
+
+
+def test_the_replaced_repair_offers_no_rename_when_the_backups_fail_to_load(caplog: pytest.LogCaptureFixture) -> None:
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.function_plan_backup.async_load.side_effect = OSError("store unreadable")
+    coordinator.plan_rename_suspected.return_value = True
+    result, _ = _step(flow, None)
+    (field,) = result["data_schema"].schema
+    assert ACTION_TAKE_OVER_RENAME not in result["data_schema"].schema[field].config["options"]
+    assert "no rename offered" in caplog.text
+
+
+@pytest.mark.parametrize(("action", "rename"), [(ACTION_WATCH_HOLDER, False), (ACTION_TAKE_OVER_RENAME, True)])
+def test_the_replaced_repair_watches_the_id_holder(action: str, rename: bool) -> None:
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.plan_rename_suspected.return_value = True
+    result, _ = _step(flow, {"action": action})
+    assert result["type"] == "create_entry"
+    coordinator.async_watch_id_holder.assert_awaited_once_with(47, "Test4", "Test 4", rename=rename)
+    coordinator.async_restore_vanished_plan.assert_not_called()
+
+
+def test_a_rename_no_longer_matching_is_not_taken_over() -> None:
+    """The content changed between the dialog opening and the choice: no longer recognisable as the plan."""
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    result, _ = _step(flow, {"action": ACTION_TAKE_OVER_RENAME})
+    assert result["reason"] == "rename_not_confirmed"
+    coordinator.async_watch_id_holder.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason"), [(False, "holder_changed"), (OSError("disk full"), "backups_not_moved")]
+)
+def test_the_replaced_repair_reports_a_holder_it_could_not_watch(outcome: Any, reason: str) -> None:
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.async_watch_id_holder.side_effect = outcome if isinstance(outcome, Exception) else None
+    coordinator.async_watch_id_holder.return_value = outcome
+    result, _ = _step(flow, {"action": ACTION_WATCH_HOLDER})
+    assert result["type"] == "abort"
+    assert result["reason"] == reason
 
 
 # (cm) A restore-as-new moves the watchdog pick with the plan.

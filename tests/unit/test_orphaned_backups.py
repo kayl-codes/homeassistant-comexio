@@ -565,3 +565,43 @@ def test_purge_with_no_plan_left_deletes_every_expired_plan(manager: FunctionPla
 def test_the_fix_flow_shows_the_plan_names_of_its_issue_data_on_one_line() -> None:
     placeholders = orphaned_backups.repair_placeholders({"plan_name": "Hall\nway", "current_plan": "Pumps\r\n2"})
     assert (placeholders["plan_name"], placeholders["current_plan"]) == ("Hall way", "Pumps 2")
+
+
+# (cq) A plan renamed in Comexio: its backups continue under the new name once the user takes the rename over.
+
+
+def test_a_renamed_plan_takes_its_backups_along(manager: FunctionPlanBackupManager) -> None:
+    async def run() -> int:
+        await manager.async_load()
+        manager._auto_data["2"]["Heating"] = [_snap(RECENT)]  # the first auto backup after the rename
+        await manager.async_keep_orphaned(2, "Pumps")
+        return await manager.async_rename_identity(2, "Pumps", "Heating")
+
+    assert asyncio.run(run()) == 3
+    auto = FakeStore.saved[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]
+    assert list(auto["2"]) == ["Heating"]
+    assert [snap["captured_at"] for snap in auto["2"]["Heating"]] == [RECENT, OLD, OLD]  # newest first
+    assert FakeStore.saved[f"{DOMAIN}_logikplan_changes_{SERVER_ID}"]["2"] == {"Heating": [_snap(OLD)]}
+    assert _kept_saved() == []  # live again under its new name: no longer an orphan to keep
+
+
+def test_a_rename_that_could_not_be_saved_is_put_back(
+    manager: FunctionPlanBackupManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        await manager.async_load()
+        monkeypatch.setattr(manager._change_store, "async_save", MagicMock(side_effect=OSError("disk full")))
+        with pytest.raises(OSError, match="disk full"):
+            await manager.async_rename_identity(2, "Pumps", "Heating")
+
+    asyncio.run(run())
+    assert manager._auto_data["2"] == {"Pumps": [_snap(OLD), _snap(OLD)]}
+    assert manager._change_data["2"] == {"Pumps": [_snap(OLD)]}
+
+
+def test_newest_auto_hash_is_the_newest_auto_snapshots(manager: FunctionPlanBackupManager) -> None:
+    asyncio.run(manager.async_load())
+    manager._auto_data["2"]["Pumps"][0]["hash"] = "abc"
+    assert manager.newest_auto_hash_sync(2, "Pumps") == "abc"
+    assert manager.newest_auto_hash_sync(1, "Lights") is None  # a snapshot without a hash
+    assert manager.newest_auto_hash_sync(9, "Gone") is None

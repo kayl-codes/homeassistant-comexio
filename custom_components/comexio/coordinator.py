@@ -186,6 +186,7 @@ from .const import (
     split_ignored_ids,
     system_info_signal,
     trigger_pair_categories,
+    watchdog_user_plan_pick,
     webio_class_label,
     webio_class_name,
 )
@@ -4480,8 +4481,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
 
     def _unresolved_plan_identities(self) -> frozenset[tuple[int, str]]:
-        """(fub_id, name) of the plan_map entries and named user picks Comexio no longer has under that name.
+        """(fub_id, name) of the plan_map entries Comexio no longer has under that name.
 
+        The user picks are not among them: such a pick raises its own repair (_vanished_user_plans).
         Empty without a live plan list: a failed fetch, or a cache holding only the plans HA itself
         created or looked up, must not read as every other plan gone. Once a poll read an empty
         plan list, every entry is unresolved (#140).
@@ -4489,24 +4491,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self.live_plan_list() is None:
             return frozenset()
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         identities = [(str(fub_id), name) for name, fub_id in raw_map.items()] if isinstance(raw_map, dict) else []
-        if isinstance(raw_picks, list):
-            picks = (parse_watchdog_user_plan_pick(value) for value in raw_picks)
-            identities += [(str(pick[0]), pick[1]) for pick in picks if pick is not None and pick[1] is not None]
         live = self._existing_plan_names(fub_id for fub_id, _ in identities if fub_id.isdigit())
         return frozenset(
             (int(fub_id), name) for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) != name
         )
 
     def _warn_unresolved_watch_picks(self) -> None:
-        """Warn once per pick that drops out of the watchdog because its ID no longer carries its name."""
+        """Warn once per HA plan that drops out of the watchdog because its ID no longer carries its name."""
         unresolved = self._unresolved_plan_identities()
         for fub_id, name in sorted(unresolved - self._unresolved_watch_picks):
             _LOGGER.warning(
-                "[%s] The function plan watchdog no longer watches '%s' (ID %s): Comexio has no plan of that name "
-                "under this ID any more (renamed, deleted, or the ID reused for another plan). A renamed user plan "
-                "can be picked again in the options",
+                "[%s] The function plan watchdog no longer watches HA's plan '%s' (ID %s): Comexio has no plan of "
+                "that name under this ID any more (renamed, deleted, or the ID reused for another plan)",
                 self.server_id,
                 one_line(name),
                 fub_id,
@@ -4555,15 +4552,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return None
 
     def _vanished_user_plans(self) -> set[tuple[int, str]]:
-        """(fub_id, name) of the user picks whose ID Comexio no longer has at all (deleted).
+        """(fub_id, name) of the user picks Comexio no longer has under their ID and name.
 
+        Deleted, or (a named pick) its ID now carries another name: renamed and deleted-then-reused
+        look alike, so both raise the same repair, which names the ID's current plan (vanished_id_holders).
         By ID and name: a reused ID can belong to two deleted picks ("47:X", "47:Y"). Only with a
-        live plan list (see _unresolved_plan_identities). An ID now carrying another name is left to
-        _warn_unresolved_watch_picks: renamed and deleted-then-reused look alike. A bare-ID pick
-        (saved before names were) takes the name its backups carry, unless a named pick of the same
-        ID names it. A pick the plan_map holds under the same ID and name is left out: that plan is
-        HA's own. The ID alone proves nothing — a stale entry of another plan on a reused ID must not
-        hide a deleted user plan.
+        live plan list (see _unresolved_plan_identities). A bare-ID pick (saved before names were)
+        watches whatever plan holds its ID; gone, it takes the name its backups carry, unless a named
+        pick of the same ID names it. A pick the plan_map holds under the same ID and name is left out:
+        that plan is HA's own. The ID alone proves nothing — a stale entry of another plan on a reused
+        ID must not hide a deleted user plan.
         """
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         if self.live_plan_list() is None or not isinstance(raw_picks, list):
@@ -4574,13 +4572,33 @@ class ComexioCoordinator(DataUpdateCoordinator):
         picks = [pick for value in raw_picks if (pick := parse_watchdog_user_plan_pick(value)) is not None]
         named_ids = {fub_id for fub_id, name in picks if name is not None}
         vanished: set[tuple[int, str]] = set()
+        live = self._existing_plan_names(fub_id for fub_id, name in picks if name is not None)
         for fub_id, name in picks:
-            if str(fub_id) in self.api.fub_data or (name is None and fub_id in named_ids):
+            if name is None:
+                if str(fub_id) in self.api.fub_data or fub_id in named_ids:
+                    continue
+            elif live.get(fub_id) == name:
                 continue
             plan_name = name if name is not None else self._backed_up_plan_name(fub_id)
             if str(raw_map.get(plan_name)) != str(fub_id):  # else HA's own plan
                 vanished.add((fub_id, plan_name))
         return vanished
+
+    def vanished_id_holders(self, vanished: Iterable[tuple[int, str]]) -> dict[int, str]:
+        """fub_id → name of the plan now holding the ID of a vanished pick: renamed, or the ID reused."""
+        return self._existing_plan_names(fub_id for fub_id, _ in vanished)
+
+    def plan_rename_suspected(self, fub_id: int, old_name: str, new_name: str) -> bool:
+        """Whether plan new_name on fub_id looks like old_name renamed: their newest auto backups hash the same.
+
+        A hint only (cache-only, backups loaded): the hash covers elements and wiring, not name or paper,
+        so a plan deleted and rebuilt with the same content (or two empty plans) match too. Without a
+        backup on either side it is no rename.
+        """
+        if old_name == new_name:
+            return False
+        hashes = [self.function_plan_backup.newest_auto_hash_sync(fub_id, name) for name in (old_name, new_name)]
+        return hashes[0] is not None and hashes[0] == hashes[1]
 
     def _backed_up_plan_name(self, fub_id: int) -> str:
         """The one plan name the backups of fub_id carry; unnamed_plan_label for none or several (no restore then)."""
@@ -4648,7 +4666,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Read after the check's awaits (auto-starts, pushes): a vanished plan restored meanwhile is no longer
         # vanished, so its repair is not raised again nor its alarm sent again. No await between it and the sync.
         vanished = await self._async_vanished_user_plans_named()
-        await self.plan_watchdog.async_sync_vanished(vanished)
+        await self.plan_watchdog.async_sync_vanished(vanished, self.vanished_id_holders(vanished))
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
         return stopped_changed
@@ -5141,13 +5159,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         if picks is None:
             return
-        _LOGGER.info(
-            "[%s] Function plan watchdog pick '%s' moved from ID %s to ID %s",
-            self.server_id,
-            one_line(name),
-            old_fub_id,
-            new_fub_id,
-        )
+        if new_fub_id == old_fub_id:
+            # Comexio handed the restored plan its old, free ID again: nothing moved.
+            _LOGGER.info(
+                "[%s] Function plan watchdog pick '%s' stays on ID %s (restored under its old ID)",
+                self.server_id,
+                one_line(name),
+                new_fub_id,
+            )
+        else:
+            _LOGGER.info(
+                "[%s] Function plan watchdog pick '%s' moved from ID %s to ID %s",
+                self.server_id,
+                one_line(name),
+                old_fub_id,
+                new_fub_id,
+            )
         self.request_options_update_without_reload(
             {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: picks}
         )
@@ -5202,6 +5229,47 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if await self.async_watch_managed_plans():
             self.async_update_listeners()
         return True
+
+    async def async_watch_id_holder(self, fub_id: int, name: str, holder: str, *, rename: bool) -> bool:
+        """Swap the vanished pick (fub_id, name) for holder, the plan holding its ID now; False if that changed.
+
+        rename: holder is the picked plan renamed (see plan_rename_suspected); its backups move to the new
+        name first, so its history goes on as one chain instead of an orphaned one. A failing backup save
+        raises with the pick unchanged.
+        """
+        if self._existing_plan_names([fub_id]).get(fub_id) != holder or not self._pick_present(fub_id, name):
+            return False
+        if rename:
+            await self.function_plan_backup.async_rename_identity(fub_id, name, holder)
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        picks: list[Any] = []
+        for value in raw_picks if isinstance(raw_picks, list) else []:
+            if parse_watchdog_user_plan_pick(value) == (fub_id, name):
+                value = watchdog_user_plan_pick(fub_id, holder)
+            if value not in picks:
+                picks.append(value)
+        _LOGGER.info(
+            "[%s] Function plan watchdog pick '%s' (ID %s) now watches '%s'%s",
+            self.server_id,
+            one_line(name),
+            fub_id,
+            one_line(holder),
+            " (taken over as a rename, backups moved)" if rename else "",
+        )
+        self.request_options_update_without_reload(
+            {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: picks}
+        )
+        # Drops the vanished repair and push right away, not only with the next run-state poll.
+        if await self.async_watch_managed_plans():
+            self.async_update_listeners()
+        return True
+
+    def _pick_present(self, fub_id: int, name: str) -> bool:
+        """Whether the options hold the named pick (fub_id, name)."""
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        return isinstance(raw_picks, list) and any(
+            parse_watchdog_user_plan_pick(value) == (fub_id, name) for value in raw_picks
+        )
 
     def _notify_bare_pick_kept(self, fub_id: int, name: str) -> None:
         """Stop watching left a bare-ID pick: the ID belongs to another plan by now, which it watches."""

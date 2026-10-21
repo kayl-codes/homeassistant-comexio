@@ -24,6 +24,7 @@ from custom_components.comexio.plan_watchdog import (
     ACTION_START,
     ACTION_UNWATCH,
     ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED,
+    ISSUE_FUNCTION_PLAN_REPLACED,
     ISSUE_FUNCTION_PLAN_STOPPED,
     ISSUE_FUNCTION_PLAN_STOPPED_USER,
     ISSUE_FUNCTION_PLAN_VANISHED,
@@ -2372,3 +2373,28 @@ def test_a_push_on_its_way_for_a_plan_no_longer_watched_is_judged_for_a_clear(ir
         assert watchdog._maybe_actionable({34: True}) == {99}
     finally:
         del plan_watchdog._PUSH_LOCKS[tag]
+
+
+# (cu) A watched plan whose ID another plan holds now: the repair and push name that plan.
+
+
+def test_a_vanished_plan_whose_id_another_plan_holds_names_it(ir: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    with caplog.at_level(logging.WARNING, logger=plan_watchdog.__name__):
+        asyncio.run(watchdog.async_sync_vanished(TEST4, {47: "Test 4"}))
+    issue = ir.async_create_issue.call_args.kwargs
+    assert issue["translation_key"] == ISSUE_FUNCTION_PLAN_REPLACED
+    assert issue["translation_placeholders"]["current_name"] == "Test 4"
+    assert issue["data"]["current_name"] == "Test 4"
+    ((_domain, _service, data),) = _pushes(watchdog)
+    assert data["title"] == "Comexio: Logikplan nicht gefunden"
+    assert data["message"].startswith(
+        "Der überwachte Logikplan Test4 (ID 47) wurde nicht gefunden: ID 47 trägt jetzt Test 4."
+    )
+    assert "'Test4' (ID 47) not found: the ID now holds 'Test 4'" in caplog.text
+    # Freed again (the other plan deleted too): the same repair, now as "no longer exists".
+    asyncio.run(watchdog.async_sync_vanished(TEST4, {}))
+    issue = ir.async_create_issue.call_args.kwargs
+    assert issue["translation_key"] == ISSUE_FUNCTION_PLAN_VANISHED
+    assert "current_name" not in issue["data"]

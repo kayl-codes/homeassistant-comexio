@@ -127,7 +127,9 @@
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Restaurer depuis la sauvegarde la plus récente",
-        "unwatch": "🚫 Ne plus surveiller ce plan"
+        "unwatch": "🚫 Ne plus surveiller ce plan",
+        "take_over_rename": "✏️ Reprendre le renommage (les sauvegardes suivent)",
+        "watch_holder": "👁️ Surveiller à la place le plan qui porte maintenant cet ID"
       }
     }
   },
@@ -492,7 +494,30 @@
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
           "plan_not_missing": "Le plan {plan_name} (ID {fub_id}) ne manque plus (restauré ou plus surveillé). Rien n'a été modifié.",
           "no_backup": "Il n'existe aucune sauvegarde de {plan_name} (ID {fub_id}) pour le restaurer. Rien n'a été modifié — vous pouvez cesser de le surveiller.",
-          "check_pending": "La liste des plans n'a pas encore été lue depuis le démarrage de Home Assistant ; on ne sait donc pas encore si {plan_name} (ID {fub_id}) manque toujours. Rien n'a été modifié ; veuillez réessayer dans un instant."
+          "check_pending": "La liste des plans n'a pas encore été lue depuis le démarrage de Home Assistant ; on ne sait donc pas encore si {plan_name} (ID {fub_id}) manque toujours. Rien n'a été modifié ; veuillez réessayer dans un instant.",
+          "rename_not_confirmed": "Le contenu de {current_name} ne correspond plus à la dernière sauvegarde de {plan_name} ; le renommage n'a donc pas été repris. Rien n'a été modifié — rouvrez la réparation pour choisir à nouveau.",
+          "backups_not_moved": "Les sauvegardes de {plan_name} n'ont pas pu être déplacées vers {current_name} ; rien n'a donc été modifié. Consultez le journal de Home Assistant.",
+          "holder_changed": "L'ID {fub_id} ne porte plus {current_name}, ou la sélection de {plan_name} a été modifiée entre-temps dans les options. Rien n'a été modifié."
+        }
+      }
+    },
+    "function_plan_replaced": {
+      "title": "Plan de fonctions {plan_name} introuvable sous l'ID {fub_id}",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de fonctions surveillé introuvable",
+            "description": "Le plan de fonctions surveillé **{plan_name}** (ID {fub_id}) est introuvable dans Comexio : l'ID {fub_id} porte maintenant le plan **{current_name}**. Soit le plan a été renommé, soit il a été supprimé et Comexio a attribué son ID à un autre plan.\n\n**Reprendre le renommage** est proposé lorsque le contenu de {current_name} correspond à la dernière sauvegarde de {plan_name} : le watchdog surveille alors {current_name}, et les sauvegardes de {plan_name} continuent sous le nouveau nom. Un contenu identique ne prouve pas qu'il s'agit du même plan (p. ex. deux plans vides).\n**Surveiller {current_name} à la place** surveille le plan qui porte maintenant l'ID ; les sauvegardes restent telles quelles.\n**Restaurer** reconstruit {plan_name} à partir de sa sauvegarde la plus récente en tant que nouveau plan et le démarre ; il reste surveillé sous son nouvel ID.\n**Ne plus surveiller** retire {plan_name} des plans utilisateur surveillés."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "plan_not_missing": "Le plan {plan_name} (ID {fub_id}) ne manque plus (restauré ou plus surveillé). Rien n'a été modifié.",
+          "no_backup": "Il n'existe aucune sauvegarde de {plan_name} (ID {fub_id}) pour le restaurer. Rien n'a été modifié — vous pouvez cesser de le surveiller.",
+          "check_pending": "La liste des plans n'a pas encore été lue depuis le démarrage de Home Assistant ; on ne sait donc pas encore si {plan_name} (ID {fub_id}) manque toujours. Rien n'a été modifié ; veuillez réessayer dans un instant.",
+          "rename_not_confirmed": "Le contenu de {current_name} ne correspond plus à la dernière sauvegarde de {plan_name} ; le renommage n'a donc pas été repris. Rien n'a été modifié — rouvrez la réparation pour choisir à nouveau.",
+          "backups_not_moved": "Les sauvegardes de {plan_name} n'ont pas pu être déplacées vers {current_name} ; rien n'a donc été modifié. Consultez le journal de Home Assistant.",
+          "holder_changed": "L'ID {fub_id} ne porte plus {current_name}, ou la sélection de {plan_name} a été modifiée entre-temps dans les options. Rien n'a été modifié."
         }
       }
     },

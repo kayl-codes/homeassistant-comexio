@@ -127,7 +127,9 @@
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Restore from the newest backup",
-        "unwatch": "🚫 Stop watching this plan"
+        "unwatch": "🚫 Stop watching this plan",
+        "take_over_rename": "✏️ Take over the rename (backups move along)",
+        "watch_holder": "👁️ Watch the plan now holding this ID instead"
       }
     }
   },
@@ -492,7 +494,30 @@
           "entry_not_found": "The associated config entry could not be found — it may have been removed.",
           "plan_not_missing": "The plan {plan_name} (ID {fub_id}) is no longer missing (restored or no longer watched). Nothing was changed.",
           "no_backup": "There is no backup of {plan_name} (ID {fub_id}) to restore it from. Nothing was changed — you can stop watching it instead.",
-          "check_pending": "The plan list was not read since Home Assistant started, so it is not known yet whether {plan_name} (ID {fub_id}) is still missing. Nothing was changed; please try again shortly."
+          "check_pending": "The plan list was not read since Home Assistant started, so it is not known yet whether {plan_name} (ID {fub_id}) is still missing. Nothing was changed; please try again shortly.",
+          "rename_not_confirmed": "The content of {current_name} no longer matches the last backup of {plan_name}, so the rename was not taken over. Nothing was changed — open the repair again to choose anew.",
+          "backups_not_moved": "The backups of {plan_name} could not be moved to {current_name}, so nothing was changed. See the Home Assistant log.",
+          "holder_changed": "ID {fub_id} no longer holds {current_name}, or the pick of {plan_name} was changed in the options meanwhile. Nothing was changed."
+        }
+      }
+    },
+    "function_plan_replaced": {
+      "title": "Function plan {plan_name} not found under ID {fub_id}",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Watched function plan not found",
+            "description": "The watched function plan **{plan_name}** (ID {fub_id}) was not found in Comexio: ID {fub_id} now holds the plan **{current_name}**. Either the plan was renamed, or it was deleted and Comexio gave its ID to another plan.\n\n**Take over the rename** is offered when the content of {current_name} matches the last backup of {plan_name}: the watchdog then watches {current_name}, and the backups of {plan_name} continue under the new name. The same content does not prove it is the same plan (e.g. two empty plans).\n**Watch {current_name} instead** watches the plan now holding the ID; the backups stay as they are.\n**Restore** rebuilds {plan_name} from its newest backup as a new plan and starts it; it stays watched under its new ID.\n**Stop watching** removes {plan_name} from the watched user plans."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "plan_not_missing": "The plan {plan_name} (ID {fub_id}) is no longer missing (restored or no longer watched). Nothing was changed.",
+          "no_backup": "There is no backup of {plan_name} (ID {fub_id}) to restore it from. Nothing was changed — you can stop watching it instead.",
+          "check_pending": "The plan list was not read since Home Assistant started, so it is not known yet whether {plan_name} (ID {fub_id}) is still missing. Nothing was changed; please try again shortly.",
+          "rename_not_confirmed": "The content of {current_name} no longer matches the last backup of {plan_name}, so the rename was not taken over. Nothing was changed — open the repair again to choose anew.",
+          "backups_not_moved": "The backups of {plan_name} could not be moved to {current_name}, so nothing was changed. See the Home Assistant log.",
+          "holder_changed": "ID {fub_id} no longer holds {current_name}, or the pick of {plan_name} was changed in the options meanwhile. Nothing was changed."
         }
       }
     },
