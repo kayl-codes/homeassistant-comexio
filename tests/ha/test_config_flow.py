@@ -189,6 +189,7 @@ async def test_reauth_login_errors_keep_the_stored_credentials(
     assert result["step_id"] == "reauth_confirm"
     assert result["errors"] == {"base": error}
     assert dict(mock_config_entry.data) == data_before
+    mock_comexio_api[0].login.assert_awaited_once()
     mock_comexio_api[0].close.assert_called_once()
 
 
@@ -248,4 +249,5 @@ async def test_reconfigure_login_errors_keep_the_stored_settings(
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": error}
     assert dict(mock_config_entry.data) == data_before
+    mock_comexio_api[0].login.assert_awaited_once()
     mock_comexio_api[0].close.assert_called_once()
