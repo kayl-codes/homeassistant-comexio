@@ -92,6 +92,7 @@ SERVER_LEVEL_UNIQUE_ID_SUFFIXES = (
     "sd_card_sensor",
     "free_storage_sensor",
     "last_boot_sensor",
+    "connection",
     "time_server_problem",
     "plan_preview_sensor",
     "plan_preview_image",

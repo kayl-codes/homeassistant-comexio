@@ -263,6 +263,14 @@
       },
       "last_boot": {
         "name": "Último arranque"
+      },
+      "connection": {
+        "name": "Conexión",
+        "state": {
+          "https": "HTTPS (cifrada)",
+          "http": "HTTP (sin cifrar)",
+          "certificate_changed": "Certificado cambiado"
+        }
       }
     },
     "binary_sensor": {

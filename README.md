@@ -61,6 +61,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
 | `sensor` (diagnostic) | Integration | `Free storage` — free space of the Comexio's internal storage in %, polled every 5 min. |
 | `sensor` (diagnostic) | Integration | `Last boot` — when the Comexio system last started (from its uptime), polled every 5 min. |
+| `sensor` (diagnostic) | Integration | `Connection` — `HTTPS` (encrypted, the pinned certificate), `HTTP` (Comexio serves no HTTPS: not encrypted) or `Certificate changed` (Comexio presents another certificate than the pinned one; nothing is sent until you decide in the repair). The pinned and, while the repair is open, the presented certificate's SHA-256 fingerprint as state attributes. Stays available while polls fail, so an automation can watch it. |
 | `binary_sensor` (diagnostic, problem) | Integration | `Time server setting` — on while Comexio does not set its clock from a time server (disabled or no server entered); a wrong clock breaks timers and schedules in the function plans. Off only means a server is configured, not that Comexio reaches it. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
 | `button` (configuration) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |

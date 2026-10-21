@@ -13,7 +13,11 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.certificate import certificate_issue_id
+from custom_components.comexio.certificate import (
+    async_clear_certificate_changed,
+    async_report_certificate_changed,
+    certificate_issue_id,
+)
 from custom_components.comexio.const import (
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_HOST,
@@ -493,6 +497,44 @@ async def test_a_setup_with_the_pinned_certificate_drops_the_repair(
 
     assert pinned_entry.state is ConfigEntryState.LOADED
     assert _issue(hass, pinned_entry) is None
+
+
+# Connection sensor
+
+CONNECTION_SENSOR = f"sensor.{SERVER_ID}_connection"
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_connection_sensor_follows_the_certificate_repair(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    # Watchable by an automation: the state turns to certificate_changed while the repair is open.
+    await _setup(hass, pinned_entry)
+
+    state = hass.states.get(CONNECTION_SENSOR)
+    assert state.state == "https"
+    assert state.attributes["pinned_fingerprint"] == ":".join(["AA"] * 32)
+    assert state.attributes["presented_fingerprint"] is None
+
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
+    state = hass.states.get(CONNECTION_SENSOR)
+    assert state.state == "certificate_changed"
+    assert state.attributes["presented_fingerprint"] == ":".join(["BB"] * 32)
+
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get(CONNECTION_SENSOR).state == "https"
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_connection_sensor_shows_plain_http(hass: HomeAssistant, mock_config_entry: MockConfigEntry) -> None:
+    # The default handshake finds no HTTPS, so the entry stays on HTTP.
+    await _setup(hass, mock_config_entry)
+
+    state = hass.states.get(CONNECTION_SENSOR)
+    assert state.state == "http"
+    assert state.attributes["pinned_fingerprint"] is None
 
 
 # Repair

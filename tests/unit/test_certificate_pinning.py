@@ -15,10 +15,11 @@ from aiocomexio import (
 )
 import pytest
 
-from custom_components.comexio import api as api_module, certificate
+from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, api as api_module, certificate
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.button import _sync_login_error
 from custom_components.comexio.const import CERTIFICATE_CHANGED_MSG, LOGIN_ERROR_CERTIFICATE, LOGIN_ERROR_CONNECTION
+from custom_components.comexio.sensor import ComexioConnectionSensor
 from custom_components.comexio.services._context import login_failed_message
 
 PINNED = "a" * 64
@@ -306,3 +307,9 @@ def test_every_language_shows_the_connection(language: str) -> None:
     placeholders = {field for _, field, _, _ in string.Formatter().parse(text) if field is not None}
     for data in ({}, {"certificate_fingerprint": PINNED}):
         assert placeholders == set(certificate.connection_placeholders(data))
+
+
+def test_the_orphan_cleanup_keeps_the_connection_sensor() -> None:
+    unique_id = ComexioConnectionSensor(MagicMock(), "srv").unique_id
+
+    assert unique_id.removeprefix("comexio_srv_") in SERVER_LEVEL_UNIQUE_ID_SUFFIXES

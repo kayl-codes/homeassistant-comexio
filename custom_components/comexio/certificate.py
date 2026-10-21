@@ -33,6 +33,12 @@ _LOGGER = logging.getLogger(__name__)
 
 ISSUE_CERTIFICATE_CHANGED = "certificate_changed"
 
+# States of the connection sensor (sensor.ComexioConnectionSensor), see connection_state.
+CONNECTION_HTTPS = "https"
+CONNECTION_HTTP = "http"
+CONNECTION_CERTIFICATE_CHANGED = ISSUE_CERTIFICATE_CHANGED
+CONNECTION_STATES = [CONNECTION_HTTPS, CONNECTION_HTTP, CONNECTION_CERTIFICATE_CHANGED]
+
 
 def certificate_issue_id(entry_id: str) -> str:
     """Issue id of the certificate_changed repair of one config entry."""
@@ -122,6 +128,23 @@ def connection_placeholders(data: Any) -> dict[str, str]:
     if pinned is None:
         return {"protocol": "HTTP", "fingerprint": "—"}
     return {"protocol": "HTTPS", "fingerprint": format_fingerprint(pinned)}
+
+
+def presented_fingerprint(hass: HomeAssistant, entry_id: str) -> str | None:
+    """The certificate Comexio presents instead of the pinned one; None while no certificate_changed repair is open."""
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, certificate_issue_id(entry_id))
+    if issue is None or issue.data is None:
+        return None
+    return issue.data.get("actual")
+
+
+def connection_state(hass: HomeAssistant, entry: ConfigEntry) -> str:
+    """CONNECTION_HTTP without a pin, CONNECTION_CERTIFICATE_CHANGED while the repair is open, else CONNECTION_HTTPS."""
+    if CONF_CERTIFICATE_FINGERPRINT not in entry.data:
+        return CONNECTION_HTTP
+    if presented_fingerprint(hass, entry.entry_id) is not None:
+        return CONNECTION_CERTIFICATE_CHANGED
+    return CONNECTION_HTTPS
 
 
 def _new_api(hass: HomeAssistant, data: Any, fingerprint: str | None) -> ComexioAPI:
