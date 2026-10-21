@@ -10,12 +10,14 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS
 import pytest
 
 from custom_components.comexio import ha_address
 from custom_components.comexio.ha_address import (
     HA_HOST_CANDIDATES,
     HaAddressResolver,
+    WebhookTarget,
     format_address,
     host_of,
     webio_device_hints,
@@ -723,10 +725,26 @@ def test_the_coordinator_passes_every_stored_address(data: dict | None, hints: t
 
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.data = data
-    coordinator.ha_address = SimpleNamespace(async_get=AsyncMock(return_value="x:8123"))
+    coordinator.api = SimpleNamespace(webhook_protocol=None)
+    coordinator.ha_address = SimpleNamespace(async_target=AsyncMock(return_value=WebhookTarget("x:8123", False)))
 
     assert asyncio.run(coordinator.async_ha_address()) == "x:8123"
-    coordinator.ha_address.async_get.assert_awaited_once_with(*hints)
+    coordinator.ha_address.async_target.assert_awaited_once_with(*hints)
+
+
+@pytest.mark.parametrize(("https", "protocol"), [(False, WEBIO_PROTOCOL_HTTP), (True, WEBIO_PROTOCOL_HTTPS)])
+def test_the_webhook_target_hands_its_protocol_to_the_command_builders(https: bool, protocol: int) -> None:
+    from unittest.mock import AsyncMock
+
+    from custom_components.comexio.coordinator import ComexioCoordinator
+
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.data = None
+    coordinator.api = SimpleNamespace(webhook_protocol=None)
+    coordinator.ha_address = SimpleNamespace(async_target=AsyncMock(return_value=WebhookTarget("x:443", https)))
+
+    assert asyncio.run(coordinator.async_webhook_target()) == WebhookTarget("x:443", https)
+    assert coordinator.api.webhook_protocol == protocol
 
 
 @pytest.mark.parametrize(

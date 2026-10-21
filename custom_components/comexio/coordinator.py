@@ -1,7 +1,16 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Set as AbstractSet
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Set as AbstractSet,
+)
 import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -14,7 +23,7 @@ import uuid
 
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
-from aiocomexio.webio import quickbus_command_name
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS, quickbus_command_name
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
@@ -80,6 +89,8 @@ from .const import (
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
     CONF_USERNAME,
+    CONF_WEBHOOK_ADDRESS_MODE,
+    CONF_WEBHOOK_URL,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
     DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
@@ -145,6 +156,7 @@ from .const import (
     SYSTEM_INFO_POLL_INTERVAL_SEC,
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
     WATCHDOG_HISTORY_MAX_ENTRIES,
+    WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
@@ -199,6 +211,7 @@ from .function_plan_block_settings import expand_autohide_blocks, snapshot_block
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .ha_address import (
     HaAddressResolver,
+    WebhookTarget,
     host_of,
     is_loopback_address,
     webio_device_hints,
@@ -517,6 +530,22 @@ def _add_audit_orphan(orphans: list[dict[str, Any]], mismatches: set[str], com: 
     mismatches.add(f"orphan_{com['id']}")
 
 
+def _protocol_audit_items(
+    com_commands: dict[str, Any], payload_map: dict[str, Any], webio_device_audit: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The commands to rewrite with the webhook protocol: every one of a class whose protocol differs.
+
+    Only commands HA builds a payload for (by name); a renamed or orphaned command is rewritten or
+    deleted by its own audit category. The items have the shape of the type-mismatch items.
+    """
+    stale = {cls for cls, dev in webio_device_audit.items() if dev.get("protocol_mismatch")}
+    return [
+        {"id": info.get("cmdId"), "name": name, "payload": payload_map[name], "webio_class": info.get("webioClass")}
+        for name, info in com_commands.items()
+        if info.get("webioClass") in stale and name in payload_map and info.get("cmdId")
+    ]
+
+
 def _log_audit_items(icon: str, label: str, items: list[dict[str, Any]]) -> None:
     """One audit summary category: its count, then one line per item."""
     _LOGGER.info("%s %s (%d):", icon, label, len(items))
@@ -660,7 +689,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
-        self.ha_address = HaAddressResolver(hass)
+        conf = {**entry.data, **entry.options}
+        self.ha_address = HaAddressResolver(
+            hass, conf.get(CONF_WEBHOOK_ADDRESS_MODE, WEBHOOK_ADDRESS_AUTO), conf.get(CONF_WEBHOOK_URL)
+        )
+        # Protocol each Web-IO class's commands were last written with ({class: WEBIO_PROTOCOL_*, or
+        # None when unknown}); the config scrape does not show it, so the audit compares against this.
+        self.webio_synced_protocols: dict[str, int | None] = {}
+        self._webio_protocol_store: Store = Store(hass, 1, f"{DOMAIN}_webio_protocol_{self.server_id}")
         self._function_plan_backup_lock: asyncio.Lock = asyncio.Lock()
         self.last_changed_plans: list[dict[str, Any]] = []
         # Backup cycles in a row whose bulk load failed (see _track_bulk_load_result).
@@ -1281,6 +1317,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Reset internal failure flag when the audit is successful
         self.last_audit_failed = False
 
+        # The address a device already stores is kept while it still points to this host (#177),
+        # so a fresh resolver after a restart needs at most one lookup instead of a search. Resolved
+        # before the payloads: it sets the protocol they are built with.
+        ha_address = (await self.async_webhook_target(webio_devices)).address
+
         # Prepare payload map for future delta updates via button/repairs
         payload_map = {
             cmd["Name"]: cmd
@@ -1289,11 +1330,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         }
 
-        # The address a device already stores is kept while it still points to this host (#177),
-        # so a fresh resolver after a restart needs at most one lookup instead of a search.
-        ha_address = await self.ha_address.async_get(*webio_device_hints(webio_devices))
-        webio_device_audit = await self._async_audit_webio_devices(webio_devices, ha_address)
+        webio_device_audit = await self._async_audit_webio_devices(
+            webio_devices, ha_address, active_webio_classes(conf)
+        )
         ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
+        protocol_items = _protocol_audit_items(audited_commands, payload_map, webio_device_audit)
 
         # Check whether a function plan is actively selected (guards against false positives).
         # At startup the select entity is not yet in the state machine; fall back to the
@@ -1314,6 +1355,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         wired_knx_webio_pairs = wired[2]
 
         mismatches: set[str] = {"ip_address"} if ip_mismatch else set()
+        mismatches.update(f"protocol_{item['webio_class']}_{item['id']}" for item in protocol_items)
         found = self._compare_audit_maps(
             ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_exts, mismatches
         )
@@ -1342,6 +1384,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "orphan": found["orphan"],
             "ip_mismatch": ip_mismatch,
             "ha_address": ha_address,
+            "protocol": protocol_items,
+            "webhook_protocol": self.api.webhook_protocol,
             "webio_devices": webio_device_audit,
             "cleanup_entities": self._cleanup_entity_ids,
             "cleanup_function_plan_count": self._cleanup_function_plan_count,
@@ -1576,11 +1620,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return True
 
     async def _async_audit_webio_devices(
-        self, webio_devices: dict[str, Any], ha_address: str
+        self, webio_devices: dict[str, Any], ha_address: str, active_classes: Collection[str]
     ) -> dict[str, dict[str, Any]]:
-        """IP/Port Audit, checked independently per Web-IO class.
+        """IP/Port and protocol audit, checked independently per Web-IO class.
 
-        Marker and IO devices can in theory drift out of sync with each other.
+        Marker and IO devices can in theory drift out of sync with each other. The protocol is
+        audited for the active classes only: a deselected class's commands are left as they are.
         """
         webio_device_audit: dict[str, dict[str, Any]] = {}
         for cls in WEBIO_CLASSES:
@@ -1592,6 +1637,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "ip_mismatch": await _device_ip_mismatch(
                     self.ha_address, ha_address, dev.get("device_ip"), dev.get("device_id")
                 ),
+                # Only a class with a device has commands to rewrite; a recreate writes the protocol anyway.
+                "protocol_mismatch": cls in active_classes
+                and bool(dev.get("device_id"))
+                and self.webio_synced_protocol(cls) != self.api.webhook_protocol,
             }
         return webio_device_audit
 
@@ -1760,7 +1809,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             f"-{len(audit['orphan'])}-{audit['ip_mismatch']}-{len(audit['function_plan_missing'])}"
             f"-{len(audit['function_plan_dangling'])}-{_count_by_ref(audit['function_plan_trigger_missing'])}"
             f"-{_count_by_ref(audit['function_plan_trigger_orphan'])}-{len(audit['knx_bridge_missing'])}"
-            f"-{len(audit['knx_bridge_loopback_missing'])}-{len(audit['cleanup_entities'])}"
+            f"-{len(audit['knx_bridge_loopback_missing'])}-{len(audit['cleanup_entities'])}-{len(audit['protocol'])}"
         )
         # Only log details if the audit result differs from the previous run. The counts alone
         # miss one item replaced by another, so the mismatch keys (item identities) count too.
@@ -1783,8 +1832,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # adds to mismatch_count, so the parts always add up to the total.
         _LOGGER.warning(
             "[%s] Comexio Audit Mismatch: %d issues detected (Type:%d, Missing:%d, "
-            "Renames:%d, Orphans:%d, IP:%d, Cleanup:%d, Not wired:%d, Plan debris:%d, Trigger gaps:%d, "
-            "Trigger orphans:%d, KNX bridges:%d, KNX loopback:%d)",
+            "Renames:%d, Orphans:%d, IP:%d, Protocol:%d, Cleanup:%d, Not wired:%d, Plan debris:%d, "
+            "Trigger gaps:%d, Trigger orphans:%d, KNX bridges:%d, KNX loopback:%d)",
             self.server_id,
             mismatch_count,
             len(audit["type"]),
@@ -1792,6 +1841,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             len(audit["rename"]),
             len(audit["orphan"]),
             1 if ip_mismatch else 0,
+            len(audit["protocol"]),
             len(audit["cleanup_entities"]),
             len(audit["function_plan_missing"]),
             len(audit["function_plan_dangling"]),
@@ -1813,6 +1863,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             (ICON_ADD, "Missing Webhooks", "missing", True),
             (ICON_RENAME, "Renames", "rename", True),
             (ICON_DELETE, "Orphans", "orphan", True),
+            (ICON_NETWORK, "Webhook protocol to rewrite", "protocol", False),
             (ICON_LINK, "Not wired in Function Plan", "function_plan_missing", False),
             (ICON_DELETE, "Function Plan debris", "function_plan_dangling", False),
             (ICON_LINK, "KNX objects without bridge Marker", "knx_bridge_missing", False),
@@ -1864,13 +1915,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
             return
         audit = self.last_audit_results
-        ip_count = 1 if audit["ip_mismatch"] else 0
+        # A protocol to rewrite is part of the server address: both are fixed by "update_ip".
+        ip_count = 1 if audit["ip_mismatch"] or audit["protocol"] else 0
         issue_data_counts = {
             "type": len(audit["type"]),
             "missing": len(audit["missing"]),
             "rename": len(audit["rename"]),
             "orphan": len(audit["orphan"]),
             "ip_mismatch": ip_count,
+            "ip_address": 1 if audit["ip_mismatch"] else 0,
+            "protocol": len(audit["protocol"]),
             "cleanup_entities": len(self._cleanup_entity_ids),
             "cleanup_function_plan_count": self._cleanup_function_plan_count,
             "function_plan_missing": len(audit["function_plan_missing"]),
@@ -4138,7 +4192,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Fires once a day at WEBIO_RANGE_CHECK_HOUR:WEBIO_RANGE_CHECK_MINUTE. The bulk config
         scrape ($FubModules["10"]) never returns Min/Max for HA's own Web-IO commands (see
-        api.get_webio_command_range), so drift can only be detected by reading each analog
+        api.get_webio_command_form), so drift can only be detected by reading each analog
         command's edit form individually — one HTTP GET per command. That cost is why this
         runs on its own nightly schedule instead of piggybacking on the regular poll audit
         or the manual sync button.
@@ -4152,9 +4206,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_check_one_webio_range(
-        self, name: str, cmd_id: Any, device: dict[str, Any], target: dict[str, Any], result: dict[str, int]
+        self,
+        name: str,
+        cmd_id: Any,
+        webio_class: str,
+        device: dict[str, Any],
+        target: dict[str, Any],
+        result: dict[str, int],
     ) -> None:
-        """Check one analog Web-IO command's Min/Max against target; correct on drift.
+        """Check one analog Web-IO command's Min/Max and protocol against target; correct on drift.
 
         Mutates result's "checked"/"fixed"/"failed"/"correction_failed" counters in place —
         factored out of _async_webio_range_check_tick purely to keep that method's cognitive
@@ -4163,33 +4223,47 @@ class ComexioCoordinator(DataUpdateCoordinator):
         kept separate so a run where every fix fails can't misreport as a clean success.
         """
         device_id = device.get("device_id")
-        live_min, live_max = await self.api.get_webio_command_range(cmd_id, device_id)
-        if live_min is None or live_max is None:
+        form = await self.api.get_webio_command_form(cmd_id, device_id)
+        if form is None or form.min is None or form.max is None:
             result[RANGE_CHECK_FAILED] += 1
             return
         result[RANGE_CHECK_CHECKED] += 1
-        if live_min == target["Min"] and live_max == target["Max"]:
+        synced = self.webio_synced_protocol(webio_class)
+        if synced is not None and synced != target["Protocol"]:
+            # A protocol change the sync has not written yet (its repair is pending): keep the class's
+            # recorded protocol — switching single analog commands ahead of the device address would
+            # send their pushes to an address that does not speak that protocol yet.
+            target = {**target, "Protocol": synced}
+        # An unreadable protocol (None, logged by aiocomexio) is no evidence of drift.
+        protocol_drifted = form.protocol is not None and form.protocol != target["Protocol"]
+        if form.min == target["Min"] and form.max == target["Max"] and not protocol_drifted:
             return
+        if protocol_drifted:
+            # The other commands of the class (digital ones are never read here) may have drifted
+            # too: an unknown protocol has the next audit rewrite the whole class.
+            await self.async_set_webio_synced_protocol(webio_class, None)
 
         if await self.api.save_single_command(device.get("base_id"), device_id, target, existing_cmd_id=cmd_id):
             result[RANGE_CHECK_FIXED] += 1
             _LOGGER.warning(
-                "Web-IO command '%s' Min/Max drifted (%s/%s -> %s/%s); corrected.",
+                "Web-IO command '%s' drifted (Min/Max %s/%s -> %s/%s, protocol %s -> %s); corrected.",
                 one_line(name),
-                live_min,
-                live_max,
+                form.min,
+                form.max,
                 target["Min"],
                 target["Max"],
+                form.protocol,
+                target["Protocol"],
             )
         else:
             result[RANGE_CHECK_CORRECTION_FAILED] += 1
-            _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max drift.", one_line(name))
+            _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max/protocol drift.", one_line(name))
 
     async def _async_webio_range_check_tick(self, _now: datetime | None = None) -> dict[str, int]:
         """Check and correct analog Web-IO command Min/Max drift against the target range.
 
         For every analog Web-IO command, compares its live Min/Max (read via
-        api.get_webio_command_range) against the target build_webio_commands would create
+        api.get_webio_command_form) against the target build_webio_commands would create
         today — WEBIO_MARKER_ANALOG_MIN/MAX for markers, the authentic IO type range for
         physical IOs — and rewrites it via api.save_single_command on a mismatch. Returns a
         {"checked": n, "fixed": n, "failed": n, "correction_failed": n, "excluded": n,
@@ -4245,7 +4319,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     )
                     continue
                 try:
-                    await self._async_check_one_webio_range(name, cmd_id, device, target, result)
+                    await self._async_check_one_webio_range(name, cmd_id, cmd.get("webioClass"), device, target, result)
                 except Exception:
                     result[RANGE_CHECK_FAILED] += 1
                     _LOGGER.exception("Unexpected error checking Web-IO command '%s' range", one_line(name))
@@ -8124,7 +8198,47 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def async_ha_address(self) -> str:
         """HA webhook address, hinted by the address the Web-IO devices of the last poll store."""
-        return await self.ha_address.async_get(*webio_device_hints((self.data or {}).get("webio_devices")))
+        return (await self.async_webhook_target()).address
+
+    async def async_webhook_target(self, webio_devices: dict[str, Any] | None = None) -> WebhookTarget:
+        """HA webhook address and protocol; the protocol is handed to the api's command builders too.
+
+        webio_devices: the parsed Web-IO devices whose stored addresses hint the resolver; default:
+        those of the last poll.
+        """
+        if webio_devices is None:
+            webio_devices = (self.data or {}).get("webio_devices")
+        target = await self.ha_address.async_target(*webio_device_hints(webio_devices))
+        self.api.webhook_protocol = WEBIO_PROTOCOL_HTTPS if target.https else WEBIO_PROTOCOL_HTTP
+        return target
+
+    async def async_load_webio_protocols(self) -> None:
+        """Restore the protocol each Web-IO class was last written with (called once at setup)."""
+        stored = await self._webio_protocol_store.async_load() or {}
+        classes = stored.get("classes")
+        self.webio_synced_protocols = {
+            cls: protocol
+            for cls, protocol in (classes if isinstance(classes, dict) else {}).items()
+            if protocol is None or type(protocol) is int
+        }
+
+    def webio_synced_protocol(self, cls: str) -> int | None:
+        """The protocol cls's commands were last written with; None when unknown.
+
+        Commands written before the protocol was configurable (#165) all carry HTTP, so a class
+        without a record counts as HTTP.
+        """
+        return self.webio_synced_protocols.get(cls, WEBIO_PROTOCOL_HTTP)
+
+    async def async_set_webio_synced_protocol(self, cls: str, protocol: int | None) -> None:
+        """Record the protocol cls's commands now carry; None: unknown (a command found drifted).
+
+        Unknown never matches, so the next audit has the whole class rewritten.
+        """
+        if cls in self.webio_synced_protocols and self.webio_synced_protocols[cls] == protocol:
+            return
+        self.webio_synced_protocols[cls] = protocol
+        await self._webio_protocol_store.async_save({"classes": self.webio_synced_protocols})
 
     async def async_fresh_trigger_audit(
         self, snapshot: dict[str, Any] | None = None

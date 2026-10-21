@@ -24,6 +24,8 @@ from .const import (
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
+    CONF_WEBHOOK_ADDRESS_MODE,
+    CONF_WEBHOOK_URL,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
     DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
@@ -35,6 +37,10 @@ from .const import (
     DOMAIN,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
+    WEBHOOK_ADDRESS_AUTO,
+    WEBHOOK_ADDRESS_CUSTOM,
+    WEBHOOK_ADDRESS_EXTERNAL,
+    WEBHOOK_ADDRESS_MODES,
     SourceCategory,
     WebioClass,
     format_ignored_ids,
@@ -46,6 +52,7 @@ from .const import (
     prune_import_disabled_ignored,
     watchdog_user_plan_pick,
 )
+from .ha_address import webhook_url_error
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -132,6 +139,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry):
         """Initialize options flow."""
         self._config_entry = config_entry
+        # The init step's input, held while the custom webhook URL step asks for the URL.
+        self._pending_input: dict[str, Any] = {}
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -157,6 +166,10 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             self._normalize_user_input(user_input, conf, errors, hidden_cats)
+            self._validate_webhook_address_mode(user_input, errors)
+            if not errors and user_input.get(CONF_WEBHOOK_ADDRESS_MODE) == WEBHOOK_ADDRESS_CUSTOM:
+                self._pending_input = user_input
+                return await self.async_step_webhook_url()
             if not errors:
                 return self._create_options_entry(user_input)
 
@@ -198,6 +211,15 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 options=SCAN_INTERVAL_OPTIONS,
                 mode=SelectSelectorMode.DROPDOWN,
                 translation_key="scan_interval",
+            )
+        )
+        schema_dict[
+            vol.Required(CONF_WEBHOOK_ADDRESS_MODE, default=conf.get(CONF_WEBHOOK_ADDRESS_MODE, WEBHOOK_ADDRESS_AUTO))
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=WEBHOOK_ADDRESS_MODES,
+                mode=SelectSelectorMode.DROPDOWN,
+                translation_key="webhook_address_mode",
             )
         )
         schema_dict[
@@ -301,6 +323,26 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         schema_dict[vol.Optional(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS, default=saved_user_plans)] = user_plan_selector
 
         return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_dict), errors=errors)
+
+    async def async_step_webhook_url(self, user_input=None):
+        """Ask for the custom webhook address (only reached with the "custom" webhook address mode)."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            url = user_input.get(CONF_WEBHOOK_URL, "").strip()
+            if error := webhook_url_error(url):
+                errors[CONF_WEBHOOK_URL] = error
+            else:
+                return self._create_options_entry({**self._pending_input, CONF_WEBHOOK_URL: url})
+        conf = {**self._config_entry.data, **self._config_entry.options}
+        schema = vol.Schema({vol.Required(CONF_WEBHOOK_URL, default=conf.get(CONF_WEBHOOK_URL, "")): str})
+        return self.async_show_form(step_id="webhook_url", data_schema=schema, errors=errors)
+
+    def _validate_webhook_address_mode(self, user_input: dict, errors: dict) -> None:
+        """The "external" mode needs a usable external URL in HA's network settings."""
+        if user_input.get(CONF_WEBHOOK_ADDRESS_MODE) != WEBHOOK_ADDRESS_EXTERNAL:
+            return
+        if webhook_url_error(self.hass.config.external_url) is not None:
+            errors[CONF_WEBHOOK_ADDRESS_MODE] = "no_external_url"
 
     @staticmethod
     def _restore_missing_ignored_fields(

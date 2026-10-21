@@ -129,6 +129,13 @@
         "restore": "♻️ Restore from the newest backup",
         "unwatch": "🚫 Stop watching this plan"
       }
+    },
+    "webhook_address_mode": {
+      "options": {
+        "auto": "Automatic (local address)",
+        "external": "External HA URL",
+        "custom": "Custom address"
+      }
     }
   },
   "options": {
@@ -153,7 +160,8 @@
           "bus_watchdog_enabled": "Enable Bus-Load Watchdog",
           "bus_watchdog_auto_reboot": "Allow automatic Comexio reboot on emergency bus load",
           "function_plan_watchdog_notify": "Function plan watchdog: push to",
-          "function_plan_watchdog_user_plans": "Function plan watchdog: also watch user plans"
+          "function_plan_watchdog_user_plans": "Function plan watchdog: also watch user plans",
+          "webhook_address_mode": "Webhook address (Comexio → HA push)"
         },
         "data_description": {
           "schema_marker": "Available variables: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -169,13 +177,26 @@
           "bus_watchdog_enabled": "On a sustained bus-load rise, automatically restart the HA-managed cluster function plans (back to front) to try to relieve it. Non-destructive to the Comexio system itself.",
           "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog.",
           "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when a watched function plan stops (HA-managed, or a user plan picked below). The push has a 'Start plan' button, and is removed again once the plan runs. A watched user plan deleted in Comexio gets a push too, with 'Restore' (its newest backup, as a new plan) and 'Stop watching' buttons. Leave empty for no push; the repair is raised either way.",
-          "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. A picked plan deleted in Comexio is not started: its repair and push offer to restore it from its newest backup or to stop watching it. Leave plans you stop on purpose (tests) out."
+          "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. A picked plan deleted in Comexio is not started: its repair and push offer to restore it from its newest backup or to stop watching it. Leave plans you stop on purpose (tests) out.",
+          "webhook_address_mode": "Where Comexio sends live values. Automatic: HA's local address, HTTPS when the internal URL has its own port and uses https, or HA itself serves TLS. External HA URL: host and port of the external URL from HA's network settings (https without a port means 443). Custom address: a URL you enter in the next step. With an external or custom address, the push leaves your network and goes over the internet. Run a Web-IO sync afterwards."
+        }
+      },
+      "webhook_url": {
+        "title": "Custom webhook address",
+        "data": {
+          "webhook_url": "Webhook URL"
+        },
+        "data_description": {
+          "webhook_url": "Base URL of Home Assistant as Comexio should reach it, e.g. https://ha.example.com:8443 — no path. The push then goes over the internet if this address is public."
         }
       }
     },
     "error": {
       "invalid_number": "Please enter a valid whole number.",
-      "invalid_schema": "Invalid naming schema. Only use the listed variable names inside curly braces, and close every brace."
+      "invalid_schema": "Invalid naming schema. Only use the listed variable names inside curly braces, and close every brace.",
+      "invalid_url": "Enter an http:// or https:// URL with a host and no path, query or credentials.",
+      "loopback_url": "A loopback address (localhost, 127.x, 0.0.0.0) cannot be reached from Comexio.",
+      "no_external_url": "Home Assistant has no usable external URL. Set one under Settings → System → Network first."
     }
   },
   "entity": {

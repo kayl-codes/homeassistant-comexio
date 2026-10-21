@@ -63,6 +63,7 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 | **Create marker entities** | Enable/disable Marker import. |
 | **Create IO entities** | Enable/disable IO import. |
 | **Polling interval** | Dropdown (1 – 1440 min). Prefer longer intervals — live values arrive via webhook. |
+| **Webhook address** | Where Comexio pushes live values. *Automatic*: HA's local address; HTTPS when the internal URL has its own port and the scheme `https`, or HA itself serves TLS. *External HA URL*: host and port of the external URL from HA's network settings (`https` without a port means 443). *Custom address*: a URL entered in a second step (`http(s)://host[:port]`, no path). With an external or custom address the push leaves your network and goes over the internet. After a change the Repair issue offers **Update HA Server Address (IP:Port, protocol)**, which rewrites the address and the protocol (HTTP/HTTPS) of every Web-IO command. |
 | **Show sync notifications** | Display pop-up progress messages during WebIO sync. |
 | **Ignore Web-IO warnings** | Suppress the Repair issue when the Web-IO class is out of sync. |
 | **Show offline extension entities** | Show entities of offline modules as *Unavailable* instead of hiding them. |
@@ -193,6 +194,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 | **Merker als Entitäten anlegen** | Merker-Import aktivieren/deaktivieren. |
 | **Ein- und Ausgänge anlegen** | IO-Import aktivieren/deaktivieren. |
 | **Abfrageintervall** | Dropdown (1 – 1440 min). Längere Intervalle bevorzugen — Live-Werte kommen per Webhook. |
+| **Webhook-Adresse** | Wohin Comexio die Live-Werte pusht. *Automatisch*: die lokale Adresse von HA; HTTPS, wenn die interne URL einen eigenen Port und das Schema `https` hat oder HA selbst TLS anbietet. *Externe HA-URL*: Host und Port der externen URL aus den HA-Netzwerkeinstellungen (`https` ohne Port bedeutet 443). *Eigene Adresse*: eine URL, die in einem zweiten Schritt eingegeben wird (`http(s)://host[:port]`, ohne Pfad). Mit externer oder eigener Adresse verlässt der Push dein Netzwerk und läuft über das Internet. Nach einer Änderung bietet das Reparatur-Issue **HA Server-Adresse (IP:Port, Protokoll) aktualisieren** an; das schreibt Adresse und Protokoll (HTTP/HTTPS) aller Web-IO-Befehle neu. |
 | **Fortschritts-Popups anzeigen** | Fortschrittsmeldungen während des WebIO-Syncs anzeigen. |
 | **Web-IO-Warnung ignorieren** | Reparatur-Issue unterdrücken, wenn die Web-IO-Klasse nicht synchron ist. |
 | **Offline-Extensions anzeigen** | Entitäten offline gegangener Module als *Nicht verfügbar* anzeigen statt ausblenden. |

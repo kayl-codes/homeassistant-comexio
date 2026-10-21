@@ -20,6 +20,7 @@ from aiocomexio import (
     SystemInfo,
     TimeServerSettings,
     WebioBaseInfo,
+    WebioCommandForm,
 )
 import aiohttp
 import pytest
@@ -1430,9 +1431,16 @@ def test_save_single_command_failure_is_false(comexio_api: ComexioAPI, client: M
 
 
 @pytest.mark.parametrize("err", [ComexioDataError("no min/max fields"), _connection_error()])
-def test_webio_command_range_failure_is_none(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
-    _fail(client, "get_webio_command_range", err)
-    assert asyncio.run(comexio_api.get_webio_command_range(5, 3)) == (None, None)
+def test_webio_command_form_failure_is_none(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
+    _fail(client, "get_webio_command_form", err)
+    assert asyncio.run(comexio_api.get_webio_command_form(5, 3)) is None
+
+
+def test_webio_command_form_is_passed_through(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    form = WebioCommandForm(min=-32768.0, max=32767.0, protocol=1)
+    client.get_webio_command_form = AsyncMock(return_value=form)
+    assert asyncio.run(comexio_api.get_webio_command_form(5, 3)) is form
+    client.get_webio_command_form.assert_awaited_once_with(5, 3)
 
 
 _PLAN_WRITES_BOOL = [

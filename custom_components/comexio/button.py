@@ -108,7 +108,15 @@ _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
 _STEP_CHECKING_PLAN = "Checking function plan wiring"
 _RETRY_CLEANUP = "run the cleanup again from Repairs"
-_DELTA_RESULT_KEYS = {"rename": "renamed", "delete": "removed", "type": "updated", "create": "added"}
+_DELTA_RESULT_KEYS = {
+    "rename": "renamed",
+    "delete": "removed",
+    "type": "updated",
+    "protocol": "updated",
+    "create": "added",
+}
+# Actions that rewrite the commands of a class whose webhook protocol changed (part of the server address).
+_PROTOCOL_ACTIONS = frozenset({"full_sync", "update_ip"})
 _FAILED_WRITES_SHOWN = 10  # failed Web-IO writes named in the result message; the rest are counted
 
 
@@ -194,6 +202,12 @@ def _mark_cancelled(ctx: "_SyncContext", msg: str) -> str:
     """
     ctx.failed_writes.append("cancelled by user")
     return f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
+
+
+def _protocol_only_items(cls_protocol: list[dict], type_fixes: list[dict]) -> list[dict]:
+    """The protocol rewrites a type-fix of the same command does not already cover."""
+    type_fix_ids = {item.get("id") for item in type_fixes}
+    return [item for item in cls_protocol if item.get("id") not in type_fix_ids]
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -436,6 +450,9 @@ class _SyncContext:
     # adapter logged why), function plan wiring errors, cleanup deletions and a user cancel.
     # Named in the result message and turn the status sensor to "partial".
     failed_writes: list[str] = field(default_factory=list)
+    # The audit's commands to rewrite with the webhook protocol, and the protocol their payloads carry.
+    protocol_items: list[dict[str, Any]] = field(default_factory=list)
+    audit_protocol: int | None = None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -653,6 +670,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 start_time=start_time,
                 class_names=class_names,
                 update_status=update_status,
+                protocol_items=audit_data.get("protocol", []),
+                audit_protocol=audit_data.get("webhook_protocol"),
             )
 
             gap_items = audit_data.get("function_plan_missing", [])
@@ -1431,6 +1450,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_renamed: list[dict],
         cls_types: list[dict],
         cls_orphans: list[dict],
+        cls_protocol: list[dict],
         dev_ip_mismatch: bool,
     ) -> str:
         """Pick recreate vs. delta-sync for one class, based on ETA vs. the Fast-Track threshold."""
@@ -1450,7 +1470,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if action in {"full_sync", "update_types"}:
             cls_action_eta += len(cls_types) * SYNC_DURATION_WRITE
             cls_task_count += len(cls_types)
-        if action in {"full_sync", "update_ip"} and dev_ip_mismatch:
+        if action in _PROTOCOL_ACTIONS:
+            protocol_only = _protocol_only_items(cls_protocol, cls_types if action == "full_sync" else [])
+            cls_action_eta += len(protocol_only) * SYNC_DURATION_WRITE
+            cls_task_count += len(protocol_only)
+        if action in _PROTOCOL_ACTIONS and dev_ip_mismatch:
             cls_action_eta += SYNC_DURATION_WRITE
         if cls_task_count > 1:
             cls_action_eta += int(1.5 * (cls_task_count - 1))
@@ -1458,7 +1482,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if not class_dev_id:
             _LOGGER.info("[%s] %s: no device instance found. Forcing recreate.", self.server_id, label)
             return "recreate"
-        if action == "update_ip":
+        if action == "update_ip" and not cls_protocol:
             _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
             return "update_ip"
         if cls_action_eta > SYNC_DURATION_RECREATE:
@@ -1612,6 +1636,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             cls_audit["orphans"],
             cls_audit["missing"],
             cls_audit["types"],
+            cls_audit["protocol"],
         )
         skipped_creates = 0
         if not base_id:
@@ -1639,8 +1664,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_dangling_to_delete = (
             cls_audit["dangling"] if cls_effective_action in {"full_sync", "delete_orphans"} else []
         )
+        failed_before = len(ctx.failed_writes)
         result = await self._execute_delta_tasks(
             ctx, cls, class_dev_id, base_id, tasks_to_do, cls_dangling_to_delete, on_progress, label, pct_start
+        )
+        # Every command of the class now carries the audit's protocol — unless a rewrite failed or was cancelled.
+        # Only an active class was audited for its protocol; a deselected one only keeps its device IP.
+        result["protocol_written"] = (
+            cls_effective_action in _PROTOCOL_ACTIONS
+            and cls in self.coordinator.active_webio_classes
+            and not getattr(self.coordinator, "cancel_sync", False)
+            and not any(f.startswith(("type ", "protocol ")) for f in ctx.failed_writes[failed_before:])
         )
         result["updated_ip"] = False
         result["skipped_creates"] = skipped_creates
@@ -1686,6 +1720,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             "delete": f"{ICON_DELETE} Remove",
             "create": f"{ICON_ADD} Add",
             "type": f"{ICON_FIX} Type-Fix",
+            "protocol": f"{ICON_NETWORK} Protocol",
         }
         t_label = labels.get(task_type, task_type)
         prog_msg = (
@@ -1709,8 +1744,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_orphans: list[dict],
         cls_missing: list[dict],
         cls_types: list[dict],
+        cls_protocol: list[dict],
     ) -> list[dict]:
-        """Collect the individual create/rename/delete/type-fix tasks for one delta-sync run."""
+        """Collect the individual create/rename/delete/type-fix/protocol tasks for one delta-sync run.
+
+        A type-fix writes the whole command, protocol included, so a command with both gets one write.
+        """
         tasks_to_do = []
         if cls_effective_action in {"full_sync", "update_renames"}:
             tasks_to_do.extend([{"item": i, "type": "rename"} for i in cls_renamed])
@@ -1718,8 +1757,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             tasks_to_do.extend([{"item": i, "type": "delete"} for i in cls_orphans])
         if cls_effective_action in {"full_sync", "create_missing"}:
             tasks_to_do.extend([{"item": i, "type": "create"} for i in cls_missing])
-        if cls_effective_action in {"full_sync", "update_types"}:
-            tasks_to_do.extend([{"item": i, "type": "type"} for i in cls_types])
+        type_fixes = cls_types if cls_effective_action in {"full_sync", "update_types"} else []
+        tasks_to_do.extend([{"item": i, "type": "type"} for i in type_fixes])
+        if cls_effective_action in _PROTOCOL_ACTIONS:
+            tasks_to_do.extend(
+                [{"item": i, "type": "protocol"} for i in _protocol_only_items(cls_protocol, type_fixes)]
+            )
         return tasks_to_do
 
     async def _cleanup_delta_debris(
@@ -1884,12 +1927,15 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         class_name = ctx.class_names[cls]
         label = webio_class_label(cls)
 
+        cls_protocol = _items_of_class(ctx.protocol_items, cls)
         cls_effective_action = await self._decide_effective_action(
-            ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch
+            ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, cls_protocol, dev_ip_mismatch
         )
 
         if cls_effective_action == "recreate":
             await self._recreate_class(ctx, cls, class_name, label, class_dev_id, pct_start, pct_end)
+            # The uploaded template was built with the protocol of this sync's address.
+            await self.coordinator.async_set_webio_synced_protocol(cls, ctx.api.webhook_protocol)
             # Everything in this class is brand new, so every command of it needs the
             # function plan pairing pass too: its old webIoId (if any) went away with the
             # deleted class, and the pre-sync audit never flagged a wiring gap for it (it
@@ -1922,6 +1968,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             "types": cls_types,
             "orphans": cls_orphans,
             "dangling": cls_dangling,
+            "protocol": cls_protocol,
         }
         result = await self._delta_sync_class(
             ctx,
@@ -1936,6 +1983,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             pct_end,
         )
         result["recreated"] = False
+        if result.pop("protocol_written") and ctx.audit_protocol is not None:
+            await self.coordinator.async_set_webio_synced_protocol(cls, ctx.audit_protocol)
         return result
 
     # --- MANAGED CLUSTER PLAN WIRING ---
