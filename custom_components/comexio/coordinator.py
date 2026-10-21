@@ -7508,12 +7508,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         relevant_fub_ids = self._function_plan_check_fub_ids()
         if not relevant_fub_ids or not self._relevant_plans_loaded(relevant_fub_ids):
             return None
-        by_k_id: dict[str, str] = {}
-        for fub_id, plan_data in self.function_plan_plans.items():
-            if fub_id in relevant_fub_ids:
-                for marker_id, k_id in self._plan_knx_bridge_pairs(plan_data):
-                    by_k_id[k_id] = marker_id
-        return by_k_id
+        return {
+            k_id: marker_id
+            for fub_id, plan_data in self.function_plan_plans.items()
+            if fub_id in relevant_fub_ids
+            for marker_id, k_id in self._plan_knx_bridge_pairs(plan_data)
+        }
 
     @staticmethod
     def _connection_endpoint_ids(conn: dict) -> set[str]:
