@@ -229,8 +229,8 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
 
         # Only classes the user opted into — an opted-out category (e.g. KNX, default off) has
         # no HA entities, so uploading its (empty) Web-IO base would just leave an orphan class
-        # on the Comexio server. The same for the Quickbus class while the server has no Quickbus IO.
-        sync_classes = coordinator.required_webio_classes
+        # on the Comexio server.
+        sync_classes = coordinator.active_webio_classes
 
         if not do_upload:
             preview_parts = []

@@ -54,10 +54,8 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
-    ComexioQuickbusIOEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
-    quickbus_ios_for_platform,
 )
 from .function_plan_backup import summarize_orphaned_backups
 
@@ -91,12 +89,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             for io in coordinator.data.get("io", [])
             if not io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
         )
-
-    # Quickbus IOs (multitouch, motion detectors, ...) are read-only, outputs included
-    entities.extend(
-        ComexioQuickbusSensor(coordinator, coordinator.server_id, io)
-        for io in quickbus_ios_for_platform(coordinator, conf, "sensor")
-    )
 
     if conf.get("import_markers", True):
         ignored_ids = coordinator.ignored_marker_ids
@@ -213,10 +205,6 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
             return int(f) if f == int(f) else f
         except (ValueError, TypeError):
             return val
-
-
-class ComexioQuickbusSensor(ComexioQuickbusIOEntity, ComexioIOSensor):
-    """An analog IO of a Quickbus device (brightness, temperature, ...), read-only."""
 
 
 class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):

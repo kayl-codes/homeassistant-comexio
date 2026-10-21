@@ -1,4 +1,4 @@
-"""Scope selection for the uninstall cleanup (full / marker / io / knx / quickbus).
+"""Scope selection for the uninstall cleanup (full / marker / io / knx).
 
 Pure logic, no HA imports — decides which HA-managed function plans and Web-IO classes a
 cleanup scope covers, so the repair flow can tear down only one part of what the
@@ -21,20 +21,12 @@ CLEANUP_SCOPE_FULL = "full"
 CLEANUP_SCOPE_MARKER = "marker"
 CLEANUP_SCOPE_IO = "io"
 CLEANUP_SCOPE_KNX = "knx"
-CLEANUP_SCOPE_QUICKBUS = "quickbus"
-CLEANUP_SCOPES = (
-    CLEANUP_SCOPE_FULL,
-    CLEANUP_SCOPE_MARKER,
-    CLEANUP_SCOPE_IO,
-    CLEANUP_SCOPE_KNX,
-    CLEANUP_SCOPE_QUICKBUS,
-)
+CLEANUP_SCOPES = (CLEANUP_SCOPE_FULL, CLEANUP_SCOPE_MARKER, CLEANUP_SCOPE_IO, CLEANUP_SCOPE_KNX)
 
 _SCOPE_CLASS: dict[str, WebioClass] = {
     CLEANUP_SCOPE_MARKER: WebioClass.MARKER,
     CLEANUP_SCOPE_IO: WebioClass.IO,
     CLEANUP_SCOPE_KNX: WebioClass.KNX,
-    CLEANUP_SCOPE_QUICKBUS: WebioClass.QUICKBUS,
 }
 
 # What a partial cleanup does with the shared trigger plan (see trigger_plan_action).

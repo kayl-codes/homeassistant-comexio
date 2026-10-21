@@ -187,7 +187,6 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(cat.import_conf_key, default=conf.get(cat.import_conf_key, cat.import_default))
             ] = bool
         schema_dict[vol.Required("import_ios", default=conf.get("import_ios", True))] = bool
-        schema_dict[vol.Required("import_quickbus", default=conf.get("import_quickbus", True))] = bool
         schema_dict[
             vol.Required(
                 "scan_interval",

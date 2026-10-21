@@ -62,8 +62,8 @@ from .const import (
     MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
-    QUICKBUS_IO_DATA_KEY,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
+    WEBIO_CLASSES,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     category_by_fub_module_type,
     function_plan_id,
@@ -94,14 +94,6 @@ _LOGGER = logging.getLogger(__name__)
 def _webhook_path(server_id: str) -> str:
     """Path of HA's webhook that the Web-IO commands of this server POST to."""
     return f"/api/webhook/comexio_{server_id}"
-
-
-def _with_quickbus_ios(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
-    """parsed_data with its Quickbus IOs back under "io", where aiocomexio's Web-IO builders expect them.
-
-    The builders tell them apart by their "quickbus" entry (own class, IO Id in the payload).
-    """
-    return {**parsed_data, "io": [*parsed_data.get("io", []), *parsed_data.get(QUICKBUS_IO_DATA_KEY, [])]}
 
 
 def _raise_transport_error(err: ComexioConnectionError) -> NoReturn:
@@ -1296,16 +1288,14 @@ class ComexioAPI:
             knx_live_states=knx_live_states,
             knx_dpt_catalog=knx_dpt_catalog,
         )
-        # Quickbus IOs (Multitouch gestures, motion sensors, ...) move to their own key: every IO code
-        # path keys an IO by ext_name + identifier, which their G1/TL1/R repeat per device (see
-        # QUICKBUS_IO_DATA_KEY). io_all keeps them for plan labels.
-        data[QUICKBUS_IO_DATA_KEY] = [io for io in data["io"] if io.get("quickbus")]
-        data["io"] = [io for io in data["io"] if not io.get("quickbus")]
+        # HA does not import Quickbus IOs (Multitouch, motion sensors) yet (#86): no entities and no
+        # Web-IO commands for them, and no QUICKBUS Web-IO class. io_all keeps them for plan labels.
+        data["io"] = [io for io in data["io"] if io.get("quickbus") is None]
+        data["webio_devices"] = {cls: dev for cls, dev in data.get("webio_devices", {}).items() if cls in WEBIO_CLASSES}
         _LOGGER.info(
-            "Audit: %d Markers, %d IOs, %d Quickbus IOs, %d KNX, %d Webhooks in Comexio for %s",
+            "Audit: %d Markers, %d IOs, %d KNX, %d Webhooks in Comexio for %s",
             len(data["markers"]),
             len(data["io"]),
-            len(data[QUICKBUS_IO_DATA_KEY]),
             len(data["knx"]),
             len(data["webio_commands"]),
             webio_name,
@@ -1595,7 +1585,7 @@ class ComexioAPI:
     ) -> list[dict[str, Any]]:
         """Build the list of Web-IO command dicts for the given parsed configuration.
 
-        webio_class restricts the result to one Web-IO class ("marker"/"io"/"knx"/"quickbus"), for the
+        webio_class restricts the result to one Web-IO class ("marker"/"io"/"knx"), for the
         bulk class-upload path (generate_webio_json); None returns all (delta-sync payload
         lookup, where the destination device is chosen separately per command).
         ignored_marker_ids / ignored_knx_ids exclude items the user configured as ignored —
@@ -1603,7 +1593,7 @@ class ComexioAPI:
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
         """
         return comexio_webio.build_webio_commands(
-            _webhook_path(server_id), _with_quickbus_ios(parsed_data), webio_class, ignored_marker_ids, ignored_knx_ids
+            _webhook_path(server_id), parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
         )
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
@@ -1632,17 +1622,12 @@ class ComexioAPI:
         """Generate the upload-ready JSON string for the Comexio Web-IO importer.
 
         webio_name here is already the class-specific name (see const.webio_class_name) —
-        callers append the ' [M]'/' [IO]'/' [KNX]'/' [QB]' suffix before calling this.
+        callers append the ' [M]'/' [IO]'/' [KNX]' suffix before calling this.
         ignored_marker_ids / ignored_knx_ids are forwarded to build_webio_commands() to
         exclude ignored items.
         """
         return comexio_webio.generate_webio_json(
-            _webhook_path(server_id),
-            webio_name,
-            _with_quickbus_ios(parsed_data),
-            webio_class,
-            ignored_marker_ids,
-            ignored_knx_ids,
+            _webhook_path(server_id), webio_name, parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
         )
 
     async def upload_web_io(self, server_id: str, webio_name: str, web_io_json: str) -> tuple[bool, str]:

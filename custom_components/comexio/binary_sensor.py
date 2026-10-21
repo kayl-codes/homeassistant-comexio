@@ -26,10 +26,8 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
-    ComexioQuickbusIOEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
-    quickbus_ios_for_platform,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,12 +47,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             for io in coordinator.data.get("io", [])
             if io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
         )
-
-    # Quickbus IOs (multitouch gestures, motion detectors, ...) are read-only, outputs included
-    entities.extend(
-        ComexioQuickbusBinarySensor(coordinator, coordinator.server_id, io)
-        for io in quickbus_ios_for_platform(coordinator, conf, "binary_sensor")
-    )
 
     if conf.get("import_markers", True):
         ignored_ids = coordinator.ignored_marker_ids
@@ -112,10 +104,6 @@ class ComexioBinarySensor(ComexioIOEntity, BinarySensorEntity):
             return float(value) > 0
         except (ValueError, TypeError):
             return False
-
-
-class ComexioQuickbusBinarySensor(ComexioQuickbusIOEntity, ComexioBinarySensor):
-    """A digital IO of a Quickbus device (gesture, button, motion), read-only."""
 
 
 class ComexioMarkerBinarySensor(ComexioMarkerEntity, BinarySensorEntity):

@@ -313,8 +313,6 @@
     ]),
     'quickbus_devices': dict({
     }),
-    'quickbus_io': list([
-    ]),
     'webio_command_duplicates': list([
     ]),
     'webio_commands': dict({
@@ -352,11 +350,6 @@
         'base_id': '7',
         'device_id': '30',
         'device_ip': '192.168.1.20:8123',
-      }),
-      <WebioClass.QUICKBUS: 'quickbus'>: dict({
-        'base_id': None,
-        'device_id': None,
-        'device_ip': None,
       }),
     }),
     'webio_names': dict({

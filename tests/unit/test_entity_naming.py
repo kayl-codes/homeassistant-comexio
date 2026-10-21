@@ -18,12 +18,8 @@ from custom_components.comexio.const import (
     DEFAULT_SCHEMA_IO,
     LEGACY_DEFAULT_SCHEMA_IO,
     entity_id_migration_target,
-    extension_device_name,
-    extension_firmware_object_id,
     hub_era_object_id,
-    marker_device_name,
     migrate_entry_options,
-    quickbus_device_name,
     stable_object_id,
 )
 from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, ComexioStableEntityIdMixin
@@ -36,7 +32,6 @@ from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, Com
         ("comexio_iosrv1_m12", "iosrv1_m12"),
         ("comexio_iosrv1_k5", "iosrv1_k5"),
         ("comexio_iosrv1_k1_k2", "iosrv1_k1_k2"),
-        ("comexio_iosrv1_qb211", "iosrv1_qb211"),
         ("comexio_iosrv1_fub19", "iosrv1_fub19"),
         ("comexio_iosrv1_orphaned_backups", "iosrv1_orphaned_backups"),
         ("comexio_iosrv1_managed_plans_problem", "iosrv1_managed_plans_problem"),
@@ -177,25 +172,8 @@ def test_function_plan_device_sorts_right_below_the_hub(monkeypatch: pytest.Monk
 
     assert info["identifiers"] == {("comexio", "iosrv1_function_plans")}
     assert info["via_device_id"] == "hub-device"
-    device_names = [
-        extension_device_name("iosrv1", "IOX1"),
-        extension_device_name("iosrv1", "BASE"),
-        quickbus_device_name("iosrv1", "MT1"),
-        info["name"],
-        marker_device_name("iosrv1"),
-        "iosrv1 KNX",
-        "iosrv1",
-    ]
-    # Letter tags without brackets: HA's frontend (ICU) sorts '[' before '#', which would push the plan device down.
-    assert sorted(device_names, key=str.casefold) == [
-        "iosrv1",
-        "iosrv1 # Function plans",
-        "iosrv1 BASE",
-        "iosrv1 EXT - IOX1",
-        "iosrv1 KNX",
-        "iosrv1 Markers",
-        "iosrv1 QB - MT1",
-    ]
+    device_names = ["iosrv1 IOX1", "iosrv1 BASE", "iosrv1 0815", info["name"], "iosrv1 Markers", "iosrv1"]
+    assert sorted(device_names, key=str.casefold)[:2] == ["iosrv1", "iosrv1 # Function plans"]
 
 
 def _function_plan_entity_classes() -> list[type]:
@@ -279,6 +257,7 @@ HA_DERIVED_ENTITY_ID_CLASSES = frozenset(
         "sensor.ComexioWatchdogEventSensor",
         "sensor.ComexioWebioCommandCountSensor",
         "update.ComexioBaseFirmwareUpdate",
+        "update.ComexioExtensionFirmwareUpdate",
         "update.ComexioFirmwareUpdateBase",
     }
 )
@@ -308,13 +287,8 @@ def _integration_entity_classes() -> dict[str, type]:
 
 
 def _requests_its_entity_id(cls: type) -> bool:
-    """The mixin's add_to_platform_start runs only if it precedes Entity in the MRO (Entity's hook calls no super).
-
-    A class may also request its id in its own add_to_platform_start (the extension firmware entity).
-    """
+    """The mixin's add_to_platform_start runs only if it precedes Entity in the MRO (Entity's hook calls no super)."""
     mro = cls.__mro__
-    if "add_to_platform_start" in vars(cls):
-        return True
     return any(
         mixin in mro and mro.index(mixin) < mro.index(Entity)
         for mixin in (ComexioStableEntityIdMixin, ComexioFunctionPlanEntityMixin)
@@ -343,30 +317,3 @@ def test_ha_derived_entity_id_allowlist_has_no_stale_entries() -> None:
 
     assert sorted(HA_DERIVED_ENTITY_ID_CLASSES - classes.keys()) == []
     assert sorted(key for key in HA_DERIVED_ENTITY_ID_CLASSES if _requests_its_entity_id(classes[key])) == []
-
-
-@pytest.mark.parametrize(
-    ("device_name", "expected"),
-    [
-        (extension_device_name("iosrv1", "BASE"), "iosrv1 BASE"),  # the main unit keeps its plain name
-        (extension_device_name("iosrv1", "IOX2"), "iosrv1 EXT - IOX2"),
-        (extension_device_name("iosrv1", "Multibridge A6"), "iosrv1 EXT - Multibridge A6"),
-        (extension_device_name("iosrv1", "Base"), "iosrv1 BASE"),  # same device as "BASE" (lower-cased identifier)
-        (extension_device_name("iosrv1", "IO\nX2"), "iosrv1 EXT - IO X2"),
-        (quickbus_device_name("iosrv1", "MT1"), "iosrv1 QB - MT1"),
-        (quickbus_device_name("iosrv1", "MT\n1"), "iosrv1 QB - MT 1"),
-        (marker_device_name("iosrv1"), "iosrv1 Markers"),
-    ],
-)
-def test_sub_device_names_group_by_kind(device_name: str, expected: str) -> None:
-    """Modules and Quickbus devices each list together under their "EXT - " / "QB - " tag."""
-    assert device_name == expected
-
-
-@pytest.mark.parametrize(
-    ("ext_name", "expected"),
-    [("IOX2", "iosrv1_iox2_firmware"), ("UD 1", "iosrv1_ud_1_firmware")],
-)
-def test_extension_firmware_entity_keeps_its_pre_tag_object_id(ext_name: str, expected: str) -> None:
-    """The EXT device tag must not reach the firmware entity's id (HA would derive "iosrv1_ext_iox2_firmware")."""
-    assert extension_firmware_object_id("iosrv1", ext_name) == expected

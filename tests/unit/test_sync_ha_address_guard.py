@@ -16,7 +16,7 @@ import pytest
 
 from custom_components.comexio import button as button_module
 from custom_components.comexio.button import ComexioSyncButton, _SyncContext
-from custom_components.comexio.const import SYNC_DURATION_RECREATE, SYNC_DURATION_WRITE, WEBIO_CLASSES, WebioClass
+from custom_components.comexio.const import SYNC_DURATION_RECREATE, SYNC_DURATION_WRITE, WEBIO_CLASSES
 from custom_components.comexio.coordinator import _device_ip_mismatch
 from custom_components.comexio.ha_address import HaAddressResolver, is_loopback_address
 
@@ -64,7 +64,7 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
         ),
         async_ha_address=AsyncMock(return_value=ha_address),
         ha_address=HaAddressResolver(MagicMock()),
-        required_webio_classes=list(WEBIO_CLASSES),
+        active_webio_classes=list(WEBIO_CLASSES),
         last_audit_results={},
         cancel_sync=False,
         data={},
@@ -126,21 +126,6 @@ def test_a_sync_runs_when_no_device_gets_a_loopback_address(ha_address: str, dev
     asyncio.run(button._sync_all_classes(ctx, {}, dev_ids))
 
     assert button._sync_class.await_count == len(WEBIO_CLASSES)
-
-
-@pytest.mark.parametrize(("quickbus_dev_id", "synced"), [(None, False), ("9", True)])
-def test_the_quickbus_class_is_synced_only_while_required_or_present(quickbus_dev_id: str | None, synced: bool) -> None:
-    """No Quickbus IO: no empty [QB] class is created, but a leftover [QB] device is still synced."""
-    button = _button(REACHABLE)
-    button.coordinator.required_webio_classes = (WebioClass.MARKER, WebioClass.IO)
-    ctx = _ctx(button, REACHABLE)
-    dev_ids = {**dict.fromkeys(WEBIO_CLASSES, "7"), WebioClass.QUICKBUS: quickbus_dev_id}
-
-    asyncio.run(button._sync_all_classes(ctx, {}, dev_ids))
-
-    synced_classes = {call.args[1] for call in button._sync_class.await_args_list}
-    assert (WebioClass.QUICKBUS in synced_classes) is synced
-    assert {WebioClass.MARKER, WebioClass.IO} <= synced_classes
 
 
 @pytest.mark.parametrize(

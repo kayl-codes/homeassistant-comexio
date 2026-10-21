@@ -849,9 +849,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # server (a class deselected after a prior sync — only its device IP is kept current;
         # its commands are no orphans and are left to the import_disabled repair). An opted-out class
         # with no server device is skipped entirely — _decide_effective_action force-"recreate"s
-        # any class with no device, so including it would create it on the live server. The same
-        # holds for the Quickbus class while the server has no Quickbus IO (required_webio_classes).
-        opted_in = set(self.coordinator.required_webio_classes)
+        # any class with no device, so including it would create it on the live server.
+        opted_in = set(self.coordinator.active_webio_classes)
         active_classes = tuple(c for c in WEBIO_CLASSES if c in opted_in or dev_ids.get(c))
         if not active_classes:
             return 0, 0, 0, 0, False, [], 0, {}, [], 0
