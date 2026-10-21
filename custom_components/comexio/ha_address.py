@@ -52,6 +52,7 @@ import time
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS
 from homeassistant.components.network.util import async_load_adapters
 from homeassistant.core import HomeAssistant
 
@@ -98,6 +99,18 @@ class WebhookTarget(NamedTuple):
 
     address: str
     https: bool
+
+    @property
+    def webio_protocol(self) -> int:
+        """The protocol the Web-IO commands carry (aiocomexio WEBIO_PROTOCOL_*) to reach this target.
+
+        Comexio speaks TLS to port 443 by itself, even with the commands on HTTP (live verified with
+        FW 11.1.4): only HTTPS on another port needs the HTTPS protocol, and switching to it rewrites
+        every command of a class, while a new device address alone is one write.
+        """
+        if self.https and self.address.rsplit(":", 1)[-1] != str(_SCHEME_PORTS["https"]):
+            return WEBIO_PROTOCOL_HTTPS
+        return WEBIO_PROTOCOL_HTTP
 
 
 # Resolver errors that mean "this name does not exist"; anything else (EAI_AGAIN while DNS is not

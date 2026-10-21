@@ -23,7 +23,7 @@ import uuid
 
 from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
 from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
-from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS, quickbus_command_name
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, quickbus_command_name
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
@@ -8209,7 +8209,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if webio_devices is None:
             webio_devices = (self.data or {}).get("webio_devices")
         target = await self.ha_address.async_target(*webio_device_hints(webio_devices))
-        self.api.webhook_protocol = WEBIO_PROTOCOL_HTTPS if target.https else WEBIO_PROTOCOL_HTTP
+        self.api.webhook_protocol = target.webio_protocol
         return target
 
     async def async_load_webio_protocols(self) -> None:
