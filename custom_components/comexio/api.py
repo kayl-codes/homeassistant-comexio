@@ -3,6 +3,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
+from datetime import timedelta
 import logging
 import math
 import time
@@ -19,6 +20,7 @@ from aiocomexio import (
     ComexioResponseError,
     CreatedFunctionPlan,
     RawConfig,
+    SystemInfo,
     config as comexio_config,
     webio as comexio_webio,
 )
@@ -449,6 +451,15 @@ class KnxBridgeReset(NamedTuple):
     title: str  # "" for an unused marker, else its title without any kind suffix
     default: float = 0  # in use: its current default value, kept by the rename
     store: bool = False  # in use: its current "store in memory" flag, kept by the rename
+
+
+class SystemInfoReading(NamedTuple):
+    """One system info poll (see ComexioAPI.get_system_info): a part is None if its fetch failed, with the cause."""
+
+    info: SystemInfo | None
+    uptime: timedelta | None
+    info_error: str | None = None
+    uptime_error: str | None = None
 
 
 def _strip_marker_kind_suffixes(name: str) -> str:
@@ -956,13 +967,15 @@ class ComexioAPI:
                 _LOGGER.debug("Comexio admin session has expired, logging in again")
         return await self._full_login()
 
-    async def _full_login(self) -> bool:
+    async def _full_login(self, seen_generation: int | None = None) -> bool:
         """Full RSA login of the main session's client, one at a time.
 
         A caller that had to wait for a concurrent full login takes over its success instead of
-        logging in again (which would clear the jar of the session just logged in).
+        logging in again (which would clear the jar of the session just logged in). A caller that
+        passes the _login_generation it saw before its failed request also takes over a login that
+        finished between that request and this call.
         """
-        generation = self._login_generation
+        generation = self._login_generation if seen_generation is None else seen_generation
         async with self._login_lock:
             client = self.client
             if self._login_generation != generation and client is self._logged_in_client:
@@ -5070,6 +5083,38 @@ class ComexioAPI:
         except ComexioError as err:
             _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
+
+    async def get_system_info(self) -> SystemInfoReading:
+        """System info (free storage, time server settings) and uptime, each with the cause if its fetch failed.
+
+        Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
+        failures and warns with the cause — so they are logged at debug level here. A lapsed admin
+        session is logged in again once per call, like the config poll does: this poll runs more
+        often, and its readings would otherwise go unknown until the next config poll.
+        """
+        relogin: list[bool] = []  # the outcome of this call's one re-login, shared by both fetches
+        info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)
+        uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime(), relogin)
+        return SystemInfoReading(info, uptime, info_error, uptime_error)
+
+    async def _system_info_part[T](
+        self, fetch: Callable[[], Awaitable[T]], relogin: list[bool]
+    ) -> tuple[T | None, str | None]:
+        """fetch()'s result, or None and the failure cause; a lapsed session is logged in again once per relogin."""
+        generation = self._login_generation
+        try:
+            try:
+                return await fetch(), None
+            except ComexioAuthenticationError:
+                if not relogin:
+                    _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
+                    relogin.append(await self._full_login(generation))
+                if not relogin[0]:
+                    return None, f"re-login failed ({self.last_login_error})"
+                return await fetch(), None
+        except ComexioError as err:
+            _LOGGER.debug("System info fetch failed: %s", err)
+            return None, str(err) or type(err).__name__
 
     async def system_emergency_reboot(self) -> bool:
         """Trigger an IMMEDIATE, unconfirmed full Comexio system reboot.

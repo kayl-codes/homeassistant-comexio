@@ -253,12 +253,21 @@
         "name": "Anzahl Web-IO-Befehle"
       },
       "watchdog_event": {
-        "name": "Letztes Watchdog-Ereignis"
+        "name": "Letztes Buslast-Watchdog-Ereignis"
+      },
+      "free_storage": {
+        "name": "Freier Speicher"
+      },
+      "last_boot": {
+        "name": "Letzter Start"
       }
     },
     "binary_sensor": {
       "managed_plans_problem": {
         "name": "Problem verwaltete Pläne"
+      },
+      "time_server_problem": {
+        "name": "Zeitserver-Setting"
       }
     },
     "switch": {

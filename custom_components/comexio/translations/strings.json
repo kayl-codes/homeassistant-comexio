@@ -253,12 +253,21 @@
         "name": "Web-IO Command Count"
       },
       "watchdog_event": {
-        "name": "Last Watchdog Event"
+        "name": "Last Bus-Load Watchdog Event"
+      },
+      "free_storage": {
+        "name": "Free storage"
+      },
+      "last_boot": {
+        "name": "Last boot"
       }
     },
     "binary_sensor": {
       "managed_plans_problem": {
         "name": "Managed Plans Problem"
+      },
+      "time_server_problem": {
+        "name": "Time server setting"
       }
     },
     "switch": {

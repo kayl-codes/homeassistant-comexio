@@ -141,6 +141,8 @@ from .const import (
     SOURCE_CATEGORIES,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
+    SYSTEM_INFO_POLL_INTERVAL_SEC,
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
@@ -182,6 +184,7 @@ from .const import (
     source_audit_key,
     source_category,
     split_ignored_ids,
+    system_info_signal,
     trigger_pair_categories,
     webio_class_label,
     webio_class_name,
@@ -215,6 +218,7 @@ from .plan_watchdog import (
     vanished_plan_token,
 )
 from .reference_monitor import ReferenceCatalogMonitor
+from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -904,6 +908,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.bus_workload: int | None = None
         self.bus_sd_card: bool | None = None
         self._bus_load_fail_streak = 0
+        # Free storage, time server settings, boot time (see async_start_system_info_poll).
+        self.system_info = SystemInfoState()
+        self._system_info_task: asyncio.Task[None] | None = None
         # Function plan run states (see async_start_plan_run_state_poll): the fetched states go
         # into api.fub_data's Active flags; the api reports the changes HA itself causes
         # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
@@ -3817,6 +3824,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # (e.g. an in-progress async_generate_plan_preview) could commit its cache after
         # HA has already moved on, one of the disarm paths missed by the original fix (#77).
         self._disarm_preview_cache()
+        if self._system_info_task is not None:
+            self._system_info_task.cancel()
+            # Wait until it has stopped: async_unload_entry closes the API session right after.
+            # asyncio.wait does not raise, so a cancellation of this shutdown itself still propagates.
+            await asyncio.wait([self._system_info_task])
         await super().async_shutdown()
 
     def _fire_plan_system_event(self, message: str) -> None:
@@ -4260,6 +4272,46 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return async_track_time_interval(
             self.hass, self._async_bus_load_tick, timedelta(seconds=BUS_LOAD_POLL_INTERVAL_SEC)
         )
+
+    def async_start_system_info_poll(self):
+        """Start the system info poll (free storage, time server, uptime); returns the cancel callback.
+
+        Fires one immediate tick, like async_start_bus_load_poll, so the readings are there right after setup.
+        """
+        self._async_schedule_system_info_tick()
+        return async_track_time_interval(
+            self.hass, self._async_schedule_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
+        )
+
+    @callback
+    def _async_schedule_system_info_tick(self, _now: datetime | None = None) -> None:
+        """Start a system info poll, unless one still runs or the entry unloads.
+
+        One poll at a time, so an older one never overwrites a newer one's readings; async_shutdown
+        cancels the running one before the API session closes under it.
+        """
+        if self.unloading:
+            return
+        if self._system_info_task is not None and not self._system_info_task.done():
+            _LOGGER.debug("[%s] System info poll still running, skipping this tick", self.server_id)
+            return
+        self._system_info_task = self.hass.async_create_task(
+            self._async_system_info_tick(), name=f"comexio_{self.server_id}_system_info_tick"
+        )
+
+    async def _async_system_info_tick(self, _now: datetime | None = None) -> None:
+        """Fetch the system info and uptime into self.system_info and notify its entities."""
+        reading = await self.api.get_system_info()
+        causes = {PART_SYSTEM_INFO: reading.info_error, PART_UPTIME: reading.uptime_error}
+        for part in self.system_info.apply(reading.info, reading.uptime, dt_util.utcnow()):
+            _LOGGER.warning(
+                "[%s] System info poll failed %s times in a row, %s reset to unknown: %s",
+                self.server_id,
+                SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
+                part,
+                causes[part],
+            )
+        async_dispatcher_send(self.hass, system_info_signal(self.server_id))
 
     def async_start_plan_run_state_poll(self):
         """Start the function plan run-state poll; returns the cancel callback.

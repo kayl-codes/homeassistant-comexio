@@ -1,17 +1,19 @@
 """Fixtures for the Home Assistant integration tests (pytest-homeassistant-custom-component)."""
 
 from collections.abc import Generator
+from datetime import timedelta
 import inspect
 from pathlib import Path
 import shutil
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import SystemInfo, TimeServerSettings
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio import api as api_module
-from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.api import ComexioAPI, SystemInfoReading
 from custom_components.comexio.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -103,6 +105,11 @@ def api_returns() -> dict[str, Any]:
         "get_live_states": ({}, {}),
         # The real bulk load returns a dict, never None — even when it fails or there is no plan.
         "function_plan_load_all_plans": {},
+        # Never None either: each part's failure is its own None plus the cause.
+        "get_system_info": SystemInfoReading(
+            SystemInfo(free_storage_percent=42.0, time_server=TimeServerSettings(True, "pool.ntp.org", 86400)),
+            timedelta(days=3),
+        ),
     }
 
 

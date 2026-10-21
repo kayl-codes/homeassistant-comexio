@@ -772,6 +772,20 @@ BUS_LOAD_POLL_INTERVAL_SEC = 10
 # silently keeping the last successful reading forever.
 BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
 
+# System info (free storage, time server settings, uptime): own slow poll, independent of the
+# config audit (skipped during a sync) — the values change slowly, a reboot shows within one interval.
+SYSTEM_INFO_POLL_INTERVAL_SEC = 300
+# Consecutive failed polls before the readings fall back to "unknown" (one hiccup keeps the last values).
+SYSTEM_INFO_FAIL_STREAK_THRESHOLD = 2
+# The boot time is now - uptime, which moves by the request latency on every poll: an estimate
+# within this many seconds of the known boot time keeps it (no state change, no recorder row).
+SYSTEM_BOOT_TIME_TOLERANCE_SEC = 60
+
+
+def system_info_signal(server_id: str) -> str:
+    """Dispatcher signal fired after every system info poll (see coordinator._async_system_info_tick)."""
+    return f"{DOMAIN}_{server_id}_system_info_update"
+
 
 def plan_watch_signal(server_id: str) -> str:
     """Dispatcher signal fired after every plan watchdog check (keeps the problem sensor's last_check current)."""

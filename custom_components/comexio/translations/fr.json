@@ -253,12 +253,21 @@
         "name": "Nombre de commandes Web-IO"
       },
       "watchdog_event": {
-        "name": "Dernier événement du Watchdog"
+        "name": "Dernier événement du watchdog de charge du bus"
+      },
+      "free_storage": {
+        "name": "Stockage libre"
+      },
+      "last_boot": {
+        "name": "Dernier démarrage"
       }
     },
     "binary_sensor": {
       "managed_plans_problem": {
         "name": "Problème plans gérés"
+      },
+      "time_server_problem": {
+        "name": "Réglage du serveur de temps"
       }
     },
     "switch": {
