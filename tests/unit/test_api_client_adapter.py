@@ -208,14 +208,18 @@ def test_a_login_with_replaced_credentials_leaves_the_refusal_alone(comexio_api:
 
     comexio_api.password = "old"
     refused = (comexio_api.host, comexio_api.username, "changed again")
-    comexio_api._refused_credentials = {refused}
+    comexio_api._refused_credentials = {comexio_api._refusal_key(refused)}
 
     async def accepted_after_reconfigure() -> None:
         comexio_api.password = "changed again"
 
     client.login = AsyncMock(side_effect=accepted_after_reconfigure)
-    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is True
-    assert comexio_api._refused_credentials == {refused}  # the accepted old password does not lift it
+    # Not a success either: the caller would mark the old client logged in and go on with a new, logged-out one.
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    assert comexio_api.last_login_error == "connection"
+    assert comexio_api._refused_credentials == {
+        comexio_api._refusal_key(refused)
+    }  # the accepted old password does not lift it
     assert comexio_api.credentials_refused is True
 
 
@@ -255,6 +259,15 @@ def test_every_refused_credential_set_stays_refused(comexio_api: ComexioAPI, cli
     assert client.login.await_count == 2
 
 
+def test_refused_credentials_keep_no_password(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Review (Sourcery, #213): refused passwords must not pile up in memory as plain text."""
+    comexio_api.password = "s3cret-but-wrong"
+    _fail(client, "login", ComexioAuthenticationError("no"))
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    assert comexio_api.credentials_refused is True
+    assert not any("s3cret-but-wrong" in key for key in comexio_api._refused_credentials)
+
+
 def test_queued_preview_tick_does_not_log_in_after_a_refusal(comexio_api: ComexioAPI) -> None:
     """Review (Sourcery, #213): ticks that passed the first check wait for the preview lock meanwhile."""
     comexio_api._login = AsyncMock(return_value=True)  # type: ignore[method-assign]
@@ -263,7 +276,7 @@ def test_queued_preview_tick_does_not_log_in_after_a_refusal(comexio_api: Comexi
         async with comexio_api._preview_session_lock:
             queued = asyncio.create_task(comexio_api.ensure_preview_session())
             await asyncio.sleep(0)
-            comexio_api._refused_credentials = {comexio_api._login_credentials()}
+            comexio_api._refused_credentials = {comexio_api._refusal_key(comexio_api._login_credentials())}
         return await queued
 
     assert asyncio.run(run()) is None
@@ -272,7 +285,7 @@ def test_queued_preview_tick_does_not_log_in_after_a_refusal(comexio_api: Comexi
 
 def test_api_user_change_does_not_lift_the_refusal(comexio_api: ComexioAPI) -> None:
     """Review (Sourcery, #213): the API user (Basic Auth for writes) is not part of the admin login."""
-    comexio_api._refused_credentials = {comexio_api._login_credentials()}
+    comexio_api._refused_credentials = {comexio_api._refusal_key(comexio_api._login_credentials())}
     comexio_api.api_user = "someone-else"
     comexio_api.api_pass = "other"
     assert comexio_api.credentials_refused is True
@@ -287,7 +300,7 @@ def test_connection_failure_does_not_count_as_a_refusal(comexio_api: ComexioAPI,
 
 
 def test_preview_session_does_not_log_in_with_refused_credentials(comexio_api: ComexioAPI) -> None:
-    comexio_api._refused_credentials = {comexio_api._login_credentials()}
+    comexio_api._refused_credentials = {comexio_api._refusal_key(comexio_api._login_credentials())}
     comexio_api._login = AsyncMock(return_value=True)  # type: ignore[method-assign]
     assert asyncio.run(comexio_api.ensure_preview_session()) is None
     comexio_api._login.assert_not_awaited()
@@ -298,7 +311,7 @@ def test_system_info_does_not_log_in_with_refused_credentials(comexio_api: Comex
     client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
     client.get_uptime = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
     client.login = AsyncMock()
-    comexio_api._refused_credentials = {comexio_api._login_credentials()}
+    comexio_api._refused_credentials = {comexio_api._refusal_key(comexio_api._login_credentials())}
 
     reading = asyncio.run(comexio_api.get_system_info())
 

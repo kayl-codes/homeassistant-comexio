@@ -337,6 +337,24 @@ async def test_a_poll_whose_re_login_is_refused_offers_reauth(
     assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
 
 
+@pytest.mark.logged_exception  # HA's coordinator logs the auth failure's traceback at debug level
+async def test_a_refusal_met_by_a_side_login_offers_reauth(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Review (Sourcery, #213): the preview or system info login is refused while the main session still works."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    api = mock_comexio_api[0]
+    api._refused_credentials = {api._refusal_key(api._login_credentials())}
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is False
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
+
+
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "connection"}])
 async def test_setup_after_an_unreachable_attempt_starts_the_watchdog_boot_grace(
     hass: HomeAssistant,

@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
 from datetime import timedelta
+import hashlib
 import logging
 import math
 import time
@@ -722,10 +723,11 @@ class ComexioAPI:
         # Set by get_raw_config, like config_relogin_unreachable, when Comexio refused that re-login's
         # credentials: the poll then asks the user for new ones.
         self.config_relogin_rejected = False
-        # Every host + admin credentials Comexio refused at login (_login). No login tries them again —
-        # HA asks for reauth then, and retrying from every poll would only risk a server-side lockout;
-        # new credentials (reauth reloads the entry) or a successful login with them lift it.
-        self._refused_credentials: set[tuple[str, ...]] = set()
+        # Every host + admin credentials Comexio refused at login (_login), as _refusal_key digests —
+        # no old password stays in memory. No login tries them again: HA asks for reauth then, and
+        # retrying from every poll would only risk a server-side lockout; new credentials (reauth
+        # reloads the entry) or a successful login with them lift it.
+        self._refused_credentials: set[str] = set()
 
     @staticmethod
     def _admin_login_part(credentials: tuple[str, ...]) -> tuple[str, ...]:
@@ -736,10 +738,15 @@ class ComexioAPI:
         """The host and admin credentials currently configured."""
         return self._admin_login_part(self._credentials())
 
+    @staticmethod
+    def _refusal_key(credentials: tuple[str, ...]) -> str:
+        """A digest of host + admin credentials: tells them apart without keeping the password."""
+        return hashlib.sha256("\0".join(credentials).encode()).hexdigest()
+
     @property
     def credentials_refused(self) -> bool:
         """Whether Comexio refused the current admin credentials at the last login that tried them."""
-        return self._login_credentials() in self._refused_credentials
+        return self._refusal_key(self._login_credentials()) in self._refused_credentials
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -781,11 +788,11 @@ class ComexioAPI:
                 settings_changed = credentials != self._credentials()
                 if not login_ok or self._closed or settings_changed:
                     session.detach()
-            if not login_ok:
-                _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
-                return None
             if settings_changed:
                 _LOGGER.info("Connection settings changed during the preview login — opening a new session next poll")
+                return None
+            if not login_ok:
+                _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
                 return None
             if self._closed:
                 return None
@@ -1020,17 +1027,19 @@ class ComexioAPI:
         _refused_credentials): the call fails as "rejected" without a request. All login requests run
         one at a time, so a caller that waited for a refused login sees the refusal and does not
         repeat it. Settings replaced by a reconfigure are outdated: a login still waiting with them
-        is not sent, and one refused while they were replaced does not report "rejected" — the
-        caller would ask for reauth although the new credentials were never tried. Both report
-        "connection" instead, so the caller simply tries again with the new settings.
+        is not sent, and one answered after they were replaced reports no outcome for the new ones:
+        not "rejected" (the caller would ask for reauth although they were never tried) and not
+        success (the caller would mark the old client logged in and go on with the new, logged-out
+        one). Both report "connection" instead, so the caller simply tries again with the new settings.
         """
         credentials = self._admin_login_part(client_credentials)
+        refusal_key = self._refusal_key(credentials)
         async with self._login_request_lock:
             if credentials != self._login_credentials():
                 _LOGGER.debug("Not logging in to Comexio: the connection settings changed while this login waited")
                 self.last_login_error = LOGIN_ERROR_CONNECTION
                 return False
-            if credentials in self._refused_credentials:
+            if refusal_key in self._refused_credentials:
                 _LOGGER.debug("Not logging in to Comexio: it refused these credentials, waiting for reauth")
                 self.last_login_error = LOGIN_ERROR_REJECTED
                 return False
@@ -1038,7 +1047,7 @@ class ComexioAPI:
                 await client.login()
             except ComexioAuthenticationError as err:
                 _LOGGER.debug("Comexio login rejected: %s", err)
-                self._refused_credentials.add(credentials)
+                self._refused_credentials.add(refusal_key)
                 outdated = credentials != self._login_credentials()
                 self.last_login_error = LOGIN_ERROR_CONNECTION if outdated else LOGIN_ERROR_REJECTED
                 return False
@@ -1048,7 +1057,11 @@ class ComexioAPI:
                 return False
             _LOGGER.info("Successfully logged into Comexio Admin interface")
             self.last_login_error = None
-            self._refused_credentials.discard(credentials)
+            self._refused_credentials.discard(refusal_key)
+            if credentials != self._login_credentials():
+                _LOGGER.debug("Comexio login succeeded with replaced connection settings — not using it")
+                self.last_login_error = LOGIN_ERROR_CONNECTION
+                return False
             return True
 
     async def get_raw_config(self) -> dict[str, Any]:
