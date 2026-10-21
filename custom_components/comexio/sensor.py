@@ -654,9 +654,11 @@ class ComexioLastBootSensor(_ComexioSystemInfoSensor):
 class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
     """How HA talks to Comexio: HTTPS with the pinned certificate, plain HTTP, or stopped on a changed certificate.
 
-    Not a CoordinatorEntity: it has to stay available while the polls fail on a changed certificate,
-    which is just when an automation wants to see it. Follows the certificate_changed repair through the
-    issue registry; a new pin changes the entry data, which reloads the entry and so this sensor.
+    Not a CoordinatorEntity: while the entry is loaded it stays available when the polls fail on a changed
+    certificate, which is just when an automation wants to see it. A setup that meets a changed certificate
+    does not load the entry, so after such a restart the sensor is unavailable and the repair alone remains.
+    Follows the certificate_changed repair through the issue registry; a new pin changes the entry data,
+    which reloads the entry and so this sensor.
     The fingerprints are public certificate hashes, kept out of the recorder only because they never
     change between states.
     """

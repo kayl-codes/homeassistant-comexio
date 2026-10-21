@@ -15,6 +15,7 @@ from aiocomexio import ComexioError, fetch_certificate_fingerprint, format_finge
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
 from .api import ComexioAPI
@@ -27,6 +28,7 @@ from .const import (
     CONF_SERVER_ID,
     CONF_USERNAME,
     DOMAIN,
+    LOGIN_ERROR_CERTIFICATE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -164,7 +166,9 @@ async def async_create_api(hass: HomeAssistant, entry: ConfigEntry) -> ComexioAP
 
     The switch pins the certificate only after a login over HTTPS worked with it — then the entry keeps
     the fingerprint and the user gets a notification. Otherwise the entry stays on HTTP for this setup
-    (the next one tries again) and the API returned is not logged in, as before.
+    (the next one tries again) and the API returned is not logged in, as before — except when the login met
+    a certificate other than the one just read: nothing is sent over plain HTTP to a Comexio whose
+    certificate changes under it, the setup is retried (ConfigEntryNotReady) and reads it afresh.
     """
     if CONF_CERTIFICATE_FINGERPRINT in entry.data:
         return _new_api(hass, entry.data, entry.data[CONF_CERTIFICATE_FINGERPRINT])
@@ -178,6 +182,9 @@ async def async_create_api(hass: HomeAssistant, entry: ConfigEntry) -> ComexioAP
         _LOGGER.info("Comexio at %s: switched to HTTPS, certificate %s pinned", host, format_fingerprint(fingerprint))
         notify_https_enabled(hass, str(entry.data[CONF_SERVER_ID]), host, fingerprint)
         return api
+    if api.last_login_error == LOGIN_ERROR_CERTIFICATE:
+        api.close()
+        raise ConfigEntryNotReady(f"Comexio at {host} changed its certificate during the switch to HTTPS")
     _LOGGER.warning(
         "Comexio at %s serves HTTPS, but the login over it failed (%s) — staying on plain HTTP for now",
         host,

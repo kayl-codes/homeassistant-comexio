@@ -2282,7 +2282,11 @@ def test_an_unreachable_poll_checks_for_a_replaced_certificate(
     update = ComexioCoordinator._async_update_data(coordinator)
     with pytest.raises(ComexioConnectionError):
         asyncio.run(update)
-    assert certificate_repair.report.called is reported
+    if reported:
+        certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    else:
+        certificate_repair.report.assert_not_called()
+    certificate_repair.clear.assert_not_called()
     assert coordinator.comexio_unreachable is True  # still counted as an outage
 
 
@@ -2300,3 +2304,17 @@ def test_a_scraped_poll_drops_the_repair_whoever_raised_it(
     coordinator._async_fetch_and_audit = answering
     asyncio.run(ComexioCoordinator._async_update_data(coordinator))
     certificate_repair.clear.assert_called_once_with(coordinator.hass, "entry1")
+
+
+def test_a_poll_that_scraped_nothing_keeps_the_repair(api: ComexioAPI, certificate_repair: SimpleNamespace) -> None:
+    # Only a poll that read Comexio's admin pages proves the pinned certificate got through.
+    coordinator = _certificate_coordinator(api)
+
+    async def not_scraped() -> dict:
+        coordinator._last_poll_scraped = False
+        coordinator._polled_plan_ids = None
+        return {}
+
+    coordinator._async_fetch_and_audit = not_scraped
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    certificate_repair.clear.assert_not_called()

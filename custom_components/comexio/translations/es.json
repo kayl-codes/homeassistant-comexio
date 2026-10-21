@@ -42,6 +42,14 @@
           "api_password": "Dejar en blanco para mantener la contraseña existente."
         }
       },
+      "reconfigure_http": {
+        "title": "¿Cambiar a HTTP sin cifrar?",
+        "description": "**{host}** no ofrece HTTPS. El certificado fijado:\n`{pinned}`\n\nSi continúas, Home Assistant se conecta por HTTP simple – sin cifrar, incluido el inicio de sesión de administrador – y descarta el certificado fijado. El próximo inicio fija el certificado que Comexio presente entonces.\n\nSi Comexio debería ofrecer HTTPS (o simplemente no está accesible ahora), cierra este diálogo y no cambia nada."
+      },
+      "reconfigure_certificate": {
+        "title": "¿Confiar en otro certificado?",
+        "description": "**{host}** presenta un certificado distinto del fijado.\n\nFijado (SHA-256):\n`{pinned}`\n\nPresentado (SHA-256):\n`{actual}`\n\nCompara el valor presentado con el SHA-256 que la página de administración de Comexio muestra en los hashes de certificado. Continúa solo si coinciden – entonces se fija el nuevo certificado. De lo contrario, cierra este diálogo y no cambia nada."
+      },
       "reauth_confirm": {
         "title": "Volver a autenticar Comexio",
         "description": "Comexio en {host} rechazó las credenciales de administrador guardadas. Introduce las actuales.",

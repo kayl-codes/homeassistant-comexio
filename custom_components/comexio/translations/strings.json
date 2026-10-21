@@ -42,6 +42,14 @@
           "api_password": "Leave blank to keep the existing password."
         }
       },
+      "reconfigure_http": {
+        "title": "Switch to unencrypted HTTP?",
+        "description": "**{host}** answered no HTTPS. The pinned certificate:\n`{pinned}`\n\nIf you continue, Home Assistant connects over plain HTTP — unencrypted, including the admin login — and drops the pinned certificate. The next start pins whatever certificate Comexio then presents.\n\nIf Comexio should serve HTTPS (or is just not reachable right now), close this dialog and nothing changes."
+      },
+      "reconfigure_certificate": {
+        "title": "Trust another certificate?",
+        "description": "**{host}** presents a certificate other than the pinned one.\n\nPinned (SHA-256):\n`{pinned}`\n\nPresented (SHA-256):\n`{actual}`\n\nCompare the presented value with the SHA-256 Comexio’s admin page lists under its certificate hashes. Continue only if they match — then the new certificate is pinned. Otherwise close this dialog and nothing changes."
+      },
       "reauth_confirm": {
         "title": "Re-authenticate Comexio",
         "description": "Comexio at {host} rejected the stored admin credentials. Enter the current ones.",

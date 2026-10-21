@@ -118,6 +118,7 @@ async def test_a_new_entry_pins_the_certificate_comexio_serves(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_CERTIFICATE_FINGERPRINT] == PINNED
     assert mock_comexio_api[0].fingerprint == PINNED  # the login test already ran over HTTPS
+    mock_comexio_api[0].login.assert_awaited_once()
     notify.assert_called_once()
     assert PINNED[:2].upper() in notify.call_args.args[1]
 
@@ -131,6 +132,7 @@ async def test_a_new_entry_stays_on_http_without_https(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert CONF_CERTIFICATE_FINGERPRINT not in result["data"]
     assert mock_comexio_api[0].fingerprint is None
+    mock_comexio_api[0].login.assert_awaited_once()
     notify.assert_not_called()
 
 
@@ -194,84 +196,215 @@ async def test_the_reconfigure_form_shows_the_connection(
     assert result["description_placeholders"] == placeholders
 
 
+PINNED_SHOWN = ":".join(["AA"] * 32)
+OTHER_SHOWN = ":".join(["BB"] * 32)
+
+
+def _serve(handshake: AsyncMock, served: str | Exception) -> None:
+    """What the reconfigured host answers to the bare TLS handshake: a fingerprint, or no HTTPS."""
+    if isinstance(served, Exception):
+        handshake.side_effect = served
+    else:
+        handshake.side_effect = None
+        handshake.return_value = served
+
+
 @pytest.mark.usefixtures("mock_setup_entry")
 @pytest.mark.parametrize(
-    ("served", "expected_pin", "title"),
+    ("host", "served", "step_id", "placeholders", "expected_pin", "title"),
     [
-        (OTHER, OTHER, "Comexio: connection encrypted"),
-        (ComexioConnectionError("no HTTPS"), None, "Comexio: connection not encrypted"),
+        (
+            NEW_HOST,
+            OTHER,
+            "reconfigure_certificate",
+            {"host": NEW_HOST, "pinned": PINNED_SHOWN, "actual": OTHER_SHOWN},
+            OTHER,
+            "Comexio: connection encrypted",
+        ),
+        (
+            NEW_HOST,
+            ComexioConnectionError("no HTTPS"),
+            "reconfigure_http",
+            {"host": NEW_HOST, "pinned": PINNED_SHOWN},
+            None,
+            "Comexio: connection not encrypted",
+        ),
+        (
+            HOST,
+            ComexioConnectionError("no HTTPS"),
+            "reconfigure_http",
+            {"host": HOST, "pinned": PINNED_SHOWN},
+            None,
+            "Comexio: connection not encrypted",
+        ),
     ],
-    ids=["new host serves HTTPS", "new host serves no HTTPS"],
+    ids=["new host with another certificate", "new host without HTTPS", "pinned host without HTTPS"],
 )
-async def test_a_new_host_gets_its_own_certificate_pinned(
+async def test_a_pinned_entry_asks_before_it_drops_or_replaces_the_pin(
     hass: HomeAssistant,
     pinned_entry: MockConfigEntry,
     mock_comexio_api: list[ComexioAPI],
     certificate_handshake: AsyncMock,
     notify: MagicMock,
+    host: str,
     served: str | Exception,
+    step_id: str,
+    placeholders: dict,
     expected_pin: str | None,
     title: str,
 ) -> None:
+    # A host that answers no HTTPS may just be unreachable this moment, and another certificate may be
+    # anyone's: nothing - not even the login test - is sent before the user confirmed what is shown.
     pinned_entry.add_to_hass(hass)
-    if isinstance(served, Exception):
-        certificate_handshake.side_effect = served
-    else:
-        certificate_handshake.side_effect = None
-        certificate_handshake.return_value = served
+    data_before = dict(pinned_entry.data)
+    _serve(certificate_handshake, served)
 
-    result = await _reconfigure(hass, pinned_entry, NEW_HOST)
+    result = await _reconfigure(hass, pinned_entry, host)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == step_id
+    assert result["description_placeholders"] == placeholders
+    assert not mock_comexio_api
+    assert dict(pinned_entry.data) == data_before
+    notify.assert_not_called()
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
+    assert pinned_entry.data[CONF_HOST] == host
     assert pinned_entry.data.get(CONF_CERTIFICATE_FINGERPRINT) == expected_pin
     assert mock_comexio_api[0].fingerprint == expected_pin
+    mock_comexio_api[0].login.assert_awaited_once()
     notify.assert_called_once()
     assert notify.call_args.kwargs["title"] == title
 
 
 @pytest.mark.usefixtures("mock_setup_entry")
-async def test_a_new_host_whose_login_test_fails_changes_nothing(
+@pytest.mark.parametrize(
+    ("api_attributes", "error"),
+    [
+        ({"last_login_error": LOGIN_ERROR_CONNECTION}, "cannot_connect"),
+        (
+            {
+                "last_login_error": LOGIN_ERROR_CERTIFICATE,
+                "certificate_mismatch": ComexioCertificateMismatchError("foreign", expected=OTHER, actual=THIRD),
+            },
+            "certificate_unstable",
+        ),
+    ],
+    ids=["unreachable", "yet another certificate at the login"],
+)
+async def test_a_confirmed_change_whose_login_test_fails_changes_nothing(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    error: str,
+) -> None:
+    # The certificate just confirmed is not the pinned one, so a mismatch at the login is no repair's case.
+    pinned_entry.add_to_hass(hass)
+    data_before = dict(pinned_entry.data)
+    _serve(certificate_handshake, OTHER)
+    api_returns["login"] = False
+
+    result = await _reconfigure(hass, pinned_entry, NEW_HOST)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+    assert result["step_id"] == "reconfigure"
+    assert result["errors"] == {"base": error}
+    assert mock_comexio_api[0].fingerprint == OTHER
+    assert dict(pinned_entry.data) == data_before
+    assert _issue(hass, pinned_entry) is None
+    notify.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+@pytest.mark.parametrize(
+    ("served", "expected_pin", "notified"),
+    [(PINNED, PINNED, True), (ComexioConnectionError("no HTTPS"), None, False)],
+    ids=["Comexio serves HTTPS", "Comexio serves no HTTPS"],
+)
+async def test_an_entry_on_plain_http_takes_https_without_asking(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    served: str | Exception,
+    expected_pin: str | None,
+    notified: bool,
+) -> None:
+    # Like at setup: encryption is only gained, nothing trusted is given up.
+    mock_config_entry.add_to_hass(hass)
+    _serve(certificate_handshake, served)
+
+    result = await _reconfigure(hass, mock_config_entry, HOST)
+
+    assert result["reason"] == "reconfigure_successful"
+    assert mock_config_entry.data.get(CONF_CERTIFICATE_FINGERPRINT) == expected_pin
+    assert mock_comexio_api[0].fingerprint == expected_pin
+    mock_comexio_api[0].login.assert_awaited_once()
+    assert notify.called is notified
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+@pytest.mark.parametrize("host", [HOST, NEW_HOST], ids=["same host", "new host, same certificate"])
+async def test_the_pinned_certificate_keeps_its_pin(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    host: str,
+) -> None:
+    pinned_entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+
+    result = await _reconfigure(hass, pinned_entry, host)
+
+    assert result["reason"] == "reconfigure_successful"
+    assert pinned_entry.data[CONF_HOST] == host
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert mock_comexio_api[0].fingerprint == PINNED
+    mock_comexio_api[0].login.assert_awaited_once()
+    notify.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+@pytest.mark.parametrize(
+    ("actual", "error", "repaired"),
+    [(OTHER, "certificate_changed", True), (None, "certificate_unstable", False)],
+    ids=["names the certificate", "names none"],
+)
+async def test_another_certificate_at_the_login_test_on_the_pinned_host(
     hass: HomeAssistant,
     pinned_entry: MockConfigEntry,
     mock_comexio_api: list[ComexioAPI],
     api_returns: dict,
     api_attributes: dict,
     certificate_handshake: AsyncMock,
-    notify: MagicMock,
+    actual: str | None,
+    error: str,
+    repaired: bool,
 ) -> None:
+    # The handshake still met the pin, the login then another certificate: the repair if it is known which.
     pinned_entry.add_to_hass(hass)
-    certificate_handshake.side_effect = None
-    certificate_handshake.return_value = OTHER
+    _serve(certificate_handshake, PINNED)
     api_returns["login"] = False
-    api_attributes["last_login_error"] = LOGIN_ERROR_CONNECTION
-
-    result = await _reconfigure(hass, pinned_entry, NEW_HOST)
-
-    assert result["errors"] == {"base": "cannot_connect"}
-    assert pinned_entry.data[CONF_HOST] == HOST
-    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
-    notify.assert_not_called()
-
-
-@pytest.mark.usefixtures("mock_setup_entry")
-async def test_the_pinned_host_keeps_its_pin(
-    hass: HomeAssistant,
-    pinned_entry: MockConfigEntry,
-    mock_comexio_api: list[ComexioAPI],
-    certificate_handshake: AsyncMock,
-    notify: MagicMock,
-) -> None:
-    pinned_entry.add_to_hass(hass)
-    certificate_handshake.side_effect = None
-    certificate_handshake.return_value = PINNED
+    api_attributes["last_login_error"] = LOGIN_ERROR_CERTIFICATE
+    api_attributes["certificate_mismatch"] = ComexioCertificateMismatchError("foreign", expected=PINNED, actual=actual)
 
     result = await _reconfigure(hass, pinned_entry, HOST)
 
-    assert result["reason"] == "reconfigure_successful"
+    assert result["errors"] == {"base": error}
     assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
-    assert mock_comexio_api[0].fingerprint == PINNED
-    notify.assert_not_called()
+    issue = _issue(hass, pinned_entry)
+    assert (issue is not None) is repaired
+    if repaired:
+        assert issue.data["actual"] == OTHER
 
 
 @pytest.mark.usefixtures("mock_setup_entry")
@@ -299,22 +432,6 @@ async def test_a_changed_certificate_on_the_pinned_host_is_left_to_the_repair(
     notify.assert_not_called()
 
 
-@pytest.mark.usefixtures("mock_setup_entry")
-async def test_a_pinned_host_without_https_goes_back_to_http_with_a_notification(
-    hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], notify: MagicMock
-) -> None:
-    # The way out for a Comexio whose HTTPS was switched off; the HTTP login test must get through.
-    pinned_entry.add_to_hass(hass)
-
-    result = await _reconfigure(hass, pinned_entry, HOST)
-
-    assert result["reason"] == "reconfigure_successful"
-    assert CONF_CERTIFICATE_FINGERPRINT not in pinned_entry.data
-    assert mock_comexio_api[0].fingerprint is None
-    notify.assert_called_once()
-    assert notify.call_args.kwargs["title"] == "Comexio: connection not encrypted"
-
-
 async def _reauth(hass: HomeAssistant, entry: MockConfigEntry) -> dict[str, Any]:
     result = await entry.start_reauth_flow(hass)
     return await hass.config_entries.flow.async_configure(
@@ -332,7 +449,10 @@ async def test_reauth_tests_the_new_credentials_over_the_pinned_https(
     result = await _reauth(hass, pinned_entry)
 
     assert result["reason"] == "reauth_successful"
-    assert mock_comexio_api[0].fingerprint == PINNED
+    api = mock_comexio_api[0]
+    assert (api.username, api.password, api.fingerprint) == ("admin2", "new-secret", PINNED)
+    api.login.assert_awaited_once()
+    assert (pinned_entry.data[CONF_USERNAME], pinned_entry.data[CONF_PASSWORD]) == ("admin2", "new-secret")
     assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
 
 
@@ -411,6 +531,56 @@ async def test_setup_stays_on_http_when_the_https_login_fails(
     assert https_api.fingerprint == PINNED
     https_api.close.assert_called()
     assert http_api.fingerprint is None
+    notify.assert_not_called()
+
+
+async def test_setup_meeting_a_changing_certificate_during_the_switch_is_retried(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+) -> None:
+    # The handshake read one certificate, the login met another: no fallback to plain HTTP with the credentials.
+    _serve(certificate_handshake, PINNED)
+    api_returns["login"] = False
+    api_attributes["last_login_error"] = LOGIN_ERROR_CERTIFICATE
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert CONF_CERTIFICATE_FINGERPRINT not in mock_config_entry.data
+    assert [api.fingerprint for api in mock_comexio_api] == [PINNED]
+    mock_comexio_api[0].close.assert_called()
+    notify.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("login_error", "state"),
+    [(LOGIN_ERROR_CONNECTION, ConfigEntryState.SETUP_RETRY), ("rejected", ConfigEntryState.SETUP_ERROR)],
+)
+async def test_a_pinned_entry_never_falls_back_to_http(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    login_error: str,
+    state: ConfigEntryState,
+) -> None:
+    api_returns["login"] = False
+    api_attributes["last_login_error"] = login_error
+
+    await _setup(hass, pinned_entry)
+
+    assert pinned_entry.state is state
+    assert [api.fingerprint for api in mock_comexio_api] == [PINNED]
+    certificate_handshake.assert_not_awaited()
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
     notify.assert_not_called()
 
 
