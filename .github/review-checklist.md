@@ -232,6 +232,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   of a race or timeout switches the state during the await it targets (e.g. inside the mocked call) and proves the
   timeout fired; a quick check is to break the target path (raise the timeout, drop the guard) and see it fail
   (#168).
+- A test of a step that validates before it acts (a config, reauth or reconfigure step that tests the login, a
+  check before a write) asserts that the validation ran — e.g. `api.login.assert_awaited_once()` — in the success
+  case and in every failure case, not only the result (entry created, data unchanged, error shown). A success test
+  otherwise passes when the step stores unchecked input; a failure test passes when the step rejects before it ever
+  validated (#207).
 - A parametrized test of a dispatch names each case's expected handler(s) and asserts that those ran and the others
   did not (for an exclusive route: exactly one handler; for an intentional fan-out: every expected handler ran and every
   forbidden one did not); a sum of awaits over several handlers also passes when an action is routed to the wrong one. A test of a
