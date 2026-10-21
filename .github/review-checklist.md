@@ -29,11 +29,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Persisted identifiers:** the lowercase `logikplan_*` option keys, `Store` storage keys and the plan-selector
   unique_id are frozen legacy spellings. Flag renames without migration code.
 - **Changed defaults reach saved entries:** the config and options forms store the shown default together with the
-  user's input, so an entry that ever saved its options holds the old default as if the user had typed it. A
-  changed `DEFAULT_*` value whose new behaviour should also apply to existing installs needs a config entry migration
-  (`CONFIG_ENTRY_MINOR_VERSION` + `migrate_entry_options`). The migration replaces a saved value equal to the old
-  default, compared the way the code reads it, and keeps a customised one. Flag a changed default without that
-  migration, or state in the PR that only new installs get it.
+  user's input, so an entry that ever saved its options holds the old default as if the user had typed it, while an
+  entry that never saved one reads the current `DEFAULT_*` at runtime. A changed default therefore needs a config entry
+  migration: bump `CONFIG_ENTRY_MINOR_VERSION` and add an `if minor_version < N` branch to `migrate_entry_options`
+  (`async_migrate_entry` and the config flow's `MINOR_VERSION` follow the constant). If existing installs should get
+  the new behaviour, the branch replaces a saved value equal to the old default, compared the way the code reads it,
+  and keeps a customised one. If only new installs should get it, the branch pins the old default into entries that
+  have no saved value (as 1.2 -> 1.3 does with `LEGACY_DEFAULT_SCHEMA_IO`). Flag a changed default without such a
+  branch.
 - **Terminology:** "function plan" is the English term in code, services, logs, notifications and en/fr/es
   translations; "Logikplan" is the German translation, used in `de.json` and the German sections of the Markdown
   docs (and as a parenthetical gloss such as "function plan (Logikplan)"), never in English UI text or code. Never
