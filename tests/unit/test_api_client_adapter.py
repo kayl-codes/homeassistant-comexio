@@ -167,11 +167,11 @@ def test_refused_credentials_are_not_sent_again(comexio_api: ComexioAPI, client:
 def test_new_credentials_lift_the_refusal(comexio_api: ComexioAPI, client: MagicMock) -> None:
     refused_password = comexio_api.password
     _fail(client, "login", ComexioAuthenticationError("no"))
-    assert asyncio.run(comexio_api._login(client)) is False
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
     comexio_api.password = "changed"
     assert comexio_api.credentials_refused is False
     client.login = AsyncMock()
-    assert asyncio.run(comexio_api._login(client)) is True
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is True
     client.login.assert_awaited_once()
     comexio_api.password = refused_password
     assert comexio_api.credentials_refused is True  # accepting other credentials says nothing about the refused ones
@@ -186,7 +186,9 @@ def test_preview_and_main_login_do_not_both_send_refused_credentials(
     preview.login = AsyncMock(side_effect=_slow_refusal)
 
     async def both() -> list[bool]:
-        return list(await asyncio.gather(comexio_api._full_login(), comexio_api._login(preview)))
+        return list(
+            await asyncio.gather(comexio_api._full_login(), comexio_api._login(preview, comexio_api._credentials()))
+        )
 
     assert asyncio.run(both()) == [False, False]
     assert client.login.await_count + preview.login.await_count == 1
@@ -200,7 +202,7 @@ def test_a_login_with_replaced_credentials_leaves_the_refusal_alone(comexio_api:
         raise ComexioAuthenticationError("no")
 
     client.login = AsyncMock(side_effect=refused_after_reconfigure)
-    assert asyncio.run(comexio_api._login(client)) is False
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
     assert comexio_api.credentials_refused is False  # the refusal was for the old password
 
     comexio_api.password = "old"
@@ -210,9 +212,55 @@ def test_a_login_with_replaced_credentials_leaves_the_refusal_alone(comexio_api:
         comexio_api.password = "changed again"
 
     client.login = AsyncMock(side_effect=accepted_after_reconfigure)
-    assert asyncio.run(comexio_api._login(client)) is True
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is True
     assert comexio_api._refused_credentials == refused  # the accepted old password does not lift it
     assert comexio_api.credentials_refused is True
+
+
+def test_a_stale_client_refusal_does_not_block_the_new_credentials(comexio_api: ComexioAPI) -> None:
+    """Review (Sourcery, #213): a client built before a reconfigure waits for the login lock meanwhile."""
+    stale = MagicMock()
+    stale.login = AsyncMock(side_effect=ComexioAuthenticationError("no"))
+    fresh = MagicMock()
+    fresh.login = AsyncMock()
+
+    async def run() -> None:
+        stale_credentials = comexio_api._credentials()
+        async with comexio_api._login_request_lock:
+            waiting = asyncio.create_task(comexio_api._login(stale, stale_credentials))
+            await asyncio.sleep(0)
+            comexio_api.password = "new and valid"
+        assert await waiting is False
+        assert comexio_api.credentials_refused is False  # refused were the old ones only
+        assert await comexio_api._login(fresh, comexio_api._credentials()) is True
+
+    asyncio.run(run())
+    fresh.login.assert_awaited_once()
+
+
+def test_a_stale_refusal_keeps_the_refusal_of_the_current_credentials(comexio_api: ComexioAPI) -> None:
+    stale_credentials = comexio_api._credentials()
+    comexio_api.password = "new but wrong"
+    comexio_api._refused_credentials = comexio_api._login_credentials()
+    stale = MagicMock()
+    stale.login = AsyncMock(side_effect=ComexioAuthenticationError("no"))
+    assert asyncio.run(comexio_api._login(stale, stale_credentials)) is False
+    assert comexio_api.credentials_refused is True
+
+
+def test_queued_preview_tick_does_not_log_in_after_a_refusal(comexio_api: ComexioAPI) -> None:
+    """Review (Sourcery, #213): ticks that passed the first check wait for the preview lock meanwhile."""
+    comexio_api._login = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    async def run() -> aiohttp.ClientSession | None:
+        async with comexio_api._preview_session_lock:
+            queued = asyncio.create_task(comexio_api.ensure_preview_session())
+            await asyncio.sleep(0)
+            comexio_api._refused_credentials = comexio_api._login_credentials()
+        return await queued
+
+    assert asyncio.run(run()) is None
+    comexio_api._login.assert_not_awaited()
 
 
 def test_api_user_change_does_not_lift_the_refusal(comexio_api: ComexioAPI) -> None:
@@ -291,7 +339,7 @@ def test_preview_session_is_kept_while_the_settings_are_unchanged(comexio_api: C
 
 def test_logged_in_preview_session_is_kept(comexio_api: ComexioAPI) -> None:
     # A preview session that logged in under the current settings survives later client reads.
-    async def login_ok(_client: object) -> bool:
+    async def login_ok(_client: object, _credentials: object) -> bool:
         return True
 
     comexio_api._login = login_ok  # type: ignore[method-assign]
@@ -323,7 +371,7 @@ def test_waiting_preview_tick_does_not_reuse_an_outdated_session(comexio_api: Co
 def test_preview_login_under_old_settings_is_discarded(comexio_api: ComexioAPI) -> None:
     # Settings that change while the preview login is in flight must not leave a session
     # bound to the old host behind; the next poll opens a fresh one.
-    async def login_while_reconfigured(_client: object) -> bool:
+    async def login_while_reconfigured(_client: object, _credentials: object) -> bool:
         comexio_api.host = "10.0.0.2"
         return True
 

@@ -725,11 +725,16 @@ class ComexioAPI:
         # The host and admin credentials Comexio last refused at login (_login). No login tries them
         # again — HA asks for reauth then, and retrying from every poll would only risk a server-side
         # lockout; new credentials (reauth reloads the entry) or a successful login lift it.
-        self._refused_credentials: tuple[str, str, str] | None = None
+        self._refused_credentials: tuple[str, ...] | None = None
 
-    def _login_credentials(self) -> tuple[str, str, str]:
+    @staticmethod
+    def _admin_login_part(credentials: tuple[str, ...]) -> tuple[str, ...]:
         """What client.login() authenticates with; the API user (Basic Auth for writes) plays no part."""
-        return (self.host, self.username, self.password)
+        return credentials[:3]
+
+    def _login_credentials(self) -> tuple[str, ...]:
+        """The host and admin credentials currently configured."""
+        return self._admin_login_part(self._credentials())
 
     @property
     def credentials_refused(self) -> bool:
@@ -755,18 +760,19 @@ class ComexioAPI:
             return None  # _login would not try them anyway; no warning on every preview tick
         async with self._preview_session_lock:
             # Re-check: another tick may have finished creating the session while this
-            # one was waiting for the lock — and the settings may have changed since.
+            # one was waiting for the lock — and the settings may have changed since,
+            # or a login meanwhile had them refused.
             self._drop_outdated_preview_session()
             if self._preview_session is not None:
                 return self._preview_session
-            if self._closed:
+            if self._closed or self.credentials_refused:
                 return None
             session = async_create_clientsession(self.hass, **self._build_session_kwargs())
             credentials = self._credentials()
             client = self._new_client(session)
             login_ok = False
             try:
-                login_ok = await self._login(client)
+                login_ok = await self._login(client, credentials)
             finally:
                 # Any non-success path (failed login, close() or new connection settings during
                 # the await above, or _login() raising) must not leave an authenticated session
@@ -998,23 +1004,25 @@ class ComexioAPI:
             client = self.client
             if self._login_generation != generation and client is self._logged_in_client:
                 return True
-            if not await self._login(client):
+            if not await self._login(client, self._client_credentials):
                 self._logged_in_client = None
                 return False
             self._logged_in_client = client
             self._login_generation += 1
             return True
 
-    async def _login(self, client: ComexioClient) -> bool:
+    async def _login(self, client: ComexioClient, client_credentials: tuple[str, ...]) -> bool:
         """client.login() mapped onto login()'s bool / last_login_error contract.
 
+        client_credentials are the settings the client was built with (_credentials()); a refusal or
+        success counts for them, not for the settings current when the answer comes — a reconfigure
+        while the client waited would otherwise get its new credentials refused unasked.
         Credentials Comexio refused are not sent again (see _refused_credentials): the call fails as
         "rejected" without a request. All login requests run one at a time, so a caller that waited
-        for a refused login sees the refusal and does not repeat it. A login whose credentials were
-        replaced meanwhile leaves the refusal alone: it speaks for the old ones only.
+        for a refused login sees the refusal and does not repeat it.
         """
+        credentials = self._admin_login_part(client_credentials)
         async with self._login_request_lock:
-            credentials = self._login_credentials()
             if self._refused_credentials == credentials:
                 _LOGGER.debug("Not logging in to Comexio: it refused these credentials, waiting for reauth")
                 self.last_login_error = LOGIN_ERROR_REJECTED
@@ -1024,7 +1032,7 @@ class ComexioAPI:
             except ComexioAuthenticationError as err:
                 _LOGGER.debug("Comexio login rejected: %s", err)
                 self.last_login_error = LOGIN_ERROR_REJECTED
-                if credentials == self._login_credentials():
+                if not self.credentials_refused:  # one slot: a refusal of the current settings matters most
                     self._refused_credentials = credentials
                 return False
             except ComexioError as err:
