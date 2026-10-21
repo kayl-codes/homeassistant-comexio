@@ -78,7 +78,7 @@ Open via **⋮ → Reconfigure** on the integration entry. Allows updating host,
 
 > **Tip:** Leave password fields blank to keep the existing password. The integration runs a connection test before saving and reloads automatically on success.
 
-> **Rejected credentials:** If Comexio refuses the stored admin credentials (when the integration starts or on a poll), HA starts a *Re-authenticate Comexio* flow instead — enter the current username and password there. Until the credentials are updated, the configuration poll stops and the integration does not try the refused credentials again. While the integration is first being added, refused credentials show an error in the setup form instead.
+> **Rejected credentials:** If Comexio refuses the stored admin credentials (when the integration starts or on a poll), HA starts a *Re-authenticate Comexio* flow instead — enter the current username and password there. Until the credentials are updated, the configuration poll stops and the integration does not try the refused credentials again — only a Home Assistant restart or a reload of the entry tries them once more, and starts the reauth flow again if Comexio still refuses them. While the integration is first being added, refused credentials show an error in the setup form instead.
 
 ---
 
@@ -208,7 +208,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 
 > **Tipp:** Passwortfelder leer lassen bedeutet "bestehendes Passwort beibehalten". Die Integration führt vor dem Speichern einen Verbindungstest durch und lädt sich bei Erfolg automatisch neu.
 
-> **Abgelehnte Zugangsdaten:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten ab (beim Start der Integration oder bei einer Abfrage), startet HA stattdessen den Ablauf *Comexio erneut anmelden* — dort den aktuellen Benutzernamen und das Passwort eingeben. Bis die Zugangsdaten aktualisiert sind, ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
+> **Abgelehnte Zugangsdaten:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten ab (beim Start der Integration oder bei einer Abfrage), startet HA stattdessen den Ablauf *Comexio erneut anmelden* — dort den aktuellen Benutzernamen und das Passwort eingeben. Bis die Zugangsdaten aktualisiert sind, ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut — nur ein Neustart von Home Assistant oder ein Neuladen der Integration versucht sie noch einmal und startet erneut den Ablauf *Comexio erneut anmelden*, wenn Comexio sie weiter ablehnt. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
 
 ---
 
