@@ -2034,6 +2034,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 webio_by_id=webio_by_id,
                 ios_by_id=ios_by_id,
                 block_settings=self.api.block_settings,
+                module_configs=self.api.module_configs,
                 # Asked again after the store's awaits: a restore may start in between.
                 held_back=lambda: self._auto_backup_held_back(pause_generation),
             )
@@ -2299,6 +2300,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 webio_by_id=webio_by_id,
                 ios_by_id=ios_by_id,
                 block_settings=self.api.block_settings,
+                module_configs=self.api.module_configs,
             )
             await self._async_refresh_service_descriptions()
         except Exception:

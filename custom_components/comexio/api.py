@@ -77,6 +77,7 @@ from .const import (
     one_line,
 )
 from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
+from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
@@ -651,6 +652,9 @@ class ComexioAPI:
         # from the newest config fetch; None when that fetch failed or did not carry a readable
         # table, so a backup then stores none rather than an ever older copy.
         self.block_settings: BlockSettings | None = None
+        # Scene block and Quantum module configs (see function_plan_module_configs) from the same
+        # fetch; None when it failed, a type the page did not carry readably is missing inside.
+        self.module_configs: ModuleConfigTables | None = None
         # Block settings saves Comexio confirmed so far — a config fetch during which one completed
         # may carry the table from before it and must not overwrite the cache the save updated.
         # A refused or failed save changed nothing on Comexio, so it does not count.
@@ -1080,20 +1084,22 @@ class ComexioAPI:
         return True
 
     def _drop_block_settings(self, generation: int) -> None:
-        """A failed fetch drops the block settings — unless a newer fetch already applied its own.
+        """A failed fetch drops the block settings and module configs — unless a newer fetch already applied its own.
 
         The newest outcome wins also as a failure: an older fetch finishing afterwards with a valid
         page is discarded entirely (io_types and comexio_version too); the next poll catches up.
         """
         if self._claim_config_fetch(generation, None):
             self.block_settings = None
+            self.module_configs = None
 
     def _apply_config_page(self, raw: RawConfig, saves_before: int) -> None:
-        """Take io_types, comexio_version and the block settings from a fetched config page."""
+        """Take io_types, comexio_version, the module configs and the block settings from a fetched config page."""
         self.io_types = raw.io_types
         self.io_input_types = raw.io_input_types
         if raw.comexio_version:
             self.comexio_version = raw.comexio_version
+        self.module_configs = parse_module_config_tables(raw.variables)
         block_settings = parse_block_settings(raw.variables.get("FubBaseConfig"))
         if self._block_settings_saves_confirmed != saves_before:
             # The page may predate the save; the cache already holds the saved values — or stays
