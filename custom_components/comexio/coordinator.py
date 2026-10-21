@@ -5007,14 +5007,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if self.unloading:
                 # The restore would run on the torn-down coordinator; the new one takes the next tap.
                 self._notify_vanished_restore_not_run(fub_id, name, "the integration reloaded while it waited")
-            elif from_push and (holder := await self._async_suspected_rename_holder(fub_id, name)) is not None:
-                # A push sent while the ID was free: for a renamed plan its Restore would start a copy beside it.
-                self._notify_vanished_restore_not_run(
-                    fub_id,
-                    name,
-                    f"ID {fub_id} now holds '{one_line(holder)}' with its content, most likely the plan renamed",
-                    hint="Take the rename over, or restore it anyway, in its Home Assistant repair.",
-                )
             elif not self._vanished_pick_present(fub_id, name):
                 _LOGGER.info(
                     "[%s] Restore of function plan '%s' (ID %s) skipped: it was restored or unwatched meanwhile",
@@ -5023,6 +5015,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     fub_id,
                 )
                 return False
+            elif from_push and (holder := await self._async_suspected_rename_holder(fub_id, name)) is not None:
+                # A push sent while the ID was free: for a renamed plan its Restore would start a copy beside it.
+                self._notify_vanished_restore_not_run(
+                    fub_id,
+                    name,
+                    f"ID {fub_id} now holds '{one_line(holder)}' with its content, most likely the plan renamed",
+                    hint="Take the rename over, or restore it anyway, in its Home Assistant repair.",
+                )
             else:
                 return await self._async_restore_vanished_from_backup(fub_id, name, from_push=from_push)
         except Exception as err:
@@ -5301,7 +5301,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         While the ID still holds holder (the pick was edited), the backups stay with that plan. Otherwise
         they go back to (fub_id, name), so its still-vanished pick keeps its restore (the chain is one
-        plan's history: the rename was suspected by its equal content).
+        plan's history: the rename was suspected by its equal content). The holder's own snapshots from
+        before the take-over go along: the merged chain records no origin per snapshot.
         """
         if self._existing_plan_names([fub_id]).get(fub_id) == holder:
             _LOGGER.warning(

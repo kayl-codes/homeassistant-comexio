@@ -2444,3 +2444,15 @@ def test_a_replaced_plan_push_retry_and_english_text_name_the_id_holder(ir: Magi
         assert data["message"].startswith(
             "The monitored function plan Test4 (ID 47) was not found: ID 47 now holds Test 4."
         )
+
+
+def test_a_restore_failed_push_with_another_plan_on_the_id_offers_no_restore(ir: MagicMock) -> None:
+    """(Review) a refused Restore of a plan most likely renamed came back with Restore: refused on every tap."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    asyncio.run(watchdog.async_sync_vanished(TEST4, {47: "Test 4"}))
+    asyncio.run(watchdog.async_push_restore_failed(47, "Test4"))
+    _domain, _service, data = _pushes(watchdog)[-1]
+    assert [action["action"] for action in data["data"]["actions"]] == [
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, vanished_plan_token(47, "Test4"))
+    ]

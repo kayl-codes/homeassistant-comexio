@@ -1233,14 +1233,18 @@ class ManagedPlanWatchdog:
             )
 
     async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
-        """Tell the phone a Restore from its push failed or was refused, with both actions again."""
+        """Tell the phone a Restore from its push failed or was refused, with both actions again.
+
+        With another plan on the ID only "Stop watching", as its alarm (see _async_push_vanished): a refused
+        Restore of a plan most likely renamed would be refused again on every tap.
+        """
         await self._async_push(
             fub_id,
             name,
             "restore_failed_title",
             "restore_failed",
             token=vanished_plan_token(fub_id, name),
-            actions=_vanished_actions(fub_id, name),
+            actions=_vanished_actions(fub_id, name) if fub_id not in self.vanished_holders else (ACTION_UNWATCH,),
             # Its buttons would replace the "restored" push sent meanwhile, or name a plan no longer vanished.
             vanished_guard=_VanishedGuard.WHILE_VANISHED,
         )

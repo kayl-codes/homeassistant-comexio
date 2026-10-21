@@ -535,6 +535,19 @@ def test_watching_the_id_holder_is_refused_while_unloading() -> None:
     coordinator.async_watch_id_holder.assert_not_awaited()
 
 
+def test_watching_the_id_holder_is_not_held_back_by_a_restore() -> None:
+    """(Review) only the rename moves backups a restore moves too; watching the holder touches the options only."""
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+
+    async def submit() -> dict[str, Any]:
+        await coordinator._restore_lock.acquire()
+        with patch.object(repairs.ir, "async_delete_issue"):
+            return await flow.async_step_function_plan_vanished({"action": ACTION_WATCH_HOLDER})
+
+    assert asyncio.run(submit())["type"] == "create_entry"
+    coordinator.async_watch_id_holder.assert_awaited_once_with(47, "Test4", "Test 4", rename=False)
+
+
 def test_a_rename_with_unreadable_backups_is_reported_as_not_moved() -> None:
     """(Review) a load failure was reported as "content no longer matches"."""
     flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)

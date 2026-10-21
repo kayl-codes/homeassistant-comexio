@@ -1577,7 +1577,7 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_abort(reason="backups_not_moved", description_placeholders=placeholders)
         if not done:
             # Another plan holds the ID by now, or the pick was changed in the options meanwhile.
-            _LOGGER.info(
+            _LOGGER.warning(
                 "Function plan '%s' (ID %s): not switched to '%s', the ID or the pick changed meanwhile",
                 one_line(name),
                 fub_id,

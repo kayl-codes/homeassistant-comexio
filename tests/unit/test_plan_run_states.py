@@ -2351,6 +2351,55 @@ def test_a_holder_gone_while_the_backups_moved_gets_them_back(
     assert "the backups moved back to 'Alt'" in caplog.text
 
 
+def test_a_failed_move_back_is_logged_and_leaves_the_pick(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """(Review) the move back failed: logged, not raised into the repair, and no "moved back" claimed."""
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+
+    async def rename(*args: Any) -> int:
+        if args[1] == "Licht":
+            raise OSError("disk full")
+        api._fub_data["43"] = {**api._fub_data["43"], "Name": "Pumpe"}
+        return 3
+
+    coordinator.function_plan_backup = SimpleNamespace(async_rename_identity=AsyncMock(side_effect=rename))
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=True)) is False
+    coordinator.request_options_update_without_reload.assert_not_called()
+    assert "moving them back to 'Alt' failed; they are listed as orphaned backups" in caplog.text
+    assert "backups moved back" not in caplog.text
+
+
+def test_a_failing_check_after_the_pick_swap_still_reports_the_swap(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Review) the swap is written: a failing watchdog check is logged, the next poll repeats it."""
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    coordinator.async_watch_managed_plans = AsyncMock(side_effect=RuntimeError("check"))  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=False)) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht"]
+    assert "check after the pick swap failed" in caplog.text
+    coordinator.async_update_listeners.assert_not_called()
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+@pytest.mark.parametrize(("from_push", "suspected"), [(True, False), (False, True)])
+def test_a_restore_with_another_plan_on_the_id_runs_unless_a_push_meets_a_likely_rename(
+    api: ComexioAPI, from_push: bool, suspected: bool
+) -> None:
+    """(Review) a reused ID (other content), or the repair's "restore anyway", still restores."""
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["47"] = {"Id": 47, "Name": "Licht", "Active": 1}
+    coordinator.function_plan_backup.async_load = AsyncMock()
+    coordinator.plan_rename_suspected = MagicMock(return_value=suspected)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=from_push)) is True
+    coordinator.hass.services.async_call.assert_called_once()
+    if not from_push:
+        coordinator.plan_rename_suspected.assert_not_called()
+
+
 @pytest.mark.usefixtures("fast_restore_wait")
 def test_a_push_restore_of_a_plan_most_likely_renamed_is_not_run(
     api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
