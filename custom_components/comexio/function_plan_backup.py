@@ -232,7 +232,7 @@ def _newer_timestamp(a: str | None, b: str | None) -> str | None:
         return b
     if b is None:
         return a
-    return a if a > b else b
+    return max(a, b)
 
 
 def is_orphaned_identity(fub_data: dict[str, Any] | None, fub_id: int, plan_name: str) -> bool:

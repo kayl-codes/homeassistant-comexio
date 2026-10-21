@@ -15,9 +15,16 @@ select = [
     "C4",   # flake8-comprehensions
     "E",    # pycodestyle errors
     "F",    # pyflakes
+    "FURB", # refurb — modern idioms (Sourcery-style refactorings)
     "I",    # isort
+    "PERF", # perflint — comprehensions instead of append/assign loops
+    "PIE",  # flake8-pie — unnecessary pass/spread/placeholders
+    "PLE",  # pylint errors
+    "PLW",  # pylint warnings (redefined loop names, unnecessary lambdas, …)
     "PT012",  # pytest.raises() block holds a single statement that may raise (Sonar S5778)
     "PT018",  # composite assertion — split it (Sonar S9073)
+    "RET",  # flake8-return — unnecessary assign/else before return (Sourcery-style)
+    "RSE",  # flake8-raise — unnecessary parentheses on raised exceptions
     "SIM",  # flake8-simplify
     "UP",   # pyupgrade
     "W",    # pycodestyle warnings

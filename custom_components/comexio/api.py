@@ -5160,8 +5160,9 @@ class ComexioAPI:
         often, and its readings would otherwise go unknown until the next config poll.
         """
         relogin: list[bool] = []  # the outcome of this call's one re-login, shared by both fetches
-        info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)
-        uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime(), relogin)
+        # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
+        info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)  # noqa: PLW0108
+        uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime(), relogin)  # noqa: PLW0108
         return SystemInfoReading(info, uptime, info_error, uptime_error)
 
     async def _system_info_part[T](

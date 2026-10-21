@@ -994,11 +994,12 @@ def repointed_watchdog_user_plan_picks(
     picks: list[Any] = []
     for value in raw_picks:
         pick = parse_watchdog_user_plan_pick(value)
+        kept = value
         if pick is not None and pick[0] == old_fub_id and pick[1] in movable_names:
-            value = watchdog_user_plan_pick(new_fub_id, plan_name)
+            kept = watchdog_user_plan_pick(new_fub_id, plan_name)
             moved = True
-        if value not in picks:
-            picks.append(value)
+        if kept not in picks:
+            picks.append(kept)
     return picks if moved else None
 
 
@@ -1372,7 +1373,8 @@ def _subtracted_intervals(
     """keep's IDs minus drop's (both merged) — linear in the number of intervals, never in the IDs."""
     result: list[tuple[int, int]] = []
     first = 0
-    for start, end in keep:
+    for keep_start, end in keep:
+        start = keep_start
         while first < len(drop) and drop[first][1] < start:
             first += 1
         cut = first
