@@ -28,9 +28,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   description. Flag any change that would let a renamed description or naming schema alter a unique_id or entity_id.
 - **Persisted identifiers:** the lowercase `logikplan_*` option keys, `Store` storage keys and the plan-selector
   unique_id are frozen legacy spellings. Flag renames without migration code.
-- **Changed defaults reach saved entries:** the config and options forms store the shown default together with the
-  user's input, so an entry that ever saved its options holds the old default as if the user had typed it, while an
-  entry that never saved one reads the current `DEFAULT_*` at runtime. A changed default therefore needs a config entry
+- **Changed defaults reach saved entries:** the initial config flow (into `entry.data`) and the options form (into
+  `entry.options`) store the shown default together with the user's input, so an entry that holds the key in either
+  keeps the old default as if the user had typed it, while an entry that holds it in neither (the form never offered
+  the setting) reads the current `DEFAULT_*` at runtime. A changed default therefore needs a config entry
   migration: bump `CONFIG_ENTRY_MINOR_VERSION` and add an `if minor_version < N` branch to `migrate_entry_options`
   (`async_migrate_entry` and the config flow's `MINOR_VERSION` follow the constant). If existing installs should get
   the new behaviour, the branch replaces a saved value equal to the old default, compared the way the code reads it,
