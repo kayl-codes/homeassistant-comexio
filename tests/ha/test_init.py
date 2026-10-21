@@ -3,8 +3,9 @@
 import asyncio
 import time
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioAuthenticationError
 from homeassistant.components.webhook import DOMAIN as WEBHOOK_DOMAIN
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import CONF_PASSWORD
@@ -333,6 +334,28 @@ async def test_a_poll_whose_re_login_is_refused_offers_reauth(
     assert coordinator.data is data_before
     api.get_live_states.assert_not_awaited()  # the poll stopped at the refusal, nothing parsed from {}
     assert coordinator.comexio_unreachable is False  # Comexio answered
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
+
+
+@pytest.mark.logged_exception  # HA's coordinator logs the auth failure's traceback at debug level
+async def test_a_refusal_met_by_a_side_login_offers_reauth(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Review (Sourcery, #213): the preview or system info login is refused while the main session still works."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    api = mock_comexio_api[0]
+    # The real _login (the fixture stubs it) on a side client Comexio refuses: the latch the poll reads.
+    side_client = MagicMock()
+    side_client.login = AsyncMock(side_effect=ComexioAuthenticationError("no"))
+    assert await ComexioAPI._login(api, side_client, api._credentials()) is False
+    side_client.login.assert_awaited_once()
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is False
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
 

@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
 from datetime import timedelta
+import hashlib
 import logging
 import math
 import time
@@ -77,6 +78,7 @@ from .const import (
     one_line,
 )
 from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
+from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
@@ -630,6 +632,9 @@ class ComexioAPI:
         self._logged_in_client: ComexioClient | None = None
         # Serializes full logins: two at once clear each other's cookie jar mid-login.
         self._login_lock = asyncio.Lock()
+        # Serializes every login request, main session and preview alike, so the refusal check and
+        # its update in _login see each other (taken inside _login_lock, never the other way round).
+        self._login_request_lock = asyncio.Lock()
         # Bumped by every successful full login, so a caller that waited for the lock sees
         # that another one already logged the session in again.
         self._login_generation: int = 0
@@ -651,6 +656,9 @@ class ComexioAPI:
         # from the newest config fetch; None when that fetch failed or did not carry a readable
         # table, so a backup then stores none rather than an ever older copy.
         self.block_settings: BlockSettings | None = None
+        # Scene block and Quantum module configs (see function_plan_module_configs) from the same
+        # fetch; None when it failed, a type the page did not carry readably is missing inside.
+        self.module_configs: ModuleConfigTables | None = None
         # Block settings saves Comexio confirmed so far — a config fetch during which one completed
         # may carry the table from before it and must not overwrite the cache the save updated.
         # A refused or failed save changed nothing on Comexio, so it does not count.
@@ -719,6 +727,30 @@ class ComexioAPI:
         # Set by get_raw_config, like config_relogin_unreachable, when Comexio refused that re-login's
         # credentials: the poll then asks the user for new ones.
         self.config_relogin_rejected = False
+        # Every host + admin credentials Comexio refused at login (_login), as _refusal_key digests —
+        # no old password stays in memory. No login tries them again: HA asks for reauth then, and
+        # retrying from every poll would only risk a server-side lockout; new credentials (reauth
+        # reloads the entry) or a successful login with them lift it.
+        self._refused_credentials: set[str] = set()
+
+    @staticmethod
+    def _admin_login_part(credentials: tuple[str, ...]) -> tuple[str, ...]:
+        """What client.login() authenticates with; the API user (Basic Auth for writes) plays no part."""
+        return credentials[:3]
+
+    def _login_credentials(self) -> tuple[str, ...]:
+        """The host and admin credentials currently configured."""
+        return self._admin_login_part(self._credentials())
+
+    @staticmethod
+    def _refusal_key(credentials: tuple[str, ...]) -> str:
+        """A digest of host + admin credentials: tells them apart without keeping the password."""
+        return hashlib.sha256("\0".join(credentials).encode()).hexdigest()
+
+    @property
+    def credentials_refused(self) -> bool:
+        """Whether Comexio refused the current admin credentials at the last login that tried them."""
+        return self._refusal_key(self._login_credentials()) in self._refused_credentials
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -730,25 +762,29 @@ class ComexioAPI:
         Returns None if the login fails — the caller falls back to the main session for that
         one poll tick rather than blocking the preview on a retry loop; the next tick tries
         the dedicated session again from scratch (a fresh session, since a stale/rejected
-        cookie jar wouldn't fix itself).
+        cookie jar wouldn't fix itself) — unless Comexio refused the credentials: those are
+        not tried again until they change (see _refused_credentials).
         """
         self._drop_outdated_preview_session()
         if self._preview_session is not None:
             return self._preview_session
+        if self.credentials_refused:
+            return None  # _login would not try them anyway; no warning on every preview tick
         async with self._preview_session_lock:
             # Re-check: another tick may have finished creating the session while this
-            # one was waiting for the lock — and the settings may have changed since.
+            # one was waiting for the lock — and the settings may have changed since,
+            # or a login meanwhile had them refused.
             self._drop_outdated_preview_session()
             if self._preview_session is not None:
                 return self._preview_session
-            if self._closed:
+            if self._closed or self.credentials_refused:
                 return None
             session = async_create_clientsession(self.hass, **self._build_session_kwargs())
             credentials = self._credentials()
             client = self._new_client(session)
             login_ok = False
             try:
-                login_ok = await self._login(client)
+                login_ok = await self._login(client, credentials)
             finally:
                 # Any non-success path (failed login, close() or new connection settings during
                 # the await above, or _login() raising) must not leave an authenticated session
@@ -756,11 +792,11 @@ class ComexioAPI:
                 settings_changed = credentials != self._credentials()
                 if not login_ok or self._closed or settings_changed:
                     session.detach()
-            if not login_ok:
-                _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
-                return None
             if settings_changed:
                 _LOGGER.info("Connection settings changed during the preview login — opening a new session next poll")
+                return None
+            if not login_ok:
+                _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
                 return None
             if self._closed:
                 return None
@@ -980,28 +1016,57 @@ class ComexioAPI:
             client = self.client
             if self._login_generation != generation and client is self._logged_in_client:
                 return True
-            if not await self._login(client):
+            if not await self._login(client, self._client_credentials):
                 self._logged_in_client = None
                 return False
             self._logged_in_client = client
             self._login_generation += 1
             return True
 
-    async def _login(self, client: ComexioClient) -> bool:
-        """client.login() mapped onto login()'s bool / last_login_error contract."""
-        try:
-            await client.login()
-        except ComexioAuthenticationError as err:
-            _LOGGER.debug("Comexio login rejected: %s", err)
-            self.last_login_error = LOGIN_ERROR_REJECTED
-            return False
-        except ComexioError as err:
-            _LOGGER.warning("Comexio login failed: %s", err)
-            self.last_login_error = LOGIN_ERROR_CONNECTION
-            return False
-        _LOGGER.info("Successfully logged into Comexio Admin interface")
-        self.last_login_error = None
-        return True
+    async def _login(self, client: ComexioClient, client_credentials: tuple[str, ...]) -> bool:
+        """client.login() mapped onto login()'s bool / last_login_error contract.
+
+        client_credentials are the settings the client was built with (_credentials()); a refusal or
+        success counts for them. Credentials Comexio refused are not sent again (see
+        _refused_credentials): the call fails as "rejected" without a request. All login requests run
+        one at a time, so a caller that waited for a refused login sees the refusal and does not
+        repeat it. Settings replaced by a reconfigure are outdated: a login still waiting with them
+        is not sent, and one answered after they were replaced reports no outcome for the new ones:
+        not "rejected" (the caller would ask for reauth although they were never tried) and not
+        success (the caller would mark the old client logged in and go on with the new, logged-out
+        one). Both report "connection" instead, so the caller simply tries again with the new settings.
+        """
+        credentials = self._admin_login_part(client_credentials)
+        refusal_key = self._refusal_key(credentials)
+        async with self._login_request_lock:
+            if credentials != self._login_credentials():
+                _LOGGER.debug("Not logging in to Comexio: the connection settings changed while this login waited")
+                self.last_login_error = LOGIN_ERROR_CONNECTION
+                return False
+            if refusal_key in self._refused_credentials:
+                _LOGGER.debug("Not logging in to Comexio: it refused these credentials, waiting for reauth")
+                self.last_login_error = LOGIN_ERROR_REJECTED
+                return False
+            try:
+                await client.login()
+            except ComexioAuthenticationError as err:
+                _LOGGER.debug("Comexio login rejected: %s", err)
+                self._refused_credentials.add(refusal_key)
+                outdated = credentials != self._login_credentials()
+                self.last_login_error = LOGIN_ERROR_CONNECTION if outdated else LOGIN_ERROR_REJECTED
+                return False
+            except ComexioError as err:
+                _LOGGER.warning("Comexio login failed: %s", err)
+                self.last_login_error = LOGIN_ERROR_CONNECTION
+                return False
+            _LOGGER.info("Successfully logged into Comexio Admin interface")
+            self.last_login_error = None
+            self._refused_credentials.discard(refusal_key)
+            if credentials != self._login_credentials():
+                _LOGGER.debug("Comexio login succeeded with replaced connection settings — not using it")
+                self.last_login_error = LOGIN_ERROR_CONNECTION
+                return False
+            return True
 
     async def get_raw_config(self) -> dict[str, Any]:
         """The function module page's config objects ($FubModules, $Fubs, ...), keyed without "$".
@@ -1080,20 +1145,22 @@ class ComexioAPI:
         return True
 
     def _drop_block_settings(self, generation: int) -> None:
-        """A failed fetch drops the block settings — unless a newer fetch already applied its own.
+        """A failed fetch drops the block settings and module configs — unless a newer fetch already applied its own.
 
         The newest outcome wins also as a failure: an older fetch finishing afterwards with a valid
         page is discarded entirely (io_types and comexio_version too); the next poll catches up.
         """
         if self._claim_config_fetch(generation, None):
             self.block_settings = None
+            self.module_configs = None
 
     def _apply_config_page(self, raw: RawConfig, saves_before: int) -> None:
-        """Take io_types, comexio_version and the block settings from a fetched config page."""
+        """Take io_types, comexio_version, the module configs and the block settings from a fetched config page."""
         self.io_types = raw.io_types
         self.io_input_types = raw.io_input_types
         if raw.comexio_version:
             self.comexio_version = raw.comexio_version
+        self.module_configs = parse_module_config_tables(raw.variables)
         block_settings = parse_block_settings(raw.variables.get("FubBaseConfig"))
         if self._block_settings_saves_confirmed != saves_before:
             # The page may predate the save; the cache already holds the saved values — or stays
@@ -5100,7 +5167,11 @@ class ComexioAPI:
     async def _system_info_part[T](
         self, fetch: Callable[[], Awaitable[T]], relogin: list[bool]
     ) -> tuple[T | None, str | None]:
-        """fetch()'s result, or None and the failure cause; a lapsed session is logged in again once per relogin."""
+        """fetch()'s result, or None and the failure cause.
+
+        A lapsed session is logged in again once per relogin — not with credentials Comexio refused
+        (see _login): then the cause is "re-login failed (rejected)" without a request.
+        """
         generation = self._login_generation
         try:
             try:

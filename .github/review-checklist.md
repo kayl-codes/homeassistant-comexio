@@ -28,6 +28,22 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   description. Flag any change that would let a renamed description or naming schema alter a unique_id or entity_id.
 - **Persisted identifiers:** the lowercase `logikplan_*` option keys, `Store` storage keys and the plan-selector
   unique_id are frozen legacy spellings. Flag renames without migration code.
+- **Changed defaults reach saved entries:** the initial config flow (into `entry.data`) and the options form (into
+  `entry.options`) store the shown default together with the user's input, so an entry that holds the key in either
+  keeps the old default as if the user had typed it, while an entry that holds it in neither reads the current
+  `DEFAULT_*` at runtime (the code reads `{**entry.data, **entry.options}`, so a migrated option overrides an old data
+  value; a key read straight from `entry.data` instead needs `async_migrate_entry` to pass an updated `data=` as
+  well). A changed default needs a config entry migration (except in the last case below): bump
+  `CONFIG_ENTRY_MINOR_VERSION` and add an `if minor_version < N` branch to `migrate_entry_options`
+  (`async_migrate_entry` and the config flow's `MINOR_VERSION` follow the constant). Flag a changed default without
+  it.
+  - Existing installs should get it, and a form saves the key: the branch replaces a saved value equal to the old
+    default, compared the way the code reads it, and keeps a customised one (accepted trade-off: a user who
+    deliberately chose the old default is migrated too; the PR says so).
+  - Only new installs should get it: the branch pins the old default into entries without a saved value (as
+    1.2 -> 1.3 does with `LEGACY_DEFAULT_SCHEMA_IO`).
+  - Existing installs should get it, and no form ever saves the key: no migration needed, the runtime fallback
+    already delivers it.
 - **Terminology:** "function plan" is the English term in code, services, logs, notifications and en/fr/es
   translations; "Logikplan" is the German translation, used in `de.json` and the German sections of the Markdown
   docs (and as a parenthetical gloss such as "function plan (Logikplan)"), never in English UI text or code. Never
