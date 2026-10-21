@@ -311,6 +311,52 @@ async def test_a_pinned_host_without_https_goes_back_to_http_with_a_notification
     assert notify.call_args.kwargs["title"] == "Comexio: connection not encrypted"
 
 
+async def _reauth(hass: HomeAssistant, entry: MockConfigEntry) -> dict[str, Any]:
+    result = await entry.start_reauth_flow(hass)
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "admin2", CONF_PASSWORD: "new-secret"}
+    )
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_reauth_tests_the_new_credentials_over_the_pinned_https(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    # New credentials never go out unencrypted to a Comexio that serves HTTPS.
+    pinned_entry.add_to_hass(hass)
+
+    result = await _reauth(hass, pinned_entry)
+
+    assert result["reason"] == "reauth_successful"
+    assert mock_comexio_api[0].fingerprint == PINNED
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_reauth_meeting_another_certificate_is_left_to_the_repair(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+) -> None:
+    # aiohttp reports a foreign certificate on a host name with several addresses as a connection error.
+    pinned_entry.add_to_hass(hass)
+    data_before = dict(pinned_entry.data)
+    api_returns["login"] = False
+    api_returns["fetch_replaced_fingerprint"] = OTHER
+    api_attributes["last_login_error"] = LOGIN_ERROR_CONNECTION
+
+    result = await _reauth(hass, pinned_entry)
+
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": "certificate_changed"}
+    assert dict(pinned_entry.data) == data_before
+    issue = _issue(hass, pinned_entry)
+    assert issue is not None
+    assert issue.data["actual"] == OTHER
+
+
 # Setup
 
 
