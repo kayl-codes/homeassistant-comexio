@@ -253,7 +253,7 @@
         "name": "Anzahl Web-IO-Befehle"
       },
       "watchdog_event": {
-        "name": "Letztes Watchdog-Ereignis"
+        "name": "Letztes Buslast-Watchdog-Ereignis"
       },
       "free_storage": {
         "name": "Freier Speicher"

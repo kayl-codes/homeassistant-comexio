@@ -253,7 +253,7 @@
         "name": "Web-IO Command Count"
       },
       "watchdog_event": {
-        "name": "Last Watchdog Event"
+        "name": "Last Bus-Load Watchdog Event"
       },
       "free_storage": {
         "name": "Free storage"
