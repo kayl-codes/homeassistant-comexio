@@ -1,0 +1,79 @@
+{
+  "FubModules": {
+    "13": [],
+    "20": {
+      "1": {"Id": 1, "RandomId": 111, "TypeId": 2, "DefaultValue": "0;0"},
+      "2": {"Id": 2, "RandomId": 222, "TypeId": 1, "DefaultValue": "20;0;0"}
+    },
+    "21": {
+      "1": {"Id": 1, "RandomId": 333, "TypeId": 2, "DefaultValue": null}
+    }
+  },
+  "CurrentSceneConfig": {
+    "31": {
+      "name": "Living room",
+      "category": 1,
+      "id": 1,
+      "allow_save": 1,
+      "common": {
+        "1": {"value": "latch_s_r", "id": 1},
+        "2": {"value": "_set_analog_", "id": 2}
+      },
+      "scene": {
+        "1": {
+          "name": "All off",
+          "user_save": true,
+          "default_scene": false,
+          "id": 1,
+          "data": {
+            "1": {"value": 0, "common_id": 1, "id": 1},
+            "2": {"value": 0, "common_id": 2, "id": 2}
+          }
+        },
+        "2": {
+          "name": "Evening",
+          "user_save": true,
+          "default_scene": true,
+          "id": 2,
+          "data": {
+            "1": {"value": 1, "common_id": 1, "id": 3},
+            "2": {"value": 40, "common_id": 2, "id": 4}
+          }
+        }
+      }
+    },
+    "990": {"name": "Other plan", "category": 1, "id": 2, "allow_save": 0, "common": [], "scene": []}
+  },
+  "CombinedModuleSettingData": {
+    "settings": {
+      "1": {"Id": 1, "CombinedModuleId": 1, "Name": "inverted_output", "Value": "true"},
+      "2": {"Id": 2, "CombinedModuleId": 2, "Name": "local_lock", "Value": "false"},
+      "3": {"Id": 3, "CombinedModuleId": 9, "Name": "orphan", "Value": "1"}
+    },
+    "rules": {
+      "1": {
+        "Id": 1, "Name": "User event 1", "Start": "", "End": "", "Active": 1, "Freq": "EVENT",
+        "ByDay": "user_event_1", "DtEnd": 0, "CombinedModuleId": 1, "Value": "50;0;0",
+        "ValueType": "0;0;0", "CentralId": 0, "Priority": 104, "RandomId": 444, "CentralGroupId": null
+      },
+      "2": {
+        "Id": 2, "Name": "Window", "Start": "", "End": "", "Active": 1, "Freq": "EVENT",
+        "ByDay": "window", "DtEnd": 0, "CombinedModuleId": 2, "Value": "5;0;1",
+        "ValueType": "0;0;0", "CentralId": 0, "Priority": 102, "RandomId": 555, "CentralGroupId": null
+      },
+      "3": {"Id": 3, "Name": "Orphan", "Freq": "EVENT", "CombinedModuleId": 9, "Value": "1;0;0"}
+    }
+  },
+  "CombinedModuleCentralSettingData": {
+    "settings": {
+      "1": {"Id": 1, "CombinedModuleId": 1, "Name": "central_lock", "Value": "true"}
+    },
+    "rules": {
+      "1": {
+        "Id": 7, "Name": "Night", "Start": "22:00", "End": "", "Active": 1, "Freq": "DAILY",
+        "ByDay": "", "DtEnd": 0, "CombinedModuleId": 1, "Value": "0;0;0",
+        "ValueType": "0;0;0", "CentralId": 0, "Priority": 50, "RandomId": 666, "CentralGroupId": null
+      }
+    }
+  }
+}

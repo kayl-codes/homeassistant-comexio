@@ -50,6 +50,7 @@ from ..function_plan_block_settings import (
     settings_to_write,
     snapshot_block_settings,
 )
+from ..function_plan_module_configs import module_configs_diff, snapshot_module_configs, uses_module_configs
 from ..orphaned_backups import delete_all_orphaned_backup_issues, delete_orphaned_backup_issue
 from ._context import (
     NO_PLAN_SELECTED_MSG,
@@ -90,6 +91,10 @@ _MISSING_VALUE = "—"
 # Diff line when a side of the diff was stored before block settings were captured (#nv = no
 # value): without it a values diff would silently look like "nothing changed".
 _NO_BLOCK_SETTINGS = "#nv — no block values stored in {side}, not compared"
+_NO_MODULE_CONFIGS = "#nv — no scene/Quantum configs stored in {side}, not compared"
+_MODULE_CONFIGS_NOT_IN_BACKUP = (
+    f"Scene/Quantum configs: {ICON_WARNING} not in this backup — check scene blocks/Quantum modules in Comexio\n"
+)
 
 
 _REBUILD_PAPER = "A3"
@@ -310,6 +315,7 @@ async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[di
             entry["diff"]["block_settings"] = _label_block_settings_diff(settings_diff, newer, catalog, newer_maps)
         else:
             entry["diff"]["block_settings"] = [_no_block_settings_line(newer, older)]
+        entry["diff"]["module_configs"] = _module_configs_diff(newer, older, catalog, newer_maps)
         entry["diff"]["paper_format"] = _paper_format_diff(newer, older)
 
 
@@ -330,6 +336,25 @@ def _no_block_settings_line(newer: dict, older: dict) -> str:
     else:
         side = "either backup"
     return _NO_BLOCK_SETTINGS.format(side=side)
+
+
+def _module_configs_diff(newer: dict, older: dict, catalog: dict, newer_maps: _LabelMaps) -> list[str]:
+    """Diff lines of the scene block / Quantum module configs, worded like the block settings'.
+
+    A side stored without them (before they were captured, or while Comexio's tables were not
+    readable) is named by a #nv line, unless neither plan has a scene block or Quantum module.
+    """
+    if (changes := module_configs_diff(newer, older)) is not None:
+        return _label_block_settings_diff(changes, newer, catalog, newer_maps)
+    if not (uses_module_configs(newer) or uses_module_configs(older)):
+        return []
+    if snapshot_module_configs(newer) is not None:
+        side = "the older backup"
+    elif snapshot_module_configs(older) is not None:
+        side = "this backup"
+    else:
+        side = "either backup"
+    return [_NO_MODULE_CONFIGS.format(side=side)]
 
 
 def _label_block_settings_diff(
@@ -507,6 +532,11 @@ async def _restore_plan_in_place(
         # (force_override) run_fup reassigns the element ids, so the snapshot's elements can
         # only be matched to the live ones now. Saving settings changes no element id.
         apply["block_settings"] = await _restore_block_settings(api, fub_id, snapshot, live_plan=verify["plan"])
+        apply["element_map"] = (
+            map_restored_elements(snapshot.get("elements") or {}, verify["plan"].get("elements") or {})
+            if verify["plan"]
+            else None
+        )
         duration = time.monotonic() - t_start
 
         # identity_was_mismatched (force_override onto a DIFFERENT plan): that plan's elements
@@ -849,6 +879,34 @@ def _block_settings_line(result: dict[str, Any]) -> str:
     return line + "\n"
 
 
+def _module_configs_line(snapshot: dict, element_map: Mapping[str, Any] | None) -> str:
+    """Restore message line naming the scene blocks / Quantum modules whose configs a restore does not write back.
+
+    element_map: {snapshot element id: restored element id}. A restore can hand out new ids (new
+    plan, copy, force_override), so the line names the restored elements; without a map (the plan
+    could not be reloaded) it names the backup's element ids as such. A backup stored without them
+    (before they were captured, or while Comexio's tables were unreadable) says so when its plan
+    has such blocks.
+    """
+    if (configs := snapshot_module_configs(snapshot)) is None and uses_module_configs(snapshot):
+        return _MODULE_CONFIGS_NOT_IN_BACKUP
+    if not configs:
+        return ""
+    backup_ids = sorted(configs, key=_numeric_first)
+    line = f"Scene/Quantum configs: {ICON_WARNING} not restored (not supported yet) — check "
+    if element_map is None:
+        return f"{line}backup element(s) #{', #'.join(backup_ids)} in Comexio\n"
+    restored = sorted((str(element_map[i]) for i in backup_ids if i in element_map), key=_numeric_first)
+    parts = [f"element(s) #{', #'.join(restored)} in Comexio"] if restored else []
+    if unmapped := [i for i in backup_ids if i not in element_map]:
+        parts.append(f"no restored element for backup element(s) #{', #'.join(unmapped)}")
+    return line + " | ".join(parts) + "\n"
+
+
+def _numeric_first(elem_id: str) -> tuple[int, str]:
+    return (int(elem_id), "") if elem_id.isdigit() else (0, elem_id)
+
+
 def _block_settings_ok(result: dict[str, Any]) -> bool:
     """False when the restored plan's block settings differ from the backup's."""
     return not (result.get("error") or result["failed"] or result["unmapped"] or result.get("live_only"))
@@ -932,17 +990,21 @@ def _restore_build_message(
         f"run_fup: {run_label}"
         f"{reactivation_note}\n"
         f"{_block_settings_line(apply['block_settings'])}"
+        f"{_module_configs_line(snapshot, apply.get('element_map'))}"
         f"{comment_line}"
         f"{promoted_line}"
         f"Duration: {duration:.1f}s"
     )
 
 
-async def _rebuild_new_plan(api, new_fub_id: int, snapshot: dict) -> tuple[int, int, list[str], dict[str, Any]]:
-    """(elements, connections created, warnings, block settings result) of rebuilding a new plan."""
+async def _rebuild_new_plan(
+    api, new_fub_id: int, snapshot: dict
+) -> tuple[dict[str, Any], int, list[str], dict[str, Any]]:
+    """({snapshot element id: new element id}, connections created, warnings, block settings result)
+    of rebuilding a new plan."""
     id_map, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(new_fub_id, snapshot)
     block_settings = await _restore_block_settings(api, new_fub_id, snapshot, id_map)
-    return len(id_map), connections_created, warnings, block_settings
+    return id_map, connections_created, warnings, block_settings
 
 
 def _new_plan_status(
@@ -1155,9 +1217,7 @@ async def _restore_plan_as_new(
         return
 
     try:
-        elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
-            api, new_fub_id, snapshot
-        )
+        id_map, connections_created, warnings, block_settings = await _rebuild_new_plan(api, new_fub_id, snapshot)
     except (aiohttp.ClientError, TimeoutError) as exc:
         # Same gap as the copy-restore path closes: without this the "in progress" notification
         # above would stay forever. The backup lineage stays at the old ID — nothing was rekeyed.
@@ -1188,6 +1248,7 @@ async def _restore_plan_as_new(
 
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))
+    elements_created = len(id_map)
     status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
     if (lineage_error or refs_error) and status == "OK":
         status = "PARTIAL"
@@ -1208,6 +1269,7 @@ async def _restore_plan_as_new(
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
         f"{_block_settings_line(block_settings)}"
+        f"{_module_configs_line(snapshot, id_map)}"
         f"Paper: {paper} @ {dpi} DPI, {orientation}{_paper_default_note(snapshot)}\n"
         f"{activation_line}\n\n"
         f"{consumer_line}\n"
@@ -1281,9 +1343,7 @@ async def _restore_plan_as_copy(
             )
             return
 
-        elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
-            api, new_fub_id, snapshot
-        )
+        id_map, connections_created, warnings, block_settings = await _rebuild_new_plan(api, new_fub_id, snapshot)
     except (aiohttp.ClientError, TimeoutError) as exc:
         # Without this, a connection drop mid-restore leaves the "in progress" notification
         # above stuck forever — the exception propagates past the persistent_notification calls
@@ -1306,6 +1366,7 @@ async def _restore_plan_as_copy(
 
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))
+    elements_created = len(id_map)
     status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
 
     captured_raw = snapshot.get("captured_at")
@@ -1321,6 +1382,7 @@ async def _restore_plan_as_copy(
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
         f"{_block_settings_line(block_settings)}"
+        f"{_module_configs_line(snapshot, id_map)}"
         f"Paper: {paper} @ {dpi} DPI, {orientation}{_paper_default_note(snapshot)}\n"
         f"{activation_line}\n\n"
         "Backup lineage: unchanged — snapshots stay with the source plan; the copy starts fresh.\n\n"
