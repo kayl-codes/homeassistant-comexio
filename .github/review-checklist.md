@@ -30,11 +30,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   unique_id are frozen legacy spellings. Flag renames without migration code.
 - **Changed defaults reach saved entries:** the initial config flow (into `entry.data`) and the options form (into
   `entry.options`) store the shown default together with the user's input, so an entry that holds the key in either
-  keeps the old default as if the user had typed it, while an entry that holds it in neither (the form never offered
-  the setting) reads the current `DEFAULT_*` at runtime. A changed default needs a config entry migration (except
-  in the last case below): bump `CONFIG_ENTRY_MINOR_VERSION` and add an `if minor_version < N` branch to
-  `migrate_entry_options` (`async_migrate_entry` and the config flow's `MINOR_VERSION` follow the constant). Flag a
-  changed default without it.
+  keeps the old default as if the user had typed it, while an entry that holds it in neither reads the current
+  `DEFAULT_*` at runtime (the code reads `{**entry.data, **entry.options}`, so a migrated option overrides an old data
+  value; a key read straight from `entry.data` needs its data value migrated instead). A changed default needs a
+  config entry migration (except in the last case below): bump `CONFIG_ENTRY_MINOR_VERSION` and add an `if
+  minor_version < N` branch to `migrate_entry_options` (`async_migrate_entry` and the config flow's `MINOR_VERSION`
+  follow the constant). Flag a changed default without it.
   - Existing installs should get it, and a form saves the key: the branch replaces a saved value equal to the old
     default, compared the way the code reads it, and keeps a customised one (accepted trade-off: a user who
     deliberately chose the old default is migrated too; the PR says so).
