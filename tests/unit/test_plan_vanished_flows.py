@@ -480,7 +480,11 @@ def test_the_replaced_repair_offers_no_rename_when_the_backups_fail_to_load(capl
     coordinator.plan_rename_suspected.return_value = True
     result, _ = _step(flow, None)
     (field,) = result["data_schema"].schema
-    assert ACTION_TAKE_OVER_RENAME not in result["data_schema"].schema[field].config["options"]
+    assert result["data_schema"].schema[field].config["options"] == [
+        ACTION_RESTORE,
+        ACTION_WATCH_HOLDER,
+        ACTION_UNWATCH,
+    ]
     assert "no rename offered" in caplog.text
 
 
@@ -518,6 +522,15 @@ def test_a_rename_is_not_taken_over_while_backups_are_busy(unloading: bool, rest
             return await flow.async_step_function_plan_vanished({"action": ACTION_TAKE_OVER_RENAME})
 
     result = asyncio.run(submit())
+    assert result["reason"] == "backups_busy"
+    coordinator.async_watch_id_holder.assert_not_awaited()
+
+
+def test_watching_the_id_holder_is_refused_while_unloading() -> None:
+    """(Review) after the unload's wait the options write would hit a torn-down entry."""
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.unloading = True
+    result, _ = _step(flow, {"action": ACTION_WATCH_HOLDER})
     assert result["reason"] == "backups_busy"
     coordinator.async_watch_id_holder.assert_not_awaited()
 

@@ -230,6 +230,8 @@ class _FakeCoordinator(SimpleNamespace):
     async_watch_id_holder = ComexioCoordinator.async_watch_id_holder
     _pick_present = ComexioCoordinator._pick_present
     _holder_and_pick_unchanged = ComexioCoordinator._holder_and_pick_unchanged
+    _async_settle_rename_changed_meanwhile = ComexioCoordinator._async_settle_rename_changed_meanwhile
+    _async_suspected_rename_holder = ComexioCoordinator._async_suspected_rename_holder
     _handle_vanished_plan_action = ComexioCoordinator._handle_vanished_plan_action
     async_restore_vanished_plan = ComexioCoordinator.async_restore_vanished_plan
     async_newest_backup_field = ComexioCoordinator.async_newest_backup_field
@@ -2325,6 +2327,48 @@ def test_a_pick_changed_while_its_backups_moved_is_left_as_it_is(
         assert asyncio.run(coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=True)) is False
     coordinator.request_options_update_without_reload.assert_not_called()
     assert "changed while 3 backup(s) moved to 'Licht'" in caplog.text
+    coordinator.function_plan_backup.async_rename_identity.assert_awaited_once()  # the backups stay with Licht
+
+
+def test_a_holder_gone_while_the_backups_moved_gets_them_back(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Review) ID 43 renamed again during the move: the backups went back to the pick, which keeps its restore."""
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    calls: list[tuple[Any, ...]] = []
+
+    async def rename(*args: Any) -> int:
+        calls.append(args)
+        api._fub_data["43"] = {**api._fub_data["43"], "Name": "Pumpe"}  # a poll saw ID 43 renamed again
+        return 3
+
+    coordinator.function_plan_backup = SimpleNamespace(async_rename_identity=AsyncMock(side_effect=rename))
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=True)) is False
+    assert calls == [(43, "Alt", "Licht"), (43, "Licht", "Alt")]
+    coordinator.request_options_update_without_reload.assert_not_called()
+    assert "the backups moved back to 'Alt'" in caplog.text
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_push_restore_of_a_plan_most_likely_renamed_is_not_run(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(Review) a push sent while the ID was free: its Restore of a since renamed plan would start a copy."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
+    coordinator.function_plan_backup.async_load = AsyncMock()
+    coordinator.plan_rename_suspected = MagicMock(return_value=True)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
+    coordinator.plan_rename_suspected.assert_called_once_with(47, "Test4", "Test 4")
+    coordinator.hass.services.async_call.assert_not_called()
+    coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4")
+    message = notifications.call_args.args[1]
+    assert "ID 47 now holds 'Test 4' with its content, most likely the plan renamed" in message
+    assert message.endswith("Take the rename over, or restore it anyway, in its Home Assistant repair.")
 
 
 @pytest.mark.parametrize(("new_fub_id", "expected"), [(47, "stays on ID 47"), (50, "moved from ID 47 to ID 50")])

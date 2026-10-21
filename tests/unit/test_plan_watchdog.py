@@ -2420,6 +2420,10 @@ def test_a_vanished_plan_whose_id_holder_changes_is_logged_without_a_new_alarm(
     assert len(_pushes(watchdog)) == 1  # the first alarm only
     assert "still not found: the ID now holds 'Licht'" in caplog.text
     assert caplog.text.count("still not found: the ID now holds 'Pumpe'") == 1
+    assert "still not found: the ID now holds no plan" not in caplog.text
+    with caplog.at_level(logging.INFO, logger=plan_watchdog.__name__):
+        asyncio.run(watchdog.async_sync_vanished(TEST4, {}))
+    assert "still not found: the ID now holds no plan" in caplog.text
 
 
 def test_a_replaced_plan_push_retry_and_english_text_name_the_id_holder(ir: MagicMock) -> None:

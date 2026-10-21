@@ -103,7 +103,7 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "replaced_title": "Comexio: function plan not found",
         "replaced": (
             "The monitored function plan {name} (ID {fub_id}) was not found: ID {fub_id} now holds {current}. "
-            "If it was renamed, take the rename over in the Home Assistant repair; restoring it is offered there too."
+            "If it was renamed, take the rename over in the Home Assistant repair; the other choices are there too."
         ),
         "restore": "Restore",
         "unwatch": "Stop watching",
@@ -148,8 +148,8 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "replaced_title": "Comexio: Logikplan nicht gefunden",
         "replaced": (
             "Der überwachte Logikplan {name} (ID {fub_id}) wurde nicht gefunden: ID {fub_id} trägt jetzt {current}. "
-            "Wurde er umbenannt, übernimm die Umbenennung in der Reparatur von Home Assistant; dort lässt er sich "
-            "auch wiederherstellen."
+            "Wurde er umbenannt, übernimm die Umbenennung in der Reparatur von Home Assistant; dort stehen auch "
+            "die anderen Möglichkeiten."
         ),
         "restore": "Wiederherstellen",
         "unwatch": "Nicht mehr überwachen",

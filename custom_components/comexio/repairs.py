@@ -1565,9 +1565,9 @@ class ComexioRepairFlow(RepairsFlow):
             if not suspected:
                 # Its content changed since the dialog opened: no longer recognisable as the same plan.
                 return self.async_abort(reason="rename_not_confirmed", description_placeholders=placeholders)
-            if coordinator.unloading or coordinator._restore_lock.locked():
-                # A restore moves the same backups; after the unload's wait a write would hit a torn-down entry.
-                return self.async_abort(reason="backups_busy")
+        if coordinator.unloading or (rename and coordinator._restore_lock.locked()):
+            # A restore moves the same backups; after the unload's wait a write would hit a torn-down entry.
+            return self.async_abort(reason="backups_busy")
         try:
             # No await since the check: a restore starting from here on refuses until the move ends.
             with coordinator.plan_edit():
@@ -1577,6 +1577,12 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_abort(reason="backups_not_moved", description_placeholders=placeholders)
         if not done:
             # Another plan holds the ID by now, or the pick was changed in the options meanwhile.
+            _LOGGER.info(
+                "Function plan '%s' (ID %s): not switched to '%s', the ID or the pick changed meanwhile",
+                one_line(name),
+                fub_id,
+                one_line(holder),
+            )
             return self.async_abort(reason="holder_changed", description_placeholders=placeholders)
         is_de = self.hass.config.language == "de"
         if rename:

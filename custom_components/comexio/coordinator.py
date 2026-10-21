@@ -5007,6 +5007,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if self.unloading:
                 # The restore would run on the torn-down coordinator; the new one takes the next tap.
                 self._notify_vanished_restore_not_run(fub_id, name, "the integration reloaded while it waited")
+            elif from_push and (holder := await self._async_suspected_rename_holder(fub_id, name)) is not None:
+                # A push sent while the ID was free: for a renamed plan its Restore would start a copy beside it.
+                self._notify_vanished_restore_not_run(
+                    fub_id,
+                    name,
+                    f"ID {fub_id} now holds '{one_line(holder)}' with its content, most likely the plan renamed",
+                    hint="Take the rename over, or restore it anyway, in its Home Assistant repair.",
+                )
             elif not self._vanished_pick_present(fub_id, name):
                 _LOGGER.info(
                     "[%s] Restore of function plan '%s' (ID %s) skipped: it was restored or unwatched meanwhile",
@@ -5044,11 +5052,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         return any(parse_watchdog_user_plan_pick(value) in ((fub_id, name), (fub_id, None)) for value in raw_picks)
 
-    def _notify_vanished_restore_not_run(self, fub_id: int, name: str, reason: str) -> None:
+    async def _async_suspected_rename_holder(self, fub_id: int, name: str) -> str | None:
+        """The plan holding the vanished plan's ID now, if it looks like the plan renamed (plan_rename_suspected)."""
+        holder = self._existing_plan_names([fub_id]).get(fub_id)
+        if holder is None:
+            return None
+        await self.function_plan_backup.async_load()
+        return holder if self.plan_rename_suspected(fub_id, name, holder) else None
+
+    def _notify_vanished_restore_not_run(
+        self, fub_id: int, name: str, reason: str, *, hint: str = "Choose Restore again."
+    ) -> None:
         """The notification a "not restored" push points at, for a restore that never reached the restore action."""
         persistent_notification.async_create(
             self.hass,
-            f"Function plan '{one_line(name)}' (ID {fub_id}) was not restored: {reason}. Choose Restore again.",
+            f"Function plan '{one_line(name)}' (ID {fub_id}) was not restored: {reason}. {hint}",
             title=f"Comexio Function Plan Restore ({self.server_id})",
             notification_id=f"comexio_vanished_restore_{self.server_id}_{vanished_plan_token(fub_id, name)}",
         )
@@ -5247,16 +5265,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             except Exception as err:
                 raise PlanBackupsNotMovedError from err
             if not self._holder_and_pick_unchanged(fub_id, name, holder):
-                # Changed during the move: the backups follow the plan's new name, the pick stays as the user left it.
-                _LOGGER.warning(
-                    "[%s] Function plan watchdog pick '%s' (ID %s) changed while %d backup(s) moved to '%s'; "
-                    "the pick was left as it is",
-                    self.server_id,
-                    one_line(name),
-                    fub_id,
-                    moved,
-                    one_line(holder),
-                )
+                await self._async_settle_rename_changed_meanwhile(fub_id, name, holder, moved)
                 return False
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         picks: list[Any] = []
@@ -5277,9 +5286,55 @@ class ComexioCoordinator(DataUpdateCoordinator):
             {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: picks}
         )
         # Drops the vanished repair and push right away, not only with the next run-state poll.
-        if await self.async_watch_managed_plans():
+        try:
+            changed = await self.async_watch_managed_plans()
+        except Exception:
+            # The swap is done: the next run-state poll repeats the check.
+            _LOGGER.exception("[%s] Function plan watchdog check after the pick swap failed", self.server_id)
+            return True
+        if changed:
             self.async_update_listeners()
         return True
+
+    async def _async_settle_rename_changed_meanwhile(self, fub_id: int, name: str, holder: str, moved: int) -> None:
+        """The ID or the pick changed while a rename's backups moved to holder; the pick stays as it is.
+
+        While the ID still holds holder (the pick was edited), the backups stay with that plan. Otherwise
+        they go back to (fub_id, name), so its still-vanished pick keeps its restore (the chain is one
+        plan's history: the rename was suspected by its equal content).
+        """
+        if self._existing_plan_names([fub_id]).get(fub_id) == holder:
+            _LOGGER.warning(
+                "[%s] Function plan watchdog pick '%s' (ID %s) changed while %d backup(s) moved to '%s'; "
+                "the backups stay with it, the pick was left as it is",
+                self.server_id,
+                one_line(name),
+                fub_id,
+                moved,
+                one_line(holder),
+            )
+            return
+        try:
+            await self.function_plan_backup.async_rename_identity(fub_id, holder, name)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] ID %s no longer holds '%s' after %d backup(s) moved to it, and moving them back to '%s' "
+                "failed; they are listed as orphaned backups",
+                self.server_id,
+                fub_id,
+                one_line(holder),
+                moved,
+                one_line(name),
+            )
+            return
+        _LOGGER.warning(
+            "[%s] ID %s no longer holds '%s' after its rename was taken over: the backups moved back to '%s', "
+            "whose pick was left as it is",
+            self.server_id,
+            fub_id,
+            one_line(holder),
+            one_line(name),
+        )
 
     def _holder_and_pick_unchanged(self, fub_id: int, name: str, holder: str) -> bool:
         """Whether ID fub_id still holds holder and the options still hold the pick (fub_id, name)."""
