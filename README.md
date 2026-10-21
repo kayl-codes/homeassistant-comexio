@@ -96,6 +96,8 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 
 > [!TIP]
 > **Changing connection details later:** If your Comexio IP address or passwords change, you do **not** need to re-add the integration. Open *Settings → Devices & Services → Comexio → ⋮ → Reconfigure* and update host, username, and passwords directly. Leave password fields blank to keep the existing password.
+>
+> **Admin password changed in Comexio:** If Comexio rejects the stored admin credentials — at setup or on a poll — Home Assistant shows a *Re-authenticate Comexio* prompt under *Settings → Devices & Services*. Enter the current username and password there; polling pauses until then.
 
 > [!NOTE]
 > **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, notifications, and cover detection keywords.
@@ -329,6 +331,8 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 
 > [!TIP]
 > **Verbindungsdaten nachträglich ändern:** Wenn sich IP-Adresse oder Passwörter ändern, musst du die Integration **nicht** neu einrichten. Öffne die Integration unter *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu konfigurieren* und passe Host, Benutzername und Passwörter direkt an. Felder für Passwörter leer lassen bedeutet "bestehendes Passwort beibehalten".
+>
+> **Admin-Passwort in Comexio geändert:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten ab — bei der Einrichtung oder bei einer Abfrage —, zeigt Home Assistant unter *Einstellungen → Geräte & Dienste* die Aufforderung *Comexio erneut anmelden*. Dort den aktuellen Benutzernamen und das Passwort eingeben; bis dahin pausiert die Abfrage.
 
 > [!NOTE]
 > **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Benachrichtigungen und Rollladen-Schlüsselwörter.

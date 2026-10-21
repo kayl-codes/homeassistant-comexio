@@ -78,6 +78,8 @@ Open via **⋮ → Reconfigure** on the integration entry. Allows updating host,
 
 > **Tip:** Leave password fields blank to keep the existing password. The integration runs a connection test before saving and reloads automatically on success.
 
+> **Rejected credentials:** If Comexio refuses the stored admin credentials (at setup or on a poll), HA starts a *Re-authenticate Comexio* flow instead — enter the current username and password there. Polling pauses until the credentials are updated.
+
 ---
 
 ## 5. WebIO Sync
@@ -205,6 +207,8 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 <img src="docs/assets/ui/2_integration_reconf-1_de.png" width="320">
 
 > **Tipp:** Passwortfelder leer lassen bedeutet "bestehendes Passwort beibehalten". Die Integration führt vor dem Speichern einen Verbindungstest durch und lädt sich bei Erfolg automatisch neu.
+
+> **Abgelehnte Zugangsdaten:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten ab (bei der Einrichtung oder bei einer Abfrage), startet HA stattdessen den Ablauf *Comexio erneut anmelden* — dort den aktuellen Benutzernamen und das Passwort eingeben. Bis die Zugangsdaten aktualisiert sind, pausiert die Abfrage.
 
 ---
 
