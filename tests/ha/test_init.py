@@ -3,8 +3,9 @@
 import asyncio
 import time
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioAuthenticationError
 from homeassistant.components.webhook import DOMAIN as WEBHOOK_DOMAIN
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import CONF_PASSWORD
@@ -345,7 +346,11 @@ async def test_a_refusal_met_by_a_side_login_offers_reauth(
     await _setup(hass, mock_config_entry)
     coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
     api = mock_comexio_api[0]
-    api._refused_credentials = {api._refusal_key(api._login_credentials())}
+    # The real _login (the fixture stubs it) on a side client Comexio refuses: the latch the poll reads.
+    side_client = MagicMock()
+    side_client.login = AsyncMock(side_effect=ComexioAuthenticationError("no"))
+    assert await ComexioAPI._login(api, side_client, api._credentials()) is False
+    side_client.login.assert_awaited_once()
 
     await coordinator.async_refresh()
     await hass.async_block_till_done()
