@@ -250,6 +250,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   `test_plan_watchdog.py`) and has not yet done its work, then release and assert it runs. A test that only checks
   the final order or outcome also passes when the second operation never takes the lock (#187).
 - Test function parameters carry type annotations.
+- A `pytest.raises` block makes exactly one call, the tested one; build its arguments before the `with`, and enter
+  no other context manager after `pytest.raises` in the same `with` — its `__enter__` is a call too; wrap such a
+  sequence in a local function and call that (SonarCloud S5778). `tests/unit/test_pytest_raises_single_call.py` enforces this for literal
+  `pytest.raises(...)` with-items; check by hand a `pytest.raises` bound to a name or passed as a parametrize argument
+  (`with expectation:`) and a local function called inside the block.
 
 ## GitHub Actions
 

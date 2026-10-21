@@ -138,9 +138,17 @@ def test_the_reload_holding_the_restores_off_unloads_without_waiting() -> None:
         async with coordinator.restores_held_off():
             await asyncio.wait_for(coordinator.async_wait_before_unload(), 1)
         assert coordinator._restores_held_for_reload is False
-        with pytest.raises(RuntimeError):
+        held_during_failure: list[bool] = []
+
+        async def failing_reload() -> None:
             async with coordinator.restores_held_off():
+                held_during_failure.append(coordinator._restores_held_for_reload)
                 raise RuntimeError
+
+        with pytest.raises(RuntimeError):
+            await failing_reload()
+        # The RuntimeError came from inside the hold, not from entering it.
+        assert held_during_failure == [True]
         assert coordinator._restores_held_for_reload is False
 
     asyncio.run(run())

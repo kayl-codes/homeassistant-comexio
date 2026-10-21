@@ -300,8 +300,9 @@ def test_ignored_ids_keep_one_canonical_form() -> None:
     assert len(IgnoredIds(ranges={(8, 3)})) == 6
     assert repr(IgnoredIds({1, 2}, {(3, 5), (7, 7)})) == "IgnoredIds('1-5,7')"
     assert not IgnoredIds({1}) - {1}
+    empty = IgnoredIds()
     with pytest.raises(TypeError):
-        hash(IgnoredIds())
+        hash(empty)
 
 
 def test_ignored_ids_with_non_int_or_non_set_operands() -> None:

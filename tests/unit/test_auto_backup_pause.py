@@ -138,8 +138,17 @@ def test_a_restore_during_the_bulk_load_skips_this_cycles_auto_backup() -> None:
 
 def test_a_failed_restore_resumes_the_auto_backup() -> None:
     coordinator = _coordinator()
-    with pytest.raises(RuntimeError), coordinator.pause_auto_backup():
-        raise RuntimeError("restore failed")
+    pauses_during_restore: list[int] = []
+
+    def failing_restore() -> None:
+        with coordinator.pause_auto_backup():
+            pauses_during_restore.append(coordinator._auto_backup_pauses)
+            raise RuntimeError("restore failed")
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        failing_restore()
+    # The RuntimeError came from inside the paused restore, not from entering the pause.
+    assert pauses_during_restore == [1]
     _cycle(coordinator)
     coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
 
@@ -161,13 +170,14 @@ def test_the_restore_service_pauses_the_auto_backup_for_every_restore_path(fails
         if fails:
             raise RuntimeError("connection lost")
 
+    handle_restore = backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={}))
     with (
         patch.object(backup, "_async_get_service_context", AsyncMock(return_value=(coordinator, None, None))),
         patch.object(backup, "_run_function_plan_restore", AsyncMock(side_effect=restore)),
         patch.object(backup, "_refresh_service_descriptions", AsyncMock()),
         pytest.raises(RuntimeError) if fails else contextlib.nullcontext(),
     ):
-        asyncio.run(backup._handle_function_plan_restore(MagicMock(), SimpleNamespace(data={})))
+        asyncio.run(handle_restore)
 
     assert pauses_during_restore == [1]
     assert coordinator._auto_backup_pauses == 0
