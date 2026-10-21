@@ -1143,8 +1143,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self.api.config_relogin_unreachable:
             # The re-login after a lapsed session (e.g. a reboot) got no reply.
             self.note_comexio_unreachable()
-        if self.api.config_relogin_rejected:
+        if self.api.config_relogin_rejected or self.api.credentials_refused:
             # Changed credentials: HA starts the reauth flow and stops polling until it updates the entry.
+            # credentials_refused also covers a refusal the preview or system info login met first,
+            # while the main session still works.
             raise ConfigEntryAuthFailed(f"Comexio at {self.api.host} rejected the stored credentials")
         # aiocomexio decodes each page variable on its own, so $FubModules alone does not
         # prove $Fubs was read; an empty plan list still decodes to a dict.
