@@ -20,6 +20,7 @@
           "import_markers": "Create entities for markers",
           "import_ios": "Create entities for IOs",
           "import_knx": "Create entities for KNX objects",
+          "import_quickbus": "Create entities for Quickbus devices (multitouch, motion detectors, ...)",
           "scan_interval": "Background polling interval (min)",
           "cover_keywords": "Keywords for cover detection"
         }
@@ -344,7 +345,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Uninstall Cleanup",
-            "description": "Choose what to remove from Comexio. In total, the integration created {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\n* **Everything** removes all of it.\n* **Markers only / IOs only / KNX only** remove just that part's Function Plans, Web-IO device and class. The shared trigger plan is only removed as a whole if it holds no trigger pairs of the other category — otherwise Markers/KNX remove just their own pairs from it.\n* **KNX only** and **Everything** also clear the titles of unused KNX bridge markers, so they become free markers again. A bridge marker you use in an own Function Plan only loses its [K…], [RO] and [TRIG] suffixes and stays a plain marker with its start value. The markers themselves are not deleted.\n\nThis cannot be undone. Deleted Function Plans lose their wiring permanently."
+            "description": "Choose what to remove from Comexio. In total, the integration created {plan_count} Function Plan(s), {device_count} Web-IO device(s), and {class_count} Web-IO class(es).\n\n* **Everything** removes all of it.\n* **Markers only / IOs only / KNX only / Quickbus only** remove just that part's Function Plans, Web-IO device and class. The shared trigger plan is only removed as a whole if it holds no trigger pairs of the other category — otherwise Markers/KNX remove just their own pairs from it.\n* **KNX only** and **Everything** also clear the titles of unused KNX bridge markers, so they become free markers again. A bridge marker you use in an own Function Plan only loses its [K…], [RO] and [TRIG] suffixes and stays a plain marker with its start value. The markers themselves are not deleted.\n\nThis cannot be undone. Deleted Function Plans lose their wiring permanently."
           }
         },
         "abort": {

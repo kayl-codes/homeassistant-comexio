@@ -1,5 +1,6 @@
 # Version: 0.7.8
 import asyncio
+from collections.abc import Callable
 import logging
 from typing import Any
 
@@ -10,7 +11,21 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, SOURCE_CATEGORIES, WebioClass, hub_era_object_id, stable_object_id
+from .const import (
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    DOMAIN,
+    QUICKBUS_IO_DATA_KEY,
+    SOURCE_CATEGORIES,
+    WebioClass,
+    extension_device_name,
+    hub_era_object_id,
+    marker_device_name,
+    one_line,
+    quickbus_device_name,
+    quickbus_io_platform,
+    quickbus_io_unique_id,
+    stable_object_id,
+)
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,16 +63,33 @@ def hub_device_info(coordinator: ComexioCoordinator) -> DeviceInfo:
 
 
 def build_device_info(
-    coordinator: ComexioCoordinator, *, identifiers: set[tuple[str, str]], name: str, model: str
+    coordinator: ComexioCoordinator,
+    *,
+    identifiers: set[tuple[str, str]],
+    name: str,
+    model: str,
+    via_identifier: str | None = None,
 ) -> DeviceInfo:
-    """Build a sub-device's device_info, linked to the hub device via via_device_id."""
+    """Build a sub-device's device_info, linked to its parent device via via_device_id.
+
+    The parent is the device of via_identifier (a Quickbus device's host extension) once that is
+    registered, else the hub — the platforms set up in parallel, so on the very first setup the
+    host may not exist yet; update_quickbus_devices moves it once all platforms are set up. A host
+    with no entities of its own (only Quickbus IOs) never gets a device, so its Quickbus devices
+    stay on the hub.
+    """
     info: DeviceInfo = {
         "identifiers": identifiers,
         "name": name,
         "manufacturer": "Comexio",
         "model": model,
     }
-    if via_id := hub_device_id(coordinator):
+    parent = via_identifier and dr.async_get(coordinator.hass).async_get_device_by_identifier(
+        (DOMAIN, via_identifier), coordinator.config_entry.entry_id
+    )
+    if via_identifier and not parent:
+        _LOGGER.debug("Parent device %s not registered yet, linking %s to the hub", via_identifier, one_line(name))
+    if via_id := parent.id if parent else hub_device_id(coordinator):
         info["via_device_id"] = via_id
     return info
 
@@ -148,14 +180,115 @@ class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
     def device_info(self) -> DeviceInfo:
         return build_device_info(
             self.coordinator,
-            identifiers={(DOMAIN, f"{self.coordinator.server_id}_{self._ext_name}".lower())},
-            name=f"{self.coordinator.server_id} {self._ext_name}",
+            identifiers={(DOMAIN, extension_device_identifier(self.coordinator.server_id, self._ext_name))},
+            name=extension_device_name(self.coordinator.server_id, self._ext_name),
             model="Extension Module",
         )
 
     @property
     def available(self) -> bool:
         return super().available and self._ext_name not in self.coordinator.offline_extensions
+
+
+class ComexioQuickbusIOEntity(ComexioIOEntity):
+    """Shared base for the IO entities of a Quickbus device (multitouch, motion detector, ...).
+
+    Its identifiers (G1, TL1, ...) repeat on every device of the same kind, so the unique_id
+    carries the IO's unique Id instead; each device gets its own HA device. Availability
+    follows the host extension (ext_name) the device hangs on.
+    """
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
+        super().__init__(coordinator, server_id, io)
+        self._attr_unique_id = quickbus_io_unique_id(server_id, io["id"])
+        self._quickbus_device_id: str = str(io["quickbus"]["device_id"])
+        self._quickbus_device_name: str = io["quickbus"]["name"]
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(
+            self.coordinator,
+            identifiers={(DOMAIN, quickbus_device_identifier(self.coordinator.server_id, self._quickbus_device_id))},
+            name=quickbus_device_name(self.coordinator.server_id, self._quickbus_device_name),
+            model="Quickbus Device",
+            via_identifier=extension_device_identifier(self.coordinator.server_id, self._ext_name),
+        )
+
+
+def quickbus_device_identifier(server_id: str, device_id: str | int) -> str:
+    """Device registry identifier of a Quickbus device (its Comexio device id, not its name)."""
+    return f"{server_id}_qb{device_id}".lower()
+
+
+def extension_device_identifier(server_id: str, ext_name: str) -> str:
+    """Device registry identifier of an extension module."""
+    return f"{server_id}_{ext_name}".lower()
+
+
+def update_quickbus_devices(coordinator: ComexioCoordinator) -> None:
+    """Bring the registered Quickbus devices in line with the polled data: host extension and name.
+
+    The platforms set up in parallel, so on the very first setup a Quickbus device can be
+    registered before its host extension's device and falls back to the hub; every host that has
+    a device by now gets its Quickbus devices. HA applies device_info only when an entity is added,
+    so a device renamed in Comexio is renamed here (a name set in HA wins over it anyway).
+    """
+    dev_reg = dr.async_get(coordinator.hass)
+    entry_id = coordinator.config_entry.entry_id
+    server_id = coordinator.server_id
+    # One host per Quickbus device: its IOs all hang on the same extension.
+    devices = {
+        str(io["quickbus"]["device_id"]): (io["ext_name"], io["quickbus"]["name"])
+        for io in coordinator.data.get(QUICKBUS_IO_DATA_KEY, [])
+    }
+    for device_id, (ext_name, name) in devices.items():
+        device = dev_reg.async_get_device_by_identifier(
+            (DOMAIN, quickbus_device_identifier(server_id, device_id)), entry_id
+        )
+        if device is None:
+            continue  # no entity of it was added (offline host)
+        changes: dict[str, Any] = {}
+        if device.name != (current_name := quickbus_device_name(server_id, name)):
+            changes["name"] = current_name
+        host = dev_reg.async_get_device_by_identifier(
+            (DOMAIN, extension_device_identifier(server_id, ext_name)), entry_id
+        )
+        if host is None:
+            _LOGGER.debug("Host %s of %s has no device, it stays on the hub", one_line(ext_name), one_line(device.name))
+        elif device.via_device_id != host.id:
+            changes["via_device_id"] = host.id
+        if changes:
+            dev_reg.async_update_device(device.id, **changes)
+
+
+def track_quickbus_devices(coordinator: ComexioCoordinator) -> Callable[[], None]:
+    """Run update_quickbus_devices now (all platforms set up) and after every poll; returns the unsubscribe."""
+    update_quickbus_devices(coordinator)
+    last_data = coordinator.data
+
+    def _on_update() -> None:
+        nonlocal last_data
+        # Webhook pushes and the other in-place refreshes keep the data object: no new poll, nothing to update.
+        if coordinator.data is not last_data:
+            last_data = coordinator.data
+            update_quickbus_devices(coordinator)
+
+    return coordinator.async_add_listener(_on_update)
+
+
+def quickbus_ios_for_platform(
+    coordinator: ComexioCoordinator, conf: dict[str, Any], platform: str
+) -> list[dict[str, Any]]:
+    """The imported Quickbus IOs that get an entity on this platform (read-only: binary_sensor/sensor).
+
+    Same platform and offline rule as the entity cleanup in __init__ (_quickbus_entity_uids).
+    """
+    include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
+    return [
+        io
+        for io in coordinator.data.get(QUICKBUS_IO_DATA_KEY, [])
+        if quickbus_io_platform(io) == platform and (not io.get("offline") or include_offline)
+    ]
 
 
 class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
@@ -204,7 +337,7 @@ class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
         return build_device_info(
             self.coordinator,
             identifiers={(DOMAIN, f"{self.coordinator.server_id}_markers")},
-            name=f"{self.coordinator.server_id} Markers",
+            name=marker_device_name(self.coordinator.server_id),
             model="Marker Group",
         )
 

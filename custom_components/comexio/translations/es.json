@@ -20,6 +20,7 @@
           "import_markers": "Crear entidades para marcadores",
           "import_ios": "Crear entidades para IOs",
           "import_knx": "Crear entidades para objetos KNX",
+          "import_quickbus": "Crear entidades para dispositivos Quickbus (multitouch, detectores de movimiento, ...)",
           "scan_interval": "Intervalo de consulta en segundo plano (min)",
           "cover_keywords": "Palabras clave para detectar persianas"
         }
@@ -344,7 +345,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Limpieza de desinstalación",
-            "description": "Elige qué eliminar de Comexio. En total, la integración creó {plan_count} plan(es) de funciones, {device_count} dispositivo(s) Web-IO y {class_count} clase(s) Web-IO.\n\n* **Everything** lo elimina todo.\n* **Markers only / IOs only / KNX only** eliminan solo los planes de funciones, el dispositivo y la clase Web-IO de esa parte. El plan de disparo compartido solo se elimina por completo si no contiene pares de disparo de la otra categoría; de lo contrario, Markers/KNX solo eliminan sus propios pares.\n* **KNX only** y **Everything** también borran los títulos de los marcadores puente KNX sin usar, que vuelven a quedar libres. Un marcador puente que usas en un plan de funciones propio solo pierde sus sufijos [K…], [RO] y [TRIG] y sigue como marcador normal con su valor inicial. Los marcadores en sí no se eliminan.\n\nEsta acción no se puede deshacer. Los planes de funciones eliminados pierden su cableado permanentemente."
+            "description": "Elige qué eliminar de Comexio. En total, la integración creó {plan_count} plan(es) de funciones, {device_count} dispositivo(s) Web-IO y {class_count} clase(s) Web-IO.\n\n* **Everything** lo elimina todo.\n* **Markers only / IOs only / KNX only / Quickbus only** eliminan solo los planes de funciones, el dispositivo y la clase Web-IO de esa parte. El plan de disparo compartido solo se elimina por completo si no contiene pares de disparo de la otra categoría; de lo contrario, Markers/KNX solo eliminan sus propios pares.\n* **KNX only** y **Everything** también borran los títulos de los marcadores puente KNX sin usar, que vuelven a quedar libres. Un marcador puente que usas en un plan de funciones propio solo pierde sus sufijos [K…], [RO] y [TRIG] y sigue como marcador normal con su valor inicial. Los marcadores en sí no se eliminan.\n\nEsta acción no se puede deshacer. Los planes de funciones eliminados pierden su cableado permanentemente."
           }
         },
         "abort": {

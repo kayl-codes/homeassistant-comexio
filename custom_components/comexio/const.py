@@ -141,8 +141,8 @@ CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
 
 
 # Web-IO class split: HA maintains separate Web-IO device classes on the Comexio
-# server — one per source category (Marker, physical IO, KNX object) — derived from the
-# single webio_name field in the config/options flow by appending a suffix. The webIoId
+# server — one per source category (Marker, physical IO, KNX object, Quickbus IO) — derived
+# from the single webio_name field in the config/options flow by appending a suffix. The webIoId
 # (the per-command key inside $FubModules["10"]) is a global counter across ALL Web-IO
 # devices on a Comexio server, never reused per-device (verified live 2026-07-27), so
 # commands from every class can share one flat webio_commands lookup without ambiguity.
@@ -150,16 +150,22 @@ CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
 WEBIO_CLASS_MARKER = WebioClass.MARKER
 WEBIO_CLASS_IO = WebioClass.IO
 WEBIO_CLASS_KNX = WebioClass.KNX
-# Listed explicitly, not tuple(WebioClass): aiocomexio 0.7.0 adds WebioClass.QUICKBUS, which
-# HA does not maintain yet (Quickbus IOs are left out of the import until #86).
-WEBIO_CLASSES = (WebioClass.MARKER, WebioClass.IO, WebioClass.KNX)
+WEBIO_CLASS_QUICKBUS = WebioClass.QUICKBUS
+WEBIO_CLASSES = tuple(WebioClass)
 
 # Internal audit-map key convention (coordinator._async_update_data): IO entries are keyed
-# as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}" —
-# centralized here so the build and classify sides can't drift apart.
+# as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}",
+# Quickbus IOs as "QB{io_id}" (their identifier repeats per device, only the IO's Id is
+# unique) — centralized here so the build and classify sides can't drift apart.
 _IO_AUDIT_KEY_PREFIX = "IO_"
 _MARKER_AUDIT_KEY_PREFIX = "M"
 _KNX_AUDIT_KEY_PREFIX = "K"
+_QUICKBUS_AUDIT_KEY_PREFIX = "QB"
+
+# parse_config() output key of the Quickbus IOs (Multitouch gestures, motion sensors, ...). The
+# integration keeps them apart from "io": every IO code path addresses an IO by ext_name +
+# identifier, which a Quickbus IO's G1/TL1/R repeats on every device of the same kind.
+QUICKBUS_IO_DATA_KEY = "quickbus_io"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -170,15 +176,17 @@ class SourceCategory:
     with numeric ids, mirrored 1:1 and clustered into "HA - <label> [n-m]" id-range
     function plans. Physical IOs are the odd one out (ext/identifier composite keys,
     one cluster plan per extension, binary_sensor support) and keep some special
-    handling at the call sites where genericity isn't reachable. Adding a further
-    Comexio module type = one more entry in SOURCE_CATEGORIES.
+    handling at the call sites where genericity isn't reachable. Quickbus IOs share the
+    IOs' $FubModules group but are keyed by their IO Id, read-only and not wired into
+    managed plans (yet). Adding a further Comexio module type = one more entry in
+    SOURCE_CATEGORIES.
     """
 
     key: WebioClass
     fub_module_type: str  # $FubModules key holding the raw source items
-    data_key: str  # parse_config() output-dict key ("markers"/"io"/"knx")
+    data_key: str  # parse_config() output-dict key ("markers"/"io"/"knx"/"quickbus_io")
     audit_key_prefix: str  # coordinator audit-map key prefix
-    webio_name_suffix: str  # appended to the configured webio_name (" [M]"/" [IO]"/" [KNX]")
+    webio_name_suffix: str  # appended to the configured webio_name (" [M]"/" [IO]"/" [KNX]"/" [QB]")
     label: str  # short display label for sync/audit messages (English — used in UI/log text)
     german_label: str  # German equivalent, used only in options_flow.py's German-only inline
     # validation errors ("Merker" is the correct German automation term, distinct from the
@@ -188,8 +196,8 @@ class SourceCategory:
     schema_default: str  # default entity-name schema
     id_placeholder: str  # entity-name schema format key for the id
     title_placeholder: str  # entity-name schema format key for the title
-    unique_id_infix: str  # HA unique_id infix ("m"/""/"k")
-    range_clustered: bool  # True → id-range cluster plans; False → one plan per extension
+    unique_id_infix: str  # HA unique_id infix ("m"/""/"k"/"qb")
+    range_clustered: bool  # True → id-range cluster plans; False → IO: one plan per extension, Quickbus: none
     supports_trigger_pairs: bool  # True → [TRIG]/[TP] items get a shared-trigger-plan self-reset pair
     import_conf_key: str  # entry.options opt-in flag
     import_default: bool  # default for the opt-in flag (KNX ships OFF)
@@ -258,6 +266,30 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         import_default=False,
         ignored_conf_key=CONF_IGNORED_KNX,
     ),
+    # IOs of Quickbus devices (Multitouch gestures, motion sensors, ...): same $FubModules group
+    # as the IOs, so it must stay after IO here — category_by_fub_module_type("1") is the IO
+    # category. Read-only entities (no known API write path), one HA device per Quickbus device,
+    # Web-IO commands in their own class, not wired into managed plans (#86). Named with the IO
+    # schema: aiocomexio renders {ExtName} as the Quickbus device's name.
+    WebioClass.QUICKBUS: SourceCategory(
+        key=WebioClass.QUICKBUS,
+        fub_module_type="1",
+        data_key=QUICKBUS_IO_DATA_KEY,
+        audit_key_prefix=_QUICKBUS_AUDIT_KEY_PREFIX,
+        webio_name_suffix=" [QB]",
+        label="Quickbus",
+        german_label="Quickbus",
+        schema_conf_key=CONF_SCHEMA_IO,
+        schema_default=DEFAULT_SCHEMA_IO,
+        id_placeholder="IoId",
+        title_placeholder="IoTitle",
+        unique_id_infix="qb",
+        range_clustered=False,
+        supports_trigger_pairs=False,
+        import_conf_key="import_quickbus",
+        import_default=True,
+        ignored_conf_key=None,
+    ),
 }
 
 
@@ -284,6 +316,18 @@ def active_webio_classes(conf: Mapping[str, Any]) -> tuple[WebioClass, ...]:
         cls
         for cls in WEBIO_CLASSES
         if conf.get(SOURCE_CATEGORIES[cls].import_conf_key, SOURCE_CATEGORIES[cls].import_default)
+    )
+
+
+def required_webio_classes(conf: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[WebioClass, ...]:
+    """The opted-in Web-IO classes that must exist on the server (audit "missing class", sync create).
+
+    The Quickbus class only once the server has a Quickbus IO: import_quickbus is on by default,
+    so without this every installation without a Quickbus device would get an empty [QB] class
+    created and, until then, a "missing Web-IO class" repair. data: the (imported) parse result.
+    """
+    return tuple(
+        cls for cls in active_webio_classes(conf) if cls != WebioClass.QUICKBUS or data.get(QUICKBUS_IO_DATA_KEY)
     )
 
 
@@ -381,10 +425,10 @@ def io_audit_key(ext_name: str, identifier: str) -> str:
 
 
 def source_audit_key(category: SourceCategory, item_id: object) -> str:
-    """Build the internal audit-map key identifying a range_clustered source item (Marker/KNX).
+    """Build the internal audit-map key identifying a source item keyed by its id (Marker/KNX/Quickbus IO).
 
-    Registry-driven counterpart to io_audit_key(): every range_clustered category keys its
-    audit-map entries by a plain "<prefix><id>" string (e.g. "M5"/"K5"), so one function
+    Registry-driven counterpart to io_audit_key(): every such category keys its audit-map
+    entries by a plain "<prefix><id>" string (e.g. "M5"/"K5"/"QB211"), so one function
     covers all of them via category.audit_key_prefix — classify_audit_key() is the reverse
     lookup (audit key -> WebioClass) for callers that need to go the other way.
     """
@@ -841,6 +885,54 @@ def extension_firmware_update_unique_id(server_id: str, ext_name: str) -> str:
     return f"comexio_{server_id}_{ext_name}_firmware_update".lower()
 
 
+def quickbus_io_unique_id(server_id: str, io_id: str | int) -> str:
+    """unique_id of a Quickbus IO's entity — its IO Id only: G1/TL1 repeat on every device of a kind."""
+    return f"comexio_{server_id}_{SOURCE_CATEGORIES[WebioClass.QUICKBUS].unique_id_infix}{io_id}".lower()
+
+
+# Comexio's name for the IO-Server's own onboard IOs: its HA device keeps the plain name.
+BASE_EXTENSION_NAME = "BASE"
+
+
+def extension_device_name(server_id: str, ext_name: str) -> str:
+    """HA device name of an extension module: "<server> EXT - <name>", so all modules list together.
+
+    The IO-Server's onboard IOs (BASE) stay "<server> BASE" — the main unit, not an add-on module.
+    """
+    if is_base_extension(ext_name):
+        return f"{server_id} {BASE_EXTENSION_NAME}"
+    return f"{server_id} EXT - {one_line(ext_name)}"
+
+
+def is_base_extension(ext_name: str) -> bool:
+    """True for the IO-Server's onboard IOs — case-insensitive, like their lower-cased device identifier."""
+    return ext_name.upper() == BASE_EXTENSION_NAME
+
+
+def marker_device_name(server_id: str) -> str:
+    """HA device name of the marker group: "<server> Markers"."""
+    return f"{server_id} Markers"
+
+
+def extension_firmware_object_id(server_id: str, ext_name: str) -> str:
+    """Object id of an extension's firmware entity, as HA derived it before the device got its "EXT - " tag.
+
+    The entity names itself "Firmware" on the extension device, so HA would now derive
+    "<server> EXT - <ext> Firmware"; requesting the old id keeps new installs on the same ids.
+    """
+    return slugify(f"{server_id} {ext_name} Firmware")
+
+
+def quickbus_device_name(server_id: str, device_name: str) -> str:
+    """HA device name of a Quickbus device: "<server> QB - <name>", so all Quickbus devices list together."""
+    return f"{server_id} QB - {one_line(device_name)}"
+
+
+def quickbus_io_platform(io: Mapping[str, Any]) -> str:
+    """Platform of a Quickbus IO's entity: read-only always (no known API write path for its address)."""
+    return "binary_sensor" if io.get("is_binary") else "sensor"
+
+
 def function_plan_id(fid: Any) -> int | None:
     """Plan id of a $Fubs key (api.fub_data), None for a key that is no plan id as str(fub_id) spells it.
 
@@ -974,6 +1066,9 @@ WEBHOOK_VALUE_LOG_MSG = "Webhook %s push: %s = %r (prev %r)"
 # WARNING emitted when a webhook pushes a value for an IO key that is not in the parsed config
 # index — the value cannot be tracked and is dropped. Args: ext name, identifier, new value.
 WEBHOOK_UNKNOWN_IO_LOG_MSG = "Webhook push for unknown IO %s/%s (value %r) — not tracked, dropped"
+
+# The same for a Quickbus IO, addressed by its IO Id (unknown, or its import is off). Args: IO Id, new value.
+WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (value %r) — not tracked, dropped"
 
 # Marker for a comment element the restore-as-new path adds to a rebuilt plan, so a user
 # opening it in Comexio Studio immediately understands why it exists and shouldn't hand-edit it.

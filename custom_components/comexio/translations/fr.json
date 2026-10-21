@@ -20,6 +20,7 @@
           "import_markers": "Créer des entités pour les marqueurs",
           "import_ios": "Créer des entités pour les IOs",
           "import_knx": "Créer des entités pour les objets KNX",
+          "import_quickbus": "Créer des entités pour les appareils Quickbus (multitouch, détecteurs de mouvement, ...)",
           "scan_interval": "Intervalle d'interrogation en arrière-plan (min)",
           "cover_keywords": "Mots-clés pour la détection des volets"
         }
@@ -344,7 +345,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Nettoyage de désinstallation",
-            "description": "Choisissez ce qui doit être supprimé de Comexio. Au total, l'intégration a créé {plan_count} plan(s) de fonctions, {device_count} appareil(s) Web-IO et {class_count} classe(s) Web-IO.\n\n* **Everything** supprime tout.\n* **Markers only / IOs only / KNX only** suppriment uniquement les plans de fonctions, l'appareil et la classe Web-IO de cette partie. Le plan de déclenchement commun n'est supprimé entièrement que s'il ne contient aucune paire de déclenchement de l'autre catégorie — sinon Markers/KNX n'en retirent que leurs propres paires.\n* **KNX only** et **Everything** effacent aussi les titres des marqueurs passerelles KNX inutilisés, qui redeviennent des marqueurs libres. Un marqueur passerelle utilisé dans un de vos propres plans de fonctions perd seulement ses suffixes [K…], [RO] et [TRIG] et reste un marqueur normal avec sa valeur initiale. Les marqueurs eux-mêmes ne sont pas supprimés.\n\nCette action est irréversible. Les plans de fonctions supprimés perdent définitivement leur câblage."
+            "description": "Choisissez ce qui doit être supprimé de Comexio. Au total, l'intégration a créé {plan_count} plan(s) de fonctions, {device_count} appareil(s) Web-IO et {class_count} classe(s) Web-IO.\n\n* **Everything** supprime tout.\n* **Markers only / IOs only / KNX only / Quickbus only** suppriment uniquement les plans de fonctions, l'appareil et la classe Web-IO de cette partie. Le plan de déclenchement commun n'est supprimé entièrement que s'il ne contient aucune paire de déclenchement de l'autre catégorie — sinon Markers/KNX n'en retirent que leurs propres paires.\n* **KNX only** et **Everything** effacent aussi les titres des marqueurs passerelles KNX inutilisés, qui redeviennent des marqueurs libres. Un marqueur passerelle utilisé dans un de vos propres plans de fonctions perd seulement ses suffixes [K…], [RO] et [TRIG] et reste un marqueur normal avec sa valeur initiale. Les marqueurs eux-mêmes ne sont pas supprimés.\n\nCette action est irréversible. Les plans de fonctions supprimés perdent définitivement leur câblage."
           }
         },
         "abort": {

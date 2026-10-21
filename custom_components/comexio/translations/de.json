@@ -20,6 +20,7 @@
           "import_markers": "Merker als Entitäten anlegen",
           "import_ios": "Ein- und Ausgänge anlegen",
           "import_knx": "KNX-Objekte als Entitäten anlegen",
+          "import_quickbus": "Quickbus-Geräte (Multitouch, Bewegungsmelder, ...) als Entitäten anlegen",
           "scan_interval": "Abfrageintervall (Minuten)",
           "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
         }
@@ -344,7 +345,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Deinstallations-Bereinigung",
-            "description": "Wähle, was aus Comexio entfernt werden soll. Insgesamt hat die Integration {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e) und {class_count} Web-IO-Klasse(n) angelegt.\n\n* **Everything** entfernt alles.\n* **Markers only / IOs only / KNX only** entfernen nur die Logikpläne, das Web-IO-Gerät und die Klasse dieses Bereichs. Der gemeinsame Trigger-Plan wird nur dann komplett entfernt, wenn er keine Trigger-Paare der anderen Kategorie enthält — sonst entfernen Merker/KNX nur ihre eigenen Paare daraus.\n* **KNX only** und **Everything** leeren außerdem die Titel ungenutzter KNX-Brücken-Merker, damit sie wieder als freie Merker verfügbar sind. Ein Brücken-Merker, den du in einem eigenen Logikplan verwendest, verliert nur seine Suffixe [K…], [RO] und [TRIG] und bleibt als normaler Merker samt Startwert erhalten. Die Merker selbst werden nicht gelöscht.\n\nDies kann nicht rückgängig gemacht werden. Gelöschte Logikpläne verlieren ihre Verdrahtung endgültig."
+            "description": "Wähle, was aus Comexio entfernt werden soll. Insgesamt hat die Integration {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e) und {class_count} Web-IO-Klasse(n) angelegt.\n\n* **Everything** entfernt alles.\n* **Markers only / IOs only / KNX only / Quickbus only** entfernen nur die Logikpläne, das Web-IO-Gerät und die Klasse dieses Bereichs. Der gemeinsame Trigger-Plan wird nur dann komplett entfernt, wenn er keine Trigger-Paare der anderen Kategorie enthält — sonst entfernen Merker/KNX nur ihre eigenen Paare daraus.\n* **KNX only** und **Everything** leeren außerdem die Titel ungenutzter KNX-Brücken-Merker, damit sie wieder als freie Merker verfügbar sind. Ein Brücken-Merker, den du in einem eigenen Logikplan verwendest, verliert nur seine Suffixe [K…], [RO] und [TRIG] und bleibt als normaler Merker samt Startwert erhalten. Die Merker selbst werden nicht gelöscht.\n\nDies kann nicht rückgängig gemacht werden. Gelöschte Logikpläne verlieren ihre Verdrahtung endgültig."
           }
         },
         "abort": {
