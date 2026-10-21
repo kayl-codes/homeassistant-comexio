@@ -36,6 +36,8 @@ _COMBINED_TABLES = {
     COMBINED_TYPE: "CombinedModuleSettingData",
     COMBINED_CENTRAL_TYPE: "CombinedModuleCentralSettingData",
 }
+# The central table may carry no rules sub-table at all; the module table always has one.
+_RULES_OPTIONAL = frozenset({_COMBINED_TABLES[COMBINED_CENTRAL_TYPE]})
 _SCENE_TABLE = "CurrentSceneConfig"
 _MODULE_ID = "CombinedModuleId"
 # Rule fields the diff leaves out: the row id is the key, the module id is the element's
@@ -86,11 +88,35 @@ def _scene_table(variables: Mapping[str, Any]) -> dict[str, dict[str, Any]] | No
     scenes = variables.get(_SCENE_TABLE)
     if isinstance(scenes, list) and not scenes:
         scenes = {}
-    if isinstance(scenes, Mapping) and all(isinstance(scene, Mapping) for scene in scenes.values()):
-        return {str(elem_id): dict(scene) for elem_id, scene in scenes.items()}
-    if _SCENE_TABLE in variables:
-        _LOGGER.warning("Module configs: $%s has an unknown format — scene blocks are not backed up", _SCENE_TABLE)
-    return None
+    if not isinstance(scenes, Mapping):
+        if _SCENE_TABLE in variables:
+            _LOGGER.warning("Module configs: $%s has an unknown format — scene blocks are not backed up", _SCENE_TABLE)
+        return None
+    # One unreadable scene makes the table unreadable, like a malformed Quantum row does.
+    if (bad := next((elem_id for elem_id, scene in scenes.items() if not _readable_scene(scene)), None)) is not None:
+        _LOGGER.warning(
+            "Module configs: $%s has an unknown format for element %s — scene blocks are not backed up",
+            _SCENE_TABLE,
+            bad,
+        )
+        return None
+    return {str(elem_id): dict(scene) for elem_id, scene in scenes.items()}
+
+
+def _readable_scene(scene: Any) -> bool:
+    """Whether a scene config's channel, scene and per-scene value tables are all readable rows.
+
+    A partial view would hide a change confined to the unreadable part, so one bad table rejects it.
+    """
+    if not (isinstance(scene, Mapping) and _is_table(scene.get("common")) and _is_table(scene.get("scene"))):
+        return False
+    return all(_is_table(row.get("data")) for row in _rows(scene["scene"]) or ())
+
+
+def _is_table(raw: Any) -> bool:
+    """Whether raw is a PHP-serialized table whose rows are all objects."""
+    rows = _rows(raw)
+    return rows is not None and all(isinstance(row, Mapping) for row in rows)
 
 
 def _module_list(modules: Any, elem_type: str) -> dict[str, dict[str, Any]] | None:
@@ -118,7 +144,7 @@ def _module_list(modules: Any, elem_type: str) -> dict[str, dict[str, Any]] | No
 
 def _parse_combined(configs: dict[str, dict[str, Any]], data: Any, table: str) -> dict[str, dict[str, Any]] | None:
     """{module id: {"type_id", "default_value", "settings": {name: value}, "rules": {row id: row}}}."""
-    settings, rules = _sub_tables(data)
+    settings, rules = _sub_tables(data, table)
     if data is not None and (settings is None or rules is None):
         _LOGGER.warning("Module configs: $%s has an unknown format — Quantum modules are not backed up", table)
         return None
@@ -131,15 +157,14 @@ def _parse_combined(configs: dict[str, dict[str, Any]], data: Any, table: str) -
     return configs
 
 
-def _sub_tables(data: Any) -> tuple[Iterable[Any] | None, Iterable[Any] | None]:
+def _sub_tables(data: Any, table: str) -> tuple[Iterable[Any] | None, Iterable[Any] | None]:
     """The settings and rules rows of a Quantum table; None for a missing or malformed one."""
     if isinstance(data, list) and not data:
         return [], []
     if not isinstance(data, Mapping):
         return None, None
-    # A missing rules sub-table is empty (the central table may carry no rules); settings always come
-    # along, so a table without them is unreadable rather than settings-free.
-    return _rows(data.get("settings")), _rows(data.get("rules", []))
+    # A sub-table the table must carry is unreadable when missing, never read as empty.
+    return _rows(data.get("settings")), _rows(data.get("rules", [] if table in _RULES_OPTIONAL else None))
 
 
 def _add_rows(configs: dict[str, dict[str, Any]], rows: Iterable[Any], part: str, table: str) -> bool:

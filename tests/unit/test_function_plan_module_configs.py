@@ -205,6 +205,50 @@ def test_a_table_without_settings_is_not_read_as_settings_free(caplog: pytest.Lo
     assert "$CombinedModuleSettingData has an unknown format" in caplog.text
 
 
+def test_the_module_table_without_rules_is_not_read_as_rule_free(caplog: pytest.LogCaptureFixture) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    del raw["CombinedModuleSettingData"]["rules"]
+
+    tables = parse_module_config_tables(raw)
+    assert "20" not in tables
+    assert "21" in tables
+    assert "$CombinedModuleSettingData has an unknown format" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        lambda scene: scene.pop("common"),
+        lambda scene: scene.update(common="x"),
+        lambda scene: scene["common"].update({"9": "x"}),
+        lambda scene: scene.update(common=["x"]),
+        lambda scene: scene.pop("scene"),
+        lambda scene: scene["scene"].update({"9": "x"}),
+        lambda scene: scene["scene"]["1"].pop("data"),
+        lambda scene: scene["scene"]["1"].update(data="x"),
+        lambda scene: scene["scene"]["1"]["data"].update({"9": "x"}),
+    ],
+)
+def test_a_scene_with_an_unreadable_nested_table_makes_the_scenes_unreadable(
+    damage: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    damage(raw["CurrentSceneConfig"]["31"])
+
+    tables = parse_module_config_tables(raw)
+    assert "13" not in tables
+    assert {"20", "21"} <= set(tables)
+    assert "$CurrentSceneConfig has an unknown format for element 31" in caplog.text
+
+
+def test_a_scene_without_values_is_read(caplog: pytest.LogCaptureFixture) -> None:
+    raw = load_json_fixture("module_configs_raw.json")
+    raw["CurrentSceneConfig"]["31"]["scene"]["1"]["data"] = []
+
+    assert parse_module_config_tables(raw)["13"]["31"]["scene"]["1"]["data"] == []
+    assert not caplog.text
+
+
 def test_a_table_without_rules_has_no_rules(caplog: pytest.LogCaptureFixture) -> None:
     raw = load_json_fixture("module_configs_raw.json")
     del raw["CombinedModuleCentralSettingData"]["rules"]

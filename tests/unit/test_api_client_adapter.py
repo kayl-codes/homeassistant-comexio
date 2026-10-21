@@ -337,7 +337,7 @@ def _block_page(value: str, version: str, active: int = 1) -> RawConfig:
         "FubBaseConfig": {"1": {"FubElementId": 104, "Name": "in_0", "Value": value}},
         "Fubs": {"7": {"Id": 7, "Name": f"Plan {value}", "Active": active}},
         "Paper": {"1": {"Id": 1, "Name": f"Paper {value}"}},
-        "CurrentSceneConfig": {"31": {"name": f"Scene {value}"}},
+        "CurrentSceneConfig": {"31": {"name": f"Scene {value}", "common": [], "scene": []}},
     }
     return RawConfig(variables, {"1": {"unit": version}}, {"2": {"input": version}}, version)
 
@@ -346,7 +346,7 @@ def _page_state(page: RawConfig) -> tuple[Any, ...]:
     """What a fetch that applied page leaves in block_settings, io_types, io_input_types, comexio_version,
     module_configs."""
     value = page.variables["FubBaseConfig"]["1"]["Value"]
-    scenes = {"13": {"31": {"name": f"Scene {value}"}}}
+    scenes = {"13": {"31": {"name": f"Scene {value}", "common": [], "scene": []}}}
     return {"104": {"in_0": value}}, page.io_types, page.io_input_types, page.comexio_version, scenes
 
 
