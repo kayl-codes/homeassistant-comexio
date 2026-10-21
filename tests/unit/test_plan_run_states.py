@@ -2432,3 +2432,21 @@ def test_a_restored_pick_logs_its_move_only_when_the_id_changed(
     assert expected in caplog.text
     (new_options,) = coordinator.request_options_update_without_reload.call_args.args
     assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == [f"{new_fub_id}:Test4"]
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_push_restore_of_an_unwatched_plan_is_skipped_before_the_rename_check(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(Review) unwatched meanwhile: no "most likely renamed" notification pointing at a repair that is gone."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+    coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: []}
+    api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
+    coordinator.function_plan_backup.async_load = AsyncMock()
+    coordinator.plan_rename_suspected = MagicMock(return_value=True)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
+    coordinator.plan_rename_suspected.assert_not_called()
+    notifications.assert_not_called()
+    coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
