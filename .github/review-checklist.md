@@ -35,7 +35,8 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   migration: bump `CONFIG_ENTRY_MINOR_VERSION` and add an `if minor_version < N` branch to `migrate_entry_options`
   (`async_migrate_entry` and the config flow's `MINOR_VERSION` follow the constant). If existing installs should get
   the new behaviour, the branch replaces a saved value equal to the old default, compared the way the code reads it,
-  and keeps a customised one. If only new installs should get it, the branch pins the old default into entries that
+  and keeps a customised one (accepted trade-off: a user who deliberately chose the old default is migrated too;
+  the PR says so). If only new installs should get it, the branch pins the old default into entries that
   have no saved value (as 1.2 -> 1.3 does with `LEGACY_DEFAULT_SCHEMA_IO`). Flag a changed default without such a
   branch.
 - **Terminology:** "function plan" is the English term in code, services, logs, notifications and en/fr/es
