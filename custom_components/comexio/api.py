@@ -719,6 +719,15 @@ class ComexioAPI:
         # Set by get_raw_config, like config_relogin_unreachable, when Comexio refused that re-login's
         # credentials: the poll then asks the user for new ones.
         self.config_relogin_rejected = False
+        # The connection settings Comexio last refused at login (_login). No login tries them again —
+        # HA asks for reauth then, and retrying from every poll would only risk a server-side lockout;
+        # new credentials (reauth reloads the entry) or a successful login lift it.
+        self._refused_credentials: tuple[str, ...] | None = None
+
+    @property
+    def credentials_refused(self) -> bool:
+        """Whether Comexio refused the current connection settings at the last login that tried them."""
+        return self._refused_credentials == self._credentials()
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -735,6 +744,8 @@ class ComexioAPI:
         self._drop_outdated_preview_session()
         if self._preview_session is not None:
             return self._preview_session
+        if self.credentials_refused:
+            return None  # _login would not try them anyway; no warning on every preview tick
         async with self._preview_session_lock:
             # Re-check: another tick may have finished creating the session while this
             # one was waiting for the lock — and the settings may have changed since.
@@ -988,12 +999,23 @@ class ComexioAPI:
             return True
 
     async def _login(self, client: ComexioClient) -> bool:
-        """client.login() mapped onto login()'s bool / last_login_error contract."""
+        """client.login() mapped onto login()'s bool / last_login_error contract.
+
+        Credentials Comexio refused are not sent again (see _refused_credentials): the call fails as
+        "rejected" without a request. The main session's logins run under _login_lock, so a caller
+        that waited for a refused login sees the refusal and does not repeat it.
+        """
+        credentials = self._credentials()
+        if self._refused_credentials == credentials:
+            _LOGGER.debug("Not logging in to Comexio: it refused these credentials, waiting for reauth")
+            self.last_login_error = LOGIN_ERROR_REJECTED
+            return False
         try:
             await client.login()
         except ComexioAuthenticationError as err:
             _LOGGER.debug("Comexio login rejected: %s", err)
             self.last_login_error = LOGIN_ERROR_REJECTED
+            self._refused_credentials = credentials
             return False
         except ComexioError as err:
             _LOGGER.warning("Comexio login failed: %s", err)
@@ -1001,6 +1023,7 @@ class ComexioAPI:
             return False
         _LOGGER.info("Successfully logged into Comexio Admin interface")
         self.last_login_error = None
+        self._refused_credentials = None
         return True
 
     async def get_raw_config(self) -> dict[str, Any]:
@@ -5090,9 +5113,7 @@ class ComexioAPI:
         Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
         failures and warns with the cause — so they are logged at debug level here. A lapsed admin
         session is logged in again once per call, like the config poll does: this poll runs more
-        often, and its readings would otherwise go unknown until the next config poll. Not once the
-        config poll's re-login was refused, though: HA asks for reauth then and stops that poll, and
-        trying the same credentials every few minutes would only risk a server-side lockout.
+        often, and its readings would otherwise go unknown until the next config poll.
         """
         relogin: list[bool] = []  # the outcome of this call's one re-login, shared by both fetches
         info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)
@@ -5108,8 +5129,6 @@ class ComexioAPI:
             try:
                 return await fetch(), None
             except ComexioAuthenticationError:
-                if self.config_relogin_rejected:
-                    return None, "credentials refused, waiting for reauth"
                 if not relogin:
                     _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
                     relogin.append(await self._full_login(generation))

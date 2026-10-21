@@ -333,8 +333,6 @@ async def test_a_poll_whose_re_login_is_refused_offers_reauth(
     assert coordinator.data is data_before
     api.get_live_states.assert_not_awaited()  # the poll stopped at the refusal, nothing parsed from {}
     assert coordinator.comexio_unreachable is False  # Comexio answered
-    # Review (Sourcery, #212): the run-state poll does not try the refused credentials again either.
-    assert coordinator._plan_run_state_relogin_refused is True
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
 

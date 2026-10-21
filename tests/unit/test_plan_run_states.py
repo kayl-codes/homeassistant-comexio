@@ -546,18 +546,6 @@ def test_refused_relogin_is_not_retried_every_tick(api: ComexioAPI, caplog: pyte
     assert "refused the re-login" in caplog.text
 
 
-def test_run_states_skip_the_login_once_the_full_poll_saw_the_credentials_refused(
-    api: ComexioAPI, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Review (Sourcery, #212): the full poll's refusal alone stops the run-state poll's login."""
-    api.client.get_function_plan_run_states = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
-    api.login = AsyncMock()
-    coordinator = _coordinator(api, _plan_run_state_relogin_refused=True)  # as the refused full poll leaves it
-    asyncio.run(coordinator._async_refresh_plan_run_states())
-    api.login.assert_not_awaited()
-    assert "refused the re-login" not in caplog.text
-
-
 @pytest.mark.parametrize(
     ("polled", "scraped", "fails"),
     [({43}, True, False), (None, True, False), ({43}, False, False), ({43}, True, True)],
