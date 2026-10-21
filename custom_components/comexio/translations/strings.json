@@ -6,7 +6,8 @@
       "invalid_auth": "Invalid credentials (UI User/Pass).",
       "unknown": "An unexpected error occurred.",
       "certificate_changed": "Comexio presents another certificate than the pinned one. Check it under Settings → Repairs.",
-      "certificate_unstable": "Comexio presented another certificate at the login test than a moment before. Something in the network may answer in its place — check it and try again."
+      "certificate_unstable": "Comexio presented another certificate at the login test than a moment before. Something in the network may answer in its place — check it and try again.",
+      "invalid_host": "This is not a host name or IP address (optionally with :port) — leave out http://, paths and the like."
     },
     "step": {
       "user": {

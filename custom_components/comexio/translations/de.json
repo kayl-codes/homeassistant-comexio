@@ -6,7 +6,8 @@
       "invalid_auth": "Ungültige Anmeldedaten (UI User/Pass).",
       "unknown": "Unerwarteter Fehler aufgetreten.",
       "certificate_changed": "Comexio zeigt ein anderes Zertifikat als das gespeicherte. Bitte unter Einstellungen → Reparaturen prüfen.",
-      "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut."
+      "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut.",
+      "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches."
     },
     "step": {
       "user": {

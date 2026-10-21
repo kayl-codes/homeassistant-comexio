@@ -6,7 +6,8 @@
       "invalid_auth": "Identifiants invalides (Interface Utilisateur/Mot de passe).",
       "unknown": "Une erreur inattendue s'est produite.",
       "certificate_changed": "Comexio présente un autre certificat que celui enregistré. Vérifiez-le sous Paramètres → Réparations.",
-      "certificate_unstable": "Comexio a présenté lors du test de connexion un autre certificat qu'un instant auparavant. Quelque chose dans le réseau répond peut-être à sa place — vérifiez-le et réessayez."
+      "certificate_unstable": "Comexio a présenté lors du test de connexion un autre certificat qu'un instant auparavant. Quelque chose dans le réseau répond peut-être à sa place — vérifiez-le et réessayez.",
+      "invalid_host": "Ce n’est pas un nom d’hôte ni une adresse IP (éventuellement avec :port) – sans http://, chemins, etc."
     },
     "step": {
       "user": {

@@ -28,6 +28,7 @@ from custom_components.comexio.const import (
     DOMAIN,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
+    LOGIN_ERROR_REJECTED,
 )
 from custom_components.comexio.repairs import ComexioRepairFlow
 
@@ -280,20 +281,27 @@ async def test_a_pinned_entry_asks_before_it_drops_or_replaces_the_pin(
     assert notify.call_args.kwargs["title"] == title
 
 
+def _form_default(result: dict[str, Any], field: str) -> Any:
+    """The value a form field is prefilled with."""
+    return next(key.default() for key in result["data_schema"].schema if key == field)
+
+
 @pytest.mark.usefixtures("mock_setup_entry")
 @pytest.mark.parametrize(
-    ("api_attributes", "error"),
+    ("served", "api_attributes", "error"),
     [
-        ({"last_login_error": LOGIN_ERROR_CONNECTION}, "cannot_connect"),
+        (OTHER, {"last_login_error": LOGIN_ERROR_CONNECTION}, "cannot_connect"),
         (
+            OTHER,
             {
                 "last_login_error": LOGIN_ERROR_CERTIFICATE,
                 "certificate_mismatch": ComexioCertificateMismatchError("foreign", expected=OTHER, actual=THIRD),
             },
             "certificate_unstable",
         ),
+        (ComexioConnectionError("no HTTPS"), {"last_login_error": LOGIN_ERROR_CONNECTION}, "cannot_connect"),
     ],
-    ids=["unreachable", "yet another certificate at the login"],
+    ids=["replace, unreachable", "replace, yet another certificate at the login", "drop, unreachable"],
 )
 async def test_a_confirmed_change_whose_login_test_fails_changes_nothing(
     hass: HomeAssistant,
@@ -302,12 +310,14 @@ async def test_a_confirmed_change_whose_login_test_fails_changes_nothing(
     api_returns: dict,
     certificate_handshake: AsyncMock,
     notify: MagicMock,
+    served: str | Exception,
     error: str,
 ) -> None:
-    # The certificate just confirmed is not the pinned one, so a mismatch at the login is no repair's case.
+    # The certificate just confirmed is not the pinned one, so a mismatch at the login is no repair's case;
+    # a confirmed switch to HTTP whose login fails keeps the pin.
     pinned_entry.add_to_hass(hass)
     data_before = dict(pinned_entry.data)
-    _serve(certificate_handshake, OTHER)
+    _serve(certificate_handshake, served)
     api_returns["login"] = False
 
     result = await _reconfigure(hass, pinned_entry, NEW_HOST)
@@ -315,7 +325,8 @@ async def test_a_confirmed_change_whose_login_test_fails_changes_nothing(
 
     assert result["step_id"] == "reconfigure"
     assert result["errors"] == {"base": error}
-    assert mock_comexio_api[0].fingerprint == OTHER
+    assert _form_default(result, CONF_HOST) == NEW_HOST  # what the user entered, not the entry's host
+    assert mock_comexio_api[0].fingerprint == (None if isinstance(served, Exception) else OTHER)
     assert dict(pinned_entry.data) == data_before
     assert _issue(hass, pinned_entry) is None
     notify.assert_not_called()
@@ -348,6 +359,29 @@ async def test_an_entry_on_plain_http_takes_https_without_asking(
     assert mock_comexio_api[0].fingerprint == expected_pin
     mock_comexio_api[0].login.assert_awaited_once()
     assert notify.called is notified
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+@pytest.mark.parametrize("host", ["http://192.168.1.20", "192.168.1.20/admin"])
+async def test_an_invalid_host_is_named_as_such(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+    host: str,
+) -> None:
+    # Not "no HTTPS": the pinned entry is not offered a switch to plain HTTP for a typo.
+    pinned_entry.add_to_hass(hass)
+    data_before = dict(pinned_entry.data)
+
+    result = await _reconfigure(hass, pinned_entry, host)
+
+    assert result["step_id"] == "reconfigure"
+    assert result["errors"] == {"base": "invalid_host"}
+    assert _form_default(result, CONF_HOST) == host
+    certificate_handshake.assert_not_awaited()
+    assert not mock_comexio_api
+    assert dict(pinned_entry.data) == data_before
 
 
 @pytest.mark.usefixtures("mock_setup_entry")
@@ -502,11 +536,7 @@ async def test_setup_switches_an_http_entry_to_https(
     notify.assert_called_once()
 
 
-@pytest.mark.parametrize(
-    ("login_error", "state"),
-    [(LOGIN_ERROR_CONNECTION, ConfigEntryState.SETUP_RETRY), ("rejected", ConfigEntryState.SETUP_ERROR)],
-)
-async def test_setup_stays_on_http_when_the_https_login_fails(
+async def test_setup_stays_on_http_when_the_https_login_cannot_connect(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_comexio_api: list[ComexioAPI],
@@ -514,26 +544,53 @@ async def test_setup_stays_on_http_when_the_https_login_fails(
     api_attributes: dict,
     certificate_handshake: AsyncMock,
     notify: MagicMock,
-    login_error: str,
-    state: ConfigEntryState,
 ) -> None:
-    # Pinned only after a login over HTTPS worked with the certificate; the HTTP login's failure decides.
-    certificate_handshake.side_effect = None
-    certificate_handshake.return_value = PINNED
+    # Pinned only after a login over HTTPS worked with the certificate. A Comexio whose HTTPS answers the
+    # handshake but not the login keeps working over HTTP, as before; the HTTP login's failure decides.
+    _serve(certificate_handshake, PINNED)
     api_returns["login"] = False
-    api_attributes["last_login_error"] = login_error
+    api_attributes["last_login_error"] = LOGIN_ERROR_CONNECTION
 
     await _setup(hass, mock_config_entry)
 
-    assert mock_config_entry.state is state
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
     assert CONF_CERTIFICATE_FINGERPRINT not in mock_config_entry.data
     https_api, http_api = mock_comexio_api[:2]
     assert https_api.fingerprint == PINNED
+    https_api.fetch_replaced_fingerprint.assert_awaited_once()
     https_api.close.assert_called()
     assert http_api.fingerprint is None
     notify.assert_not_called()
 
 
+async def test_setup_does_not_resend_credentials_rejected_over_https(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+) -> None:
+    _serve(certificate_handshake, PINNED)
+    api_returns["login"] = False
+    api_attributes["last_login_error"] = LOGIN_ERROR_REJECTED
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
+    assert [api.fingerprint for api in mock_comexio_api] == [PINNED]  # no second, unencrypted login
+    mock_comexio_api[0].close.assert_called()
+    assert any(flow["context"]["source"] == "reauth" for flow in hass.config_entries.flow.async_progress())
+    assert CONF_CERTIFICATE_FINGERPRINT not in mock_config_entry.data
+    notify.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("login_error", "replaced"),
+    [(LOGIN_ERROR_CERTIFICATE, None), (LOGIN_ERROR_CONNECTION, OTHER)],
+    ids=["named by the login", "reported as a connection error"],
+)
 async def test_setup_meeting_a_changing_certificate_during_the_switch_is_retried(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -542,11 +599,15 @@ async def test_setup_meeting_a_changing_certificate_during_the_switch_is_retried
     api_attributes: dict,
     certificate_handshake: AsyncMock,
     notify: MagicMock,
+    login_error: str,
+    replaced: str | None,
 ) -> None:
     # The handshake read one certificate, the login met another: no fallback to plain HTTP with the credentials.
+    # aiohttp reports a foreign certificate on a host name with several addresses as a connection error.
     _serve(certificate_handshake, PINNED)
     api_returns["login"] = False
-    api_attributes["last_login_error"] = LOGIN_ERROR_CERTIFICATE
+    api_returns["fetch_replaced_fingerprint"] = replaced
+    api_attributes["last_login_error"] = login_error
 
     await _setup(hass, mock_config_entry)
 

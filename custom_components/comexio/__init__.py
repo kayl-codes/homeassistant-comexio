@@ -111,7 +111,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     server_id = entry.data[CONF_SERVER_ID]
 
     # Initialize API (an entry still on plain HTTP is switched to HTTPS here when Comexio serves it)
-    api = await async_create_api(hass, entry)
+    try:
+        api = await async_create_api(hass, entry)
+    except (ConfigEntryNotReady, ConfigEntryAuthFailed):
+        # Raised only once Comexio answered the HTTPS login (see async_create_api).
+        _track_setup_outage(hass, entry.entry_id, False)
+        raise
 
     # Initialize Coordinator (passes config_entry to base class, sets api.config_entry and server_id)
     coordinator = ComexioCoordinator(hass, api, entry)

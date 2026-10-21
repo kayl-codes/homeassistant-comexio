@@ -6,7 +6,8 @@
       "invalid_auth": "Credenciales no válidas (Usuario/Contraseña UI).",
       "unknown": "Se ha producido un error inesperado.",
       "certificate_changed": "Comexio presenta otro certificado distinto del guardado. Revísalo en Ajustes → Reparaciones.",
-      "certificate_unstable": "Comexio presentó en la prueba de inicio de sesión otro certificado distinto del de hace un momento. Puede que otra cosa en la red responda en su lugar; revísala e inténtalo de nuevo."
+      "certificate_unstable": "Comexio presentó en la prueba de inicio de sesión otro certificado distinto del de hace un momento. Puede que otra cosa en la red responda en su lugar; revísala e inténtalo de nuevo.",
+      "invalid_host": "No es un nombre de host ni una dirección IP (opcionalmente con :puerto) – sin http://, rutas ni similares."
     },
     "step": {
       "user": {

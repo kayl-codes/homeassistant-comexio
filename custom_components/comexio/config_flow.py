@@ -17,6 +17,7 @@ from .certificate import (
     async_replaced_fingerprint,
     async_report_certificate_changed,
     connection_placeholders,
+    is_valid_host,
     notify_https_disabled,
     notify_https_enabled,
 )
@@ -222,7 +223,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle reconfiguration of connection credentials."""
         entry = self._get_reconfigure_entry()
         if user_input is None:
-            return self._show_reconfigure_form(entry, {})
+            return self._show_reconfigure_form(entry.data, {})
 
         merged = {**entry.data, **user_input}
         if not user_input.get(CONF_PASSWORD):
@@ -230,10 +231,13 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not user_input.get(CONF_API_PASSWORD):
             merged[CONF_API_PASSWORD] = entry.data.get(CONF_API_PASSWORD, "")
 
+        if not is_valid_host(merged[CONF_HOST]):
+            # Not "no HTTPS": a pinned entry would be asked to switch to plain HTTP for a typo.
+            return self._show_reconfigure_form(merged, {"base": "invalid_host"})
         try:
             https_change = await self._async_pin_for_host(entry, merged)
         except CertificateChanged as err:
-            return self._show_reconfigure_form(entry, {"base": self._certificate_error(entry, merged, err.actual)})
+            return self._show_reconfigure_form(merged, {"base": self._certificate_error(entry, merged, err.actual)})
         if https_change in _HTTPS_CONFIRM_STEPS:
             # Nothing is sent before the user agreed: neither credentials over plain HTTP nor to that certificate.
             self._pending_reconfigure = merged
@@ -252,8 +256,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_REPLACED
         )
 
-    def _show_reconfigure_form(self, entry, errors: dict[str, str]):
-        conf = entry.data
+    def _show_reconfigure_form(self, conf, errors: dict[str, str]):
+        """The reconfigure form, prefilled from conf: the entry, or after an error what the user entered."""
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=vol.Schema(
@@ -266,7 +270,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
-            description_placeholders=connection_placeholders(conf),
+            description_placeholders=connection_placeholders(self._get_reconfigure_entry().data),
         )
 
     def _show_https_confirm(self, entry, merged, https_change: str):
@@ -283,7 +287,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Test the login with the merged settings and store them; the form again with the errors if it fails."""
         errors = await self._connection_errors(entry, merged)
         if errors:
-            return self._show_reconfigure_form(entry, errors)
+            return self._show_reconfigure_form(merged, errors)
         self._notify_https_change(entry, merged, https_change)
         clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
         return self.async_update_reload_and_abort(
