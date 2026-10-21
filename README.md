@@ -63,9 +63,9 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `sensor` (diagnostic) | Integration | `Last boot` — when the Comexio system last started (from its uptime), polled every 5 min. |
 | `binary_sensor` (diagnostic, problem) | Integration | `Time server setting` — on while Comexio does not set its clock from a time server (disabled or no server entered); a wrong clock breaks timers and schedules in the function plans. Off only means a server is configured, not that Comexio reaches it. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
-| `button` (diagnostic) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
-| `button` (diagnostic) | Integration | `Fix Entity IDs` — moves existing entities to the stable, address-based entity IDs. History and statistics move along; automations, scripts and dashboards are not rewritten. |
-| `button` (diagnostic, disabled by default) | Integration | `Uninstall Cleanup` — raises a Repair issue that removes what the integration created in Comexio: everything, or only the Markers / IOs / KNX / Quickbus part (managed Function Plans, Web-IO devices and classes). KNX also resets the titles of the KNX bridge markers so they become free markers again; the shared `HA - TRIGGER` plan is only removed as a whole if it holds no other category's trigger pairs. Nothing is deleted until the Repair dialog is confirmed; progress and a result summary are shown as notifications. |
+| `button` (configuration) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
+| `button` (configuration) | Integration | `Fix Entity IDs` — moves existing entities to the stable, address-based entity IDs. History and statistics move along; automations, scripts and dashboards are not rewritten. |
+| `button` (configuration, disabled by default) | Integration | `Uninstall Cleanup` — raises a Repair issue that removes what the integration created in Comexio: everything, or only the Markers / IOs / KNX / Quickbus part (managed Function Plans, Web-IO devices and classes). KNX also resets the titles of the KNX bridge markers so they become free markers again; the shared `HA - TRIGGER` plan is only removed as a whole if it holds no other category's trigger pairs. Nothing is deleted until the Repair dialog is confirmed; progress and a result summary are shown as notifications. |
 
 ## 🚀 Installation
 
@@ -163,7 +163,7 @@ Comexio can check every extension module on the local bus for available firmware
 
 Results show up as one `update.*` entity per extension module (in that extension's device) plus one for the IO-Server base itself, each reporting installed/available firmware version through HA's standard `update` entity (visible in the Settings → *Updates available* overview). These are read-only — Comexio's install trigger isn't wired up, so use the Comexio admin UI to actually apply an update once one is found.
 
-A diagnostic **"Check Firmware Now"** button forces the check on demand, bypassing the version gate (but not the underlying risk — the same brief output interruption Comexio warns about applies). Use it to test the `update.*` entities right away instead of waiting for both a version change and the nightly window.
+A configuration **"Check Firmware Now"** button forces the check on demand, bypassing the version gate (but not the underlying risk — the same brief output interruption Comexio warns about applies). Use it to test the `update.*` entities right away instead of waiting for both a version change and the nightly window.
 
 ## 🧩 Function Plan Management (Logikplan)
 
@@ -299,9 +299,9 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `sensor` (Diagnose) | Integration | `Letzter Start` — wann das Comexio-System zuletzt gestartet ist (aus seiner Laufzeit), alle 5 min abgefragt. |
 | `binary_sensor` (Diagnose, Problem) | Integration | `Zeitserver-Setting` — an, solange Comexio seine Uhr nicht von einem Zeitserver stellt (deaktiviert oder kein Server eingetragen); eine falsche Uhr bringt Zeitglieder und Zeitpläne in den Logikplänen durcheinander. Aus heißt nur, dass ein Server eingetragen ist, nicht dass Comexio ihn erreicht. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
-| `button` (Diagnose) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
-| `button` (Diagnose) | Integration | `Entity-IDs korrigieren` — stellt bestehende Entitäten auf die stabilen, adressbasierten Entity-IDs um. Verlauf und Statistiken ziehen mit um; Automationen, Skripte und Dashboards werden nicht umgeschrieben. |
-| `button` (Diagnose, standardmäßig deaktiviert) | Integration | `Deinstallations-Bereinigung` — legt ein Reparatur-Issue an, das entfernt, was die Integration in Comexio angelegt hat: alles oder nur den Merker-/IO-/KNX-/Quickbus-Teil (verwaltete Logikpläne, Web-IO-Geräte und -Klassen). KNX setzt zusätzlich die Titel der KNX-Brücken-Merker zurück, sodass sie wieder frei sind; der gemeinsame `HA - TRIGGER`-Plan wird nur komplett entfernt, wenn er keine Trigger-Paare einer anderen Kategorie enthält. Gelöscht wird erst nach Bestätigung im Reparatur-Dialog; Fortschritt und Zusammenfassung erscheinen als Benachrichtigungen. |
+| `button` (Konfiguration) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
+| `button` (Konfiguration) | Integration | `Entity-IDs korrigieren` — stellt bestehende Entitäten auf die stabilen, adressbasierten Entity-IDs um. Verlauf und Statistiken ziehen mit um; Automationen, Skripte und Dashboards werden nicht umgeschrieben. |
+| `button` (Konfiguration, standardmäßig deaktiviert) | Integration | `Deinstallations-Bereinigung` — legt ein Reparatur-Issue an, das entfernt, was die Integration in Comexio angelegt hat: alles oder nur den Merker-/IO-/KNX-/Quickbus-Teil (verwaltete Logikpläne, Web-IO-Geräte und -Klassen). KNX setzt zusätzlich die Titel der KNX-Brücken-Merker zurück, sodass sie wieder frei sind; der gemeinsame `HA - TRIGGER`-Plan wird nur komplett entfernt, wenn er keine Trigger-Paare einer anderen Kategorie enthält. Gelöscht wird erst nach Bestätigung im Reparatur-Dialog; Fortschritt und Zusammenfassung erscheinen als Benachrichtigungen. |
 
 ## 🚀 Installation
 
@@ -399,7 +399,7 @@ Comexio kann jedes Erweiterungsmodul am lokalen Bus auf verfügbare Firmware-Upd
 
 Die Ergebnisse erscheinen als je eine `update.*`-Entität pro Erweiterungsmodul (im jeweiligen Erweiterungs-Device) sowie eine für den IO-Server-Grundbaustein selbst, jeweils mit installierter/verfügbarer Firmware-Version über die HA-Standard-`update`-Entität (sichtbar in *Einstellungen → Verfügbare Updates*). Diese sind reine Anzeige — der Install-Aufruf von Comexio ist nicht angebunden, ein gefundenes Update wird weiterhin über die Comexio-Admin-Oberfläche eingespielt.
 
-Ein Diagnose-Button **„Firmware jetzt prüfen“** erzwingt die Prüfung sofort, unabhängig vom Versions-Gate (das zugrunde liegende Risiko bleibt aber bestehen — dieselbe kurze Ausgangs-Unterbrechung, vor der Comexio warnt). Damit lassen sich die `update.*`-Entitäten sofort testen, statt auf Versionswechsel und Nachtfenster zu warten.
+Ein Konfigurations-Button **„Firmware jetzt prüfen“** erzwingt die Prüfung sofort, unabhängig vom Versions-Gate (das zugrunde liegende Risiko bleibt aber bestehen — dieselbe kurze Ausgangs-Unterbrechung, vor der Comexio warnt). Damit lassen sich die `update.*`-Entitäten sofort testen, statt auf Versionswechsel und Nachtfenster zu warten.
 
 ## 🧩 Funktionsplan-Verwaltung (Logikplan)
 
