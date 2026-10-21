@@ -722,10 +722,10 @@ class ComexioAPI:
         # Set by get_raw_config, like config_relogin_unreachable, when Comexio refused that re-login's
         # credentials: the poll then asks the user for new ones.
         self.config_relogin_rejected = False
-        # The host and admin credentials Comexio last refused at login (_login). No login tries them
-        # again — HA asks for reauth then, and retrying from every poll would only risk a server-side
-        # lockout; new credentials (reauth reloads the entry) or a successful login lift it.
-        self._refused_credentials: tuple[str, ...] | None = None
+        # Every host + admin credentials Comexio refused at login (_login). No login tries them again —
+        # HA asks for reauth then, and retrying from every poll would only risk a server-side lockout;
+        # new credentials (reauth reloads the entry) or a successful login with them lift it.
+        self._refused_credentials: set[tuple[str, ...]] = set()
 
     @staticmethod
     def _admin_login_part(credentials: tuple[str, ...]) -> tuple[str, ...]:
@@ -739,7 +739,7 @@ class ComexioAPI:
     @property
     def credentials_refused(self) -> bool:
         """Whether Comexio refused the current admin credentials at the last login that tried them."""
-        return self._refused_credentials == self._login_credentials()
+        return self._login_credentials() in self._refused_credentials
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -751,7 +751,8 @@ class ComexioAPI:
         Returns None if the login fails — the caller falls back to the main session for that
         one poll tick rather than blocking the preview on a retry loop; the next tick tries
         the dedicated session again from scratch (a fresh session, since a stale/rejected
-        cookie jar wouldn't fix itself).
+        cookie jar wouldn't fix itself) — unless Comexio refused the credentials: those are
+        not tried again until they change (see _refused_credentials).
         """
         self._drop_outdated_preview_session()
         if self._preview_session is not None:
@@ -1015,15 +1016,21 @@ class ComexioAPI:
         """client.login() mapped onto login()'s bool / last_login_error contract.
 
         client_credentials are the settings the client was built with (_credentials()); a refusal or
-        success counts for them, not for the settings current when the answer comes — a reconfigure
-        while the client waited would otherwise get its new credentials refused unasked.
-        Credentials Comexio refused are not sent again (see _refused_credentials): the call fails as
-        "rejected" without a request. All login requests run one at a time, so a caller that waited
-        for a refused login sees the refusal and does not repeat it.
+        success counts for them. Credentials Comexio refused are not sent again (see
+        _refused_credentials): the call fails as "rejected" without a request. All login requests run
+        one at a time, so a caller that waited for a refused login sees the refusal and does not
+        repeat it. Settings replaced by a reconfigure are outdated: a login still waiting with them
+        is not sent, and one refused while they were replaced does not report "rejected" — the
+        caller would ask for reauth although the new credentials were never tried. Both report
+        "connection" instead, so the caller simply tries again with the new settings.
         """
         credentials = self._admin_login_part(client_credentials)
         async with self._login_request_lock:
-            if self._refused_credentials == credentials:
+            if credentials != self._login_credentials():
+                _LOGGER.debug("Not logging in to Comexio: the connection settings changed while this login waited")
+                self.last_login_error = LOGIN_ERROR_CONNECTION
+                return False
+            if credentials in self._refused_credentials:
                 _LOGGER.debug("Not logging in to Comexio: it refused these credentials, waiting for reauth")
                 self.last_login_error = LOGIN_ERROR_REJECTED
                 return False
@@ -1031,9 +1038,9 @@ class ComexioAPI:
                 await client.login()
             except ComexioAuthenticationError as err:
                 _LOGGER.debug("Comexio login rejected: %s", err)
-                self.last_login_error = LOGIN_ERROR_REJECTED
-                if not self.credentials_refused:  # one slot: a refusal of the current settings matters most
-                    self._refused_credentials = credentials
+                self._refused_credentials.add(credentials)
+                outdated = credentials != self._login_credentials()
+                self.last_login_error = LOGIN_ERROR_CONNECTION if outdated else LOGIN_ERROR_REJECTED
                 return False
             except ComexioError as err:
                 _LOGGER.warning("Comexio login failed: %s", err)
@@ -1041,8 +1048,7 @@ class ComexioAPI:
                 return False
             _LOGGER.info("Successfully logged into Comexio Admin interface")
             self.last_login_error = None
-            if self._refused_credentials == credentials:
-                self._refused_credentials = None
+            self._refused_credentials.discard(credentials)
             return True
 
     async def get_raw_config(self) -> dict[str, Any]:
@@ -5142,7 +5148,11 @@ class ComexioAPI:
     async def _system_info_part[T](
         self, fetch: Callable[[], Awaitable[T]], relogin: list[bool]
     ) -> tuple[T | None, str | None]:
-        """fetch()'s result, or None and the failure cause; a lapsed session is logged in again once per relogin."""
+        """fetch()'s result, or None and the failure cause.
+
+        A lapsed session is logged in again once per relogin — not with credentials Comexio refused
+        (see _login): then the cause is "re-login failed (rejected)" without a request.
+        """
         generation = self._login_generation
         try:
             try:
