@@ -23,7 +23,10 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_X_MARKER as _LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
+    function_plan_info,
+    function_plans,
     one_line,
+    unreadable_plan_keys,
 )
 from ..coordinator import ComexioCoordinator
 
@@ -94,9 +97,31 @@ def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:
         return int(stripped)
     except ValueError:
         name_lower = stripped.lower()
-        for fid, fub in fub_data.items():
-            if fub.get("Name", "").lower() == name_lower:
-                return int(fid)
+        for fid, fub in function_plans(fub_data):
+            if str(fub.get("Name", "")).lower() == name_lower:
+                return fid
+    return None
+
+
+def _unreadable_plan_entry_msg(fub_id: int, fub_data: dict, *, live_plan: bool) -> str | None:
+    """Refusal text when fub_id's plan list entry is unreadable: its name and run state are unknown.
+
+    live_plan: the service acts on the plan in Comexio, so a plan not readably listed while the list
+    holds unreadable entries (one of them may be this plan) is refused too. Backup services leave it
+    out: a deleted plan's backups stay reachable.
+    """
+    if function_plan_info(fub_data, fub_id):
+        return None
+    if str(fub_id) in fub_data:
+        return (
+            f"The plan list entry of plan ID {fub_id} is unreadable "
+            f"({one_line(repr(fub_data[str(fub_id)]))}); not acting on it."
+        )
+    if live_plan and (bad_keys := unreadable_plan_keys(fub_data)):
+        return (
+            f"Plan ID {fub_id} is not readable in the plan list, which has unreadable entries "
+            f"({one_line(', '.join(bad_keys))}); not acting on it."
+        )
     return None
 
 
@@ -104,10 +129,14 @@ def _available_plans_str(fub_data: dict) -> str:
     """Return human-readable list of available plans from fub_data."""
     if not fub_data:
         return "no plans loaded — reload the integration"
-    return ", ".join(
+    plans = ", ".join(
         f"'{one_line(fub.get('Name', '?'))}' (ID {fid})"
-        for fid, fub in sorted(fub_data.items(), key=lambda x: int(x[0]))
+        for fid, fub in sorted(function_plans(fub_data), key=lambda x: x[0])
     )
+    # A plan behind an unreadable entry is not listed: say so, or the list reads as complete.
+    if skipped := len(unreadable_plan_keys(fub_data)):
+        plans = f"{plans} (+{skipped} unreadable plan list entries)".lstrip()
+    return plans
 
 
 def _resolve_coordinator(
@@ -195,6 +224,9 @@ async def _async_get_service_context(
                 f"{reason}\nAvailable: {_available_plans_str(api.fub_data)}",
                 title=error_title,
             )
+            return None
+        if unreadable := _unreadable_plan_entry_msg(fub_id, api.fub_data, live_plan=False):
+            persistent_notification.async_create(hass, unreadable, title=error_title)
             return None
 
     if do_login and not await api.login():
@@ -309,6 +341,9 @@ def _resolve_function_plan(
             f"{reason}\nAvailable: {_available_plans_str(api.fub_data)}",
             title=error_title,
         )
+        return None
+    if unreadable := _unreadable_plan_entry_msg(fub_id, api.fub_data, live_plan=True):
+        persistent_notification.async_create(hass, unreadable, title=error_title)
         return None
 
     return coordinator, api, fub_id

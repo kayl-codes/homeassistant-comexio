@@ -256,6 +256,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_run_state_stale_count=0,
         _plan_run_state_missed={},
         _plan_list_unread_polls=0,
+        _reported_unreadable_plan_keys=[],
         _plan_run_state_last_fetch=0.0,
         _plan_run_state_fetching=False,
         _plan_run_state_relogin_refused=False,
@@ -891,7 +892,7 @@ def test_the_watchdog_waits_for_the_first_full_plan_list(
 
     coordinator.plan_watchdog.async_check.assert_not_called()
     assert dispatched == []
-    assert caplog.text.count("waits for the first poll that reads the plan list") == 1
+    assert caplog.text.count("waits for a poll that reads the whole plan list") == 1
     assert "no longer watches" not in caplog.text
 
     # The first poll that reads the plan list ends the wait: the pick is judged with the managed plan.
@@ -2215,3 +2216,84 @@ def test_a_plan_restored_while_the_check_awaits_is_not_synced_as_vanished(api: C
     coordinator.plan_watchdog.async_check.side_effect = restored_meanwhile
     asyncio.run(coordinator._async_refresh_plan_run_states())
     coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with(set())
+
+
+@pytest.mark.parametrize(
+    ("fubs", "polled"),
+    [({"19": {"Name": "Pumps"}}, {19}), ({"19": {"Name": "Pumps"}, "x": {"Name": "Lights"}}, None), (None, None)],
+    ids=["readable", "unreadable-entry", "not-read"],
+)
+def test_a_poll_publishes_only_a_readable_plan_list(
+    api: ComexioAPI, fubs: dict | None, polled: set[int] | None
+) -> None:
+    """A plan list with an entry that is no plan may hide a plan: the poll leaves it unread (unknown, not deleted)."""
+    coordinator = _coordinator(api, marker_states={}, knx_states={})
+    raw_config = {"FubModules": {"2": {}}} | ({} if fubs is None else {"Fubs": fubs})
+    api.get_raw_config = AsyncMock(return_value=raw_config)
+    api.get_live_states = AsyncMock(side_effect=_StopAfterFetch)
+    fetch = ComexioCoordinator._async_fetch_parsed_config(coordinator, {})
+    with pytest.raises(_StopAfterFetch):
+        asyncio.run(fetch)
+    assert coordinator._polled_plan_ids == polled
+
+
+def test_an_unread_plan_list_with_unreadable_entries_names_them_and_the_paused_watchdog(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    api._fub_data = {"19": {"Name": "Pumps"}, "x": {"Name": "Lights"}}
+    coordinator = _coordinator(api, _polled_plan_ids=None, _last_poll_scraped=True)
+
+    with caplog.at_level(logging.WARNING):
+        coordinator._track_plan_list_read()
+
+    assert "['x']" in caplog.text
+    assert "watchdog pauses" in caplog.text
+
+
+def test_the_watchdog_logs_its_wait_again_once_a_read_plan_list_turns_unreadable(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options={}), scraped_plan_ids=None)
+    wait_log = "waits for a poll that reads the whole plan list"
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(coordinator.async_watch_managed_plans())
+        coordinator.scraped_plan_ids = {19, 43}
+        asyncio.run(coordinator.async_watch_managed_plans())
+        assert coordinator._plan_watch_deferred is False
+        api._fub_data["x"] = {"Name": "Lights"}
+        asyncio.run(coordinator.async_watch_managed_plans())
+
+    assert caplog.text.count(wait_log) == 2
+
+
+def test_the_unreadable_entries_are_warned_again_only_when_they_change(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Also after a poll whose plan list did not decode at all: the bad keys are the cause by now."""
+    coordinator = _coordinator(api, _polled_plan_ids=None, _last_poll_scraped=True)
+    names_the_keys = "that are no readable plan"
+
+    with caplog.at_level(logging.WARNING):
+        coordinator._track_plan_list_read()  # not decoded: the generic warning
+        api._fub_data["x"] = {"Name": "Lights"}
+        coordinator._track_plan_list_read()
+        coordinator._track_plan_list_read()  # unchanged: no repeat
+        api._fub_data["43"] = "garbage"
+        coordinator._track_plan_list_read()
+
+    assert caplog.text.count("brought no readable plan list") == 1
+    assert caplog.text.count(names_the_keys) == 2
+    assert "['43', 'x']" in caplog.text
+
+
+def test_stop_watching_reads_an_unreadable_entry_for_the_id_as_no_reuse(api: ComexioAPI) -> None:
+    """function_plan_name would call the entry plan "47" and keep the bare pick for a reuse nobody knows of."""
+    api._fub_data["47"] = "garbage"
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4", "47", "19:Test1"]}
+    coordinator = _coordinator(
+        api, config_entry=SimpleNamespace(options=options), request_options_update_without_reload=MagicMock()
+    )
+    assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["19:Test1"]

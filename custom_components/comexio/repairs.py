@@ -50,6 +50,7 @@ from .const import (
     ISSUE_UNINSTALL_CLEANUP,
     MARKER_READ_ONLY_SUFFIX,
     MARKER_TRIGGER_SUFFIXES,
+    PLAN_WIRING_ACTIONS,
     SOURCE_CATEGORIES,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
@@ -69,6 +70,7 @@ from .const import (
     split_ignored_ids,
     uninstall_cleanup_notification_id,
     uninstall_cleanup_pending_notification_id,
+    unreadable_plan_keys,
 )
 from .function_plan_backup import is_orphaned_identity
 from .orphaned_backups import ISSUE_ORPHANED_PLAN_BACKUPS, repair_placeholders
@@ -315,6 +317,17 @@ def _sync_running(hass: HomeAssistant, entry_id: str | None) -> bool:
     """Whether a sync or Web-IO range check currently runs for this entry (see _sync_lock / R4)."""
     coordinator = hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
     return coordinator is not None and (coordinator.in_sync or coordinator._sync_lock.locked())
+
+
+def _without_refused_plan_options(hass: HomeAssistant, entry_id: str | None, options: dict[str, str]) -> dict[str, str]:
+    """options without the plan wiring actions the sync refuses while the plan list has unreadable entries.
+
+    The press is non-blocking, so the dialog would report a refused action as executed.
+    """
+    coordinator = hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
+    if coordinator is None or not unreadable_plan_keys(coordinator.api.fub_data):
+        return options
+    return {key: label for key, label in options.items() if key not in PLAN_WIRING_ACTIONS}
 
 
 async def async_create_fix_flow(hass: HomeAssistant, issue_id: str, data: dict | None):
@@ -863,6 +876,10 @@ class ComexioRepairFlow(RepairsFlow):
                 else:
                     label = f"{ICON_NETWORK} Update HA Server Address (IP:Port)"
                 specific_options["update_ip"] = f"{label} (~{SYNC_DURATION_WRITE}s)"
+
+            specific_options = _without_refused_plan_options(
+                self.hass, self.issue_data.get("entry_id"), specific_options
+            )
 
             # Calculate Full Sync ETA
             total_write = counts.get("type", 0) + counts.get("rename", 0) + counts.get("missing", 0)

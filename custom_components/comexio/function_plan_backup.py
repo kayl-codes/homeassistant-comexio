@@ -34,7 +34,9 @@ from .const import (
     FUNCTION_PLAN_CHANGE_BACKUP_SLOTS,
     TIMESTAMP_DISPLAY_FORMAT,
     distinct_one_line,
+    function_plan_info,
     one_line,
+    unreadable_plan_keys,
 )
 from .function_plan_block_keys import (
     NO_FUB_BASE,
@@ -243,7 +245,7 @@ def is_orphaned_identity(fub_data: dict[str, Any] | None, fub_id: int, plan_name
     makes every identity orphaned. A fub_id that now carries a different name counts as
     orphaned (ID reused).
     """
-    return fub_data is not None and fub_data.get(str(fub_id), {}).get("Name") != plan_name
+    return fub_data is not None and function_plan_info(fub_data, fub_id).get("Name") != plan_name
 
 
 def _newest_orphaned_in_store(
@@ -679,8 +681,12 @@ class FunctionPlanBackupManager:
         rollback: list[tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]] = []
         for fub_id, plan_data in plans.items():
             key = str(fub_id)
+            if key in fub_data and not (info := function_plan_info(fub_data, key)):
+                # An unreadable entry would store this plan under the bogus identity (id, "id"); the poll warns.
+                _LOGGER.debug("Auto backup skips plan %s: its plan list entry %r is unreadable", key, fub_data[key])
+                continue
             new_hash = plan_hash(plan_data)
-            plan_name = fub_data.get(key, {}).get("Name", key)
+            plan_name = info.get("Name", key) if key in fub_data else key
             history = self._auto_data.setdefault(key, {}).setdefault(plan_name, [])
             plan_settings = _plan_settings(block_settings, plan_data)
             plan_configs = _plan_module_configs(module_configs, plan_data)
@@ -817,11 +823,19 @@ class FunctionPlanBackupManager:
         if held_back is not None and held_back():
             _LOGGER.debug("[%s] Function Plan paper/DPI backfill skipped: a restore ran meanwhile", self._server_id)
             return 0
+        if bad_keys := unreadable_plan_keys(fub_data):
+            # An unreadable entry may be any backed-up plan: it would read as deleted and get the fallback.
+            _LOGGER.debug(
+                "[%s] Function Plan paper/DPI backfill skipped: plan list entries %r are unreadable",
+                self._server_id,
+                bad_keys,
+            )
+            return 0
         filled = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
             group_filled: list[dict[str, Any]] = []
             for key, identities in data.items():
-                live_name = fub_data.get(key, {}).get("Name")
+                live_name = function_plan_info(fub_data, key).get("Name")
                 live_format = plan_format.get(key)
                 if live_name is not None and live_format is None:
                     _LOGGER.debug(

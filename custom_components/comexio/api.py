@@ -71,6 +71,7 @@ from .const import (
     category_by_fub_module_type,
     function_plan_id,
     function_plan_ids,
+    function_plan_info,
     io_column_rows,
     io_sort_key,
     is_valid_entity_name_schema,
@@ -566,13 +567,19 @@ def _saved_schema(conf_data: Mapping[str, Any], key: str, default: str) -> str:
 
 
 def _verified_plan_ids(fubs: dict[str, Any], source: str) -> set[int] | None:
-    """The plan ids of a plan list as ints, None after an error log if any is not numeric."""
-    try:
-        return {int(fid) for fid in fubs}
-    except (TypeError, ValueError):
-        bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
-        _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in %s — placement unknown", bad, source)
+    """The plan ids of a plan list as ints, None after an error log if an entry's plan is unknown.
+
+    Unknown: a key that is no plan id (see function_plan_id), or an entry carrying an Id other than its
+    key. An entry with no plan info still names its plan by the key, so that plan is loaded and checked.
+    """
+    if bad := [
+        fid
+        for fid, info in fubs.items()
+        if function_plan_id(fid) is None or (isinstance(info, dict) and str(info.get("Id", fid)) != str(fid))
+    ]:
+        _LOGGER.error("_load_all_plans_verified: unreadable plan entries %r in %s — placement unknown", bad, source)
         return None
+    return function_plan_ids(fubs)
 
 
 class ComexioAPI:
@@ -938,8 +945,8 @@ class ComexioAPI:
         changed = False
         for fub_id, running in states.items():
             key = str(fub_id)
-            fub = self._fub_data.get(key)
-            if not isinstance(fub, dict) or self.get_fub_active(fub_id) is running:
+            fub = function_plan_info(self._fub_data, key)
+            if not fub or self.get_fub_active(fub_id) is running:
                 continue
             self._fub_data[key] = {**fub, "Active": int(running)}
             changed = True
@@ -1426,19 +1433,19 @@ class ComexioAPI:
 
     def get_fub_paper_format(self, fub_id: int) -> str:
         """Return the paper format name (e.g. 'A4') for a function plan, defaulting to 'A4'."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         paper_id = str(fub.get("Paper", ""))
         paper = self._paper_data.get(paper_id, {})
         return str(paper.get("Name", "A4"))
 
     def get_fub_dpi(self, fub_id: int) -> int:
         """Return the configured resolution (DPI) for a function plan, defaulting to 90."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         return int(fub.get("Resolution", self._CANVAS_REF_RES))
 
     def get_fub_orientation(self, fub_id: int) -> str:
         """Return 'portrait' or 'landscape' for a function plan, defaulting to 'landscape'."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
 
     def get_fub_known_format(self, fub_id: int) -> tuple[str, int, str] | None:
@@ -1447,8 +1454,8 @@ class ComexioAPI:
         Unlike the getters above, no default stands in for a missing value: a backup compares
         and stores this, and a default (an undecoded $Paper read as A4) would count as a change.
         """
-        fub = self._fub_data.get(str(fub_id))
-        if fub is None or fub.get("Resolution") is None or fub.get("Orientation") is None:
+        fub = function_plan_info(self._fub_data, fub_id)
+        if fub.get("Resolution") is None or fub.get("Orientation") is None:
             return None
         paper = self._paper_data.get(str(fub.get("Paper", "")), {}).get("Name")
         if not paper:
@@ -1463,8 +1470,8 @@ class ComexioAPI:
 
     def get_fub_active(self, fub_id: int) -> bool | None:
         """Return a function plan's active flag, or None if the plan is not known live."""
-        fub = self._fub_data.get(str(fub_id))
-        return None if fub is None else bool(int(fub.get("Active") or 0))
+        fub = function_plan_info(self._fub_data, fub_id)
+        return bool(int(fub.get("Active") or 0)) if fub else None
 
     def get_fub_canvas_bounds(
         self,
@@ -1483,7 +1490,7 @@ class ComexioAPI:
         created and is not in the cached $Fubs data yet; None = read from $Fubs, where
         0 = landscape (long side → X), 1 = portrait (long side → Y).
         """
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         res = int(fub.get("Resolution", self._CANVAS_REF_RES)) if resolution is None else resolution
         if orientation is None:
             orient_id = int(fub.get("Orientation", 0))
@@ -2442,13 +2449,16 @@ class ComexioAPI:
                 else "reading the config failed (see the error above)"
             )
         matches = [
-            (fid, info)
+            (fub_id, info)
             for fid, info in iter_group(fubs)
-            if fid.isdigit() and fid not in known_ids and isinstance(info, dict) and info.get("Name") == plan_name
+            if (fub_id := function_plan_id(fid)) is not None
+            and fid not in known_ids
+            and isinstance(info, dict)
+            and info.get("Name") == plan_name
         ]
         if len(matches) == 1:
-            fid, info = matches[0]
-            return CreatedFunctionPlan(int(fid), info)
+            fub_id, info = matches[0]
+            return CreatedFunctionPlan(fub_id, info)
         _LOGGER.error(
             "create_fup: plan '%s' was created in Comexio, but its id is still unknown (%s) — "
             "it shows up with the next poll; do not create it again",
@@ -2477,8 +2487,8 @@ class ComexioAPI:
         create-time default) rather than preserved — a cosmetic Comexio Studio setting this
         integration doesn't otherwise manage.
         """
-        fub = self._fub_data.get(str(fub_id))
-        if fub is None:
+        fub = function_plan_info(self._fub_data, fub_id)
+        if not fub:
             _LOGGER.error("function_plan_update_paper: fub_id=%s not found in live data", fub_id)
             return False
 
@@ -4955,14 +4965,12 @@ class ComexioAPI:
     def function_plan_name(self, fub_id: int) -> str:
         """Display name of a Function Plan for logging/reporting; falls back to the id.
 
-        Tolerates a malformed $Fubs entry (key no plain number, metadata no dict): callers run inside
-        the backup cycle, which a name lookup must not abort. Keys count as in function_plan_ids.
+        Tolerates a malformed $Fubs entry (see function_plan_info): callers run inside the backup
+        cycle, which a name lookup must not abort.
         """
         wanted = function_plan_id(fub_id)
-        meta = next(
-            (fd for fid, fd in self._fub_data.items() if wanted is not None and function_plan_id(fid) == wanted), None
-        )
-        return str((meta.get("Name") if isinstance(meta, dict) else None) or fub_id)
+        meta = function_plan_info(self._fub_data, wanted) if wanted is not None else {}
+        return str(meta.get("Name") or fub_id)
 
     @staticmethod
     def _find_source_element_id(elements: dict[str, Any], source_id: int, ref_type: int = 2) -> str | None:
