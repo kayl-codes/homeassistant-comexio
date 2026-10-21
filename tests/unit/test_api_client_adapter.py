@@ -1113,6 +1113,30 @@ def test_system_info_both_parts_share_one_relogin(comexio_api: ComexioAPI, clien
     client.login.assert_awaited_once()
 
 
+def test_system_info_takes_over_a_login_that_finished_after_its_request(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Review (Sourcery, #204): a second login would clear the jar of the session another caller just logged in."""
+    comexio_api._logged_in_client = client
+
+    answers: list[SystemInfo | None] = [None, SYSTEM_INFO]
+
+    async def lapsed_then_relogged_elsewhere() -> SystemInfo:
+        answer = answers.pop(0)
+        if answer is None:
+            # The config poll logs in again while this request is still on its way back with the login form.
+            comexio_api._login_generation += 1
+            raise ComexioAuthenticationError("login form")
+        return answer
+
+    client.get_system_info = AsyncMock(side_effect=lapsed_then_relogged_elsewhere)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    client.login.assert_not_awaited()
+
+
 # --- Web-IO ---
 
 

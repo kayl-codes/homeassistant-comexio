@@ -131,7 +131,8 @@ def test_boot_time_drift_keeps_it_and_a_reboot_becomes_the_new_baseline() -> Non
     assert state.boot_time == rebooted - timedelta(seconds=10)
 
 
-def test_boot_time_follows_a_reboot() -> None:
+def test_boot_time_follows_an_estimate_beyond_the_tolerance() -> None:
+    """Without an earlier uptime (first poll after a restart of HA) only the tolerance tells a reboot."""
     known = NOW - UPTIME
     state = SystemInfoState(boot_time=known)
 
@@ -209,12 +210,13 @@ def _coordinator(info: SystemInfo | None, uptime: timedelta | None) -> ComexioCo
 def test_tick_stores_the_readings_and_notifies_the_entities(monkeypatch: pytest.MonkeyPatch) -> None:
     sent = MagicMock()
     monkeypatch.setattr(coordinator_module, "async_dispatcher_send", sent)
+    monkeypatch.setattr(coordinator_module.dt_util, "utcnow", lambda: NOW)
     coordinator = _coordinator(INFO, UPTIME)
 
     asyncio.run(coordinator._async_system_info_tick())
 
     assert coordinator.system_info.free_storage_percent == pytest.approx(42.5)
-    assert coordinator.system_info.boot_time is not None
+    assert coordinator.system_info.boot_time == NOW - UPTIME
     sent.assert_called_once_with(coordinator.hass, system_info_signal("srv"))
 
 
@@ -266,13 +268,17 @@ def test_tick_warns_once_per_part_with_its_cause(
 def test_start_poll_ticks_now_and_on_the_interval(monkeypatch: pytest.MonkeyPatch) -> None:
     track = MagicMock(return_value="cancel")
     monkeypatch.setattr(coordinator_module, "async_track_time_interval", track)
+    monkeypatch.setattr(coordinator_module, "async_dispatcher_send", MagicMock())
     coordinator = _coordinator(INFO, UPTIME)
-    coordinator.hass.async_create_task = MagicMock(side_effect=lambda coro, name: coro.close())
+    coordinator.hass.async_create_task = MagicMock(side_effect=lambda coro, name: asyncio.run(coro))
 
     assert coordinator.async_start_system_info_poll() == "cancel"
 
     coordinator.hass.async_create_task.assert_called_once()
     assert coordinator.hass.async_create_task.call_args.kwargs["name"] == "comexio_srv_system_info_tick"
+    # Review (Sourcery, #204): the task started right away is the poll itself.
+    coordinator.api.get_system_info.assert_awaited_once()
+    assert coordinator.system_info.free_storage_percent == pytest.approx(42.5)
     track.assert_called_once_with(
         coordinator.hass, coordinator._async_schedule_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
     )
@@ -340,8 +346,8 @@ def test_shutdown_cancels_a_running_poll(monkeypatch: pytest.MonkeyPatch) -> Non
         await coordinator.async_shutdown()
         task = coordinator._system_info_task
         assert task is not None
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        # Review (Sourcery, #204): stopped by the time async_shutdown returns, before the session is closed.
+        assert task.done()
         return task
 
     assert asyncio.run(scenario()).cancelled()

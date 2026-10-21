@@ -967,13 +967,15 @@ class ComexioAPI:
                 _LOGGER.debug("Comexio admin session has expired, logging in again")
         return await self._full_login()
 
-    async def _full_login(self) -> bool:
+    async def _full_login(self, seen_generation: int | None = None) -> bool:
         """Full RSA login of the main session's client, one at a time.
 
         A caller that had to wait for a concurrent full login takes over its success instead of
-        logging in again (which would clear the jar of the session just logged in).
+        logging in again (which would clear the jar of the session just logged in). A caller that
+        passes the _login_generation it saw before its failed request also takes over a login that
+        finished between that request and this call.
         """
-        generation = self._login_generation
+        generation = self._login_generation if seen_generation is None else seen_generation
         async with self._login_lock:
             client = self.client
             if self._login_generation != generation and client is self._logged_in_client:
@@ -5099,13 +5101,14 @@ class ComexioAPI:
         self, fetch: Callable[[], Awaitable[T]], relogin: list[bool]
     ) -> tuple[T | None, str | None]:
         """fetch()'s result, or None and the failure cause; a lapsed session is logged in again once per relogin."""
+        generation = self._login_generation
         try:
             try:
                 return await fetch(), None
             except ComexioAuthenticationError:
                 if not relogin:
                     _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
-                    relogin.append(await self._full_login())
+                    relogin.append(await self._full_login(generation))
                 if not relogin[0]:
                     return None, f"re-login failed ({self.last_login_error})"
                 return await fetch(), None

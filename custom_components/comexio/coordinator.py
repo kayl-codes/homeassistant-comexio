@@ -3826,6 +3826,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._disarm_preview_cache()
         if self._system_info_task is not None:
             self._system_info_task.cancel()
+            # Wait until it has stopped: async_unload_entry closes the API session right after.
+            # asyncio.wait does not raise, so a cancellation of this shutdown itself still propagates.
+            await asyncio.wait([self._system_info_task])
         await super().async_shutdown()
 
     def _fire_plan_system_event(self, message: str) -> None:
