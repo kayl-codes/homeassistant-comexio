@@ -1095,6 +1095,22 @@ def test_system_info_failed_relogin_is_the_cause(comexio_api: ComexioAPI, client
     assert client.get_uptime.await_count == 1
 
 
+def test_system_info_does_not_retry_credentials_the_config_poll_saw_refused(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Review (Sourcery, #212): HA asks for reauth then; a login every poll would only risk a lockout."""
+    client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.get_uptime = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.login = AsyncMock()
+    comexio_api.config_relogin_rejected = True
+
+    reading = asyncio.run(comexio_api.get_system_info())
+
+    assert (reading.info, reading.uptime) == (None, None)
+    assert reading.info_error == reading.uptime_error == "credentials refused, waiting for reauth"
+    client.login.assert_not_awaited()
+
+
 def test_system_info_lapse_on_the_uptime_fetch_only_logs_in_there(comexio_api: ComexioAPI, client: MagicMock) -> None:
     client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
     client.get_uptime = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), timedelta(days=3)])

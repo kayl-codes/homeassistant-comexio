@@ -1145,6 +1145,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.note_comexio_unreachable()
         if self.api.config_relogin_rejected:
             # Changed credentials: HA starts the reauth flow and stops polling until it updates the entry.
+            # The run-state poll must not try them either (the system info poll checks the api flag itself).
+            self._plan_run_state_relogin_refused = True
             raise ConfigEntryAuthFailed(f"Comexio at {self.api.host} rejected the stored credentials")
         # aiocomexio decodes each page variable on its own, so $FubModules alone does not
         # prove $Fubs was read; an empty plan list still decodes to a dict.

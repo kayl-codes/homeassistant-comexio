@@ -5090,7 +5090,9 @@ class ComexioAPI:
         Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
         failures and warns with the cause — so they are logged at debug level here. A lapsed admin
         session is logged in again once per call, like the config poll does: this poll runs more
-        often, and its readings would otherwise go unknown until the next config poll.
+        often, and its readings would otherwise go unknown until the next config poll. Not once the
+        config poll's re-login was refused, though: HA asks for reauth then and stops that poll, and
+        trying the same credentials every few minutes would only risk a server-side lockout.
         """
         relogin: list[bool] = []  # the outcome of this call's one re-login, shared by both fetches
         info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)
@@ -5106,6 +5108,8 @@ class ComexioAPI:
             try:
                 return await fetch(), None
             except ComexioAuthenticationError:
+                if self.config_relogin_rejected:
+                    return None, "credentials refused, waiting for reauth"
                 if not relogin:
                     _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
                     relogin.append(await self._full_login(generation))
