@@ -8,6 +8,7 @@ import string
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import (
+    ComexioAuthenticationError,
     ComexioCertificateMismatchError,
     ComexioConnectionError,
     ComexioResponseError,
@@ -18,7 +19,12 @@ import pytest
 from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, api as api_module, certificate
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.button import _sync_login_error
-from custom_components.comexio.const import CERTIFICATE_CHANGED_MSG, LOGIN_ERROR_CERTIFICATE, LOGIN_ERROR_CONNECTION
+from custom_components.comexio.const import (
+    CERTIFICATE_CHANGED_MSG,
+    LOGIN_ERROR_CERTIFICATE,
+    LOGIN_ERROR_CONNECTION,
+    LOGIN_ERROR_REJECTED,
+)
 from custom_components.comexio.sensor import ComexioConnectionSensor
 from custom_components.comexio.services._context import login_failed_message
 
@@ -79,6 +85,109 @@ def test_a_successful_login_clears_the_mismatch(comexio_api: ComexioAPI, client:
     client.login = AsyncMock()
     assert asyncio.run(comexio_api.login()) is True
     assert comexio_api.certificate_mismatch is None
+    assert comexio_api.last_login_error is None
+
+
+def test_a_certificate_mismatch_at_login_is_no_credential_refusal(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Else every later login would be cut short as "rejected" and the user sent to reauth, not the repair.
+    client.login = AsyncMock(side_effect=_mismatch())
+    assert asyncio.run(comexio_api.login()) is False
+    assert comexio_api.last_login_error == LOGIN_ERROR_CERTIFICATE
+    assert comexio_api.credentials_refused is False
+    client.login = AsyncMock()
+    assert asyncio.run(comexio_api.login()) is True
+    client.login.assert_awaited_once()
+    assert comexio_api.certificate_mismatch is None
+
+
+def _replace_pin_then(comexio_api: ComexioAPI, outcome: BaseException | None) -> AsyncMock:
+    """A client login during which a reconfigure or the repair replaces the pinned certificate."""
+
+    async def login() -> None:
+        comexio_api.fingerprint = OTHER
+        if outcome is not None:
+            raise outcome
+
+    return AsyncMock(side_effect=login)
+
+
+def test_a_mismatch_met_with_a_replaced_pin_raises_no_repair(comexio_api: ComexioAPI) -> None:
+    comexio_api.fingerprint = PINNED
+    client = comexio_api._client = MagicMock()
+    comexio_api._client_credentials = comexio_api._credentials()
+    client.login = _replace_pin_then(comexio_api, _mismatch())
+    reported = MagicMock()
+    comexio_api.on_certificate_mismatch = reported
+
+    assert asyncio.run(comexio_api.login()) is False
+
+    assert comexio_api.last_login_error == LOGIN_ERROR_CONNECTION
+    assert comexio_api.certificate_mismatch is None
+    reported.assert_not_called()
+
+
+def test_a_login_with_a_replaced_pin_proves_nothing_for_the_new_one(comexio_api: ComexioAPI) -> None:
+    comexio_api.fingerprint = PINNED
+    client = comexio_api._client = MagicMock()
+    comexio_api._client_credentials = comexio_api._credentials()
+    client.login = _replace_pin_then(comexio_api, None)
+    mismatch = comexio_api.certificate_mismatch = _mismatch()
+    comexio_api._mismatch_logged = OTHER
+
+    assert asyncio.run(comexio_api.login()) is False
+
+    assert comexio_api.last_login_error == LOGIN_ERROR_CONNECTION
+    assert comexio_api.certificate_mismatch is mismatch
+    assert comexio_api._mismatch_logged == OTHER
+
+
+def test_a_refusal_with_a_replaced_pin_still_counts_for_the_credentials(comexio_api: ComexioAPI) -> None:
+    # The pin is the transport, not the credentials: Comexio refused them whichever certificate it showed.
+    comexio_api.fingerprint = PINNED
+    client = comexio_api._client = MagicMock()
+    comexio_api._client_credentials = comexio_api._credentials()
+    client.login = _replace_pin_then(comexio_api, ComexioAuthenticationError("no"))
+
+    assert asyncio.run(comexio_api.login()) is False
+
+    assert comexio_api.last_login_error == LOGIN_ERROR_REJECTED
+    assert comexio_api.credentials_refused is True
+
+
+@pytest.mark.parametrize(
+    ("attribute", "before", "after"),
+    [("fingerprint", PINNED, OTHER), ("fingerprint", None, PINNED), ("password", "admin", "new")],
+    ids=["pin replaced", "pin set", "password changed"],
+)
+def test_a_login_waiting_through_a_settings_change_is_not_sent(
+    comexio_api: ComexioAPI, attribute: str, before: str | None, after: str
+) -> None:
+    # The client was built with the old settings; the caller retries with a client built with the new ones.
+    setattr(comexio_api, attribute, before)
+    stale = MagicMock()
+    stale.login = AsyncMock(side_effect=_mismatch())
+
+    async def run() -> None:
+        stale_credentials = comexio_api._credentials()
+        async with comexio_api._login_request_lock:
+            waiting = asyncio.create_task(comexio_api._login(stale, stale_credentials))
+            await asyncio.sleep(0)
+            setattr(comexio_api, attribute, after)
+        assert await waiting is False
+
+    asyncio.run(run())
+    stale.login.assert_not_awaited()
+    assert comexio_api.last_login_error == LOGIN_ERROR_CONNECTION
+    assert comexio_api.certificate_mismatch is None
+
+
+def test_a_login_outlives_a_change_of_the_api_user(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # The API user (Basic Auth for writes) plays no part in the admin login.
+    async def login() -> None:
+        comexio_api.api_user = "someone else"
+
+    client.login = AsyncMock(side_effect=login)
+    assert asyncio.run(comexio_api.login()) is True
     assert comexio_api.last_login_error is None
 
 

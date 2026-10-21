@@ -758,6 +758,15 @@ class ComexioAPI:
         """What client.login() authenticates with; the API user (Basic Auth for writes) plays no part."""
         return credentials[:3]
 
+    def _login_outdated(self, client_credentials: tuple[str, ...]) -> bool:
+        """Whether host, admin credentials or the pinned certificate changed since client_credentials.
+
+        The API user (Basic Auth for writes) plays no part in the login, so a change of it leaves a
+        login running with the old client valid.
+        """
+        login_part = (*self._admin_login_part(client_credentials), client_credentials[-1])
+        return login_part != (*self._login_credentials(), self.fingerprint or "")
+
     def _login_credentials(self) -> tuple[str, ...]:
         """The host and admin credentials currently configured."""
         return self._admin_login_part(self._credentials())
@@ -1061,16 +1070,19 @@ class ComexioAPI:
         success counts for them. Credentials Comexio refused are not sent again (see
         _refused_credentials): the call fails as "rejected" without a request. All login requests run
         one at a time, so a caller that waited for a refused login sees the refusal and does not
-        repeat it. Settings replaced by a reconfigure are outdated: a login still waiting with them
-        is not sent, and one answered after they were replaced reports no outcome for the new ones:
-        not "rejected" (the caller would ask for reauth although they were never tried) and not
-        success (the caller would mark the old client logged in and go on with the new, logged-out
-        one). Both report "connection" instead, so the caller simply tries again with the new settings.
+        repeat it. Settings replaced by a reconfigure (the pinned certificate included, see
+        _login_outdated) are outdated: a login still waiting with them is not sent, and one answered
+        after they were replaced reports no outcome for the new ones: not "rejected" (the caller would
+        ask for reauth although they were never tried), not a changed certificate (the repair would
+        name a certificate checked against a pin no longer in force) and not success (the caller would
+        mark the old client logged in and go on with the new, logged-out one). All report "connection"
+        instead, so the caller simply tries again with the new settings. A refusal still counts for
+        the credentials themselves.
         """
         credentials = self._admin_login_part(client_credentials)
         refusal_key = self._refusal_key(credentials)
         async with self._login_request_lock:
-            if credentials != self._login_credentials():
+            if self._login_outdated(client_credentials):
                 _LOGGER.debug("Not logging in to Comexio: the connection settings changed while this login waited")
                 self.last_login_error = LOGIN_ERROR_CONNECTION
                 return False
@@ -1087,6 +1099,10 @@ class ComexioAPI:
                 self.last_login_error = LOGIN_ERROR_CONNECTION if outdated else LOGIN_ERROR_REJECTED
                 return False
             except ComexioCertificateMismatchError as err:
+                if self._login_outdated(client_credentials):
+                    _LOGGER.debug("Comexio login with replaced connection settings met another certificate: %s", err)
+                    self.last_login_error = LOGIN_ERROR_CONNECTION
+                    return False
                 self._note_certificate_mismatch(err, "Comexio login refused")
                 self.last_login_error = LOGIN_ERROR_CERTIFICATE
                 return False
@@ -1095,14 +1111,14 @@ class ComexioAPI:
                 self.last_login_error = LOGIN_ERROR_CONNECTION
                 return False
             _LOGGER.info("Successfully logged into Comexio Admin interface")
-            self.last_login_error = None
-            self.certificate_mismatch = None
-            self._mismatch_logged = None
             self._refused_credentials.discard(refusal_key)
-            if credentials != self._login_credentials():
+            if self._login_outdated(client_credentials):
                 _LOGGER.debug("Comexio login succeeded with replaced connection settings — not using it")
                 self.last_login_error = LOGIN_ERROR_CONNECTION
                 return False
+            self.last_login_error = None
+            self.certificate_mismatch = None
+            self._mismatch_logged = None
             return True
 
     def _note_certificate_mismatch(

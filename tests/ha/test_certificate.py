@@ -12,6 +12,7 @@ from homeassistant.helpers import issue_registry as ir
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.comexio import config_flow as config_flow_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.certificate import (
     async_clear_certificate_changed,
@@ -29,6 +30,7 @@ from custom_components.comexio.const import (
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
+    SETUP_UNREACHABLE_ENTRIES,
 )
 from custom_components.comexio.repairs import ComexioRepairFlow
 
@@ -491,6 +493,122 @@ async def test_reauth_tests_the_new_credentials_over_the_pinned_https(
 
 
 @pytest.mark.usefixtures("mock_setup_entry")
+async def test_reauth_of_an_http_entry_pins_the_certificate_the_login_worked_with(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+) -> None:
+    # Tested like the next setup logs in: over HTTPS, and the new credentials never go out unencrypted.
+    mock_config_entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+
+    result = await _reauth(hass, mock_config_entry)
+
+    assert result["reason"] == "reauth_successful"
+    assert [api.fingerprint for api in mock_comexio_api] == [PINNED]
+    assert [api.login.await_count for api in mock_comexio_api] == [1] * len(mock_comexio_api)  # tested
+    assert mock_config_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert mock_config_entry.data[CONF_PASSWORD] == "new-secret"
+    notify.assert_called_once()
+    assert PINNED_SHOWN in notify.call_args.args[1]
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+@pytest.mark.parametrize(
+    ("login_error", "replaced", "error", "fingerprints"),
+    [
+        # The setup asks for reauth for exactly this refusal: a test passing over HTTP would loop.
+        (LOGIN_ERROR_REJECTED, None, "invalid_auth", [PINNED]),
+        (LOGIN_ERROR_CERTIFICATE, None, "certificate_unstable", [PINNED]),
+        # aiohttp reports a foreign certificate on a host name with several addresses as a connection error.
+        (LOGIN_ERROR_CONNECTION, OTHER, "certificate_unstable", [PINNED]),
+        # As the setup does: HTTPS that answers the handshake but not the login falls back to HTTP.
+        (LOGIN_ERROR_CONNECTION, None, "cannot_connect", [PINNED, None]),
+    ],
+    ids=["refused over HTTPS", "another certificate at the login", "reported as a connection error", "unreachable"],
+)
+async def test_reauth_of_an_http_entry_judges_like_the_setup(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    login_error: str,
+    replaced: str | None,
+    error: str,
+    fingerprints: list[str | None],
+) -> None:
+    mock_config_entry.add_to_hass(hass)
+    data_before = dict(mock_config_entry.data)
+    _serve(certificate_handshake, PINNED)
+    api_returns["login"] = False
+    api_returns["fetch_replaced_fingerprint"] = replaced
+    api_attributes["last_login_error"] = login_error
+
+    result = await _reauth(hass, mock_config_entry)
+
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": error}
+    assert [api.fingerprint for api in mock_comexio_api] == fingerprints
+    assert [api.login.await_count for api in mock_comexio_api] == [1] * len(mock_comexio_api)  # tested
+    assert dict(mock_config_entry.data) == data_before
+    assert _issue(hass, mock_config_entry) is None  # nothing pinned: no repair to point to
+    notify.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_reauth_of_an_http_entry_whose_https_login_cannot_connect_passes_over_http(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+) -> None:
+    mock_config_entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+    factory = config_flow_module.ComexioAPI.side_effect
+
+    def https_login_unreachable(*args: Any, **kwargs: Any) -> ComexioAPI:
+        api = factory(*args, **kwargs)
+        if kwargs.get("fingerprint") is not None:
+            api.login.return_value = False
+            api.last_login_error = LOGIN_ERROR_CONNECTION
+        return api
+
+    with patch.object(config_flow_module.ComexioAPI, "side_effect", https_login_unreachable):
+        result = await _reauth(hass, mock_config_entry)
+
+    assert result["reason"] == "reauth_successful"
+    assert [api.fingerprint for api in mock_comexio_api] == [PINNED, None]
+    assert [api.login.await_count for api in mock_comexio_api] == [1] * len(mock_comexio_api)  # tested
+    assert mock_config_entry.data[CONF_PASSWORD] == "new-secret"
+    assert CONF_CERTIFICATE_FINGERPRINT not in mock_config_entry.data
+    notify.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_reauth_of_an_entry_without_https_stays_on_http(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    notify: MagicMock,
+) -> None:
+    mock_config_entry.add_to_hass(hass)
+
+    result = await _reauth(hass, mock_config_entry)
+
+    assert result["reason"] == "reauth_successful"
+    assert [api.fingerprint for api in mock_comexio_api] == [None]
+    assert [api.login.await_count for api in mock_comexio_api] == [1] * len(mock_comexio_api)  # tested
+    assert CONF_CERTIFICATE_FINGERPRINT not in mock_config_entry.data
+    notify.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
 async def test_reauth_meeting_another_certificate_is_left_to_the_repair(
     hass: HomeAssistant,
     pinned_entry: MockConfigEntry,
@@ -549,6 +667,7 @@ async def test_setup_stays_on_http_when_the_https_login_cannot_connect(
     # handshake but not the login keeps working over HTTP, as before; the HTTP login's failure decides.
     _serve(certificate_handshake, PINNED)
     api_returns["login"] = False
+    api_returns["fetch_replaced_fingerprint"] = None  # the fresh handshake still shows the certificate read
     api_attributes["last_login_error"] = LOGIN_ERROR_CONNECTION
 
     await _setup(hass, mock_config_entry)
@@ -576,9 +695,11 @@ async def test_setup_does_not_resend_credentials_rejected_over_https(
     api_returns["login"] = False
     api_attributes["last_login_error"] = LOGIN_ERROR_REJECTED
 
+    hass.data.setdefault(SETUP_UNREACHABLE_ENTRIES, set()).add(mock_config_entry.entry_id)
     await _setup(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
+    assert mock_config_entry.entry_id not in hass.data[SETUP_UNREACHABLE_ENTRIES]  # Comexio answered
     assert [api.fingerprint for api in mock_comexio_api] == [PINNED]  # no second, unencrypted login
     mock_comexio_api[0].close.assert_called()
     assert any(flow["context"]["source"] == "reauth" for flow in hass.config_entries.flow.async_progress())
@@ -609,9 +730,11 @@ async def test_setup_meeting_a_changing_certificate_during_the_switch_is_retried
     api_returns["fetch_replaced_fingerprint"] = replaced
     api_attributes["last_login_error"] = login_error
 
+    hass.data.setdefault(SETUP_UNREACHABLE_ENTRIES, set()).add(mock_config_entry.entry_id)
     await _setup(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert mock_config_entry.entry_id not in hass.data[SETUP_UNREACHABLE_ENTRIES]  # Comexio answered
     assert CONF_CERTIFICATE_FINGERPRINT not in mock_config_entry.data
     assert [api.fingerprint for api in mock_comexio_api] == [PINNED]
     mock_comexio_api[0].close.assert_called()

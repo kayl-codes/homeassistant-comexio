@@ -349,11 +349,11 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
-            errors = await self._connection_errors(entry, {**entry.data, **user_input})
+            data_updates, errors = await self._reauth_test(entry, user_input)
             if not errors:
                 # Like reconfigure: credentials left in options from older versions would shadow the new ones.
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
-                return self.async_update_reload_and_abort(entry, data_updates=user_input, options=clean_options)
+                return self.async_update_reload_and_abort(entry, data_updates=data_updates, options=clean_options)
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -366,6 +366,33 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"host": entry.data[CONF_HOST]},
             errors=errors,
         )
+
+    async def _reauth_test(self, entry, user_input) -> tuple[dict, dict[str, str]]:
+        """The entry data to update and the form errors of a reauth's login test.
+
+        Tested over the transport the next setup uses (async_create_api): an entry not yet pinned tries
+        HTTPS first and is pinned when the login works there. Comexio refusing the credentials over
+        HTTPS is the answer — a test over plain HTTP could pass where the setup is refused again, an
+        endless reauth. Only when the HTTPS login cannot connect does the test fall back to HTTP, as
+        the setup does.
+        """
+        merged = {**entry.data, **user_input}
+        if CONF_CERTIFICATE_FINGERPRINT in merged:
+            return user_input, await self._connection_errors(entry, merged)
+        fingerprint = await async_read_fingerprint(merged[CONF_HOST])
+        if fingerprint is not None:
+            pinned = {**user_input, CONF_CERTIFICATE_FINGERPRINT: fingerprint}
+            errors = await self._connection_errors(entry, {**merged, **pinned})
+            if not errors:
+                notify_https_enabled(self.hass, entry.data[CONF_SERVER_ID], merged[CONF_HOST], fingerprint)
+                return pinned, errors
+            if errors != {"base": "cannot_connect"}:
+                return user_input, errors
+            _LOGGER.warning(
+                "Comexio at %s serves HTTPS but its login cannot be reached there — testing over plain HTTP",
+                merged[CONF_HOST],
+            )
+        return user_input, await self._connection_errors(entry, merged)
 
     async def _connection_errors(self, entry, merged) -> dict[str, str]:
         """Form errors of a login test of entry with the settings merged; empty when it succeeds.
