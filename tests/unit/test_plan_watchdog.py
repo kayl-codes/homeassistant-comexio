@@ -2393,8 +2393,50 @@ def test_a_vanished_plan_whose_id_another_plan_holds_names_it(ir: MagicMock, cap
         "Der überwachte Logikplan Test4 (ID 47) wurde nicht gefunden: ID 47 trägt jetzt Test 4."
     )
     assert "'Test4' (ID 47) not found: the ID now holds 'Test 4'" in caplog.text
+    # (Review) no one-tap Restore: for a renamed plan it would start a copy beside the original
+    assert [action["action"] for action in data["data"]["actions"]] == [
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, vanished_plan_token(47, "Test4"))
+    ]
     # Freed again (the other plan deleted too): the same repair, now as "no longer exists".
     asyncio.run(watchdog.async_sync_vanished(TEST4, {}))
     issue = ir.async_create_issue.call_args.kwargs
     assert issue["translation_key"] == ISSUE_FUNCTION_PLAN_VANISHED
     assert "current_name" not in issue["data"]
+
+
+def test_a_vanished_plan_whose_id_holder_changes_is_logged_without_a_new_alarm(
+    ir: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Review) the ID given to a plan, or to another one, while the watched plan stays missing: repair follows."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    asyncio.run(watchdog.async_sync_vanished(TEST4))
+    with caplog.at_level(logging.INFO, logger=plan_watchdog.__name__):
+        asyncio.run(watchdog.async_sync_vanished(TEST4, {47: "Licht"}))
+        assert ir.async_create_issue.call_args.kwargs["translation_key"] == ISSUE_FUNCTION_PLAN_REPLACED
+        asyncio.run(watchdog.async_sync_vanished(TEST4, {47: "Pumpe"}))
+        assert ir.async_create_issue.call_args.kwargs["data"]["current_name"] == "Pumpe"
+        asyncio.run(watchdog.async_sync_vanished(TEST4, {47: "Pumpe"}))
+    assert len(_pushes(watchdog)) == 1  # the first alarm only
+    assert "still not found: the ID now holds 'Licht'" in caplog.text
+    assert caplog.text.count("still not found: the ID now holds 'Pumpe'") == 1
+
+
+def test_a_replaced_plan_push_retry_and_english_text_name_the_id_holder(ir: MagicMock) -> None:
+    """(Review) the retry path and the English replaced text, with its {current} placeholder."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog._hass.config.language = "en"
+    watchdog._hass.services.async_call.side_effect = [OSError("offline"), None]
+    asyncio.run(watchdog.async_sync_vanished(set()))
+    asyncio.run(watchdog.async_sync_vanished(TEST4, {47: "Test 4"}))
+    token = vanished_plan_token(47, "Test4")
+    first_failed_at, targets = watchdog._vanished_push_unsent[token]
+    watchdog._vanished_push_unsent[token] = (first_failed_at - 3600, targets)  # its retry is due
+    asyncio.run(watchdog.async_sync_vanished(TEST4, {47: "Test 4"}))
+    pushes = _pushes(watchdog)
+    assert len(pushes) == 2
+    for _domain, _service, data in pushes:
+        assert data["title"] == "Comexio: function plan not found"
+        assert data["message"].startswith(
+            "The monitored function plan Test4 (ID 47) was not found: ID 47 now holds Test 4."
+        )

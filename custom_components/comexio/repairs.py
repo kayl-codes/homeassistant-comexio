@@ -70,7 +70,7 @@ from .const import (
     uninstall_cleanup_notification_id,
     uninstall_cleanup_pending_notification_id,
 )
-from .function_plan_backup import is_orphaned_identity
+from .function_plan_backup import PlanBackupsNotMovedError, is_orphaned_identity
 from .orphaned_backups import ISSUE_ORPHANED_PLAN_BACKUPS, repair_placeholders
 from .plan_watchdog import ISSUE_FUNCTION_PLAN_STOPPED, ISSUE_FUNCTION_PLAN_VANISHED, vanished_plan_restorable
 
@@ -1526,19 +1526,21 @@ class ComexioRepairFlow(RepairsFlow):
 
         With another plan on the ID: "take over the rename" when its content matches the plan's last
         backup (plan_rename_suspected), else "watch it instead". "Restore" only for a plan its backups
-        can be found by (a bare-ID pick its backups name ambiguously has no backup identity).
+        can be found by (a bare-ID pick its backups name ambiguously has no backup identity), and not
+        for a suspected rename: the restored copy would run beside the renamed original.
         """
-        actions = [ACTION_RESTORE] if vanished_plan_restorable(fub_id, name) else []
         if holder is not None and coordinator is not None:
             if await self._async_rename_suspected(coordinator, fub_id, name, holder):
-                actions.insert(0, ACTION_TAKE_OVER_RENAME)
-            else:
-                actions.append(ACTION_WATCH_HOLDER)
-        return [*actions, ACTION_UNWATCH]
+                return [ACTION_TAKE_OVER_RENAME, ACTION_UNWATCH]
+            holder_actions = [ACTION_WATCH_HOLDER]
+        else:
+            holder_actions = []
+        restore = [ACTION_RESTORE] if vanished_plan_restorable(fub_id, name) else []
+        return [*restore, *holder_actions, ACTION_UNWATCH]
 
     @staticmethod
-    async def _async_rename_suspected(coordinator, fub_id: int, name: str, holder: str) -> bool:
-        """plan_rename_suspected after loading the backups; False (no rename offered) when they fail to load."""
+    async def _async_rename_suspected(coordinator, fub_id: int, name: str, holder: str) -> bool | None:
+        """plan_rename_suspected after loading the backups; None when they fail to load (no rename offered)."""
         try:
             await coordinator.function_plan_backup.async_load()
         except Exception:
@@ -1548,7 +1550,7 @@ class ComexioRepairFlow(RepairsFlow):
                 fub_id,
                 exc_info=True,
             )
-            return False
+            return None
         return coordinator.plan_rename_suspected(fub_id, name, holder)
 
     async def _async_watch_vanished_plan_holder(
@@ -1556,12 +1558,21 @@ class ComexioRepairFlow(RepairsFlow):
     ):
         """Watch the plan holding a vanished plan's ID instead; as a rename, with the plan's backups moved to it."""
         placeholders = one_line_values({"plan_name": name, "fub_id": str(fub_id), "current_name": holder})
-        if rename and not await self._async_rename_suspected(coordinator, fub_id, name, holder):
-            # Its content changed since the dialog opened: no longer recognisable as the same plan.
-            return self.async_abort(reason="rename_not_confirmed", description_placeholders=placeholders)
+        if rename:
+            suspected = await self._async_rename_suspected(coordinator, fub_id, name, holder)
+            if suspected is None:
+                return self.async_abort(reason="backups_not_moved", description_placeholders=placeholders)
+            if not suspected:
+                # Its content changed since the dialog opened: no longer recognisable as the same plan.
+                return self.async_abort(reason="rename_not_confirmed", description_placeholders=placeholders)
+            if coordinator.unloading or coordinator._restore_lock.locked():
+                # A restore moves the same backups; after the unload's wait a write would hit a torn-down entry.
+                return self.async_abort(reason="backups_busy")
         try:
-            done = await coordinator.async_watch_id_holder(fub_id, name, holder, rename=rename)
-        except Exception:
+            # No await since the check: a restore starting from here on refuses until the move ends.
+            with coordinator.plan_edit():
+                done = await coordinator.async_watch_id_holder(fub_id, name, holder, rename=rename)
+        except PlanBackupsNotMovedError:
             _LOGGER.exception("Function plan '%s' (ID %s): its backups could not be moved", one_line(name), fub_id)
             return self.async_abort(reason="backups_not_moved", description_placeholders=placeholders)
         if not done:

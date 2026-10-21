@@ -82,6 +82,10 @@ _FALLBACK_DPI = 90
 _FALLBACK_ORIENTATION = "landscape"
 
 
+class PlanBackupsNotMovedError(Exception):
+    """Taking a rename over failed to move the plan's backups (coordinator.async_watch_id_holder); nothing changed."""
+
+
 def _backfill_identity_group(
     identities: dict[str, list[dict[str, Any]]],
     live_name: str | None,

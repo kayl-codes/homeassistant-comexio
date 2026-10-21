@@ -29,6 +29,7 @@ from custom_components.comexio.const import (
     plan_watch_signal,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.function_plan_backup import PlanBackupsNotMovedError
 from custom_components.comexio.plan_watchdog import (
     ACTION_RESTORE,
     ACTION_UNWATCH,
@@ -228,6 +229,7 @@ class _FakeCoordinator(SimpleNamespace):
     plan_rename_suspected = ComexioCoordinator.plan_rename_suspected
     async_watch_id_holder = ComexioCoordinator.async_watch_id_holder
     _pick_present = ComexioCoordinator._pick_present
+    _holder_and_pick_unchanged = ComexioCoordinator._holder_and_pick_unchanged
     _handle_vanished_plan_action = ComexioCoordinator._handle_vanished_plan_action
     async_restore_vanished_plan = ComexioCoordinator.async_restore_vanished_plan
     async_newest_backup_field = ComexioCoordinator.async_newest_backup_field
@@ -2302,9 +2304,27 @@ def test_a_rename_whose_backups_fail_to_move_keeps_the_pick(api: ComexioAPI) -> 
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
     coordinator.function_plan_backup = SimpleNamespace(async_rename_identity=AsyncMock(side_effect=OSError("disk")))
     watch = coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=True)
-    with pytest.raises(OSError, match="disk"):
+    with pytest.raises(PlanBackupsNotMovedError):
         asyncio.run(watch)
     coordinator.request_options_update_without_reload.assert_not_called()
+
+
+def test_a_pick_changed_while_its_backups_moved_is_left_as_it_is(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Review) the pick removed during the backup move: "Rename taken over" was reported, nothing swapped."""
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt"]}
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+
+    async def rename(*_args: Any) -> int:
+        options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = ["19:Test1"]  # the options flow saved meanwhile
+        return 3
+
+    coordinator.function_plan_backup = SimpleNamespace(async_rename_identity=AsyncMock(side_effect=rename))
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(coordinator.async_watch_id_holder(43, "Alt", "Licht", rename=True)) is False
+    coordinator.request_options_update_without_reload.assert_not_called()
+    assert "changed while 3 backup(s) moved to 'Licht'" in caplog.text
 
 
 @pytest.mark.parametrize(("new_fub_id", "expected"), [(47, "stays on ID 47"), (50, "moved from ID 47 to ID 50")])

@@ -192,6 +192,7 @@ from .const import (
 )
 from .function_plan_backup import (
     FunctionPlanBackupManager,
+    PlanBackupsNotMovedError,
     build_orphaned_backup_options,
     retention_cutoff,
     snapshot_paper_format,
@@ -5235,12 +5236,28 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         rename: holder is the picked plan renamed (see plan_rename_suspected); its backups move to the new
         name first, so its history goes on as one chain instead of an orphaned one. A failing backup save
-        raises with the pick unchanged.
+        raises PlanBackupsNotMovedError with the pick unchanged. The caller holds plan_edit (no restore
+        moves the same backups meanwhile).
         """
-        if self._existing_plan_names([fub_id]).get(fub_id) != holder or not self._pick_present(fub_id, name):
+        if not self._holder_and_pick_unchanged(fub_id, name, holder):
             return False
         if rename:
-            await self.function_plan_backup.async_rename_identity(fub_id, name, holder)
+            try:
+                moved = await self.function_plan_backup.async_rename_identity(fub_id, name, holder)
+            except Exception as err:
+                raise PlanBackupsNotMovedError from err
+            if not self._holder_and_pick_unchanged(fub_id, name, holder):
+                # Changed during the move: the backups follow the plan's new name, the pick stays as the user left it.
+                _LOGGER.warning(
+                    "[%s] Function plan watchdog pick '%s' (ID %s) changed while %d backup(s) moved to '%s'; "
+                    "the pick was left as it is",
+                    self.server_id,
+                    one_line(name),
+                    fub_id,
+                    moved,
+                    one_line(holder),
+                )
+                return False
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         picks: list[Any] = []
         for value in raw_picks if isinstance(raw_picks, list) else []:
@@ -5263,6 +5280,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if await self.async_watch_managed_plans():
             self.async_update_listeners()
         return True
+
+    def _holder_and_pick_unchanged(self, fub_id: int, name: str, holder: str) -> bool:
+        """Whether ID fub_id still holds holder and the options still hold the pick (fub_id, name)."""
+        return self._existing_plan_names([fub_id]).get(fub_id) == holder and self._pick_present(fub_id, name)
 
     def _pick_present(self, fub_id: int, name: str) -> bool:
         """Whether the options hold the named pick (fub_id, name)."""

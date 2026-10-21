@@ -1,6 +1,7 @@
 """A deleted watched plan's repair, HA's own unload waiting for a sync or restore, orphan purge, pick moves."""
 
 import asyncio
+import contextlib
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +22,7 @@ from custom_components.comexio.const import (
     DOMAIN,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
-from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
+from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager, PlanBackupsNotMovedError
 from custom_components.comexio.plan_watchdog import unnamed_plan_label, vanished_plan_issue_id
 from custom_components.comexio.repairs import (
     ACTION_RESTORE,
@@ -346,6 +347,9 @@ def _vanished_flow(
         function_plan_backup=SimpleNamespace(async_load=AsyncMock()),
         plan_rename_suspected=MagicMock(return_value=False),
         async_watch_id_holder=AsyncMock(return_value=True),
+        unloading=False,
+        _restore_lock=asyncio.Lock(),
+        plan_edit=MagicMock(side_effect=contextlib.nullcontext),
     )
     issue_id = vanished_plan_issue_id("cx1", int(issue_data["fub_id"]), issue_data["plan_name"])
     flow = ComexioRepairFlow(issue_id, dict(issue_data))
@@ -455,7 +459,8 @@ REPLACED_DATA = {**ISSUE_DATA, "current_name": "Test 4"}
     ("suspected", "expected"),
     [
         (False, [ACTION_RESTORE, ACTION_WATCH_HOLDER, ACTION_UNWATCH]),
-        (True, [ACTION_TAKE_OVER_RENAME, ACTION_RESTORE, ACTION_UNWATCH]),
+        # (Review) no Restore: the restored copy would run beside the renamed original
+        (True, [ACTION_TAKE_OVER_RENAME, ACTION_UNWATCH]),
     ],
 )
 def test_the_replaced_repair_offers_the_id_holder(suspected: bool, expected: list[str]) -> None:
@@ -486,7 +491,53 @@ def test_the_replaced_repair_watches_the_id_holder(action: str, rename: bool) ->
     result, _ = _step(flow, {"action": action})
     assert result["type"] == "create_entry"
     coordinator.async_watch_id_holder.assert_awaited_once_with(47, "Test4", "Test 4", rename=rename)
+    coordinator.plan_edit.assert_called_once_with()  # (Review) no restore moves the same backups meanwhile
     coordinator.async_restore_vanished_plan.assert_not_called()
+
+
+def test_the_replaced_repair_still_restores() -> None:
+    """(Review) Restore with another plan on the ID still reaches the restore, not the holder path."""
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    result, _ = _step(flow, {"action": ACTION_RESTORE})
+    assert result["type"] == "create_entry"
+    coordinator.async_restore_vanished_plan.assert_called_once_with(47, "Test4")
+    coordinator.async_watch_id_holder.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("unloading", "restoring"), [(True, False), (False, True)])
+def test_a_rename_is_not_taken_over_while_backups_are_busy(unloading: bool, restoring: bool) -> None:
+    """(Review) a restore moves the same backups; after the unload's wait a write would hit a torn-down entry."""
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.plan_rename_suspected.return_value = True
+    coordinator.unloading = unloading
+
+    async def submit() -> dict[str, Any]:
+        if restoring:
+            await coordinator._restore_lock.acquire()
+        with patch.object(repairs.ir, "async_delete_issue"):
+            return await flow.async_step_function_plan_vanished({"action": ACTION_TAKE_OVER_RENAME})
+
+    result = asyncio.run(submit())
+    assert result["reason"] == "backups_busy"
+    coordinator.async_watch_id_holder.assert_not_awaited()
+
+
+def test_a_rename_with_unreadable_backups_is_reported_as_not_moved() -> None:
+    """(Review) a load failure was reported as "content no longer matches"."""
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.function_plan_backup.async_load.side_effect = OSError("store unreadable")
+    result, _ = _step(flow, {"action": ACTION_TAKE_OVER_RENAME})
+    assert result["reason"] == "backups_not_moved"
+    coordinator.async_watch_id_holder.assert_not_awaited()
+
+
+def test_an_error_after_the_backups_moved_is_not_reported_as_not_moved() -> None:
+    """(Review) only the backup move's failure means "nothing was changed"; anything else surfaces."""
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.async_watch_id_holder.side_effect = RuntimeError("listener")
+    step = flow.async_step_function_plan_vanished({"action": ACTION_WATCH_HOLDER})
+    with pytest.raises(RuntimeError, match="listener"):
+        asyncio.run(step)
 
 
 def test_a_rename_no_longer_matching_is_not_taken_over() -> None:
@@ -498,7 +549,7 @@ def test_a_rename_no_longer_matching_is_not_taken_over() -> None:
 
 
 @pytest.mark.parametrize(
-    ("outcome", "reason"), [(False, "holder_changed"), (OSError("disk full"), "backups_not_moved")]
+    ("outcome", "reason"), [(False, "holder_changed"), (PlanBackupsNotMovedError(), "backups_not_moved")]
 )
 def test_the_replaced_repair_reports_a_holder_it_could_not_watch(outcome: Any, reason: str) -> None:
     flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)

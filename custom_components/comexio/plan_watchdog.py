@@ -103,7 +103,7 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "replaced_title": "Comexio: function plan not found",
         "replaced": (
             "The monitored function plan {name} (ID {fub_id}) was not found: ID {fub_id} now holds {current}. "
-            "If it was renamed, take the rename over in the Home Assistant repair."
+            "If it was renamed, take the rename over in the Home Assistant repair; restoring it is offered there too."
         ),
         "restore": "Restore",
         "unwatch": "Stop watching",
@@ -148,7 +148,8 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         "replaced_title": "Comexio: Logikplan nicht gefunden",
         "replaced": (
             "Der überwachte Logikplan {name} (ID {fub_id}) wurde nicht gefunden: ID {fub_id} trägt jetzt {current}. "
-            "Wurde er umbenannt, übernimm die Umbenennung in der Reparatur von Home Assistant."
+            "Wurde er umbenannt, übernimm die Umbenennung in der Reparatur von Home Assistant; dort lässt er sich "
+            "auch wiederherstellen."
         ),
         "restore": "Wiederherstellen",
         "unwatch": "Nicht mehr überwachen",
@@ -1049,6 +1050,7 @@ class ManagedPlanWatchdog:
             return  # unloaded: the reloaded watchdog owns the shared repairs, this snapshot may predate them
         previous = self.vanished or set()
         self.vanished = set(vanished)
+        self._log_holder_changes(previous & self.vanished, dict(holders or {}))
         self.vanished_holders = dict(holders or {})
         self._sync_vanished_issues(self.vanished)
         newly_vanished = self.vanished - previous
@@ -1068,6 +1070,18 @@ class ManagedPlanWatchdog:
             # Not reached (the sync raised): a mark set meanwhile would outlive its plan and hold back its next alarm.
             self._restored_pushes -= {vanished_plan_token(fub_id, name) for fub_id, name in self._vanished_clearing}
             self._vanished_clearing = set()
+
+    def _log_holder_changes(self, still_vanished: Collection[tuple[int, str]], holders: Mapping[int, str]) -> None:
+        """Log a still-vanished plan whose ID got another holder; its repair follows, its push is not resent."""
+        for fub_id, name in sorted(still_vanished):
+            if (holder := holders.get(fub_id)) != self.vanished_holders.get(fub_id):
+                _LOGGER.info(
+                    "[%s] Monitored function plan '%s' (ID %s), still not found: the ID now holds %s",
+                    self._server_id,
+                    one_line(name),
+                    fub_id,
+                    "no plan" if holder is None else f"'{one_line(holder)}'",
+                )
 
     def _sync_vanished_issues(self, vanished: Collection[tuple[int, str]]) -> None:
         for fub_id, name in vanished:
@@ -1126,7 +1140,9 @@ class ManagedPlanWatchdog:
             "vanished" if holder is None else "replaced",
             current_name=holder or "",
             token=token,
-            actions=_vanished_actions(fub_id, name),
+            # With another plan on the ID the choice (restore, take a rename over, watch it) is the repair's:
+            # a one-tap Restore of a renamed plan would start a copy beside the original.
+            actions=_vanished_actions(fub_id, name) if holder is None else (ACTION_UNWATCH,),
             alarm=True,
             targets=targets,
             # Restored while an earlier plan's push was sent: the alarm would replace that confirmation, and the
