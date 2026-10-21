@@ -235,9 +235,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - A test of a step that validates before it acts (a config, reauth or reconfigure step that tests the login, a
   check before a write) asserts whether the validation ran, not only the result (entry created, data unchanged, error
   shown): the success case and every failure the validation reports assert it ran — e.g.
-  `api.login.assert_awaited_once()`; a path that is meant to reject before validating (wrong device, aborted flow)
-  asserts it did not — `api.login.assert_not_awaited()`. A success test otherwise passes when the step stores
-  unchecked input; a failure test passes when the step rejects before it ever validated (#207).
+  `api.login.assert_awaited_once()`; a path that is meant to reject before validating (a taken server id, a wrong
+  device) asserts it did not — `api.login.assert_not_awaited()`, or that no API was built. A flow that ends in an
+  abort after the validation (`reauth_successful`, `reconfigure_successful`) is a success case. A success test
+  otherwise passes when the step stores unchecked input; a failure test passes when the step rejects before it ever
+  validated (#207).
 - A parametrized test of a dispatch names each case's expected handler(s) and asserts that those ran and the others
   did not (for an exclusive route: exactly one handler; for an intentional fan-out: every expected handler ran and every
   forbidden one did not); a sum of awaits over several handlers also passes when an action is routed to the wrong one. A test of a

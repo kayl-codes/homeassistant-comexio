@@ -66,6 +66,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant, mock_comexio_api: li
     assert result["title"] == f"Comexio iosrv2 ({HOST})"
     # The rest of data are the form's defaults for the fields the user left alone.
     assert {**USER_INPUT, CONF_SERVER_ID: "iosrv2", "scan_interval": 15}.items() <= result["data"].items()
+    mock_comexio_api[0].login.assert_awaited_once()  # the credentials were tested before the entry was created
     mock_comexio_api[0].close.assert_called_once()
 
 
