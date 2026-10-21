@@ -7,3 +7,6 @@ pytest-homeassistant-custom-component==0.13.357
 # The integration's own runtime requirements (manifest.json), at the same pins.
 aiocomexio==0.7.0
 idna>=3.15
+# certifi: homeassistant only sets a floor (>=2021.5.30); this one keeps out the emSign roots with
+# compromised intermediates (PYSEC-2026-4320), so OSV-Scanner resolves a fixed version too.
+certifi>=2026.10.19
