@@ -1264,6 +1264,17 @@ def test_system_info_logs_in_again_on_a_lapsed_session(comexio_api: ComexioAPI, 
     assert client.get_system_info.await_count == 2
 
 
+def test_system_info_uptime_fetch_retries_after_the_polls_re_login(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), SYSTEM_INFO])
+    client.get_uptime = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), timedelta(days=3)])
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    # The uptime fetch reuses the poll's one re-login.
+    client.login.assert_awaited_once()
+    assert client.get_uptime.await_count == 2
+
+
 def test_system_info_failed_relogin_is_the_cause(comexio_api: ComexioAPI, client: MagicMock) -> None:
     client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
     client.get_uptime = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
