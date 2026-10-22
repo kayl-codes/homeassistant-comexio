@@ -2273,11 +2273,13 @@ def test_a_named_pick_whose_id_holds_another_plan_is_vanished_with_its_holder(ap
 
 def test_a_rename_is_suspected_only_for_matching_newest_auto_backups(api: ComexioAPI) -> None:
     coordinator = _coordinator(api)
-    hashes = {(43, "Alt"): "h1", (43, "Licht"): "h1", (43, "Other"): "h2"}
+    empty = plan_hash({"elements": {}, "connections": {}})
+    hashes = {(43, "Alt"): "h1", (43, "Licht"): "h1", (43, "Other"): "h2", (43, "Leer"): empty, (43, "Neu"): empty}
     coordinator.function_plan_backup = SimpleNamespace(
         newest_auto_hash_sync=lambda fub_id, name: hashes.get((fub_id, name))
     )
     assert coordinator.plan_rename_suspected(43, "Alt", "Licht") is True
+    assert coordinator.plan_rename_suspected(43, "Leer", "Neu") is False  # (Sourcery) two empty plans hash the same
     assert coordinator.plan_rename_suspected(43, "Other", "Licht") is False  # other content
     assert coordinator.plan_rename_suspected(43, "Gone", "Licht") is False  # no backup of the old plan
     assert coordinator.plan_rename_suspected(43, "Alt", "New") is False  # none of the new one yet

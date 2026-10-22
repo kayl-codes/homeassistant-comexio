@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -610,6 +611,43 @@ def test_a_rename_that_could_not_be_saved_is_put_back(
     assert change_save.await_count == (2 if isinstance(error, asyncio.CancelledError) else 1)
     assert manager._auto_data["2"] == {"Pumps": [_snap(OLD), _snap(OLD)]}
     assert manager._change_data["2"] == {"Pumps": [_snap(OLD)]}
+
+
+def test_a_second_cancel_does_not_stop_the_put_back_on_disk() -> None:
+    """(Sourcery) cancelled again while putting back: every store is still written back."""
+    written: list[str] = []
+    release = asyncio.Event()
+
+    async def save_auto(_data: dict) -> None:
+        written.append("auto")
+        if len(written) > 1:  # the put-back waits; the task is cancelled again meanwhile
+            await release.wait()
+
+    async def save_changes(_data: dict) -> None:
+        if "changes-failed" not in written:
+            written.append("changes-failed")
+            raise asyncio.CancelledError
+        written.append("changes")
+
+    saves = [
+        (SimpleNamespace(async_save=save_auto), {}, {}),
+        (SimpleNamespace(async_save=save_changes), {}, {}),
+    ]
+
+    async def run() -> None:
+        task = asyncio.create_task(backup_module._async_save_all_or_put_back(saves))
+        while written.count("auto") < 2:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        async with asyncio.timeout(1):
+            while len(written) < 4:
+                await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert written == ["auto", "changes-failed", "auto", "changes"]
 
 
 def test_newest_auto_hash_is_the_newest_auto_snapshots(manager: FunctionPlanBackupManager) -> None:

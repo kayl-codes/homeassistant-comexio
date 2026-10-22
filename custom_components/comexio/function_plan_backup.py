@@ -160,8 +160,8 @@ async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
     would sit under two IDs. Re-saving the stores already written takes their change back on
     disk too; when that fails as well it is logged — memory then holds the state before the move.
     A cancelled save is put back as well: memory left moved would hide the old lineage from a retry. Its
-    interrupted store is re-saved too, as its write may still land. A second cancel stops the re-saves;
-    memory is put back by then, so each store's next save writes it.
+    interrupted store is re-saved too, as its write may still land. The re-saves run shielded: a second
+    cancel stops only the wait for them, not the put-back on disk.
     """
     saved: list[_StoreSave] = []
     try:
@@ -173,16 +173,21 @@ async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
             _put_back(data, before)
         if isinstance(err, asyncio.CancelledError):
             saved = saves[: len(saved) + 1]
-        for store, data, _before in saved:
-            try:
-                await store.async_save(data)
-            except Exception:
-                # Memory holds the state before the move; this store's next save writes it to disk.
-                _LOGGER.exception(
-                    "Function Plan backup: a store could not be put back on disk after a failed lineage move — "
-                    "until its next save it keeps the moved lineage there"
-                )
+        await asyncio.shield(_async_save_put_back(saved))
         raise
+
+
+async def _async_save_put_back(saved: list[_StoreSave]) -> None:
+    """Write the put-back stores to disk; a store that fails is logged, the others are still written."""
+    for store, data, _before in saved:
+        try:
+            await store.async_save(data)
+        except Exception:
+            # Memory holds the state before the move; this store's next save writes it to disk.
+            _LOGGER.exception(
+                "Function Plan backup: a store could not be put back on disk after a failed lineage move — "
+                "until its next save it keeps the moved lineage there"
+            )
 
 
 async def _async_save_backfill_or_take_back(store: Any, data: dict[str, Any], filled: list[dict[str, Any]]) -> None:

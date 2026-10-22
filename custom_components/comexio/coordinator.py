@@ -581,6 +581,9 @@ def _marker_reset_progress(report: Callable[[str], None], step: str) -> Callable
     return _cb
 
 
+EMPTY_PLAN_HASH = plan_hash({})
+
+
 def plan_has_elements(plan_data: Mapping[str, Any] | None) -> bool:
     """Whether a loaded plan holds any element: empty plans all hash the same, so they prove no rename."""
     return bool(plan_data and plan_data.get("elements"))
@@ -4830,13 +4833,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Whether plan new_name on fub_id looks like old_name renamed: their newest auto backups hash the same.
 
         A hint only (cache-only, backups loaded): the hash covers elements and wiring, not name or paper,
-        so a plan deleted and rebuilt with the same content (or two empty plans) match too. Without a
-        backup on either side it is no rename.
+        so a plan deleted and rebuilt with the same content matches too. Without a backup on either side,
+        or with both empty (all empty plans hash the same, see plan_has_elements), it is no rename.
         """
         if old_name == new_name:
             return False
         hashes = [self.function_plan_backup.newest_auto_hash_sync(fub_id, name) for name in (old_name, new_name)]
-        return hashes[0] is not None and hashes[0] == hashes[1]
+        return hashes[0] not in (None, EMPTY_PLAN_HASH) and hashes[0] == hashes[1]
 
     def _backed_up_plan_name(self, fub_id: int) -> str:
         """The one plan name the backups of fub_id carry; unnamed_plan_label for none or several (no restore then)."""
