@@ -113,6 +113,7 @@ def test_a_loopback_webhook_url_is_refused(url: str) -> None:
         "http://evilfritz.box",
         "http://ha.local.example.com",
         "http://HA.EXAMPLE.COM.",
+        "http://8.8.8.8.:8123",
     ],
 )
 def test_plain_http_outside_the_local_network_is_refused(url: str) -> None:
@@ -812,6 +813,15 @@ def test_the_audit_resolves_the_protocol_before_it_builds_the_payloads() -> None
     assert 0 <= source.index("async_webhook_target(") < source.index("build_webio_commands(")
 
 
+def test_the_audit_takes_the_fallback_reason_with_the_address_it_explains() -> None:
+    """Read before the next await: a later resolution (button, sync) rewrites the resolver's reason."""
+    source = inspect.getsource(ComexioCoordinator._async_audit_webio)
+    resolved = source.index("async_webhook_target(")
+    taken = source.index("address_fallback = self.ha_address.fallback_reason")
+    assert resolved < taken < source.index("await ", resolved + 1)
+    assert '"address_fallback": address_fallback,' in source
+
+
 # --- repair issue ---
 
 
@@ -959,10 +969,15 @@ def test_an_error_on_the_first_step_keeps_the_custom_mode_from_moving_on() -> No
 @pytest.mark.parametrize(
     ("language", "expected"),
     [
-        ("en", "unusable (http:// outside the local network). The fix sets the automatic address **192.0.2.10:8123**"),
+        (
+            "en",
+            "unusable (http:// outside the local network). Fixing the server address sets the automatic address "
+            "**192.0.2.10:8123**",
+        ),
         (
             "de",
-            "nicht nutzbar (http:// außerhalb des lokalen Netzes). Die Korrektur setzt stattdessen die automatische "
+            "nicht nutzbar (http:// außerhalb des lokalen Netzes). Die Korrektur der Server-Adresse "
+            "setzt stattdessen die automatische "
             "Adresse **192.0.2.10:8123**",
         ),
     ],
@@ -982,12 +997,19 @@ def test_the_repair_adds_no_fallback_note_while_the_options_url_is_used(issue_da
     assert "webhook URL from the options" not in form["description_placeholders"]["summary_text"]
 
 
-def test_a_protocol_only_fix_also_says_it_ignores_the_options_url() -> None:
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [("en", "sets the automatic address **x:8123**"), ("de", "setzt stattdessen die automatische Adresse **x:8123**")],
+)
+def test_a_protocol_only_fix_also_says_it_ignores_the_options_url(language: str, expected: str) -> None:
     """The fix writes the automatic address's protocol too, so the options URL is just as ignored."""
     form = _repair_form(
-        {"ip_mismatch": 1, "ip_address": 0, "protocol": 3}, ha_address="x:8123", address_fallback="invalid_url"
+        {"ip_mismatch": 1, "ip_address": 0, "protocol": 3},
+        language,
+        ha_address="x:8123",
+        address_fallback="invalid_url",
     )
-    assert "The fix sets the automatic address **x:8123**" in form["description_placeholders"]["summary_text"]
+    assert expected in form["description_placeholders"]["summary_text"]
 
 
 @pytest.mark.parametrize(
@@ -995,6 +1017,11 @@ def test_a_protocol_only_fix_also_says_it_ignores_the_options_url() -> None:
     [
         ({"ip_address": 1}, "en", "* 🌐 **Server Address:** Incorrect\n  * ⚠️ The webhook URL from the options"),
         ({"ip_address": 0, "protocol": 3}, "en", "**Webhook protocol:** 3\n  * ⚠️ The webhook URL from the options"),
+        (
+            {"ip_address": 1, "protocol": 3},
+            "en",
+            "**Server Address:** Incorrect\n* 🌐 **Webhook protocol:** 3\n  * ⚠️ The webhook URL",
+        ),
         ({"ip_address": 1}, "de", "**Server-Adresse:** Falsch\n  * ⚠️ Die Webhook-URL aus den Optionen"),
     ],
 )
@@ -1007,8 +1034,17 @@ def test_with_configuration_issues_the_note_follows_the_address_lines(
     assert expected in form["description_placeholders"]["summary_text"]
 
 
-def test_with_configuration_issues_and_no_fallback_there_is_no_note() -> None:
-    form = _repair_form({"ip_mismatch": 1, "missing": 2, "ip_address": 1}, address_fallback=None)
+@pytest.mark.parametrize(
+    ("counts", "issue_data"),
+    [
+        ({"ip_mismatch": 1, "missing": 2, "ip_address": 1}, {"address_fallback": None}),
+        ({"ip_mismatch": 0, "missing": 2, "ip_address": 0, "protocol": 0}, {"address_fallback": "insecure_url"}),
+    ],
+)
+def test_with_configuration_issues_and_no_fallback_or_no_address_fix_there_is_no_note(
+    counts: dict[str, int], issue_data: dict[str, Any]
+) -> None:
+    form = _repair_form(counts, ha_address="x:8123", **issue_data)
     assert "webhook URL from the options" not in form["description_placeholders"]["summary_text"]
 
 

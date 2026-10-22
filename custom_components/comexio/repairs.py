@@ -134,12 +134,12 @@ def _address_fallback_note(issue_data: dict, is_de: bool) -> str | None:
     if is_de:
         return (
             f"{ICON_WARNING} Die Webhook-URL aus den Optionen ist nicht nutzbar ({de_reason}). Die Korrektur "
-            f"setzt stattdessen die automatische Adresse **{address}**. Für die eigene Adresse zuerst die URL "
-            "korrigieren."
+            f"der Server-Adresse setzt stattdessen die automatische Adresse **{address}**. Für die eigene Adresse "
+            "zuerst die URL korrigieren."
         )
     return (
-        f"{ICON_WARNING} The webhook URL from the options is unusable ({en_reason}). The fix sets the automatic "
-        f"address **{address}** instead. Correct the URL first to use your own address."
+        f"{ICON_WARNING} The webhook URL from the options is unusable ({en_reason}). Fixing the server "
+        f"address sets the automatic address **{address}** instead. Correct the URL first to use your own address."
     )
 
 
