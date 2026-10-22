@@ -1002,7 +1002,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._full_poll_running = False
         if self._last_poll_scraped:
             self._note_comexio_reachable()
-            self._clear_certificate_changed()
+            # A request of this poll (or one alongside it) that met another certificate keeps its repair.
+            if self.api.certificate_mismatch is None:
+                self._clear_certificate_changed()
         # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
         # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
         if self._polled_plan_ids is not None:

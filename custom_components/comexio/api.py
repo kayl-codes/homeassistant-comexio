@@ -1343,6 +1343,9 @@ class ComexioAPI:
 
         try:
             result = await self.client.get_knx_dpt_catalog()
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "KNX DPT catalog not fetched")
+            return self._knx_dpt_catalog or {}
         except ComexioError as err:
             _LOGGER.warning("Failed to fetch KNX DPT catalog, keeping the last known-good one: %s", err)
             return self._knx_dpt_catalog or {}

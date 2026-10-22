@@ -54,6 +54,7 @@ CERTIFICATE_PUSH_TEXTS: dict[str, dict[str, str]] = {
         "message": (
             "Comexio {server_id} ({host}) presents another TLS certificate than the pinned one. Home Assistant "
             "sends nothing to it until you check the new certificate in the repair.\n"
+            "Pinned (SHA-256): {pinned}\n"
             "New (SHA-256): {actual}"
         ),
     },
@@ -62,6 +63,7 @@ CERTIFICATE_PUSH_TEXTS: dict[str, dict[str, str]] = {
         "message": (
             "Comexio {server_id} ({host}) zeigt ein anderes TLS-Zertifikat als das gepinnte. Home Assistant "
             "sendet nichts mehr dorthin, bis du das neue Zertifikat in der Reparatur prüfst.\n"
+            "Gepinnt (SHA-256): {pinned}\n"
             "Neu (SHA-256): {actual}"
         ),
     },

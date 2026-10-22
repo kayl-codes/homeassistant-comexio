@@ -942,7 +942,8 @@ async def test_another_certificate_is_pushed_urgently_once(hass: HomeAssistant, 
     assert len(phone) == len(family) == 1
     push = phone[0].data
     assert push["title"] == "Comexio: certificate changed"
-    assert ":".join(["BB"] * 32) in push["message"]
+    assert f"New (SHA-256): {OTHER_SHOWN}" in push["message"]
+    assert f"Pinned (SHA-256): {PINNED_SHOWN}" in push["message"]
     assert HOST in push["message"]
     assert push["data"]["tag"] == f"{DOMAIN}_certificate_{pinned_entry.entry_id}"
     assert push["data"]["url"] == push["data"]["clickAction"] == "/config/repairs"
@@ -1810,3 +1811,30 @@ async def test_a_poll_meeting_another_certificate_raises_the_repair_until_one_ge
 
     assert coordinator.last_update_success is True
     assert _issue(hass, pinned_entry) is None
+
+
+async def test_a_poll_keeps_the_repair_another_of_its_requests_raised(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+) -> None:
+    # The config fetch still met the pinned certificate, a later request of the same poll another one.
+    await _setup(hass, pinned_entry)
+    api = mock_comexio_api[0]
+    coordinator = hass.data[DOMAIN][pinned_entry.entry_id]
+
+    async def pinned_certificate() -> dict:
+        api.certificate_mismatch = None
+        return api_returns["get_raw_config"]
+
+    async def foreign_certificate(*_args: object) -> tuple[None, None]:
+        api.certificate_mismatch = ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+        api.on_certificate_mismatch(OTHER)
+        return None, None
+
+    api.get_raw_config = AsyncMock(side_effect=pinned_certificate)
+    api.get_live_states = AsyncMock(side_effect=foreign_certificate)
+    await coordinator.async_refresh()
+
+    api.get_live_states.assert_awaited()
+    issue = _issue(hass, pinned_entry)
+    assert issue is not None
+    assert issue.data["actual"] == OTHER

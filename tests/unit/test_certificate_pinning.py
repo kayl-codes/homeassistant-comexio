@@ -299,6 +299,7 @@ def test_placeholders_show_both_fingerprints_the_way_comexio_does() -> None:
         ("get_live_states", lambda api: api.get_live_states(4), (None, None)),
         ("rename_knx_object", lambda api: api.rename_knx_object(5, "Light"), False),
         ("create_marker", lambda api: api.create_marker(binary=True), None),
+        ("get_knx_dpt_catalog", lambda api: api.get_knx_dpt_catalog(), {}),
     ],
     ids=[
         "login",
@@ -308,6 +309,7 @@ def test_placeholders_show_both_fingerprints_the_way_comexio_does() -> None:
         "live states poll",
         "admin write",
         "admin write with a result",
+        "KNX catalog",
     ],
 )
 def test_every_mismatch_reaches_the_hook_right_away(
