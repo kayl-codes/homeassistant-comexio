@@ -4219,7 +4219,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Mutates result's "checked"/"fixed"/"failed"/"correction_failed" counters in place —
         factored out of _async_webio_range_check_tick purely to keep that method's cognitive
         complexity down. "failed" counts unreadable commands (read errors); "correction_failed"
-        counts commands that were read fine, found drifted, but whose corrective write failed —
+        counts commands that were read fine, found drifted, but not corrected — the write failed, or was not
+        attempted because neither the class nor the command tells which protocol to write —
         kept separate so a run where every fix fails can't misreport as a clean success.
         """
         device_id = device.get("device_id")

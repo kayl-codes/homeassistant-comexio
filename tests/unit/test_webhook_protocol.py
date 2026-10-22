@@ -672,11 +672,19 @@ def test_an_unknown_class_protocol_is_left_to_the_sync(live: int) -> None:
     assert coordinator.webio_synced_protocol(MARKER) is None
 
 
+@pytest.mark.parametrize(
+    "form",
+    [
+        WebioCommandForm(0, 100, None),
+        WebioCommandForm(0, 32767, None),  # Min alone
+        WebioCommandForm(-32768, 100, None),  # Max alone
+    ],
+)
 def test_an_unknown_class_with_an_unreadable_command_protocol_is_not_written(
-    caplog: pytest.LogCaptureFixture,
+    form: WebioCommandForm, caplog: pytest.LogCaptureFixture
 ) -> None:
     """No protocol to keep: a write would pick the target protocol ahead of the device address."""
-    coordinator = _range_coordinator(WebioCommandForm(0, 100, None))
+    coordinator = _range_coordinator(form)
     coordinator.webio_synced_protocols = {MARKER: None}
 
     result = _check(coordinator)
