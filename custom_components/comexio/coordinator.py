@@ -5353,8 +5353,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     fub_id,
                     name,
                     f"ID {fub_id} now holds '{one_line(holder)}' with its content, most likely the plan renamed",
-                    hint="The watchdog follows the rename with its next check, or take it over in its Home "
-                    "Assistant repair.",
+                    hint="Take the rename over in its Home Assistant repair.",
                 )
             else:
                 return await self._async_restore_vanished_from_backup(fub_id, name, from_push=from_push)

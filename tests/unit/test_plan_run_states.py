@@ -2446,9 +2446,7 @@ def test_a_restore_of_a_plan_most_likely_renamed_is_not_run(
         coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
     message = notifications.call_args.args[1]
     assert "ID 47 now holds 'Test 4' with its content, most likely the plan renamed" in message
-    assert message.endswith(
-        "The watchdog follows the rename with its next check, or take it over in its Home Assistant repair."
-    )
+    assert message.endswith("Take the rename over in its Home Assistant repair.")
 
 
 @pytest.mark.parametrize(("new_fub_id", "expected"), [(47, "stays on ID 47"), (50, "moved from ID 47 to ID 50")])
