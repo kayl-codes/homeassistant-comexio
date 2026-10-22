@@ -1240,6 +1240,40 @@ async def test_a_clear_reaches_the_registered_phone_and_waits_for_the_other(
     assert _messages(tablet) == [CLEAR]
 
 
+async def test_no_clear_task_while_only_unregistered_phones_are_left(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    # The clear at every successful poll must cost nothing while the companion app is not there.
+    _with_push_targets(hass, pinned_entry)
+    with patch.object(hass, "async_create_background_task", wraps=hass.async_create_background_task) as spawn:
+        async_clear_certificate_changed(hass, pinned_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    spawn.assert_not_called()
+
+
+async def test_a_phone_gone_again_after_it_registered_is_logged_again(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.comexio.certificate")
+    _with_push_targets(hass, pinned_entry)
+
+    async def _broken(_call: ServiceCall) -> None:
+        raise HomeAssistantError("push gateway down")
+
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)  # not registered: logged
+    await hass.async_block_till_done(wait_background_tasks=True)
+    hass.services.async_register("notify", PHONE, _broken)  # registered, the clear fails: stays shown
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    hass.services.async_remove("notify", PHONE)  # gone again: logged again
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    waiting = [record for record in caplog.records if f"waits for notify.{PHONE}" in record.getMessage()]
+    assert len(waiting) == 2
+
+
 async def test_the_certificate_back_after_a_clear_is_pushed_again(
     hass: HomeAssistant, pinned_entry: MockConfigEntry
 ) -> None:
@@ -1332,7 +1366,7 @@ async def test_a_retried_failure_is_logged_at_debug_level(
 
 
 async def test_removing_the_entry_removes_its_push_from_the_phones(
-    hass: HomeAssistant, pinned_entry: MockConfigEntry
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
     _with_push_targets(hass, pinned_entry)
     phone = async_mock_service(hass, "notify", PHONE)
@@ -1347,6 +1381,7 @@ async def test_removing_the_entry_removes_its_push_from_the_phones(
     assert len(family) == 1
     assert _issue(hass, pinned_entry) is None
     assert pinned_entry.entry_id not in hass.data[CERTIFICATE_PUSHES]
+    assert "may stay on" not in caplog.text  # every phone reached
 
     # A poll still on its way when the entry went: no repair and no alarm for an entry that is gone.
     async_report_certificate_changed(hass, pinned_entry, THIRD)
@@ -1372,11 +1407,36 @@ async def test_removing_the_entry_warns_about_a_phone_the_clear_cannot_reach(
     assert f"Comexio certificate push may stay on ['notify.{PHONE}']" in caplog.text
 
 
-async def test_removing_an_unknown_entry_leaves_no_push_state(hass: HomeAssistant) -> None:
+async def test_removing_the_entry_warns_when_its_last_clear_fails(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A clear that failed before is retried at debug level, but after the removal nothing retries it.
+    _with_push_targets(hass, pinned_entry)
+    async_mock_service(hass, "notify", FAMILY)
+
+    async def _broken(_call: ServiceCall) -> None:
+        raise HomeAssistantError("push gateway down")
+
+    hass.services.async_register("notify", PHONE, _broken)
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)  # the blind clear after a restart fails
+    await hass.async_block_till_done(wait_background_tasks=True)
+    caplog.clear()
+
+    await hass.config_entries.async_remove(pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    failures = [record for record in caplog.records if f"push to notify.{PHONE} failed" in record.getMessage()]
+    assert [record.levelno for record in failures] == [logging.WARNING]
+
+
+async def test_removing_an_unknown_entry_leaves_no_push_state(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
     async_remove_certificate_pushes(hass, "unknown_entry")
     await hass.async_block_till_done(wait_background_tasks=True)
 
     assert "unknown_entry" not in hass.data.get(CERTIFICATE_PUSHES, {})
+    assert "Comexio certificate" not in caplog.text
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

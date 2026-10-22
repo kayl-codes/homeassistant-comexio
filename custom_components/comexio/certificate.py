@@ -186,6 +186,8 @@ def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str) -> None:
 
 def async_remove_certificate_pushes(hass: HomeAssistant, entry_id: str) -> None:
     """Last clear of a removed entry; its push state goes with it (the clear holds on to it, no retry after)."""
+    if (existing := hass.data.get(CERTIFICATE_PUSHES, {}).get(entry_id)) is not None:
+        existing.clear_failed.clear()  # no retry after this one: a failure is logged as a warning
     async_clear_certificate_changed(hass, entry_id)
     if (pushes := hass.data.get(CERTIFICATE_PUSHES, {}).pop(entry_id, None)) is None:
         return
@@ -216,7 +218,8 @@ class _EntryPushes:
     shown: set[str] = field(default_factory=set)
     # Of shown: the ones whose last clear failed, so a retried failure is logged at debug level.
     clear_failed: set[str] = field(default_factory=set)
-    # Of shown: the ones logged as not registered, so each is logged once until it registers.
+    # Of shown: the ones logged as not registered, so each is logged once until it registers (and so leaves
+    # this set before a delivered clear can take it out of shown).
     unregistered: set[str] = field(default_factory=set)
 
 
@@ -345,7 +348,6 @@ def _registered_phones(hass: HomeAssistant, pushes: _EntryPushes) -> list[str]:
         elif target not in pushes.unregistered:
             pushes.unregistered.add(target)
             _LOGGER.debug("Comexio certificate push clear waits for %s: not registered", target)
-    pushes.unregistered &= pushes.shown
     return targets
 
 
