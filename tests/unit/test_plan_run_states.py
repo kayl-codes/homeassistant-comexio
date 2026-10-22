@@ -226,6 +226,7 @@ class _FakeCoordinator(SimpleNamespace):
     _watchdog_grace_run_state = ComexioCoordinator._watchdog_grace_run_state
     _watchdog_verified_run_state = ComexioCoordinator._watchdog_verified_run_state
     _vanished_user_plans = ComexioCoordinator._vanished_user_plans
+    _user_pick_not_vanished = ComexioCoordinator._user_pick_not_vanished
     vanished_id_holders = ComexioCoordinator.vanished_id_holders
     plan_rename_suspected = ComexioCoordinator.plan_rename_suspected
     async_watch_id_holder = ComexioCoordinator.async_watch_id_holder
@@ -240,6 +241,7 @@ class _FakeCoordinator(SimpleNamespace):
     _backups_move_refused = ComexioCoordinator._backups_move_refused
     _renamed_from = ComexioCoordinator._renamed_from
     _async_follow_plan_renames = ComexioCoordinator._async_follow_plan_renames
+    _forget_stale_rename_state = ComexioCoordinator._forget_stale_rename_state
     _forget_rename_follow_failed = ComexioCoordinator._forget_rename_follow_failed
     _log_rename_follow_failed = ComexioCoordinator._log_rename_follow_failed
     _async_follow_vanished_rename = ComexioCoordinator._async_follow_vanished_rename
@@ -2418,11 +2420,12 @@ def test_a_restore_with_another_plan_on_the_id_runs(api: ComexioAPI, from_push: 
     """(Review) a reused ID (other content) still restores, from the push and the repair."""
     coordinator = _restore_coordinator(api, True)
     api._fub_data["47"] = {"Id": 47, "Name": "Licht", "Active": 1}
-    coordinator.function_plan_backup.async_load = AsyncMock()
-    coordinator.plan_rename_suspected = MagicMock(return_value=False)  # type: ignore[method-assign]
+    coordinator._async_plan_holds_backup_of = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    coordinator.plan_rename_suspected = MagicMock(return_value=True)  # type: ignore[method-assign]
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=from_push)) is True
     coordinator.hass.services.async_call.assert_called_once()
-    coordinator.plan_rename_suspected.assert_called_once_with(47, "Test4", "Licht")
+    coordinator._async_plan_holds_backup_of.assert_awaited_once_with(47, "Test4", "Licht")
+    coordinator.plan_rename_suspected.assert_not_called()  # compared live: the backup hint does not decide
 
 
 @pytest.mark.usefixtures("fast_restore_wait")
@@ -2435,10 +2438,9 @@ def test_a_restore_of_a_plan_most_likely_renamed_is_not_run(
     monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
     coordinator = _restore_coordinator(api, True)
     api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
-    coordinator.function_plan_backup.async_load = AsyncMock()
-    coordinator.plan_rename_suspected = MagicMock(return_value=True)  # type: ignore[method-assign]
+    coordinator._async_plan_holds_backup_of = AsyncMock(return_value=True)  # type: ignore[method-assign]
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=from_push)) is False
-    coordinator.plan_rename_suspected.assert_called_once_with(47, "Test4", "Test 4")
+    coordinator._async_plan_holds_backup_of.assert_awaited_once_with(47, "Test4", "Test 4")
     coordinator.hass.services.async_call.assert_not_called()
     if from_push:  # (Sourcery) no Restore on the phone that would be refused again
         coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4", offer_restore=False)
@@ -2447,6 +2449,65 @@ def test_a_restore_of_a_plan_most_likely_renamed_is_not_run(
     message = notifications.call_args.args[1]
     assert "ID 47 now holds 'Test 4' with its content, most likely the plan renamed" in message
     assert message.endswith("Take the rename over in its Home Assistant repair.")
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+@pytest.mark.parametrize(
+    ("live_plan", "holder_backed_up", "restored"),
+    [
+        pytest.param("renamed", False, False, id="renamed-without-a-backup-of-its-own"),
+        pytest.param("other", True, True, id="reused-with-a-matching-old-backup"),
+    ],
+)
+def test_a_restore_compares_the_holders_live_content(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, live_plan: str, holder_backed_up: bool, restored: bool
+) -> None:
+    """(Sourcery) the holder's content decides, not its newest backup: none yet, or one its content left behind."""
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", MagicMock())
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
+    hashes = {(47, "Test4"): plan_hash(RENAMED_PLAN)}
+    if holder_backed_up:
+        hashes[(47, "Test 4")] = plan_hash(RENAMED_PLAN)
+    coordinator.function_plan_backup.async_load = AsyncMock()
+    coordinator.function_plan_backup.newest_auto_hash_sync = lambda fub_id, name: hashes.get((fub_id, name))
+    plan = RENAMED_PLAN if live_plan == "renamed" else OTHER_PLAN
+    api.function_plan_load_elements = AsyncMock(return_value=plan)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=False)) is restored
+    assert coordinator.hass.services.async_call.called is restored
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+@pytest.mark.parametrize("suspected", [True, False])
+def test_a_restore_that_cannot_compare_the_holder_follows_the_backup_hint(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, suspected: bool
+) -> None:
+    """(Sourcery) the holder could not be loaded: the newest backups' hashes decide, as the repair offered it."""
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", MagicMock())
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
+    coordinator._async_plan_holds_backup_of = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    coordinator.function_plan_backup.async_load = AsyncMock()
+    coordinator.plan_rename_suspected = MagicMock(return_value=suspected)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=False)) is not suspected
+    coordinator.plan_rename_suspected.assert_called_once_with(47, "Test4", "Test 4")
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_restore_whose_backups_cannot_be_read_for_the_rename_check_is_not_run(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(Review) an empty cache must not pass for "no rename": the restore fails instead of starting a copy."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
+    coordinator._async_plan_holds_backup_of = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    coordinator.function_plan_backup.async_load = AsyncMock(side_effect=OSError("store unreadable"))
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
+    coordinator.hass.services.async_call.assert_not_called()
+    assert "it failed (OSError)" in notifications.call_args.args[1]
+    coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4")
 
 
 @pytest.mark.parametrize(("new_fub_id", "expected"), [(47, "stays on ID 47"), (50, "moved from ID 47 to ID 50")])
@@ -2473,10 +2534,9 @@ def test_a_push_restore_of_an_unwatched_plan_is_skipped_before_the_rename_check(
     coordinator = _restore_coordinator(api, True)
     coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: []}
     api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
-    coordinator.function_plan_backup.async_load = AsyncMock()
-    coordinator.plan_rename_suspected = MagicMock(return_value=True)  # type: ignore[method-assign]
+    coordinator._async_plan_holds_backup_of = AsyncMock(return_value=True)  # type: ignore[method-assign]
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
-    coordinator.plan_rename_suspected.assert_not_called()
+    coordinator._async_plan_holds_backup_of.assert_not_awaited()
     notifications.assert_not_called()
     coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
 

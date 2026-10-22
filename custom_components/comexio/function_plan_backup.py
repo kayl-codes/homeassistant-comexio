@@ -159,15 +159,20 @@ async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
     A lineage move spans the auto and the change store: saved in one only, the plan's backups
     would sit under two IDs. Re-saving the stores already written takes their change back on
     disk too; when that fails as well it is logged — memory then holds the state before the move.
+    A cancelled save is put back as well: memory left moved would hide the old lineage from a retry. Its
+    interrupted store is re-saved too, as its write may still land. A second cancel stops the re-saves;
+    memory is put back by then, so each store's next save writes it.
     """
     saved: list[_StoreSave] = []
     try:
         for save in saves:
             await save[0].async_save(save[1])
             saved.append(save)
-    except Exception:
+    except (Exception, asyncio.CancelledError) as err:
         for _store, data, before in saves:
             _put_back(data, before)
+        if isinstance(err, asyncio.CancelledError):
+            saved = saves[: len(saved) + 1]
         for store, data, _before in saved:
             try:
                 await store.async_save(data)

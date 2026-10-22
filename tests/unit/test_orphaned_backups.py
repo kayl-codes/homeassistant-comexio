@@ -3,7 +3,7 @@
 import asyncio
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -589,16 +589,25 @@ def test_a_renamed_plan_takes_its_backups_along(manager: FunctionPlanBackupManag
     assert _kept_saved() == []  # live again under its new name: no longer an orphan to keep
 
 
+@pytest.mark.parametrize("error", [OSError("disk full"), asyncio.CancelledError("unload")])
 def test_a_rename_that_could_not_be_saved_is_put_back(
-    manager: FunctionPlanBackupManager, monkeypatch: pytest.MonkeyPatch
+    manager: FunctionPlanBackupManager, monkeypatch: pytest.MonkeyPatch, error: BaseException
 ) -> None:
+    """(Sourcery) a cancelled save too: memory left moved would hide the old lineage from the retry."""
+
+    auto_save, change_save = AsyncMock(), AsyncMock(side_effect=[error, None])
+
     async def run() -> None:
         await manager.async_load()
-        monkeypatch.setattr(manager._change_store, "async_save", MagicMock(side_effect=OSError("disk full")))
-        with pytest.raises(OSError, match="disk full"):
+        monkeypatch.setattr(manager._auto_store, "async_save", auto_save)
+        monkeypatch.setattr(manager._change_store, "async_save", change_save)
+        with pytest.raises(type(error)):
             await manager.async_rename_identity(2, "Pumps", "Heating")
 
     asyncio.run(run())
+    assert auto_save.await_count == 2  # saved moved, then put back on disk
+    # A cancelled write may still land: its store is put back on disk too; a failed one wrote nothing.
+    assert change_save.await_count == (2 if isinstance(error, asyncio.CancelledError) else 1)
     assert manager._auto_data["2"] == {"Pumps": [_snap(OLD), _snap(OLD)]}
     assert manager._change_data["2"] == {"Pumps": [_snap(OLD)]}
 
