@@ -709,6 +709,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._rename_follow_failed: set[tuple[int, str, str, str]] = set()
         # (fub_id, vanished name, ID holder) whose rename comparison failed: warned once, then logged at debug.
         self._rename_compare_warned: set[tuple[int, str, str]] = set()
+        # (fub_id, vanished name, ID holder) whose rename check raised unexpectedly: its traceback is logged once.
+        self._rename_check_error_logged: set[tuple[int, str, str]] = set()
         # One watchdog check at a time: an older one resuming after a newer one would sync stale vanished plans.
         self._plan_watch_check_lock = asyncio.Lock()
         # Set while the watchdog cannot load the backups: their load error is logged once per outage.
@@ -2072,7 +2074,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         held_back: a restore started meanwhile; the next cycle follows the rest.
         """
         # A failure noted for a rename no longer pending (renamed again, plan gone) logs afresh next time.
-        live = {(fub_id, fub.get("Name")) for fub_id in plans if isinstance(fub := fub_data.get(str(fub_id)), dict)}
+        live = {
+            (fub_id, fub.get("Name"))
+            for fub_id in plans
+            if isinstance(fub_data, dict) and isinstance(fub := fub_data.get(str(fub_id)), dict)
+        }
         self._rename_follow_failed = {key for key in self._rename_follow_failed if (key[0], key[2]) in live}
         for fub_id, plan_data in plans.items():
             if held_back():
@@ -2121,11 +2127,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Swap plan old_name's watchdog pick to new_name, its rename, and move its backups along.
 
         True when followed; False when the ID no longer holds new_name; None to try again later: a sync,
-        restore or plan edit runs, or the pick swap or the move failed (the backups stay with old_name, its
-        pick is put back, the next check or cycle finds them again). The pick swaps first: an options update
-        failing then leaves the backups unmoved, never a round trip through the store. Runs as a plan edit, so
-        no restore moves the same backups meanwhile; the ID changed during the move, the backups go back
-        (_async_settle_rename_changed_meanwhile).
+        restore or plan edit runs, or the pick swap or the move failed. The pick swaps first and is never put
+        back: a failed swap moves nothing, a failed move leaves the backups with old_name, where the backup
+        cycle finds them by their content and moves them on its own (_async_follow_plan_renames). The ID
+        renamed again meanwhile is a rename of its own: pick and backups both name new_name and follow it
+        with the next check or cycle. Runs as a plan edit, so no restore moves the same backups meanwhile.
         """
         attempt = (fub_id, old_name, new_name)
         if self._backups_move_refused():
@@ -2137,7 +2143,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._forget_rename_follow_failed(attempt)
             return False
         with self.plan_edit():
-            picks_before = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS)
             swapped = self._pick_present(fub_id, old_name)
             if swapped:
                 try:
@@ -2148,18 +2153,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             try:
                 moved = await self.function_plan_backup.async_rename_identity(fub_id, old_name, new_name)
             except Exception:
-                self._log_rename_follow_failed(
-                    attempt, "moving its backups failed; they are listed as orphaned backups"
-                )
-                if swapped:
-                    self._put_watch_picks_back(attempt, picks_before)
+                self._log_rename_follow_failed(attempt, "moving its backups failed; the next backup cycle tries again")
                 return None
-            if self._existing_plan_names([fub_id]).get(fub_id) != new_name:
-                self._forget_rename_follow_failed(attempt)
-                if swapped:
-                    self._put_watch_picks_back(attempt, picks_before)
-                await self._async_settle_rename_changed_meanwhile(fub_id, old_name, new_name, moved)
-                return False
         self._forget_rename_follow_failed(attempt)
         _LOGGER.info(
             "[%s] Function plan '%s' (ID %s) was renamed to '%s' in Comexio: %d backup(s)%s follow",
@@ -2171,27 +2166,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             " and its watchdog pick" if swapped else "",
         )
         return True
-
-    def _put_watch_picks_back(self, attempt: tuple[int, str, str], picks_before: Any) -> None:
-        """Restore the watchdog picks as they were before a rename follow-up that did not complete."""
-        options = dict(self.config_entry.options)
-        if picks_before is None:
-            options.pop(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS, None)
-        else:
-            options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = picks_before
-        try:
-            self.request_options_update_without_reload(options)
-        except Exception:
-            fub_id, old_name, new_name = attempt
-            _LOGGER.exception(
-                "[%s] Function plan watchdog pick '%s' (ID %s) could not be put back: it names '%s' while the "
-                "backups stay with '%s'",
-                self.server_id,
-                one_line(old_name),
-                fub_id,
-                one_line(new_name),
-                one_line(old_name),
-            )
 
     def _log_rename_follow_failed(self, attempt: tuple[int, str, str], what: str) -> None:
         """Log a failed rename follow-up: retried every check and cycle, its traceback once per kind, then debug."""
@@ -4862,6 +4836,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         candidates = {(fub_id, name, holders[fub_id]) for fub_id, name in vanished if fub_id in holders}
         self._rename_checked &= candidates
         self._rename_compare_warned &= candidates
+        self._rename_check_error_logged &= candidates
         awaited = False
         for candidate in sorted(candidates - self._rename_checked):
             awaited = True
@@ -4869,10 +4844,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 settled = await self._async_follow_vanished_rename(*candidate)
             except Exception:
                 # The vanished alarm still follows; tried again with the next check, the traceback logged once.
-                if candidate in self._rename_compare_warned:
+                if candidate in self._rename_check_error_logged:
                     _LOGGER.debug("[%s] Rename check of ID %s failed again", self.server_id, candidate[0])
                 else:
-                    self._rename_compare_warned.add(candidate)
+                    self._rename_check_error_logged.add(candidate)
                     _LOGGER.exception(
                         "[%s] Rename check of watchdog pick '%s' (ID %s) failed",
                         self.server_id,
@@ -4890,6 +4865,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if holds is None:
             return False
         self._rename_compare_warned.discard((fub_id, name, holder))
+        self._rename_check_error_logged.discard((fub_id, name, holder))
         if holds and self._pick_present(fub_id, name):
             return await self._async_follow_rename(fub_id, name, holder) is not None
         return True
