@@ -529,3 +529,28 @@ def test_a_left_out_plan_counts_before_the_first_poll() -> None:
     coordinator.scraped_plan_ids = None
     _cycle(coordinator)
     assert coordinator._plan_omit_streaks == {8: 1}
+
+
+def test_a_cycle_follows_renames_before_the_auto_backup() -> None:
+    """Followed first, the renamed chain already holds the plan's content: no duplicate snapshot under the new name."""
+    coordinator = _coordinator()
+    order: list[str] = []
+    coordinator._async_follow_plan_renames = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda *_: order.append("follow")
+    )
+    coordinator.function_plan_backup.async_auto_backup.side_effect = lambda *_a, **_k: order.append("backup") or []
+    _cycle(coordinator)
+    assert order == ["follow", "backup"]
+    plans, fub_data, held_back = coordinator._async_follow_plan_renames.await_args.args
+    assert (plans, fub_data, held_back()) == (PLANS, {"7": {"Name": "Pumps"}}, False)
+
+
+def test_a_restore_running_when_the_bulk_load_returns_follows_no_rename() -> None:
+    async def load(**_: object) -> dict:
+        coordinator.pause_auto_backup().__enter__()
+        return dict(PLANS)
+
+    coordinator = _coordinator(AsyncMock(side_effect=load))
+    coordinator._async_follow_plan_renames = AsyncMock()  # type: ignore[method-assign]
+    _cycle(coordinator)
+    coordinator._async_follow_plan_renames.assert_not_awaited()
