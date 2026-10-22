@@ -672,14 +672,51 @@ def test_an_unknown_class_protocol_is_left_to_the_sync(live: int) -> None:
     assert coordinator.webio_synced_protocol(MARKER) is None
 
 
-def test_an_unknown_class_with_an_unreadable_command_protocol_is_not_written() -> None:
+def test_an_unknown_class_with_an_unreadable_command_protocol_is_not_written(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """No protocol to keep: a write would pick the target protocol ahead of the device address."""
     coordinator = _range_coordinator(WebioCommandForm(0, 100, None))
     coordinator.webio_synced_protocols = {MARKER: None}
 
-    _check(coordinator)
+    result = _check(coordinator)
+    # The drift stays visible in the nightly summary instead of reading as a clean run.
+    assert result == {
+        RANGE_CHECK_CHECKED: 1,
+        RANGE_CHECK_FIXED: 0,
+        RANGE_CHECK_FAILED: 0,
+        RANGE_CHECK_CORRECTION_FAILED: 1,
+    }
+    assert "protocol is unknown" in caplog.text
     coordinator.api.save_single_command.assert_not_awaited()
+    coordinator._webio_protocol_store.async_save.assert_not_awaited()
     assert coordinator.webio_synced_protocol(MARKER) is None
+
+
+def test_an_unknown_class_with_an_unreadable_protocol_and_no_drift_is_a_clean_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    coordinator = _range_coordinator(WebioCommandForm(-32768, 32767, None))
+    coordinator.webio_synced_protocols = {MARKER: None}
+
+    assert _check(coordinator) == {
+        RANGE_CHECK_CHECKED: 1,
+        RANGE_CHECK_FIXED: 0,
+        RANGE_CHECK_FAILED: 0,
+        RANGE_CHECK_CORRECTION_FAILED: 0,
+    }
+    assert not caplog.records
+    coordinator.api.save_single_command.assert_not_awaited()
+
+
+def test_after_an_unreadable_store_the_range_check_keeps_each_command_protocol() -> None:
+    coordinator = _range_coordinator(WebioCommandForm(0, 100, WEBIO_PROTOCOL_HTTP))
+    coordinator._webio_protocol_store.async_load = AsyncMock(return_value={"classes": [1]})
+    asyncio.run(coordinator.async_load_webio_protocols())
+    assert all(coordinator.webio_synced_protocol(cls) is None for cls in WEBIO_CLASSES)
+
+    _check(coordinator)
+    assert coordinator.api.save_single_command.await_args.args[2]["Protocol"] == WEBIO_PROTOCOL_HTTP
 
 
 def test_an_unknown_class_with_matching_min_max_is_not_rewritten() -> None:

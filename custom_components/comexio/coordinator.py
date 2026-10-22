@@ -4235,8 +4235,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         synced = self.webio_synced_protocol(webio_class)
         expected = synced if synced is not None else form.protocol
         if expected is None:
-            # Unknown class and unreadable command protocol: any write would pick a protocol blindly. The next
-            # sync rewrites the whole class (Min/Max included).
+            # Unknown class and unreadable command protocol: any write would pick a protocol blindly. A Min/Max
+            # drift stays visible as a failed correction until the sync rewrites the whole class.
+            if form.min != target["Min"] or form.max != target["Max"]:
+                result[RANGE_CHECK_CORRECTION_FAILED] += 1
+                _LOGGER.warning(
+                    "Web-IO command '%s' drifted (Min/Max %s/%s -> %s/%s) but its protocol is unknown; "
+                    "left to the next Web-IO sync of its class.",
+                    one_line(name),
+                    form.min,
+                    form.max,
+                    target["Min"],
+                    target["Max"],
+                )
             return
         if expected != target["Protocol"]:
             target = {**target, "Protocol": expected}
