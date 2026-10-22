@@ -1501,7 +1501,7 @@ async def test_removing_the_entry_while_its_push_and_a_clear_wait_still_runs_the
     async_mock_service(hass, "notify", FAMILY)
     gate = asyncio.Event()
     gateway_down = False
-    clears_tried = []
+    clears_tried: list[ServiceCall] = []
 
     async def _held(call: ServiceCall) -> None:
         if call.data["message"] != CLEAR:
