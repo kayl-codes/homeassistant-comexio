@@ -390,6 +390,47 @@ def test_a_re_login_meeting_another_certificate_names_the_certificate_change(
     assert client.get_system_info.await_count == client.get_uptime.await_count == 1
 
 
+def test_a_system_info_re_login_meeting_a_pin_replaced_meanwhile_raises_no_repair(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # The certificate met belongs to a pin no longer in force: a connection failure, no certificate change.
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    comexio_api.fingerprint = PINNED
+    comexio_api._client_credentials = comexio_api._credentials()
+    client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.get_uptime = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+
+    async def login_while_the_pin_is_replaced() -> None:
+        comexio_api.fingerprint = OTHER
+        comexio_api._client_credentials = comexio_api._credentials()  # the uptime fetch keeps the mock client
+        raise _mismatch()
+
+    client.login = AsyncMock(side_effect=login_while_the_pin_is_replaced)
+    reading = asyncio.run(comexio_api.get_system_info())
+    assert reading.info_error == "re-login failed (connection)"
+    assert reading.uptime_error == "re-login failed (connection)"
+    hook.assert_not_called()
+    assert comexio_api.certificate_mismatch is None
+
+
+def test_the_uptime_fetch_keeps_the_cause_of_the_polls_re_login(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # A login of another task between the two fetches does not rewrite why this poll's re-login failed.
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.login = AsyncMock(side_effect=_mismatch())
+
+    async def uptime_after_another_login() -> None:
+        comexio_api.last_login_error = None
+        raise ComexioAuthenticationError("login form")
+
+    client.get_uptime = AsyncMock(side_effect=uptime_after_another_login)
+    reading = asyncio.run(comexio_api.get_system_info())
+    assert reading == SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
+    hook.assert_called_once_with(OTHER)
+
+
 @pytest.mark.parametrize(
     "helper",
     [

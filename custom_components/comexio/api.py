@@ -5314,7 +5314,8 @@ class ComexioAPI:
         session is logged in again once per call, like the config poll does: this poll runs more
         often, and its readings would otherwise go unknown until the next config poll.
         """
-        relogin: list[bool] = []  # the outcome of this call's one re-login, shared by both fetches
+        # This call's one re-login, shared by both fetches: None when it worked, else the failure cause.
+        relogin: list[str | None] = []
         try:
             # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
             info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)  # noqa: PLW0108
@@ -5326,7 +5327,7 @@ class ComexioAPI:
         return SystemInfoReading(info, uptime, info_error, uptime_error)
 
     async def _system_info_part[T](
-        self, fetch: Callable[[], Awaitable[T]], relogin: list[bool]
+        self, fetch: Callable[[], Awaitable[T]], relogin: list[str | None]
     ) -> tuple[T | None, str | None]:
         """fetch()'s result, or None and the failure cause.
 
@@ -5340,17 +5341,23 @@ class ComexioAPI:
             except ComexioAuthenticationError:
                 if not relogin:
                     _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
-                    relogin.append(await self._full_login(generation))
-                if not relogin[0]:
-                    if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
-                        return None, SYSTEM_INFO_CERTIFICATE_CHANGED  # _full_login raised the repair
-                    return None, f"re-login failed ({self.last_login_error})"
+                    relogin.append(self._relogin_failure(await self._full_login(generation)))
+                if relogin[0] is not None:
+                    return None, relogin[0]
                 return await fetch(), None
         except ComexioCertificateMismatchError:
             raise  # get_system_info raises the repair
         except ComexioError as err:
             _LOGGER.debug("System info fetch failed: %s", err)
             return None, str(err) or type(err).__name__
+
+    def _relogin_failure(self, logged_in: bool) -> str | None:
+        """The system info cause of a re-login that just returned, read before another login can change it."""
+        if logged_in:
+            return None
+        if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
+            return SYSTEM_INFO_CERTIFICATE_CHANGED  # _full_login raised the repair
+        return f"re-login failed ({self.last_login_error})"
 
     async def system_emergency_reboot(self) -> bool:
         """Trigger an IMMEDIATE, unconfirmed full Comexio system reboot.
