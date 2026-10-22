@@ -138,8 +138,9 @@ def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, ac
     pushed once more.
     """
     pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
-    if pinned is None or actual == pinned:
-        # Nothing pinned, or a late report of a client still on the pin the user just replaced.
+    if pinned is None or actual == pinned or hass.config_entries.async_get_entry(entry.entry_id) is None:
+        # Nothing pinned, a late report of a client still on the pin the user just replaced, or of an entry
+        # removed meanwhile (its repair and push are gone with it).
         return
     ir.async_create_issue(
         hass,
@@ -167,8 +168,8 @@ def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str) -> None:
     """Drop the certificate_changed repair: Comexio presents the pinned certificate (again).
 
     The push is removed from the companion apps it reached as well (also of a removed entry), retried at the
-    next clear where that failed; with none left nothing is sent, so the clear at every successful poll
-    costs nothing.
+    next clear where that failed or the companion app was not registered; the clear at every successful poll
+    starts no task once no registered companion app is left to clear.
     """
     if presented_fingerprint(hass, entry_id) is not None:
         ir.async_delete_issue(hass, DOMAIN, certificate_issue_id(entry_id))
@@ -177,7 +178,7 @@ def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str) -> None:
         return
     # A send still waiting for the lock is dropped; one already sending adds to shown only when it is done.
     pushing, pushes.current = pushes.current is not None, None
-    if pushing or pushes.shown:
+    if pushing or _registered_phones(hass, pushes):
         hass.async_create_background_task(
             _async_clear_certificate_push(hass, pushes, entry_id), f"{DOMAIN} certificate changed push clear"
         )
@@ -186,7 +187,12 @@ def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str) -> None:
 def async_remove_certificate_pushes(hass: HomeAssistant, entry_id: str) -> None:
     """Last clear of a removed entry; its push state goes with it (the clear holds on to it, no retry after)."""
     async_clear_certificate_changed(hass, entry_id)
-    hass.data.get(CERTIFICATE_PUSHES, {}).pop(entry_id, None)
+    if (pushes := hass.data.get(CERTIFICATE_PUSHES, {}).pop(entry_id, None)) is None:
+        return
+    if unreachable := sorted(pushes.shown - set(_registered_phones(hass, pushes))):
+        _LOGGER.warning(
+            "Comexio certificate push may stay on %s: not registered when the entry was removed", unreachable
+        )
 
 
 @dataclass
@@ -208,7 +214,10 @@ class _EntryPushes:
     current: _CertificatePush | None = None
     # Companion apps a push (of any certificate) reached and no clear has since: the next clear goes to them.
     shown: set[str] = field(default_factory=set)
-    clear_failed: set[str] = field(default_factory=set)  # a retried clear's failure is logged at debug level
+    # Of shown: the ones whose last clear failed, so a retried failure is logged at debug level.
+    clear_failed: set[str] = field(default_factory=set)
+    # Of shown: the ones logged as not registered, so each is logged once until it registers.
+    unregistered: set[str] = field(default_factory=set)
 
 
 def _entry_pushes(hass: HomeAssistant, entry: ConfigEntry) -> _EntryPushes:
@@ -280,15 +289,8 @@ async def _async_send_certificate_push(
 async def _async_clear_certificate_push(hass: HomeAssistant, pushes: _EntryPushes, entry_id: str) -> None:
     """Take the push off the phones, after a send still on its way (the lock); the failed ones stay for the next."""
     async with pushes.lock:
-        if (entry := hass.config_entries.async_get_entry(entry_id)) is not None:
-            pushes.shown &= _phones(entry)  # a phone taken off the notify option is left alone
-        # A notify service not registered (yet: right after a restart the companion app may come up after this
-        # integration) stays for the next clear.
-        targets = sorted(
-            target
-            for target in pushes.shown
-            if hass.services.has_service(NOTIFY_DOMAIN, target.removeprefix(f"{NOTIFY_DOMAIN}."))
-        )
+        # Also a phone taken off the notify option since: the push may still be on it.
+        targets = _registered_phones(hass, pushes)
         if not targets:
             return
         # A companion-app command: any other notify service would deliver it as the text "clear_notification".
@@ -327,6 +329,24 @@ async def _async_notify(
             failed.add(target)
             log_failure("Comexio certificate push to notify.%s failed", service, exc_info=True)
     return delivered, failed
+
+
+def _registered_phones(hass: HomeAssistant, pushes: _EntryPushes) -> list[str]:
+    """The companion apps showing the push whose notify service is registered, the ones a clear can reach.
+
+    One not registered (yet: right after a restart the companion app may come up after this integration, or
+    the device was removed) stays for the next clear, logged once at debug level.
+    """
+    targets: list[str] = []
+    for target in sorted(pushes.shown):
+        if hass.services.has_service(NOTIFY_DOMAIN, target.removeprefix(f"{NOTIFY_DOMAIN}.")):
+            targets.append(target)
+            pushes.unregistered.discard(target)
+        elif target not in pushes.unregistered:
+            pushes.unregistered.add(target)
+            _LOGGER.debug("Comexio certificate push clear waits for %s: not registered", target)
+    pushes.unregistered &= pushes.shown
+    return targets
 
 
 def _is_mobile_app(target: str) -> bool:

@@ -20,6 +20,7 @@ from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.certificate import (
     CERTIFICATE_PUSHES,
     async_clear_certificate_changed,
+    async_remove_certificate_pushes,
     async_report_certificate_changed,
     certificate_issue_id,
 )
@@ -1197,9 +1198,10 @@ async def test_no_blind_clear_for_an_entry_without_a_pin(hass: HomeAssistant, pi
     assert entry.entry_id not in hass.data.get(CERTIFICATE_PUSHES, {})
 
 
-async def test_a_phone_taken_off_the_notify_option_gets_no_clear(
+async def test_a_phone_taken_off_the_notify_option_still_gets_the_clear(
     hass: HomeAssistant, pinned_entry: MockConfigEntry
 ) -> None:
+    # The alarm is still on it: taking it off the option must not leave it there.
     _with_push_targets(hass, pinned_entry)
     phone = async_mock_service(hass, "notify", PHONE)
     async_mock_service(hass, "notify", FAMILY)
@@ -1211,7 +1213,31 @@ async def test_a_phone_taken_off_the_notify_option_gets_no_clear(
     async_clear_certificate_changed(hass, pinned_entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
 
-    assert _messages(phone) == ["push"]
+    assert _messages(phone) == ["push", CLEAR]
+
+
+async def test_a_clear_reaches_the_registered_phone_and_waits_for_the_other(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.comexio.certificate")
+    tablet_service = "mobile_app_tablet"
+    two_phones = {"function_plan_watchdog_notify": [f"notify.{PHONE}", f"notify.{tablet_service}"]}
+    pinned_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(pinned_entry, options=two_phones)
+    phone = async_mock_service(hass, "notify", PHONE)
+
+    for _ in range(2):  # restart: both taken as showing an earlier push; the tablet not registered yet
+        async_clear_certificate_changed(hass, pinned_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+    waiting = [record for record in caplog.records if "waits for notify.mobile_app_tablet" in record.getMessage()]
+    assert len(waiting) == 1  # logged once, not at every poll
+
+    tablet = async_mock_service(hass, "notify", tablet_service)
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert _messages(phone) == [CLEAR]
+    assert _messages(tablet) == [CLEAR]
 
 
 async def test_the_certificate_back_after_a_clear_is_pushed_again(
@@ -1321,6 +1347,36 @@ async def test_removing_the_entry_removes_its_push_from_the_phones(
     assert len(family) == 1
     assert _issue(hass, pinned_entry) is None
     assert pinned_entry.entry_id not in hass.data[CERTIFICATE_PUSHES]
+
+    # A poll still on its way when the entry went: no repair and no alarm for an entry that is gone.
+    async_report_certificate_changed(hass, pinned_entry, THIRD)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert _messages(phone) == ["push", CLEAR]
+    assert _issue(hass, pinned_entry) is None
+    assert pinned_entry.entry_id not in hass.data[CERTIFICATE_PUSHES]
+
+
+async def test_removing_the_entry_warns_about_a_phone_the_clear_cannot_reach(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    _with_push_targets(hass, pinned_entry)
+    async_mock_service(hass, "notify", PHONE)
+    async_mock_service(hass, "notify", FAMILY)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    hass.services.async_remove("notify", PHONE)
+    await hass.config_entries.async_remove(pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert f"Comexio certificate push may stay on ['notify.{PHONE}']" in caplog.text
+
+
+async def test_removing_an_unknown_entry_leaves_no_push_state(hass: HomeAssistant) -> None:
+    async_remove_certificate_pushes(hass, "unknown_entry")
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert "unknown_entry" not in hass.data.get(CERTIFICATE_PUSHES, {})
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
