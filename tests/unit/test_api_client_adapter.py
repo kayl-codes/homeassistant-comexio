@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import (
     ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
     ComexioConnectionError,
     ComexioCreatedWithoutIdError,
     ComexioDataError,
@@ -1087,6 +1088,17 @@ def test_knx_catalog_failure_keeps_last_known_good(comexio_api: ComexioAPI, clie
     _fail(client, "get_knx_dpt_catalog", ComexioDataError("no data"))
     assert asyncio.run(comexio_api.get_knx_dpt_catalog()) is catalog
     # The failed fetch is not cached as current, so the next poll retries.
+    assert comexio_api.get_knx_dpt_catalog_snapshot() == (catalog, "11.0.1")
+
+
+def test_knx_catalog_meeting_another_certificate_keeps_last_known_good(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    catalog = {"KnxPoints": {"1": {}}}
+    comexio_api.seed_knx_dpt_catalog(catalog, "11.0.1")
+    comexio_api.comexio_version = "11.0.2"
+    _fail(client, "get_knx_dpt_catalog", ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64))
+    assert asyncio.run(comexio_api.get_knx_dpt_catalog()) is catalog
     assert comexio_api.get_knx_dpt_catalog_snapshot() == (catalog, "11.0.1")
 
 

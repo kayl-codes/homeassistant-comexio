@@ -1838,3 +1838,8 @@ async def test_a_poll_keeps_the_repair_another_of_its_requests_raised(
     issue = _issue(hass, pinned_entry)
     assert issue is not None
     assert issue.data["actual"] == OTHER
+
+    api.get_live_states = AsyncMock(return_value=api_returns["get_live_states"])
+    await coordinator.async_refresh()  # every request meets the pinned certificate again
+
+    assert _issue(hass, pinned_entry) is None
