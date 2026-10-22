@@ -1501,11 +1501,13 @@ async def test_removing_the_entry_while_its_push_and_a_clear_wait_still_runs_the
     async_mock_service(hass, "notify", FAMILY)
     gate = asyncio.Event()
     gateway_down = False
+    clears_tried = []
 
     async def _held(call: ServiceCall) -> None:
         if call.data["message"] != CLEAR:
             await gate.wait()
         elif gateway_down:
+            clears_tried.append(call)
             raise HomeAssistantError("push gateway down")
 
     hass.services.async_register("notify", PHONE, _held)
@@ -1521,6 +1523,26 @@ async def test_removing_the_entry_while_its_push_and_a_clear_wait_still_runs_the
 
     failures = [record for record in caplog.records if f"push to notify.{PHONE} failed" in record.getMessage()]
     assert [record.levelno for record in failures] == [logging.WARNING, logging.WARNING]
+    assert len(clears_tried) == 2  # the poll's clear and the last one
+    assert pinned_entry.entry_id not in hass.data[CERTIFICATE_PUSHES]
+
+
+async def test_removing_the_entry_after_its_push_was_cleared_sends_nothing_more(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    _with_push_targets(hass, pinned_entry)
+    async_mock_service(hass, "notify", FAMILY)
+    phone = async_mock_service(hass, "notify", PHONE)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    await hass.config_entries.async_remove(pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert _messages(phone) == ["push", CLEAR]
+    assert not _certificate_warnings(caplog)
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
