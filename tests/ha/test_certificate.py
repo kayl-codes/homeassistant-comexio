@@ -1,5 +1,6 @@
 """HTTPS to Comexio with a pinned certificate: config flow, setup upgrade, mismatch repair."""
 
+import asyncio
 from collections.abc import Generator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -934,7 +935,9 @@ async def test_another_certificate_is_pushed_urgently_once(hass: HomeAssistant, 
     assert HOST in push["message"]
     assert push["data"]["tag"] == f"{DOMAIN}_certificate_{pinned_entry.entry_id}"
     assert push["data"]["url"] == push["data"]["clickAction"] == "/config/repairs"
+    assert push["data"]["group"] == f"{DOMAIN}_{SERVER_ID}"
     assert push["data"]["priority"] == "high"
+    assert push["data"]["channel"] == "alarm_stream"
     assert push["data"]["ttl"] == 0
     assert push["data"]["push"]["interruption-level"] == "critical"
     assert push["data"]["push"]["sound"]["critical"] == 1
@@ -969,7 +972,6 @@ async def test_no_push_without_targets_or_for_the_pinned_certificate(
     assert not phone
 
 
-@pytest.mark.logged_exception
 async def test_a_failing_notify_service_does_not_stop_the_others(
     hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -985,7 +987,72 @@ async def test_a_failing_notify_service_does_not_stop_the_others(
     await hass.async_block_till_done()
 
     assert len(family) == 1
+    assert f"Comexio certificate push to notify.{PHONE} failed: push gateway down" in caplog.text
+
+    # The next report retries the service the push has not reached, and only that one.
+    phone = async_mock_service(hass, "notify", PHONE)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
+    assert len(phone) == 1
+    assert len(family) == 1
+
+
+async def test_a_notify_service_not_there_yet_gets_the_push_at_the_next_report(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Right after a restart the setup can report before the mobile app has registered its notify service.
+    _with_push_targets(hass, pinned_entry)
+    family = async_mock_service(hass, "notify", FAMILY)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
     assert f"Comexio certificate push to notify.{PHONE} failed" in caplog.text
+
+    phone = async_mock_service(hass, "notify", PHONE)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
+
+    assert len(phone) == 1
+    assert phone[0].data["title"] == "Comexio: certificate changed"
+    assert len(family) == 1
+
+
+async def test_a_hanging_notify_service_times_out_without_holding_up_the_others(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    _with_push_targets(hass, pinned_entry)
+
+    async def _hanging(_call: ServiceCall) -> None:
+        await asyncio.sleep(10)
+
+    hass.services.async_register("notify", PHONE, _hanging)
+    family = async_mock_service(hass, "notify", FAMILY)
+
+    with patch("custom_components.comexio.certificate.FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC", 0.01):
+        async_report_certificate_changed(hass, pinned_entry, OTHER)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert len(family) == 1
+    assert f"Comexio certificate push to notify.{PHONE} timed out" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("language", "title"), [("de", "Comexio: Zertifikat geändert"), ("fr", "Comexio: certificate changed")]
+)
+async def test_the_push_speaks_the_language_of_home_assistant(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, language: str, title: str
+) -> None:
+    # German has its own texts, any other language gets the English ones.
+    hass.config.language = language
+    _with_push_targets(hass, pinned_entry)
+    phone = async_mock_service(hass, "notify", PHONE)
+    async_mock_service(hass, "notify", FAMILY)
+
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
+
+    assert phone[0].data["title"] == title
+    for part in (SERVER_ID, HOST, ":".join(["BB"] * 32)):
+        assert part in phone[0].data["message"]
 
 
 async def test_clearing_the_repair_removes_the_push_from_the_phones(
@@ -1010,6 +1077,38 @@ async def test_clearing_the_repair_removes_the_push_from_the_phones(
         "data": {"tag": f"{DOMAIN}_certificate_{pinned_entry.entry_id}"},
     }
     assert len(family) == 1  # the clear is a companion-app command
+    assert _issue(hass, pinned_entry) is None
+
+
+async def test_a_clear_right_after_the_push_reaches_the_phone_after_it(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    # The pinned certificate back before the push went out: the clear must not overtake it.
+    _with_push_targets(hass, pinned_entry)
+    phone = async_mock_service(hass, "notify", PHONE)
+    async_mock_service(hass, "notify", FAMILY)
+
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert [call.data["message"] for call in phone][1:] == ["clear_notification"]
+    assert len(phone) == 2
+
+
+async def test_removing_the_entry_removes_its_push_from_the_phones(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    _with_push_targets(hass, pinned_entry)
+    phone = async_mock_service(hass, "notify", PHONE)
+    async_mock_service(hass, "notify", FAMILY)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
+
+    await hass.config_entries.async_remove(pinned_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert [call.data["message"] for call in phone][1:] == ["clear_notification"]
     assert _issue(hass, pinned_entry) is None
 
 
@@ -1075,13 +1174,38 @@ async def test_confirming_the_certificate_removes_the_push_from_the_phones(
     flow = await _repair_form(hass, pinned_entry)
     hass.config_entries.async_update_entry(pinned_entry, options=PUSH_TARGETS)
     phone = async_mock_service(hass, "notify", PHONE)
+    async_mock_service(hass, "notify", FAMILY)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)  # the push the repair goes with
+    await hass.async_block_till_done()
     certificate_handshake.side_effect = None
     certificate_handshake.return_value = OTHER
 
     await flow.async_step_certificate_changed({})
     await hass.async_block_till_done()
 
-    assert [call.data["message"] for call in phone] == ["clear_notification"]
+    assert [call.data["message"] for call in phone][1:] == ["clear_notification"]
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_pinned_certificate_back_in_the_repair_removes_the_push_from_the_phones(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, certificate_handshake: AsyncMock
+) -> None:
+    flow = await _repair_form(hass, pinned_entry)
+    hass.config_entries.async_update_entry(pinned_entry, options=PUSH_TARGETS)
+    phone = async_mock_service(hass, "notify", PHONE)
+    family = async_mock_service(hass, "notify", FAMILY)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)  # the push the repair goes with
+    await hass.async_block_till_done()
+    certificate_handshake.side_effect = None
+    certificate_handshake.return_value = PINNED
+
+    result = await flow.async_step_certificate_changed({})
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "certificate_restored"
+    assert [call.data["message"] for call in phone][1:] == ["clear_notification"]
+    assert len(family) == 1
+    assert _issue(hass, pinned_entry) is None
 
 
 @pytest.mark.parametrize(

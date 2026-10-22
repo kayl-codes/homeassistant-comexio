@@ -9,6 +9,7 @@ shows the pinned and the new fingerprint and pins the new one only when the user
 """
 
 import asyncio
+from dataclasses import dataclass, field
 import logging
 from typing import Any
 
@@ -17,8 +18,9 @@ from aiocomexio.tls import https_address
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+import voluptuous as vol
 
 from .api import ComexioAPI
 from .const import (
@@ -42,6 +44,8 @@ _LOGGER = logging.getLogger(__name__)
 
 ISSUE_CERTIFICATE_CHANGED = "certificate_changed"
 REPAIRS_PATH = "/config/repairs"
+# hass.data: entry_id -> _EntryPushes, the urgent push of each entry's changed certificate.
+CERTIFICATE_PUSHES = f"{DOMAIN}_certificate_pushes"
 
 # Push texts by HA language (English fallback); the certificate_changed placeholders are filled in.
 CERTIFICATE_PUSH_TEXTS: dict[str, dict[str, str]] = {
@@ -128,18 +132,15 @@ def _https_notification_id(server_id: str) -> str:
 def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, actual: str) -> None:
     """Raise (or update) the certificate_changed repair: Comexio presents `actual` instead of the pin.
 
-    A certificate not reported yet also goes out as an urgent push (see _async_push_certificate_changed);
-    the reports of the same certificate at every retry and poll do not. The repair lives in memory only, so
-    a certificate still changed after a restart of Home Assistant is pushed once more.
+    A certificate not reported yet also goes out as an urgent push (see _certificate_push_data); the reports
+    of the same certificate at every retry and poll only retry the notify services it has not reached yet.
+    That state lives in memory only, so a certificate still changed after a restart of Home Assistant is
+    pushed once more.
     """
     pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
     if pinned is None or actual == pinned:
         # Nothing pinned, or a late report of a client still on the pin the user just replaced.
         return
-    if presented_fingerprint(hass, entry.entry_id) != actual:
-        hass.async_create_background_task(
-            _async_push_certificate_changed(hass, entry, actual), f"{DOMAIN} certificate changed push"
-        )
     ir.async_create_issue(
         hass,
         DOMAIN,
@@ -150,31 +151,67 @@ def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, ac
         translation_placeholders=certificate_placeholders(entry, actual),
         data={"entry_id": entry.entry_id, "actual": actual},
     )
+    pushes = _entry_pushes(hass, entry.entry_id)
+    if pushes.current is None or pushes.current.actual != actual:
+        pushes.current = _CertificatePush(actual, _certificate_push_data(hass, entry, actual))
+    push = pushes.current
+    targets = [target for target in _notify_targets(entry) if target not in push.delivered]
+    if targets and not push.sending:
+        push.sending = True
+        hass.async_create_background_task(
+            _async_send_certificate_push(hass, pushes, push, targets), f"{DOMAIN} certificate changed push"
+        )
 
 
 def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str) -> None:
     """Drop the certificate_changed repair: Comexio presents the pinned certificate (again).
 
-    The push of an open repair is removed from the phones as well; without one nothing is sent, so the
-    clear at every successful poll costs nothing.
+    The push is removed from the companion apps it reached as well (also of a removed entry); without one
+    nothing is sent, so the clear at every successful poll costs nothing.
     """
-    if presented_fingerprint(hass, entry_id) is None:
+    if presented_fingerprint(hass, entry_id) is not None:
+        ir.async_delete_issue(hass, DOMAIN, certificate_issue_id(entry_id))
+    pushes = hass.data.get(CERTIFICATE_PUSHES, {}).get(entry_id)
+    if pushes is None or (push := pushes.current) is None:
         return
-    ir.async_delete_issue(hass, DOMAIN, certificate_issue_id(entry_id))
-    if (entry := hass.config_entries.async_get_entry(entry_id)) is not None:
-        hass.async_create_background_task(
-            _async_send_certificate_push(
-                hass, entry, {"message": "clear_notification", "data": {"tag": _certificate_push_tag(entry_id)}}
-            ),
-            f"{DOMAIN} certificate changed push clear",
-        )
+    pushes.current = None
+    hass.async_create_background_task(
+        _async_clear_certificate_push(hass, pushes, push), f"{DOMAIN} certificate changed push clear"
+    )
 
 
-async def _async_push_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, actual: str) -> None:
-    """Urgent push to the configured notify services: the repair needs the user, Comexio gets nothing until then.
+@dataclass
+class _CertificatePush:
+    """The urgent push of one presented certificate: the notify services it reached, and whether a send runs."""
 
-    Through Do Not Disturb (iOS: a critical alert, Android: high priority, delivered at once); a tap opens
-    the repairs. The fingerprints are the hashes of public certificates, no secret.
+    actual: str
+    service_data: dict[str, Any]
+    delivered: set[str] = field(default_factory=set)
+    failed: set[str] = field(default_factory=set)  # failed once already: a retry's failure is logged at debug level
+    sending: bool = False
+
+
+@dataclass
+class _EntryPushes:
+    """One entry's certificate push; the lock keeps a clear behind the push it takes off the phones."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    current: _CertificatePush | None = None
+
+
+def _entry_pushes(hass: HomeAssistant, entry_id: str) -> _EntryPushes:
+    return hass.data.setdefault(CERTIFICATE_PUSHES, {}).setdefault(entry_id, _EntryPushes())
+
+
+def _notify_targets(entry: ConfigEntry) -> list[str]:
+    return list(entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or [])
+
+
+def _certificate_push_data(hass: HomeAssistant, entry: ConfigEntry, actual: str) -> dict[str, Any]:
+    """Urgent push: the repair needs the user, Comexio gets nothing until then.
+
+    Through Do Not Disturb (iOS: a critical alert, Android: the alarm stream), delivered at once; a tap
+    opens the repairs. The fingerprints are the hashes of public certificates, no secret.
     """
     texts = CERTIFICATE_PUSH_TEXTS.get(hass.config.language, CERTIFICATE_PUSH_TEXTS["en"])
     data: dict[str, Any] = {
@@ -184,28 +221,68 @@ async def _async_push_certificate_changed(hass: HomeAssistant, entry: ConfigEntr
         "clickAction": REPAIRS_PATH,
         "ttl": 0,
         "priority": "high",
+        "channel": "alarm_stream",
         "push": {"interruption-level": "critical", "sound": {"name": "default", "critical": 1, "volume": 1.0}},
     }
     message = texts["message"].format(**certificate_placeholders(entry, actual))
-    await _async_send_certificate_push(hass, entry, {"title": texts["title"], "message": message, "data": data})
+    return {"title": texts["title"], "message": message, "data": data}
 
 
-async def _async_send_certificate_push(hass: HomeAssistant, entry: ConfigEntry, service_data: dict[str, Any]) -> None:
-    """Send to every notify service of CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY; a failing one does not stop the others.
+async def _async_send_certificate_push(
+    hass: HomeAssistant, pushes: _EntryPushes, push: _CertificatePush, targets: list[str]
+) -> None:
+    try:
+        async with pushes.lock:
+            delivered, failed = await _async_notify(hass, push.service_data, targets, push.failed)
+            push.delivered |= delivered
+            push.failed |= failed
+    finally:
+        push.sending = False
 
-    A clear (message "clear_notification") is a companion-app command and goes to the mobile apps only.
+
+async def _async_clear_certificate_push(hass: HomeAssistant, pushes: _EntryPushes, push: _CertificatePush) -> None:
+    """Take the push off the phones, after a send of it still on its way (the lock)."""
+    async with pushes.lock:
+        # A companion-app command: any other notify service would deliver it as the text "clear_notification".
+        targets = [target for target in push.delivered if _is_mobile_app(target)]
+        if targets:
+            service_data = {"message": "clear_notification", "data": {"tag": push.service_data["data"]["tag"]}}
+            await _async_notify(hass, service_data, targets, set())
+
+
+async def _async_notify(
+    hass: HomeAssistant, service_data: dict[str, Any], targets: list[str], quiet: set[str]
+) -> tuple[set[str], set[str]]:
+    """Send to each target; a failing one does not stop the others. Returns the delivered and the failed ones.
+
+    quiet: targets whose failure was logged before, logged at debug level now: a dead notify service, retried
+    at every poll, must not flood the log.
     """
-    clear = service_data["message"] == "clear_notification"
-    for target in entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or []:
+    delivered: set[str] = set()
+    failed: set[str] = set()
+    for target in targets:
         service = target.removeprefix(f"{NOTIFY_DOMAIN}.")
-        if clear and not service.startswith(MOBILE_APP_SERVICE_PREFIX):
-            continue
+        log_failure = _LOGGER.debug if target in quiet else _LOGGER.warning
         try:
+            # Bounded: a hanging notify service would hold the lock, and so the clear, too.
             async with asyncio.timeout(FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC):
                 await hass.services.async_call(NOTIFY_DOMAIN, service, service_data, blocking=True)
+            delivered.add(target)
+        except TimeoutError:
+            failed.add(target)
+            log_failure("Comexio certificate push to notify.%s timed out", service)
+        except (HomeAssistantError, vol.Invalid) as err:
+            failed.add(target)
+            log_failure("Comexio certificate push to notify.%s failed: %s", service, err)
         except Exception:
             # Third-party notify platforms raise their own errors; none may skip the remaining targets.
-            _LOGGER.warning("Comexio certificate push to notify.%s failed", service, exc_info=True)
+            failed.add(target)
+            log_failure("Comexio certificate push to notify.%s failed", service, exc_info=True)
+    return delivered, failed
+
+
+def _is_mobile_app(target: str) -> bool:
+    return target.removeprefix(f"{NOTIFY_DOMAIN}.").startswith(MOBILE_APP_SERVICE_PREFIX)
 
 
 def _certificate_push_tag(entry_id: str) -> str:
