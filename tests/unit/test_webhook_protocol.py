@@ -218,7 +218,11 @@ def test_a_class_without_a_record_counts_as_http() -> None:
         ({"classes": {MARKER: 1, IO: None}}, {MARKER: 1, IO: None}),
         # An invalid record is unknown (rewritten), not HTTP (which could hide an HTTPS class).
         ({"classes": {MARKER: "1", IO: True, "x": 0}}, {MARKER: None, IO: None, "x": 0}),
-        ({"classes": [1]}, {}),
+        ({}, {}),
+        # An unreadable store: every class is unknown, not HTTP.
+        ({"classes": [1]}, dict.fromkeys(WEBIO_CLASSES)),
+        ([1], dict.fromkeys(WEBIO_CLASSES)),
+        ("garbage", dict.fromkeys(WEBIO_CLASSES)),
     ],
 )
 def test_the_protocol_store_is_restored_defensively(stored: Any, expected: dict) -> None:
@@ -227,10 +231,23 @@ def test_the_protocol_store_is_restored_defensively(stored: Any, expected: dict)
     assert coordinator.webio_synced_protocols == expected
 
 
-@pytest.mark.parametrize("stored", [{"classes": [1]}, {"classes": {MARKER: "1"}}])
-def test_a_damaged_protocol_store_is_logged(stored: Any, caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize(
+    ("stored", "logged"),
+    [
+        ({"classes": [1]}, "unreadable (list)"),
+        ("garbage", "unreadable (str)"),
+        ({"classes": {MARKER: "1"}}, f"invalid record for {MARKER}"),
+    ],
+)
+def test_a_damaged_protocol_store_is_logged(stored: Any, logged: str, caplog: pytest.LogCaptureFixture) -> None:
     asyncio.run(_coordinator(stored=stored).async_load_webio_protocols())
-    assert "Web-IO protocol store" in caplog.text
+    assert logged in caplog.text
+
+
+@pytest.mark.parametrize("stored", [None, {}, {"classes": {}}, {"classes": {MARKER: 1, IO: None}}])
+def test_a_sound_protocol_store_logs_nothing(stored: Any, caplog: pytest.LogCaptureFixture) -> None:
+    asyncio.run(_coordinator(stored=stored).async_load_webio_protocols())
+    assert not caplog.records
 
 
 def test_a_recorded_protocol_is_saved_only_when_it_changes() -> None:
@@ -652,6 +669,16 @@ def test_an_unknown_class_protocol_is_left_to_the_sync(live: int) -> None:
     assert _check(coordinator)[RANGE_CHECK_FIXED] == 1  # the Min/Max drift
     written = coordinator.api.save_single_command.await_args.args[2]
     assert written == {**_TARGET, "Protocol": live}
+    assert coordinator.webio_synced_protocol(MARKER) is None
+
+
+def test_an_unknown_class_with_an_unreadable_command_protocol_is_not_written() -> None:
+    """No protocol to keep: a write would pick the target protocol ahead of the device address."""
+    coordinator = _range_coordinator(WebioCommandForm(0, 100, None))
+    coordinator.webio_synced_protocols = {MARKER: None}
+
+    _check(coordinator)
+    coordinator.api.save_single_command.assert_not_awaited()
     assert coordinator.webio_synced_protocol(MARKER) is None
 
 

@@ -4234,7 +4234,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # unknown record keeps the command's own protocol — the next sync rewrites the whole class anyway.
         synced = self.webio_synced_protocol(webio_class)
         expected = synced if synced is not None else form.protocol
-        if expected is not None and expected != target["Protocol"]:
+        if expected is None:
+            # Unknown class and unreadable command protocol: any write would pick a protocol blindly. The next
+            # sync rewrites the whole class (Min/Max included).
+            return
+        if expected != target["Protocol"]:
             target = {**target, "Protocol": expected}
         # An unreadable protocol (None, logged by aiocomexio) is no evidence of drift.
         protocol_drifted = form.protocol is not None and form.protocol != target["Protocol"]
@@ -8216,21 +8220,29 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def async_load_webio_protocols(self) -> None:
         """Restore the protocol each Web-IO class was last written with (called once at setup)."""
-        stored = await self._webio_protocol_store.async_load() or {}
-        classes = stored.get("classes")
-        if not isinstance(classes, dict):
-            if classes is not None:
-                _LOGGER.warning("Web-IO protocol store is unreadable (%r); assuming HTTP for every class", classes)
-            classes = {}
+        stored = await self._webio_protocol_store.async_load()
+        classes = stored.get("classes") if isinstance(stored, dict) else stored
         # An invalid record is unknown, not HTTP: unknown never matches, so the next audit rewrites the class
-        # instead of hiding a protocol the commands may still carry.
+        # instead of hiding a protocol the commands may still carry. Only no record at all (a store from before
+        # the protocol was configurable, or none yet) means HTTP.
+        if classes is None:
+            self.webio_synced_protocols = {}
+            return
+        if not isinstance(classes, dict):
+            _LOGGER.warning(
+                "Web-IO protocol store is unreadable (%s); every class gets rewritten", type(classes).__name__
+            )
+            self.webio_synced_protocols = dict.fromkeys(WEBIO_CLASSES)
+            return
         self.webio_synced_protocols = {
             cls: protocol if protocol is None or type(protocol) is int else None for cls, protocol in classes.items()
         }
         if invalid := sorted(
             cls for cls, protocol in classes.items() if protocol is not None and type(protocol) is not int
         ):
-            _LOGGER.warning("Web-IO protocol store: invalid record for %s; the class gets rewritten", invalid)
+            _LOGGER.warning(
+                "Web-IO protocol store: invalid record for %s; rewritten on the next sync", ", ".join(map(str, invalid))
+            )
 
     def webio_synced_protocol(self, cls: str) -> int | None:
         """The protocol cls's commands were last written with; None when unknown.
