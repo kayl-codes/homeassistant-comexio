@@ -913,8 +913,8 @@ class FunctionPlanBackupManager:
 
         For a plan renamed in Comexio (confirmed by the user): its history goes on under the new name
         instead of being left as an orphaned chain. Combines with the history already captured under
-        the new name (its first auto backup after the rename) as async_rekey_fub_id does. Each snapshot
-        keeps the plan_name it was captured with. Returns the number moved.
+        the new name (its first auto backup after the rename) as async_rekey_fub_id does. Each moved snapshot
+        takes the new plan_name: listings and restores name the plan as it is called now. Returns the number moved.
         """
         moved = await self._async_move_identity((fub_id, old_name), (fub_id, new_name))
         if moved:
@@ -952,7 +952,8 @@ class FunctionPlanBackupManager:
             if not old_history:
                 continue
             new_identities = data.setdefault(new_key, {})
-            combined = new_identities.get(new_name, []) + old_history
+            # Renamed copies: the put-back on a failed save restores the originals from before.
+            combined = new_identities.get(new_name, []) + [{**snap, "plan_name": new_name} for snap in old_history]
             combined.sort(key=lambda s: s.get("captured_at") or "", reverse=True)
             new_identities[new_name] = combined[:limit]
             saves.append((store, data, before))

@@ -895,7 +895,10 @@ def test_a_plan_dropping_out_of_the_watchdog_is_warned_once(api: ComexioAPI, cap
     warnings = [r.getMessage() for r in caplog.records if "no longer watches" in r.getMessage()]
     assert len(warnings) == 1
     assert "'HA - Gone' (ID 99)" in warnings[0]
-    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_with({(43, "Alt")}, {43: "Licht"})
+    # (Sourcery) both checks name the plan holding the ID, not only the last one
+    assert [call.args for call in coordinator.plan_watchdog.async_sync_vanished.await_args_list] == [
+        ({(43, "Alt")}, {43: "Licht"})
+    ] * 2
     # Resolved again (mapped anew), then lost again: warned anew.
     options[CONF_FUNCTION_PLAN_PLAN_MAP] = {"Test1": 19}
     asyncio.run(coordinator.async_watch_managed_plans())
@@ -2283,6 +2286,7 @@ def test_a_rename_is_suspected_only_for_matching_newest_auto_backups(api: Comexi
 def test_watching_the_id_holder_swaps_the_pick(api: ComexioAPI, rename: bool) -> None:
     options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["43:Alt", "19:Test1"]}
     coordinator = _coordinator(api, config_entry=SimpleNamespace(options=options))
+    coordinator.request_options_update_without_reload.side_effect = options.update
     coordinator.function_plan_backup = SimpleNamespace(
         async_load=AsyncMock(),
         plan_names_for_fub_id_sync=MagicMock(return_value=set()),
@@ -2295,7 +2299,8 @@ def test_watching_the_id_holder_swaps_the_pick(api: ComexioAPI, rename: bool) ->
         coordinator.function_plan_backup.async_rename_identity.assert_awaited_once_with(43, "Alt", "Licht")
     else:
         coordinator.function_plan_backup.async_rename_identity.assert_not_awaited()
-    coordinator.plan_watchdog.async_sync_vanished.assert_awaited()  # its repair goes right away
+    # (Sourcery) its repair goes right away: the check right after the swap lists nothing vanished
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with(set(), {})
 
 
 def test_watching_the_id_holder_keeps_one_pick_per_plan(api: ComexioAPI) -> None:
@@ -2408,39 +2413,42 @@ def test_a_failing_check_after_the_pick_swap_still_reports_the_swap(
 
 
 @pytest.mark.usefixtures("fast_restore_wait")
-@pytest.mark.parametrize(("from_push", "suspected"), [(True, False), (False, True)])
-def test_a_restore_with_another_plan_on_the_id_runs_unless_a_push_meets_a_likely_rename(
-    api: ComexioAPI, from_push: bool, suspected: bool
-) -> None:
-    """(Review) a reused ID (other content), or the repair's "restore anyway", still restores."""
+@pytest.mark.parametrize("from_push", [True, False])
+def test_a_restore_with_another_plan_on_the_id_runs(api: ComexioAPI, from_push: bool) -> None:
+    """(Review) a reused ID (other content) still restores, from the push and the repair."""
     coordinator = _restore_coordinator(api, True)
     api._fub_data["47"] = {"Id": 47, "Name": "Licht", "Active": 1}
     coordinator.function_plan_backup.async_load = AsyncMock()
-    coordinator.plan_rename_suspected = MagicMock(return_value=suspected)  # type: ignore[method-assign]
+    coordinator.plan_rename_suspected = MagicMock(return_value=False)  # type: ignore[method-assign]
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=from_push)) is True
     coordinator.hass.services.async_call.assert_called_once()
-    if not from_push:
-        coordinator.plan_rename_suspected.assert_not_called()
+    coordinator.plan_rename_suspected.assert_called_once_with(47, "Test4", "Licht")
 
 
 @pytest.mark.usefixtures("fast_restore_wait")
-def test_a_push_restore_of_a_plan_most_likely_renamed_is_not_run(
-    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("from_push", [True, False])
+def test_a_restore_of_a_plan_most_likely_renamed_is_not_run(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, from_push: bool
 ) -> None:
-    """(Review) a push sent while the ID was free: its Restore of a since renamed plan would start a copy."""
+    """(Review) offered while the ID was free (push or repair): a Restore of a since renamed plan starts a copy."""
     notifications = MagicMock()
     monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
     coordinator = _restore_coordinator(api, True)
     api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
     coordinator.function_plan_backup.async_load = AsyncMock()
     coordinator.plan_rename_suspected = MagicMock(return_value=True)  # type: ignore[method-assign]
-    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=from_push)) is False
     coordinator.plan_rename_suspected.assert_called_once_with(47, "Test4", "Test 4")
     coordinator.hass.services.async_call.assert_not_called()
-    coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4")
+    if from_push:  # (Sourcery) no Restore on the phone that would be refused again
+        coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4", offer_restore=False)
+    else:
+        coordinator.plan_watchdog.async_push_restore_failed.assert_not_awaited()
     message = notifications.call_args.args[1]
     assert "ID 47 now holds 'Test 4' with its content, most likely the plan renamed" in message
-    assert message.endswith("Take the rename over, or restore it anyway, in its Home Assistant repair.")
+    assert message.endswith(
+        "The watchdog follows the rename with its next check, or take it over in its Home Assistant repair."
+    )
 
 
 @pytest.mark.parametrize(("new_fub_id", "expected"), [(47, "stays on ID 47"), (50, "moved from ID 47 to ID 50")])
@@ -3049,16 +3057,20 @@ def test_a_failed_move_does_not_follow_another_plan_on_its_id(
     coordinator.function_plan_backup.async_rename_identity.assert_awaited_once()  # only the failed move
     assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht", "19:Test1"]
     assert not coordinator._rename_move_pending
-    assert "'Alt' (ID 43) no longer follow its rename to 'Licht' (ID 43 holds 'Fremd' by now)" in caplog.text
+    assert (
+        "'Alt' (ID 43) no longer follow its rename to 'Licht' (ID 43 holds 'Fremd' with other content by now)"
+        in caplog.text
+    )
 
 
-def test_a_failed_move_of_a_managed_plan_does_not_follow(api: ComexioAPI) -> None:
+def test_a_failed_move_of_a_managed_plan_does_not_follow(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
     """HA manages "Alt" on ID 43 by now (plan_map): its backups are not moved away."""
     coordinator, _ = _failed_move(api)
     coordinator.config_entry.options[CONF_FUNCTION_PLAN_PLAN_MAP] = {"Alt": 43}
-    asyncio.run(coordinator._async_follow_plan_renames({43: RENAMED_PLAN}, api.fub_data, lambda: False))
+    asyncio.run(coordinator._async_follow_plan_renames({43: OTHER_PLAN}, api.fub_data, lambda: False))
     coordinator.function_plan_backup.async_rename_identity.assert_awaited_once()
     assert not coordinator._rename_move_pending
+    assert "(HA manages 'Alt' on that ID)" in caplog.text
 
 
 def test_an_empty_plan_list_keeps_the_noted_move(api: ComexioAPI) -> None:
@@ -3099,6 +3111,68 @@ def test_an_uncompared_failed_move_in_the_watchdog_waits_without_following(api: 
     assert coordinator._rename_move_pending == {(43, "Alt"): "Licht"}
 
 
+def test_the_watchdog_takes_the_pick_back_for_a_plan_renamed_back_and_edited(api: ComexioAPI) -> None:
+    """(Local review) as the backup cycle: renamed back to "Alt", only the pick goes back, no alarm."""
+    coordinator, options = _failed_move(api)
+    api.fub_data["43"] = {"Id": 43, "Name": "Alt", "Active": 1}
+    api.function_plan_load_elements = AsyncMock(return_value=OTHER_PLAN)  # type: ignore[method-assign]
+    asyncio.run(coordinator.async_watch_managed_plans())
+    coordinator.function_plan_backup.async_rename_identity.assert_awaited_once()  # only the failed move
+    assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Alt", "19:Test1"]
+    assert not coordinator._rename_move_pending
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_with(set(), {})
+
+
+def test_the_watchdog_does_not_follow_a_failed_move_of_a_managed_plan(api: ComexioAPI) -> None:
+    """(Local review) as the backup cycle: HA manages "Alt" on ID 43, its backups stay."""
+    coordinator, options = _failed_move(api)
+    coordinator.config_entry.options[CONF_FUNCTION_PLAN_PLAN_MAP] = {"Alt": 43}
+    api.fub_data["43"] = {"Id": 43, "Name": "Licht 2", "Active": 1}
+    api.function_plan_load_elements = AsyncMock(return_value=RENAMED_PLAN)  # type: ignore[method-assign]
+    asyncio.run(coordinator.async_watch_managed_plans())
+    coordinator.function_plan_backup.async_rename_identity.assert_awaited_once()
+    assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht", "19:Test1"]
+
+
+def test_a_failed_move_matching_by_content_moves_once_without_a_warning(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator, _ = _failed_move(api)
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(coordinator._async_follow_plan_renames({43: RENAMED_PLAN}, api.fub_data, lambda: False))
+    assert coordinator.function_plan_backup.async_rename_identity.await_args_list[1:] == [call(43, "Alt", "Licht")]
+    assert not coordinator._rename_move_pending
+    assert "no longer follow" not in caplog.text
+
+
+def test_a_failed_move_does_not_follow_an_empty_plan_under_another_name(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two empty plans hash the same: under another name an empty plan is no rename."""
+    coordinator, _ = _failed_move(api)
+    api.fub_data["43"] = {"Id": 43, "Name": "Fremd", "Active": 1}
+    asyncio.run(coordinator._async_follow_plan_renames({43: {"elements": {}}}, api.fub_data, lambda: False))
+    coordinator.function_plan_backup.async_rename_identity.assert_awaited_once()
+    assert not coordinator._rename_move_pending
+    assert "holds 'Fremd' with other content by now" in caplog.text
+
+
+def test_the_retried_move_logs_no_pick_swap(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """(Local review) the pick took the name with the failed move: the retry only moves the backups."""
+    coordinator, _ = _failed_move(api)
+    with caplog.at_level(logging.INFO):
+        asyncio.run(coordinator._async_follow_plan_renames({43: OTHER_PLAN}, api.fub_data, lambda: False))
+    followed = [r.getMessage() for r in caplog.records if "backup(s)" in r.getMessage()]
+    assert followed == ["[iosrv1] Function plan 'Alt' (ID 43) was renamed to 'Licht' in Comexio: 3 backup(s) follow"]
+
+
+def test_a_followed_rename_with_a_pick_logs_it(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    coordinator, _ = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)})
+    with caplog.at_level(logging.INFO):
+        asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht"))
+    assert "3 backup(s) and its watchdog pick follow" in caplog.text
+
+
 def test_a_plan_renamed_back_before_its_move_takes_its_pick_back(api: ComexioAPI) -> None:
     coordinator, options = _failed_move(api)
     api.fub_data["43"] = {"Id": 43, "Name": "Alt", "Active": 1}
@@ -3119,10 +3193,17 @@ def test_a_cancelled_move_is_noted_and_logged(api: ComexioAPI, caplog: pytest.Lo
     assert not coordinator.plan_edits_running
 
 
-def test_a_deleted_plan_drops_its_noted_move(api: ComexioAPI) -> None:
+def test_a_deleted_plan_drops_its_noted_move(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
     coordinator, _ = _failed_move(api)
-    asyncio.run(coordinator._async_follow_plan_renames({}, {"19": {"Name": "Test1"}}, lambda: False))
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            asyncio.run(coordinator._async_follow_plan_renames({}, {"19": {"Name": "Test1"}}, lambda: False))
     assert not coordinator._rename_move_pending
+    warnings = [r.getMessage() for r in caplog.records if "no longer follow" in r.getMessage()]
+    assert warnings == [
+        "[iosrv1] The backups of function plan 'Alt' (ID 43) no longer follow its rename to 'Licht' (the plan is "
+        "gone from Comexio); they stay listed as orphaned backups"
+    ]
 
 
 def test_rename_check_errors_log_one_traceback_then_debug(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:

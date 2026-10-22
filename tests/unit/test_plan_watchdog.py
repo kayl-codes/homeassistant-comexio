@@ -1284,6 +1284,17 @@ def test_a_deleted_plan_without_a_backup_identity_is_not_offered_restore(ir: Mag
     ]
 
 
+def test_a_restore_refused_as_a_rename_offers_no_restore_again() -> None:
+    """(Sourcery) refused before a check listed the plan on its ID: Restore would be refused on every tap."""
+    watchdog, _ = _watchdog(targets=["notify.mobile_app_phone"])
+    watchdog.vanished = set(TEST4)
+    asyncio.run(watchdog.async_push_restore_failed(47, "Test4", offer_restore=False))
+    ((_domain, _service, data),) = _pushes(watchdog)
+    assert [action["action"] for action in data["data"]["actions"]] == [
+        plan_action_id(ACTION_UNWATCH, SERVER_ID, TOKEN)
+    ]
+
+
 @pytest.mark.parametrize(
     ("method", "args", "actions"),
     [

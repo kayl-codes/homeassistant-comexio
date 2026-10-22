@@ -2106,9 +2106,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """The former names whose backups move to live_name: renamed by content, and earlier moves not done.
 
         A noted move (_rename_move_pending) follows without comparing content only while the ID holds the name
-        its pick took, or its old name again: the plan may have been edited since. Under any other name its
-        content must match as for any rename; otherwise the ID may hold another plan by now and the backups
-        stay with the old name, listed as orphaned backups.
+        its pick took (unless HA manages the old name on that ID), or its old name again (only the pick goes
+        back): the plan may have been edited since. Under any other name its content must match as for any
+        rename; otherwise the ID may hold another plan by now and the backups stay with the old name, listed
+        as orphaned backups.
         """
         sources = (
             set(self._renamed_from(fub_id, live_name, plan_hash(plan_data))) if plan_has_elements(plan_data) else set()
@@ -2116,10 +2117,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for (pending_id, old_name), pick_name in list(self._rename_move_pending.items()):
             if pending_id != fub_id or old_name in sources:
                 continue
-            if live_name in (pick_name, old_name) and not self._managed_under(fub_id, old_name):
+            if live_name == old_name or (live_name == pick_name and not self._managed_under(fub_id, old_name)):
                 sources.add(old_name)
+            elif live_name == pick_name:
+                self._drop_rename_move_pending(fub_id, old_name, f"HA manages '{one_line(old_name)}' on that ID")
             else:
-                self._drop_rename_move_pending(fub_id, old_name, f"ID {fub_id} holds '{one_line(live_name)}' by now")
+                reason = f"ID {fub_id} holds '{one_line(live_name)}' with other content by now"
+                self._drop_rename_move_pending(fub_id, old_name, reason)
         return sorted(sources)
 
     def _drop_rename_move_pending(self, fub_id: int, old_name: str, reason: str) -> None:
@@ -4936,18 +4940,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Compare and follow one vanished pick's rename; False when that is to be tried again with the next check.
 
         A pick an earlier follow renamed while its backups did not move (_rename_move_pending) is compared
-        with those backups, still under their old name.
+        with those backups, still under their old name; renamed back to that name, only the pick goes back
+        (as _rename_sources). Not while HA manages the old name on that ID.
         """
         pending_old = next(
             (
                 old
                 for (pending_id, old), pick in self._rename_move_pending.items()
-                if (pending_id, pick) == (fub_id, name)
+                if (pending_id, pick) == (fub_id, name) and (holder == old or not self._managed_under(fub_id, old))
             ),
             None,
         )
         backup_name = name if pending_old is None else pending_old
-        holds = await self._async_plan_holds_backup_of(fub_id, name, holder, backup_name)
+        if holder == pending_old:
+            holds: bool | None = True
+        else:
+            holds = await self._async_plan_holds_backup_of(fub_id, name, holder, backup_name)
         if holds is None:
             return False
         followed = holds and (pending_old is not None or self._pick_present(fub_id, name))
@@ -5319,7 +5327,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return (fub_id, name) in self._vanished_restores
 
     async def _async_restore_vanished_when_free(self, fub_id: int, name: str, *, from_push: bool) -> bool:
-        """Wait for a restore running elsewhere, then restore; any error is reported like a failed restore."""
+        """Wait for a restore running elsewhere, then restore; any error is reported like a failed restore.
+
+        Refused while the ID holds a plan that looks like this one renamed (repair and push alike: either may
+        have offered Restore while the ID was free); its push then offers no Restore again.
+        """
+        offer_restore = True
         try:
             await self._async_wait_for_restore_slot()
             if self.unloading:
@@ -5333,13 +5346,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     fub_id,
                 )
                 return False
-            elif from_push and (holder := await self._async_suspected_rename_holder(fub_id, name)) is not None:
-                # A push sent while the ID was free: for a renamed plan its Restore would start a copy beside it.
+            elif (holder := await self._async_suspected_rename_holder(fub_id, name)) is not None:
+                # Offered while the ID was free: for a renamed plan its Restore would start a copy beside it.
+                offer_restore = False
                 self._notify_vanished_restore_not_run(
                     fub_id,
                     name,
                     f"ID {fub_id} now holds '{one_line(holder)}' with its content, most likely the plan renamed",
-                    hint="Take the rename over, or restore it anyway, in its Home Assistant repair.",
+                    hint="The watchdog follows the rename with its next check, or take it over in its Home "
+                    "Assistant repair.",
                 )
             else:
                 return await self._async_restore_vanished_from_backup(fub_id, name, from_push=from_push)
@@ -5349,8 +5364,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "[%s] Restore of function plan '%s' (ID %s) failed", self.server_id, one_line(name), fub_id
             )
             self._notify_vanished_restore_not_run(fub_id, name, f"it failed ({type(err).__name__})")
-        if from_push:
+        if from_push and offer_restore:
             await self.plan_watchdog.async_push_restore_failed(fub_id, name)
+        elif from_push:
+            await self.plan_watchdog.async_push_restore_failed(fub_id, name, offer_restore=False)
         return False
 
     async def _async_wait_for_restore_slot(self) -> None:

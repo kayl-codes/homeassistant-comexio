@@ -581,7 +581,11 @@ def test_a_renamed_plan_takes_its_backups_along(manager: FunctionPlanBackupManag
     auto = FakeStore.saved[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]
     assert list(auto["2"]) == ["Heating"]
     assert [snap["captured_at"] for snap in auto["2"]["Heating"]] == [RECENT, OLD, OLD]  # newest first
-    assert FakeStore.saved[f"{DOMAIN}_logikplan_changes_{SERVER_ID}"]["2"] == {"Heating": [_snap(OLD)]}
+    # (Sourcery) listings and restores name the moved snapshots as the plan is called now
+    assert all(snap.get("plan_name") == "Heating" for snap in auto["2"]["Heating"][1:])
+    assert FakeStore.saved[f"{DOMAIN}_logikplan_changes_{SERVER_ID}"]["2"] == {
+        "Heating": [{**_snap(OLD), "plan_name": "Heating"}]
+    }
     assert _kept_saved() == []  # live again under its new name: no longer an orphan to keep
 
 
