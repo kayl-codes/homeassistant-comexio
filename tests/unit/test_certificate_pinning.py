@@ -17,7 +17,7 @@ from aiocomexio import (
 import pytest
 
 from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, api as api_module, certificate
-from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI, SystemInfoReading
 from custom_components.comexio.button import _sync_login_error
 from custom_components.comexio.const import (
     CERTIFICATE_CHANGED_MSG,
@@ -290,26 +290,89 @@ def test_placeholders_show_both_fingerprints_the_way_comexio_does() -> None:
 
 
 @pytest.mark.parametrize(
-    ("method", "call"),
+    ("method", "call", "failed"),
     [
-        ("login", lambda api: api.login()),
-        ("get_raw_config", lambda api: api.get_raw_config()),
-        ("set_marker_value", lambda api: api.set_value("marker", 7, 1)),
-        ("get_bus_workload", lambda api: api.get_bus_workload()),
+        ("login", lambda api: api.login(), False),
+        ("get_raw_config", lambda api: api.get_raw_config(), {}),
+        ("set_marker_value", lambda api: api.set_value("marker", 7, 1), False),
+        ("get_bus_workload", lambda api: api.get_bus_workload(), {}),
+        ("get_live_states", lambda api: api.get_live_states(4), (None, None)),
+        ("rename_knx_object", lambda api: api.rename_knx_object(5, "Light"), False),
+        ("create_marker", lambda api: api.create_marker(binary=True), None),
     ],
-    ids=["login", "config fetch", "API write", "bus load poll"],
+    ids=[
+        "login",
+        "config fetch",
+        "API write",
+        "bus load poll",
+        "live states poll",
+        "admin write",
+        "admin write with a result",
+    ],
 )
 def test_every_mismatch_reaches_the_hook_right_away(
-    comexio_api: ComexioAPI, client: MagicMock, method: str, call
+    comexio_api: ComexioAPI, client: MagicMock, method: str, call, failed: object
 ) -> None:
     # The repair comes up with the first request that meets the certificate, not only with the next full poll.
     hook = MagicMock()
     comexio_api.on_certificate_mismatch = hook
     setattr(client, method, AsyncMock(side_effect=_mismatch()))
     result = asyncio.run(call(comexio_api))
-    assert result in (False, {})
+    assert result == failed
+    assert type(result) is type(failed)
     hook.assert_called_once_with(OTHER)
     assert comexio_api.certificate_mismatch is not None
+
+
+def test_a_system_info_poll_meeting_another_certificate_raises_the_repair(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # The slow system info poll may be the first request to meet the change; the uptime fetch is not sent then.
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    client.get_system_info = AsyncMock(side_effect=_mismatch())
+    client.get_uptime = AsyncMock()
+    reading = asyncio.run(comexio_api.get_system_info())
+    assert reading == SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
+    hook.assert_called_once_with(OTHER)
+    client.get_uptime.assert_not_awaited()
+
+
+def test_a_mismatch_on_an_admin_write_whose_transport_failures_raise_is_no_transport_failure(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # The restore paths abort on a transport failure; a changed certificate fails the write and raises the repair.
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    client._plan_json = AsyncMock(side_effect=_mismatch())
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(3, {"Delay": "5"})) is False
+    hook.assert_called_once_with(OTHER)
+
+
+def test_a_mismatch_at_the_uptime_fetch_drops_the_whole_system_info_reading(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    client.get_system_info = AsyncMock(return_value=MagicMock())
+    client.get_uptime = AsyncMock(side_effect=_mismatch())
+    reading = asyncio.run(comexio_api.get_system_info())
+    assert reading == SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
+    hook.assert_called_once_with(OTHER)
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        lambda call: api_module._attempt("Writing", call, "failed"),
+        lambda call: api_module._succeeded("Writing", call),
+    ],
+    ids=["attempt", "succeeded"],
+)
+def test_a_mismatch_without_a_mismatch_hook_is_a_warning(helper, caplog: pytest.LogCaptureFixture) -> None:
+    result = asyncio.run(helper(AsyncMock(side_effect=_mismatch())))
+    assert result in ("failed", False)
+    assert [record.levelno for record in caplog.records if "Writing failed" in record.getMessage()] == [logging.WARNING]
 
 
 def test_a_mismatch_without_a_hook_is_kept_for_the_caller(comexio_api: ComexioAPI, client: MagicMock) -> None:

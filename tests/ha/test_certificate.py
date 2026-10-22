@@ -123,7 +123,7 @@ async def test_a_new_entry_pins_the_certificate_comexio_serves(
     assert mock_comexio_api[0].fingerprint == PINNED  # the login test already ran over HTTPS
     mock_comexio_api[0].login.assert_awaited_once()
     notify.assert_called_once()
-    assert PINNED[:2].upper() in notify.call_args.args[1]
+    assert PINNED_SHOWN in notify.call_args.args[1]
 
 
 @pytest.mark.usefixtures("mock_setup_entry", "no_auto_discovery")
@@ -441,6 +441,31 @@ async def test_another_certificate_at_the_login_test_on_the_pinned_host(
     assert (issue is not None) is repaired
     if repaired:
         assert issue.data["actual"] == OTHER
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_another_certificate_at_the_login_test_on_another_host_raises_no_repair(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+) -> None:
+    # The new host met the pin at the handshake, another certificate at the login: the repair would check the
+    # entry's old host, so the new one goes through reconfigure again instead.
+    pinned_entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+    api_returns["login"] = False
+    api_attributes["last_login_error"] = LOGIN_ERROR_CERTIFICATE
+    api_attributes["certificate_mismatch"] = ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+
+    result = await _reconfigure(hass, pinned_entry, NEW_HOST)
+
+    assert result["errors"] == {"base": "certificate_unstable"}
+    assert pinned_entry.data[CONF_HOST] == HOST
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, pinned_entry) is None
 
 
 @pytest.mark.usefixtures("mock_setup_entry")

@@ -323,8 +323,16 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return _HTTPS_REPLACED
 
     def _certificate_error(self, entry, merged, actual: str | None) -> str:
-        """Error key of a login test refused for the certificate; raises the repair for the pinned one."""
-        if actual is None or merged.get(CONF_CERTIFICATE_FINGERPRINT) != entry.data.get(CONF_CERTIFICATE_FINGERPRINT):
+        """Error key of a login test refused for the certificate; raises the repair for the pinned one.
+
+        Only the entry's own host with its own pin is the repair's case: the repair checks that host. Another
+        host — even one that presented the pinned certificate a moment ago — goes through reconfigure again.
+        """
+        if (
+            actual is None
+            or merged.get(CONF_CERTIFICATE_FINGERPRINT) != entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+            or merged[CONF_HOST] != entry.data[CONF_HOST]
+        ):
             # A certificate read a moment ago and refused at the login: nothing pinned to compare with.
             return "certificate_unstable"
         async_report_certificate_changed(self.hass, entry, actual)
