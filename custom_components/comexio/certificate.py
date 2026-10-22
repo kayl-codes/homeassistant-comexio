@@ -181,17 +181,24 @@ def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str, *, final
         return
     # A send still waiting for the lock is dropped; one already sending adds to shown only when it is done.
     pushing, pushes.current = pushes.current is not None, None
-    if pushing or (final and pushes.shown) or _registered_phones(hass, pushes):
+    # The final one always runs: behind the lock it also catches a send a poll's clear started waiting for.
+    if final or pushing or _registered_phones(hass, pushes):
         hass.async_create_background_task(
             _async_clear_certificate_push(hass, pushes, entry_id, final=final),
             f"{DOMAIN} certificate changed push clear",
         )
 
 
-def async_remove_certificate_pushes(hass: HomeAssistant, entry_id: str) -> None:
-    """Last clear of a removed entry; its push state goes with it (the clear holds on to it, no retry after)."""
-    async_clear_certificate_changed(hass, entry_id, final=True)
-    hass.data.get(CERTIFICATE_PUSHES, {}).pop(entry_id, None)
+def async_remove_certificate_pushes(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Last clear of a removed entry; its push state goes with it (the clear holds on to it, no retry after).
+
+    The entry is out of the registry already, so its state is set up from the entry itself: with none yet since
+    Home Assistant started, a push from before the restart may still be on every companion app.
+    """
+    if CONF_CERTIFICATE_FINGERPRINT in entry.data:
+        _entry_pushes(hass, entry)
+    async_clear_certificate_changed(hass, entry.entry_id, final=True)
+    hass.data.get(CERTIFICATE_PUSHES, {}).pop(entry.entry_id, None)
 
 
 @dataclass

@@ -1460,14 +1460,67 @@ async def test_removing_the_entry_during_a_failing_clear_still_warns_about_its_l
     assert [record.levelno for record in failures] == [logging.WARNING, logging.WARNING]
 
 
-async def test_removing_an_unknown_entry_leaves_no_push_state(
-    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+async def test_removing_an_entry_without_a_pin_leaves_no_push_state(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async_remove_certificate_pushes(hass, "unknown_entry")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        data={key: value for key, value in pinned_entry.data.items() if key != CONF_CERTIFICATE_FINGERPRINT},
+        options=PUSH_TARGETS,
+    )
+    phone = async_mock_service(hass, "notify", PHONE)
+
+    async_remove_certificate_pushes(hass, entry)
     await hass.async_block_till_done(wait_background_tasks=True)
 
-    assert "unknown_entry" not in hass.data.get(CERTIFICATE_PUSHES, {})
+    assert not phone
+    assert entry.entry_id not in hass.data.get(CERTIFICATE_PUSHES, {})
     assert not _certificate_warnings(caplog)
+
+
+async def test_removing_the_entry_first_after_a_restart_clears_the_phones_blindly(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    # No report or clear since the start: a push from before the restart may still be on the phone.
+    _with_push_targets(hass, pinned_entry)
+    phone = async_mock_service(hass, "notify", PHONE)
+
+    await hass.config_entries.async_remove(pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert _messages(phone) == [CLEAR]
+    assert pinned_entry.entry_id not in hass.data[CERTIFICATE_PUSHES]
+
+
+async def test_removing_the_entry_while_its_push_and_a_clear_wait_still_runs_the_last_clear(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The push on its way, a poll's clear waiting behind it, then the entry goes: the last clear runs too.
+    _with_push_targets(hass, pinned_entry)
+    async_mock_service(hass, "notify", FAMILY)
+    gate = asyncio.Event()
+    gateway_down = False
+
+    async def _held(call: ServiceCall) -> None:
+        if call.data["message"] != CLEAR:
+            await gate.wait()
+        elif gateway_down:
+            raise HomeAssistantError("push gateway down")
+
+    hass.services.async_register("notify", PHONE, _held)
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)  # the blind clear: no phone shows one now
+    await hass.async_block_till_done(wait_background_tasks=True)
+    gateway_down = True
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.config_entries.async_remove(pinned_entry.entry_id)
+    gate.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    failures = [record for record in caplog.records if f"push to notify.{PHONE} failed" in record.getMessage()]
+    assert [record.levelno for record in failures] == [logging.WARNING, logging.WARNING]
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
