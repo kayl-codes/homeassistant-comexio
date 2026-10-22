@@ -57,6 +57,7 @@ def _coordinator(load: AsyncMock | None = None) -> ComexioCoordinator:
         async_auto_backup=AsyncMock(return_value=[]),
         async_backfill_paper_metadata=AsyncMock(),
         async_backfill_block_keys=AsyncMock(),
+        plan_names_for_fub_id_sync=lambda _fub_id: set(),
     )
     coordinator._async_refresh_service_descriptions = AsyncMock()  # type: ignore[method-assign]
     coordinator._async_audit_orphaned_backups = AsyncMock()  # type: ignore[method-assign]
