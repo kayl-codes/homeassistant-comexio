@@ -216,7 +216,8 @@ def test_a_class_without_a_record_counts_as_http() -> None:
     [
         (None, {}),
         ({"classes": {MARKER: 1, IO: None}}, {MARKER: 1, IO: None}),
-        ({"classes": {MARKER: "1", IO: True, "x": 0}}, {"x": 0}),  # only ints and None survive
+        # An invalid record is unknown (rewritten), not HTTP (which could hide an HTTPS class).
+        ({"classes": {MARKER: "1", IO: True, "x": 0}}, {MARKER: None, IO: None, "x": 0}),
         ({"classes": [1]}, {}),
     ],
 )
@@ -224,6 +225,12 @@ def test_the_protocol_store_is_restored_defensively(stored: Any, expected: dict)
     coordinator = _coordinator(stored=stored)
     asyncio.run(coordinator.async_load_webio_protocols())
     assert coordinator.webio_synced_protocols == expected
+
+
+@pytest.mark.parametrize("stored", [{"classes": [1]}, {"classes": {MARKER: "1"}}])
+def test_a_damaged_protocol_store_is_logged(stored: Any, caplog: pytest.LogCaptureFixture) -> None:
+    asyncio.run(_coordinator(stored=stored).async_load_webio_protocols())
+    assert "Web-IO protocol store" in caplog.text
 
 
 def test_a_recorded_protocol_is_saved_only_when_it_changes() -> None:
@@ -253,7 +260,34 @@ def test_a_recorded_protocol_is_saved_only_when_it_changes() -> None:
 def test_the_device_audit_flags_a_protocol_mismatch(
     synced: int | None, device_id: str | None, active: bool, mismatch: bool
 ) -> None:
-    coordinator = _coordinator(WEBIO_PROTOCOL_HTTPS)
+    _assert_protocol_mismatch(WEBIO_PROTOCOL_HTTPS, synced, device_id, active, mismatch)
+
+
+@pytest.mark.parametrize(
+    ("synced", "mismatch"),
+    [
+        (WEBIO_PROTOCOL_HTTPS, True),  # back from HTTPS on another port to HTTP (or HTTPS on 443)
+        (WEBIO_PROTOCOL_HTTP, False),
+        (None, True),
+    ],
+)
+def test_the_device_audit_flags_a_switch_back_to_http(synced: int | None, mismatch: bool) -> None:
+    _assert_protocol_mismatch(WEBIO_PROTOCOL_HTTP, synced, "7", True, mismatch)
+
+
+def test_an_install_without_records_needs_no_rewrite_for_http() -> None:
+    coordinator = _coordinator(WEBIO_PROTOCOL_HTTP)
+    coordinator.ha_address = HaAddressResolver(MagicMock())
+    devices = {MARKER: {"device_id": "7", "device_ip": "192.0.2.10:8123"}}
+
+    audit = asyncio.run(coordinator._async_audit_webio_devices(devices, "192.0.2.10:8123", [MARKER]))
+    assert audit[MARKER]["protocol_mismatch"] is False
+
+
+def _assert_protocol_mismatch(
+    webhook_protocol: int, synced: int | None, device_id: str | None, active: bool, mismatch: bool
+) -> None:
+    coordinator = _coordinator(webhook_protocol)
     coordinator.ha_address = HaAddressResolver(MagicMock())
     coordinator.webio_synced_protocols = {MARKER: synced}
     devices = {MARKER: {"device_id": device_id, "device_ip": "192.0.2.10:8123"}}
@@ -412,6 +446,21 @@ def test_a_delta_sync_keeps_the_old_record_when_not_every_command_was_rewritten(
     _sync_class(button, _ctx(action))
 
     button.coordinator.async_set_webio_synced_protocol.assert_not_awaited()
+
+
+@pytest.mark.parametrize("address_written", [True, False])
+def test_the_record_follows_the_commands_not_the_device_address(address_written: bool) -> None:
+    """The record describes the commands: a failed address write is its own failure, shown again as an IP mismatch."""
+    button = _sync_button()
+    button._decide_effective_action = AsyncMock(return_value="update_ip")  # type: ignore[method-assign]
+    ctx = _ctx()
+    ctx.api.update_webio_device_ip = AsyncMock(return_value=address_written)
+
+    result = asyncio.run(button._sync_class(ctx, MARKER, "7", [], [], [], [], [], True, 10, 50))
+
+    assert result["updated_ip"] is address_written
+    assert ("Marker: server address update" in ctx.failed_writes) is not address_written
+    button.coordinator.async_set_webio_synced_protocol.assert_awaited_once_with(MARKER, WEBIO_PROTOCOL_HTTPS)
 
 
 def test_an_earlier_failure_of_another_class_does_not_block_the_record() -> None:
@@ -591,6 +640,26 @@ def test_a_pending_protocol_change_is_not_written_ahead_by_the_range_check() -> 
     coordinator.webio_synced_protocols = {MARKER: WEBIO_PROTOCOL_HTTP}
 
     assert _check(coordinator)[RANGE_CHECK_CHECKED] == 1
+    coordinator.api.save_single_command.assert_not_awaited()
+
+
+@pytest.mark.parametrize("live", [WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS])
+def test_an_unknown_class_protocol_is_left_to_the_sync(live: int) -> None:
+    """After a drift the class is unknown: the range check neither flags nor rewrites the protocol again."""
+    coordinator = _range_coordinator(WebioCommandForm(0, 100, live))
+    coordinator.webio_synced_protocols = {MARKER: None}
+
+    assert _check(coordinator)[RANGE_CHECK_FIXED] == 1  # the Min/Max drift
+    written = coordinator.api.save_single_command.await_args.args[2]
+    assert written == {**_TARGET, "Protocol": live}
+    assert coordinator.webio_synced_protocol(MARKER) is None
+
+
+def test_an_unknown_class_with_matching_min_max_is_not_rewritten() -> None:
+    coordinator = _range_coordinator(WebioCommandForm(-32768, 32767, WEBIO_PROTOCOL_HTTP))
+    coordinator.webio_synced_protocols = {MARKER: None}
+
+    _check(coordinator)
     coordinator.api.save_single_command.assert_not_awaited()
 
 

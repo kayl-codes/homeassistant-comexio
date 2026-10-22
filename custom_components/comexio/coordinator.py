@@ -4228,12 +4228,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             result[RANGE_CHECK_FAILED] += 1
             return
         result[RANGE_CHECK_CHECKED] += 1
+        # The protocol a command should carry is the one its class was last synced with, not the target's:
+        # a protocol change the sync has not written yet (its repair is pending) would switch single analog
+        # commands ahead of the device address, to an address that does not speak that protocol yet. An
+        # unknown record keeps the command's own protocol — the next sync rewrites the whole class anyway.
         synced = self.webio_synced_protocol(webio_class)
-        if synced is not None and synced != target["Protocol"]:
-            # A protocol change the sync has not written yet (its repair is pending): keep the class's
-            # recorded protocol — switching single analog commands ahead of the device address would
-            # send their pushes to an address that does not speak that protocol yet.
-            target = {**target, "Protocol": synced}
+        expected = synced if synced is not None else form.protocol
+        if expected is not None and expected != target["Protocol"]:
+            target = {**target, "Protocol": expected}
         # An unreadable protocol (None, logged by aiocomexio) is no evidence of drift.
         protocol_drifted = form.protocol is not None and form.protocol != target["Protocol"]
         if form.min == target["Min"] and form.max == target["Max"] and not protocol_drifted:
@@ -8216,11 +8218,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Restore the protocol each Web-IO class was last written with (called once at setup)."""
         stored = await self._webio_protocol_store.async_load() or {}
         classes = stored.get("classes")
+        if not isinstance(classes, dict):
+            if classes is not None:
+                _LOGGER.warning("Web-IO protocol store is unreadable (%r); assuming HTTP for every class", classes)
+            classes = {}
+        # An invalid record is unknown, not HTTP: unknown never matches, so the next audit rewrites the class
+        # instead of hiding a protocol the commands may still carry.
         self.webio_synced_protocols = {
-            cls: protocol
-            for cls, protocol in (classes if isinstance(classes, dict) else {}).items()
-            if protocol is None or type(protocol) is int
+            cls: protocol if protocol is None or type(protocol) is int else None for cls, protocol in classes.items()
         }
+        if invalid := sorted(
+            cls for cls, protocol in classes.items() if protocol is not None and type(protocol) is not int
+        ):
+            _LOGGER.warning("Web-IO protocol store: invalid record for %s; the class gets rewritten", invalid)
 
     def webio_synced_protocol(self, cls: str) -> int | None:
         """The protocol cls's commands were last written with; None when unknown.
