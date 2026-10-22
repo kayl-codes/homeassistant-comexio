@@ -434,16 +434,16 @@ def test_the_uptime_fetch_keeps_the_cause_of_the_polls_re_login(comexio_api: Com
 
 
 @pytest.mark.parametrize(
-    "helper",
+    ("helper", "expected"),
     [
-        lambda call: api_module._attempt("Writing", call, "failed"),
-        lambda call: api_module._succeeded("Writing", call),
+        (lambda call: api_module._attempt("Writing", call, "failed"), "failed"),
+        (lambda call: api_module._succeeded("Writing", call), False),
     ],
     ids=["attempt", "succeeded"],
 )
-def test_a_mismatch_without_a_mismatch_hook_is_a_warning(helper, caplog: pytest.LogCaptureFixture) -> None:
+def test_a_mismatch_without_a_mismatch_hook_is_a_warning(helper, expected, caplog: pytest.LogCaptureFixture) -> None:
     result = asyncio.run(helper(AsyncMock(side_effect=_mismatch())))
-    assert result in ("failed", False)
+    assert result is expected
     assert [record.levelno for record in caplog.records if "Writing failed" in record.getMessage()] == [logging.WARNING]
 
 

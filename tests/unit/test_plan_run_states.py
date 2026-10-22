@@ -247,6 +247,7 @@ class _FakeCoordinator(SimpleNamespace):
     comexio_unreachable = ComexioCoordinator.comexio_unreachable
     _async_bus_load_emergency_reboot = ComexioCoordinator._async_bus_load_emergency_reboot
     _report_certificate_changed = ComexioCoordinator._report_certificate_changed
+    _fail_poll_on_certificate_mismatch = ComexioCoordinator._fail_poll_on_certificate_mismatch
     _clear_certificate_changed = ComexioCoordinator._clear_certificate_changed
 
 

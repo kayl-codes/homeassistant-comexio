@@ -838,7 +838,9 @@ async def test_a_connection_error_with_a_replaced_certificate_raises_the_repair(
     await _setup(hass, pinned_entry)
 
     assert pinned_entry.state is ConfigEntryState.SETUP_RETRY
-    assert _issue(hass, pinned_entry) is not None
+    issue = _issue(hass, pinned_entry)
+    assert issue is not None
+    assert issue.data["actual"] == OTHER
 
 
 @pytest.mark.parametrize(("entry_fixture", "hinted"), [("pinned_entry", True), ("mock_config_entry", False)])
@@ -1816,7 +1818,40 @@ async def test_a_poll_meeting_another_certificate_raises_the_repair_until_one_ge
 async def test_a_poll_keeps_the_repair_another_of_its_requests_raised(
     hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
 ) -> None:
-    # The config fetch still met the pinned certificate, a later request of the same poll another one.
+    # The config fetch still met the pinned certificate, a request alongside the poll another one.
+    await _setup(hass, pinned_entry)
+    api = mock_comexio_api[0]
+    coordinator = hass.data[DOMAIN][pinned_entry.entry_id]
+
+    async def pinned_certificate() -> dict:
+        api.certificate_mismatch = None
+        return api_returns["get_raw_config"]
+
+    async def write_meets_foreign_certificate(*_args: object) -> tuple[dict, dict]:
+        api.certificate_mismatch = ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+        api.on_certificate_mismatch(OTHER)
+        return api_returns["get_live_states"]
+
+    api.get_raw_config = AsyncMock(side_effect=pinned_certificate)
+    api.get_live_states = AsyncMock(side_effect=write_meets_foreign_certificate)
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    issue = _issue(hass, pinned_entry)
+    assert issue is not None
+    assert issue.data["actual"] == OTHER
+
+    api.get_live_states = AsyncMock(return_value=api_returns["get_live_states"])
+    await coordinator.async_refresh()  # every request meets the pinned certificate again
+
+    assert _issue(hass, pinned_entry) is None
+
+
+@pytest.mark.logged_exception  # HA's coordinator traces the UpdateFailed at debug
+async def test_live_states_meeting_another_certificate_fail_the_poll(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+) -> None:
+    # The kept values of a failed live-states read must not pass as current ones.
     await _setup(hass, pinned_entry)
     api = mock_comexio_api[0]
     coordinator = hass.data[DOMAIN][pinned_entry.entry_id]
@@ -1827,19 +1862,13 @@ async def test_a_poll_keeps_the_repair_another_of_its_requests_raised(
 
     async def foreign_certificate(*_args: object) -> tuple[None, None]:
         api.certificate_mismatch = ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
-        api.on_certificate_mismatch(OTHER)
         return None, None
 
     api.get_raw_config = AsyncMock(side_effect=pinned_certificate)
     api.get_live_states = AsyncMock(side_effect=foreign_certificate)
     await coordinator.async_refresh()
 
-    api.get_live_states.assert_awaited()
+    assert not coordinator.last_update_success
     issue = _issue(hass, pinned_entry)
     assert issue is not None
     assert issue.data["actual"] == OTHER
-
-    api.get_live_states = AsyncMock(return_value=api_returns["get_live_states"])
-    await coordinator.async_refresh()  # every request meets the pinned certificate again
-
-    assert _issue(hass, pinned_entry) is None

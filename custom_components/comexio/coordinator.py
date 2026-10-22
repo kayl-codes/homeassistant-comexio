@@ -1145,6 +1145,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.available_source_counts = source_counts
         return final_data
 
+    def _fail_poll_on_certificate_mismatch(self) -> None:
+        """Raise UpdateFailed when a request of this poll met another certificate than the pinned one."""
+        if (mismatch := self.api.certificate_mismatch) is not None:
+            # Nothing more goes out to a server that is not the pinned one; the repair asks the user.
+            self._report_certificate_changed(mismatch.actual)
+            raise UpdateFailed(f"Comexio presents another certificate than the pinned one — see Repairs: {mismatch}")
+
     async def _async_fetch_parsed_config(
         self, conf: dict[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -1154,10 +1161,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # while this poll runs keeps that state over the older Active flag in raw_config.
         run_state_mark = self.api.run_state_mark()
         raw_config = await self.api.get_raw_config()
-        if (mismatch := self.api.certificate_mismatch) is not None:
-            # Nothing more goes out to a server that is not the pinned one; the repair asks the user.
-            self._report_certificate_changed(mismatch.actual)
-            raise UpdateFailed(f"Comexio presents another certificate than the pinned one — see Repairs: {mismatch}")
+        self._fail_poll_on_certificate_mismatch()
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
         if self.api.config_relogin_unreachable:
             # The re-login after a lapsed session (e.g. a reboot) got no reply.
@@ -1174,6 +1178,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         live_states, knx_live_states = await self.api.get_live_states(*_source_max_ids(raw_config))
         if live_states is None:
+            # Kept values must not pass as current ones while another certificate answers.
+            self._fail_poll_on_certificate_mismatch()
             # Fetch/parse failure this cycle (see get_live_states' docstring) — keep last
             # known values instead of letting parse_config default every item to 0/off.
             _LOGGER.warning("[%s] Live states fetch failed; keeping last known values", self.server_id)
