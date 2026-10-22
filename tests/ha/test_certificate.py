@@ -1847,6 +1847,27 @@ async def test_a_poll_keeps_the_repair_another_of_its_requests_raised(
     assert _issue(hass, pinned_entry) is None
 
 
+async def test_live_states_failing_for_another_reason_keep_the_last_values(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Only another certificate fails the poll; a plain read failure keeps the last known values.
+    await _setup(hass, pinned_entry)
+    api = mock_comexio_api[0]
+    coordinator = hass.data[DOMAIN][pinned_entry.entry_id]
+    before = dict(coordinator.marker_states)
+
+    api.get_live_states = AsyncMock(return_value=(None, None))
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    assert coordinator.marker_states == before
+    assert _issue(hass, pinned_entry) is None
+    assert "Live states fetch failed; keeping last known values" in caplog.text
+
+
 @pytest.mark.logged_exception  # HA's coordinator traces the UpdateFailed at debug
 async def test_live_states_meeting_another_certificate_fail_the_poll(
     hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
