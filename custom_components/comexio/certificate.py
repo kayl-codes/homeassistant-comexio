@@ -151,7 +151,7 @@ def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, ac
         translation_placeholders=certificate_placeholders(entry, actual),
         data={"entry_id": entry.entry_id, "actual": actual},
     )
-    pushes = _entry_pushes(hass, entry.entry_id)
+    pushes = _entry_pushes(hass, entry)
     if pushes.current is None or pushes.current.actual != actual:
         pushes.current = _CertificatePush(actual, _certificate_push_data(hass, entry, actual))
     push = pushes.current
@@ -183,6 +183,12 @@ def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str) -> None:
         )
 
 
+def async_remove_certificate_pushes(hass: HomeAssistant, entry_id: str) -> None:
+    """Last clear of a removed entry; its push state goes with it (the clear holds on to it, no retry after)."""
+    async_clear_certificate_changed(hass, entry_id)
+    hass.data.get(CERTIFICATE_PUSHES, {}).pop(entry_id, None)
+
+
 @dataclass
 class _CertificatePush:
     """The urgent push of one presented certificate: the notify services it reached, and whether a send runs."""
@@ -205,29 +211,34 @@ class _EntryPushes:
     clear_failed: set[str] = field(default_factory=set)  # a retried clear's failure is logged at debug level
 
 
-def _entry_pushes(hass: HomeAssistant, entry_id: str) -> _EntryPushes:
-    return hass.data.setdefault(CERTIFICATE_PUSHES, {}).setdefault(entry_id, _EntryPushes())
+def _entry_pushes(hass: HomeAssistant, entry: ConfigEntry) -> _EntryPushes:
+    """The entry's push state; the first since Home Assistant started takes every companion app as showing one.
+
+    The state lives in memory only, so a push sent before a restart may still be on the phones: the first
+    clear goes to all of them, whether a report or a clear comes first after the start.
+    """
+    all_pushes: dict[str, _EntryPushes] = hass.data.setdefault(CERTIFICATE_PUSHES, {})
+    if (pushes := all_pushes.get(entry.entry_id)) is None:
+        pushes = all_pushes[entry.entry_id] = _EntryPushes(shown=_phones(entry))
+    return pushes
 
 
 def _pushes_to_clear(hass: HomeAssistant, entry_id: str) -> _EntryPushes | None:
-    """The entry's push state; at the first clear since Home Assistant started, one that clears blindly.
-
-    The state lives in memory only, so a push sent before a restart may still be on the phones: the first
-    clear goes to every companion app of the entry (failures at debug level: the apps may not be set up yet).
-    """
-    all_pushes: dict[str, _EntryPushes] = hass.data.setdefault(CERTIFICATE_PUSHES, {})
-    if (pushes := all_pushes.get(entry_id)) is not None:
+    """The entry's push state, None for an entry without a pin (or one removed) that never had one this run."""
+    if (pushes := hass.data.get(CERTIFICATE_PUSHES, {}).get(entry_id)) is not None:
         return pushes
     entry = hass.config_entries.async_get_entry(entry_id)
     if entry is None or CONF_CERTIFICATE_FINGERPRINT not in entry.data:
         return None
-    phones = {target for target in _notify_targets(entry) if _is_mobile_app(target)}
-    pushes = all_pushes[entry_id] = _EntryPushes(shown=phones, clear_failed=set(phones))
-    return pushes
+    return _entry_pushes(hass, entry)
 
 
 def _notify_targets(entry: ConfigEntry) -> list[str]:
     return list(entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or [])
+
+
+def _phones(entry: ConfigEntry) -> set[str]:
+    return {target for target in _notify_targets(entry) if _is_mobile_app(target)}
 
 
 def _certificate_push_data(hass: HomeAssistant, entry: ConfigEntry, actual: str) -> dict[str, Any]:
@@ -269,13 +280,22 @@ async def _async_send_certificate_push(
 async def _async_clear_certificate_push(hass: HomeAssistant, pushes: _EntryPushes, entry_id: str) -> None:
     """Take the push off the phones, after a send still on its way (the lock); the failed ones stay for the next."""
     async with pushes.lock:
-        if not pushes.shown:
+        if (entry := hass.config_entries.async_get_entry(entry_id)) is not None:
+            pushes.shown &= _phones(entry)  # a phone taken off the notify option is left alone
+        # A notify service not registered (yet: right after a restart the companion app may come up after this
+        # integration) stays for the next clear.
+        targets = sorted(
+            target
+            for target in pushes.shown
+            if hass.services.has_service(NOTIFY_DOMAIN, target.removeprefix(f"{NOTIFY_DOMAIN}."))
+        )
+        if not targets:
             return
         # A companion-app command: any other notify service would deliver it as the text "clear_notification".
         service_data = {"message": "clear_notification", "data": {"tag": _certificate_push_tag(entry_id)}}
-        delivered, failed = await _async_notify(hass, service_data, sorted(pushes.shown), pushes.clear_failed)
+        delivered, failed = await _async_notify(hass, service_data, targets, pushes.clear_failed)
         pushes.shown -= delivered
-        pushes.clear_failed = (pushes.clear_failed | failed) - delivered
+        pushes.clear_failed = ((pushes.clear_failed | failed) - delivered) & pushes.shown
 
 
 async def _async_notify(

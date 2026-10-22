@@ -18,6 +18,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from custom_components.comexio import config_flow as config_flow_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.certificate import (
+    CERTIFICATE_PUSHES,
     async_clear_certificate_changed,
     async_report_certificate_changed,
     certificate_issue_id,
@@ -1119,6 +1120,7 @@ async def test_the_first_clear_after_a_restart_clears_the_phones_blindly(
 async def test_a_failed_clear_is_retried_at_the_next_clear(
     hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.comexio.certificate")
     _with_push_targets(hass, pinned_entry)
     async_mock_service(hass, "notify", FAMILY)
     pushed = async_mock_service(hass, "notify", PHONE)
@@ -1126,15 +1128,108 @@ async def test_a_failed_clear_is_retried_at_the_next_clear(
     await hass.async_block_till_done(wait_background_tasks=True)
     assert len(pushed) == 1
 
-    hass.services.async_remove("notify", PHONE)  # the companion app gone for a moment
+    async def _broken(_call: ServiceCall) -> None:
+        raise HomeAssistantError("push gateway down")
+
+    hass.services.async_remove("notify", PHONE)
+    hass.services.async_register("notify", PHONE, _broken)
+    for _ in range(2):
+        async_clear_certificate_changed(hass, pinned_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+    levels = [record.levelno for record in caplog.records if f"push to notify.{PHONE} failed" in record.getMessage()]
+    assert levels == [logging.WARNING, logging.DEBUG]  # one warning, not one per poll
+
+    hass.services.async_remove("notify", PHONE)
+    phone = async_mock_service(hass, "notify", PHONE)
     async_clear_certificate_changed(hass, pinned_entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert f"Comexio certificate push to notify.{PHONE} failed" in caplog.text
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert _messages(phone) == [CLEAR]
+
+
+async def test_a_clear_waits_for_a_companion_app_not_set_up_yet(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Right after a restart the mobile app may register its notify service after this integration's first clear.
+    _with_push_targets(hass, pinned_entry)
+
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert "failed" not in caplog.text
 
     phone = async_mock_service(hass, "notify", PHONE)
     async_clear_certificate_changed(hass, pinned_entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert _messages(phone) == [CLEAR]
+
+
+async def test_a_report_first_after_a_restart_still_clears_the_earlier_push(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    # The setup reports the changed certificate before any clear, and its push does not get through: the
+    # push from before the restart is still on the phone once the pinned certificate is back.
+    _with_push_targets(hass, pinned_entry)
+    async_mock_service(hass, "notify", FAMILY)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)  # notify.mobile_app_phone not there yet
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    phone = async_mock_service(hass, "notify", PHONE)
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert _messages(phone) == [CLEAR]
+
+
+async def test_no_blind_clear_for_an_entry_without_a_pin(hass: HomeAssistant, pinned_entry: MockConfigEntry) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        data={key: value for key, value in pinned_entry.data.items() if key != CONF_CERTIFICATE_FINGERPRINT},
+    )
+    _with_push_targets(hass, entry)
+    phone = async_mock_service(hass, "notify", PHONE)
+
+    async_clear_certificate_changed(hass, entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert not phone
+    assert entry.entry_id not in hass.data.get(CERTIFICATE_PUSHES, {})
+
+
+async def test_a_phone_taken_off_the_notify_option_gets_no_clear(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    _with_push_targets(hass, pinned_entry)
+    phone = async_mock_service(hass, "notify", PHONE)
+    async_mock_service(hass, "notify", FAMILY)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    family_only = {"function_plan_watchdog_notify": [f"notify.{FAMILY}"]}
+    hass.config_entries.async_update_entry(pinned_entry, options=family_only)
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert _messages(phone) == ["push"]
+
+
+async def test_the_certificate_back_after_a_clear_is_pushed_again(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    # Pinned certificate back, then the other one again before the clear ran: the phone must end on the alarm.
+    _with_push_targets(hass, pinned_entry)
+    phone, gate = _gated(hass, PHONE)
+    async_mock_service(hass, "notify", FAMILY)
+
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    gate.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert _messages(phone) == ["push", CLEAR, "push"]
 
 
 async def test_a_clear_waits_for_the_push_on_its_way(hass: HomeAssistant, pinned_entry: MockConfigEntry) -> None:
@@ -1225,6 +1320,7 @@ async def test_removing_the_entry_removes_its_push_from_the_phones(
     assert _messages(phone) == ["push", CLEAR]
     assert len(family) == 1
     assert _issue(hass, pinned_entry) is None
+    assert pinned_entry.entry_id not in hass.data[CERTIFICATE_PUSHES]
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

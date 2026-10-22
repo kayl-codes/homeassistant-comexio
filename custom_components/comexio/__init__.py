@@ -15,6 +15,7 @@ from homeassistant.util import slugify
 from .certificate import (
     async_clear_certificate_changed,
     async_create_api,
+    async_remove_certificate_pushes,
     async_replaced_fingerprint,
     async_report_certificate_changed,
 )
@@ -736,8 +737,8 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
 
 # HA awaits async_remove_entry, so it stays a coroutine without an await of its own (S7503 false positive).
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:  # NOSONAR
-    """Drop the entry's certificate_changed repair, which has nothing left to fix."""
-    async_clear_certificate_changed(hass, entry.entry_id)
+    """Drop the entry's certificate_changed repair, which has nothing left to fix, and its push on the phones."""
+    async_remove_certificate_pushes(hass, entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
