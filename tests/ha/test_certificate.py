@@ -918,6 +918,14 @@ FAMILY = "family"  # a notify group: gets the push, but no companion-app clear
 PUSH_TARGETS = {"function_plan_watchdog_notify": [f"notify.{PHONE}", f"notify.{FAMILY}"]}
 
 
+def _certificate_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == "custom_components.comexio.certificate" and record.levelno >= logging.WARNING
+    ]
+
+
 def _with_push_targets(hass: HomeAssistant, entry: MockConfigEntry) -> None:
     entry.add_to_hass(hass)
     hass.config_entries.async_update_entry(entry, options=PUSH_TARGETS)
@@ -1381,7 +1389,7 @@ async def test_removing_the_entry_removes_its_push_from_the_phones(
     assert len(family) == 1
     assert _issue(hass, pinned_entry) is None
     assert pinned_entry.entry_id not in hass.data[CERTIFICATE_PUSHES]
-    assert "may stay on" not in caplog.text  # every phone reached
+    assert not _certificate_warnings(caplog)  # every phone reached
 
     # A poll still on its way when the entry went: no repair and no alarm for an entry that is gone.
     async_report_certificate_changed(hass, pinned_entry, THIRD)
@@ -1429,6 +1437,29 @@ async def test_removing_the_entry_warns_when_its_last_clear_fails(
     assert [record.levelno for record in failures] == [logging.WARNING]
 
 
+async def test_removing_the_entry_during_a_failing_clear_still_warns_about_its_last_one(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A poll's clear still on its way when the entry goes: its failure must not quiet the last clear's.
+    _with_push_targets(hass, pinned_entry)
+    async_mock_service(hass, "notify", FAMILY)
+    gate = asyncio.Event()
+
+    async def _broken(_call: ServiceCall) -> None:
+        await gate.wait()
+        raise HomeAssistantError("push gateway down")
+
+    hass.services.async_register("notify", PHONE, _broken)
+    async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    await hass.async_block_till_done()
+    await hass.config_entries.async_remove(pinned_entry.entry_id)
+    gate.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    failures = [record for record in caplog.records if f"push to notify.{PHONE} failed" in record.getMessage()]
+    assert [record.levelno for record in failures] == [logging.WARNING, logging.WARNING]
+
+
 async def test_removing_an_unknown_entry_leaves_no_push_state(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1436,7 +1467,7 @@ async def test_removing_an_unknown_entry_leaves_no_push_state(
     await hass.async_block_till_done(wait_background_tasks=True)
 
     assert "unknown_entry" not in hass.data.get(CERTIFICATE_PUSHES, {})
-    assert "Comexio certificate" not in caplog.text
+    assert not _certificate_warnings(caplog)
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
