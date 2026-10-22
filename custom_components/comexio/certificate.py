@@ -166,18 +166,21 @@ def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, ac
 def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str) -> None:
     """Drop the certificate_changed repair: Comexio presents the pinned certificate (again).
 
-    The push is removed from the companion apps it reached as well (also of a removed entry); without one
-    nothing is sent, so the clear at every successful poll costs nothing.
+    The push is removed from the companion apps it reached as well (also of a removed entry), retried at the
+    next clear where that failed; with none left nothing is sent, so the clear at every successful poll
+    costs nothing.
     """
     if presented_fingerprint(hass, entry_id) is not None:
         ir.async_delete_issue(hass, DOMAIN, certificate_issue_id(entry_id))
-    pushes = hass.data.get(CERTIFICATE_PUSHES, {}).get(entry_id)
-    if pushes is None or (push := pushes.current) is None:
+    pushes = _pushes_to_clear(hass, entry_id)
+    if pushes is None:
         return
-    pushes.current = None
-    hass.async_create_background_task(
-        _async_clear_certificate_push(hass, pushes, push), f"{DOMAIN} certificate changed push clear"
-    )
+    # A send still waiting for the lock is dropped; one already sending adds to shown only when it is done.
+    pushing, pushes.current = pushes.current is not None, None
+    if pushing or pushes.shown:
+        hass.async_create_background_task(
+            _async_clear_certificate_push(hass, pushes, entry_id), f"{DOMAIN} certificate changed push clear"
+        )
 
 
 @dataclass
@@ -197,10 +200,30 @@ class _EntryPushes:
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     current: _CertificatePush | None = None
+    # Companion apps a push (of any certificate) reached and no clear has since: the next clear goes to them.
+    shown: set[str] = field(default_factory=set)
+    clear_failed: set[str] = field(default_factory=set)  # a retried clear's failure is logged at debug level
 
 
 def _entry_pushes(hass: HomeAssistant, entry_id: str) -> _EntryPushes:
     return hass.data.setdefault(CERTIFICATE_PUSHES, {}).setdefault(entry_id, _EntryPushes())
+
+
+def _pushes_to_clear(hass: HomeAssistant, entry_id: str) -> _EntryPushes | None:
+    """The entry's push state; at the first clear since Home Assistant started, one that clears blindly.
+
+    The state lives in memory only, so a push sent before a restart may still be on the phones: the first
+    clear goes to every companion app of the entry (failures at debug level: the apps may not be set up yet).
+    """
+    all_pushes: dict[str, _EntryPushes] = hass.data.setdefault(CERTIFICATE_PUSHES, {})
+    if (pushes := all_pushes.get(entry_id)) is not None:
+        return pushes
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None or CONF_CERTIFICATE_FINGERPRINT not in entry.data:
+        return None
+    phones = {target for target in _notify_targets(entry) if _is_mobile_app(target)}
+    pushes = all_pushes[entry_id] = _EntryPushes(shown=phones, clear_failed=set(phones))
+    return pushes
 
 
 def _notify_targets(entry: ConfigEntry) -> list[str]:
@@ -233,21 +256,26 @@ async def _async_send_certificate_push(
 ) -> None:
     try:
         async with pushes.lock:
+            if pushes.current is not push:
+                return  # cleared, or another certificate reported, while it waited: its alarm is no news anymore
             delivered, failed = await _async_notify(hass, push.service_data, targets, push.failed)
             push.delivered |= delivered
             push.failed |= failed
+            pushes.shown |= {target for target in delivered if _is_mobile_app(target)}
     finally:
         push.sending = False
 
 
-async def _async_clear_certificate_push(hass: HomeAssistant, pushes: _EntryPushes, push: _CertificatePush) -> None:
-    """Take the push off the phones, after a send of it still on its way (the lock)."""
+async def _async_clear_certificate_push(hass: HomeAssistant, pushes: _EntryPushes, entry_id: str) -> None:
+    """Take the push off the phones, after a send still on its way (the lock); the failed ones stay for the next."""
     async with pushes.lock:
+        if not pushes.shown:
+            return
         # A companion-app command: any other notify service would deliver it as the text "clear_notification".
-        targets = [target for target in push.delivered if _is_mobile_app(target)]
-        if targets:
-            service_data = {"message": "clear_notification", "data": {"tag": push.service_data["data"]["tag"]}}
-            await _async_notify(hass, service_data, targets, set())
+        service_data = {"message": "clear_notification", "data": {"tag": _certificate_push_tag(entry_id)}}
+        delivered, failed = await _async_notify(hass, service_data, sorted(pushes.shown), pushes.clear_failed)
+        pushes.shown -= delivered
+        pushes.clear_failed = (pushes.clear_failed | failed) - delivered
 
 
 async def _async_notify(
