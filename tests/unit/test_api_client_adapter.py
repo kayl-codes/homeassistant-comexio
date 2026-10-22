@@ -1097,9 +1097,11 @@ def test_knx_catalog_meeting_another_certificate_keeps_last_known_good(
     catalog = {"KnxPoints": {"1": {}}}
     comexio_api.seed_knx_dpt_catalog(catalog, "11.0.1")
     comexio_api.comexio_version = "11.0.2"
-    _fail(client, "get_knx_dpt_catalog", ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64))
+    err = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
+    _fail(client, "get_knx_dpt_catalog", err)
     assert asyncio.run(comexio_api.get_knx_dpt_catalog()) is catalog
     assert comexio_api.get_knx_dpt_catalog_snapshot() == (catalog, "11.0.1")
+    assert comexio_api.certificate_mismatch is err  # reported, not swallowed as a plain fetch failure
 
 
 def test_knx_catalog_failure_without_cache_is_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
