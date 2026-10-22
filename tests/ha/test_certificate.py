@@ -1851,13 +1851,16 @@ async def test_live_states_failing_for_another_reason_keep_the_last_values(
     hass: HomeAssistant,
     pinned_entry: MockConfigEntry,
     mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Only another certificate fails the poll; a plain read failure keeps the last known values.
+    api_returns["get_live_states"] = ({"1": "1"}, {})
     await _setup(hass, pinned_entry)
     api = mock_comexio_api[0]
     coordinator = hass.data[DOMAIN][pinned_entry.entry_id]
     before = dict(coordinator.marker_states)
+    assert before  # a real live value, so dropping it shows
 
     api.get_live_states = AsyncMock(return_value=(None, None))
     await coordinator.async_refresh()
