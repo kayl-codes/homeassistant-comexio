@@ -534,9 +534,11 @@ MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400
 
 # Range of a temperature marker number (is_temperature_marker_name below, user decision
-# 2026-10-17, #179): down to absolute zero so negative correction offsets and outdoor
-# setpoints are settable, up to a generous ceiling that still blocks gross typos.
-MARKER_TEMPERATURE_MIN_VALUE = -273.15
+# 2026-10-17, #179): down to about absolute zero so negative correction offsets and outdoor
+# setpoints are settable, up to a generous ceiling that still blocks gross typos. The
+# minimum is -273, not -273.15: the frontend's number input counts its steps from the
+# minimum, so -273.15 with step 0.1 accepted only values ending in 5 (49.95, 50.05).
+MARKER_TEMPERATURE_MIN_VALUE = -273.0
 MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
 
 # A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
