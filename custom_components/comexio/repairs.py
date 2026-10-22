@@ -13,7 +13,12 @@ from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig,
 from homeassistant.util import slugify
 import voluptuous as vol
 
-from .certificate import ISSUE_CERTIFICATE_CHANGED, async_report_certificate_changed, certificate_placeholders
+from .certificate import (
+    ISSUE_CERTIFICATE_CHANGED,
+    async_clear_certificate_changed,
+    async_report_certificate_changed,
+    certificate_placeholders,
+)
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
     CLEANUP_SCOPE_IO,
@@ -1374,7 +1379,7 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_abort(reason="cannot_connect", description_placeholders=placeholders)
         if current == entry.data[CONF_CERTIFICATE_FINGERPRINT]:
             # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
-            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            async_clear_certificate_changed(self.hass, entry.entry_id)
             if entry.state is not ConfigEntryState.LOADED:
                 self.hass.config_entries.async_schedule_reload(entry.entry_id)
             return self.async_abort(reason="certificate_restored", description_placeholders=placeholders)
@@ -1393,7 +1398,7 @@ class ComexioRepairFlow(RepairsFlow):
         # A loaded entry reloads through its update listener on the data change below.
         reload = entry.state is not ConfigEntryState.LOADED
         self.hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: current})
-        ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+        async_clear_certificate_changed(self.hass, entry.entry_id)  # also removes the push from the phones
         if reload:
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
         return self.async_create_entry(data={})

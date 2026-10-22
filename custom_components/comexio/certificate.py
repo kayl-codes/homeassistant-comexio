@@ -8,6 +8,7 @@ A certificate other than the pinned one is never accepted on its own: the certif
 shows the pinned and the new fingerprint and pins the new one only when the user confirms it.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -24,19 +25,43 @@ from .const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
     CONF_CERTIFICATE_FINGERPRINT,
+    CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_HOST,
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_USERNAME,
     DOMAIN,
+    FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
 )
+from .plan_watchdog import MOBILE_APP_SERVICE_PREFIX, NOTIFY_DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 ISSUE_CERTIFICATE_CHANGED = "certificate_changed"
+REPAIRS_PATH = "/config/repairs"
+
+# Push texts by HA language (English fallback); the certificate_changed placeholders are filled in.
+CERTIFICATE_PUSH_TEXTS: dict[str, dict[str, str]] = {
+    "en": {
+        "title": "Comexio: certificate changed",
+        "message": (
+            "Comexio {server_id} ({host}) presents another TLS certificate than the pinned one. Home Assistant "
+            "sends nothing to it until you check the new certificate in the repair.\n"
+            "New (SHA-256): {actual}"
+        ),
+    },
+    "de": {
+        "title": "Comexio: Zertifikat geändert",
+        "message": (
+            "Comexio {server_id} ({host}) zeigt ein anderes TLS-Zertifikat als das gepinnte. Home Assistant "
+            "sendet nichts mehr dorthin, bis du das neue Zertifikat in der Reparatur prüfst.\n"
+            "Neu (SHA-256): {actual}"
+        ),
+    },
+}
 
 # States of the connection sensor (sensor.ComexioConnectionSensor), see connection_state.
 CONNECTION_HTTPS = "https"
@@ -101,11 +126,20 @@ def _https_notification_id(server_id: str) -> str:
 
 
 def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, actual: str) -> None:
-    """Raise (or update) the certificate_changed repair: Comexio presents `actual` instead of the pin."""
+    """Raise (or update) the certificate_changed repair: Comexio presents `actual` instead of the pin.
+
+    A certificate not reported yet also goes out as an urgent push (see _async_push_certificate_changed);
+    the reports of the same certificate at every retry and poll do not. The repair lives in memory only, so
+    a certificate still changed after a restart of Home Assistant is pushed once more.
+    """
     pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
     if pinned is None or actual == pinned:
         # Nothing pinned, or a late report of a client still on the pin the user just replaced.
         return
+    if presented_fingerprint(hass, entry.entry_id) != actual:
+        hass.async_create_background_task(
+            _async_push_certificate_changed(hass, entry, actual), f"{DOMAIN} certificate changed push"
+        )
     ir.async_create_issue(
         hass,
         DOMAIN,
@@ -119,8 +153,64 @@ def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, ac
 
 
 def async_clear_certificate_changed(hass: HomeAssistant, entry_id: str) -> None:
-    """Drop the certificate_changed repair: Comexio presents the pinned certificate (again)."""
+    """Drop the certificate_changed repair: Comexio presents the pinned certificate (again).
+
+    The push of an open repair is removed from the phones as well; without one nothing is sent, so the
+    clear at every successful poll costs nothing.
+    """
+    if presented_fingerprint(hass, entry_id) is None:
+        return
     ir.async_delete_issue(hass, DOMAIN, certificate_issue_id(entry_id))
+    if (entry := hass.config_entries.async_get_entry(entry_id)) is not None:
+        hass.async_create_background_task(
+            _async_send_certificate_push(
+                hass, entry, {"message": "clear_notification", "data": {"tag": _certificate_push_tag(entry_id)}}
+            ),
+            f"{DOMAIN} certificate changed push clear",
+        )
+
+
+async def _async_push_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, actual: str) -> None:
+    """Urgent push to the configured notify services: the repair needs the user, Comexio gets nothing until then.
+
+    Through Do Not Disturb (iOS: a critical alert, Android: high priority, delivered at once); a tap opens
+    the repairs. The fingerprints are the hashes of public certificates, no secret.
+    """
+    texts = CERTIFICATE_PUSH_TEXTS.get(hass.config.language, CERTIFICATE_PUSH_TEXTS["en"])
+    data: dict[str, Any] = {
+        "tag": _certificate_push_tag(entry.entry_id),
+        "group": f"{DOMAIN}_{entry.data[CONF_SERVER_ID]}",
+        "url": REPAIRS_PATH,
+        "clickAction": REPAIRS_PATH,
+        "ttl": 0,
+        "priority": "high",
+        "push": {"interruption-level": "critical", "sound": {"name": "default", "critical": 1, "volume": 1.0}},
+    }
+    message = texts["message"].format(**certificate_placeholders(entry, actual))
+    await _async_send_certificate_push(hass, entry, {"title": texts["title"], "message": message, "data": data})
+
+
+async def _async_send_certificate_push(hass: HomeAssistant, entry: ConfigEntry, service_data: dict[str, Any]) -> None:
+    """Send to every notify service of CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY; a failing one does not stop the others.
+
+    A clear (message "clear_notification") is a companion-app command and goes to the mobile apps only.
+    """
+    clear = service_data["message"] == "clear_notification"
+    for target in entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or []:
+        service = target.removeprefix(f"{NOTIFY_DOMAIN}.")
+        if clear and not service.startswith(MOBILE_APP_SERVICE_PREFIX):
+            continue
+        try:
+            async with asyncio.timeout(FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC):
+                await hass.services.async_call(NOTIFY_DOMAIN, service, service_data, blocking=True)
+        except Exception:
+            # Third-party notify platforms raise their own errors; none may skip the remaining targets.
+            _LOGGER.warning("Comexio certificate push to notify.%s failed", service, exc_info=True)
+
+
+def _certificate_push_tag(entry_id: str) -> str:
+    """One push per entry: a newer one replaces it on the phone, the clear removes it."""
+    return f"{DOMAIN}_certificate_{entry_id}"
 
 
 def certificate_placeholders(entry: ConfigEntry, actual: str) -> dict[str, str]:
