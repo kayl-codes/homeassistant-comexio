@@ -1321,6 +1321,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # so a fresh resolver after a restart needs at most one lookup instead of a search. Resolved
         # before the payloads: it sets the protocol they are built with.
         ha_address = (await self.async_webhook_target(webio_devices)).address
+        # Taken with the address: a later resolution (button, sync) rewrites the resolver's reason.
+        address_fallback = self.ha_address.fallback_reason
 
         # Prepare payload map for future delta updates via button/repairs
         payload_map = {
@@ -1384,6 +1386,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "orphan": found["orphan"],
             "ip_mismatch": ip_mismatch,
             "ha_address": ha_address,
+            "address_fallback": address_fallback,
             "protocol": protocol_items,
             "webhook_protocol": self.api.webhook_protocol,
             "webio_devices": webio_device_audit,
@@ -1962,7 +1965,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # The address "update_ip" writes, and why it is the automatic one although the options name an
                 # external/custom URL (a webhook_url_error key; None when the mode's own URL is used).
                 "ha_address": audit.get("ha_address"),
-                "address_fallback": self.ha_address.fallback_reason,
+                "address_fallback": audit.get("address_fallback"),
             },
         )
 

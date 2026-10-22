@@ -199,11 +199,11 @@ _SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
 def _is_lan_host(host: str) -> bool:
     """A host reached only inside the local network: a private, link-local or shared-space IP, a single-label
     name or a name under one of the KNOWN_DOMAINS (fritz.box, local, …). Cleartext there never crosses the
-    internet."""
-    if (ip := _ip(host)) is not None:
+    internet. Names are taken by their suffix, not resolved."""
+    name = host.rstrip(".").lower()  # "192.168.1.5." is still the IP
+    if (ip := _ip(name)) is not None:
         ip = getattr(ip, "ipv4_mapped", None) or ip
         return ip.is_private or ip.is_link_local or ip in _SHARED_ADDRESS_SPACE
-    name = host.rstrip(".").lower()
     return "." not in name or any(name == domain or name.endswith(f".{domain}") for domain in KNOWN_DOMAINS)
 
 

@@ -43,7 +43,7 @@ from custom_components.comexio.ha_address import (
     webhook_url_target,
 )
 from custom_components.comexio.options_flow import ComexioOptionsFlow
-from custom_components.comexio.repairs import ComexioRepairFlow
+from custom_components.comexio.repairs import _ADDRESS_FALLBACK_REASONS, ComexioRepairFlow
 
 MARKER, IO = WEBIO_CLASSES[0], WEBIO_CLASSES[1]
 
@@ -100,7 +100,21 @@ def test_a_loopback_webhook_url_is_refused(url: str) -> None:
     assert webhook_url_error(url) == "loopback_url"
 
 
-@pytest.mark.parametrize("url", ["http://ha.example.com", "http://ha.example.com:8123", "http://8.8.8.8:8123"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://ha.example.com",
+        "http://ha.example.com:8123",
+        "http://8.8.8.8:8123",
+        "http://[::ffff:8.8.8.8]:8123",
+        "http://[2606:4700::1]:8123",
+        "http://100.63.255.255",
+        "http://100.128.0.1",
+        "http://evilfritz.box",
+        "http://ha.local.example.com",
+        "http://HA.EXAMPLE.COM.",
+    ],
+)
 def test_plain_http_outside_the_local_network_is_refused(url: str) -> None:
     """The values would cross the internet in cleartext, to a webhook whose id is predictable."""
     assert webhook_url_target(url) is not None
@@ -121,6 +135,10 @@ def test_plain_http_outside_the_local_network_is_refused(url: str) -> None:
         "http://ha.home.arpa.",
         "http://fritz.box",
         "https://ha.example.com:8123",
+        "http://[::ffff:192.168.1.5]:8123",
+        "http://192.168.1.5.:8123",
+        "http://100.127.255.255",
+        "http://HA.FRITZ.BOX",
     ],
 )
 def test_plain_http_inside_the_local_network_or_https_is_allowed(url: str) -> None:
@@ -816,8 +834,8 @@ def _issue_coordinator(ip_mismatch: bool, protocol: list[dict]) -> ComexioCoordi
         "ip_mismatch": ip_mismatch,
         "protocol": protocol,
         "ha_address": "192.0.2.10:8123",
+        "address_fallback": None,
     }
-    coordinator.ha_address = SimpleNamespace(fallback_reason=None)
     return coordinator
 
 
@@ -846,7 +864,7 @@ def test_the_issue_carries_the_address_to_write_and_why_it_is_the_automatic_one(
     created = MagicMock()
     monkeypatch.setattr(coordinator_module.ir, "async_create_issue", created)
     coordinator = _issue_coordinator(True, [])
-    coordinator.ha_address.fallback_reason = reason
+    coordinator.last_audit_results["address_fallback"] = reason
 
     coordinator._update_sync_mismatch_issue({"x"}, {}, {}, {})
 
@@ -964,8 +982,38 @@ def test_the_repair_adds_no_fallback_note_while_the_options_url_is_used(issue_da
     assert "webhook URL from the options" not in form["description_placeholders"]["summary_text"]
 
 
-def test_a_fallback_without_a_wrong_address_adds_no_note() -> None:
+def test_a_protocol_only_fix_also_says_it_ignores_the_options_url() -> None:
+    """The fix writes the automatic address's protocol too, so the options URL is just as ignored."""
     form = _repair_form(
         {"ip_mismatch": 1, "ip_address": 0, "protocol": 3}, ha_address="x:8123", address_fallback="invalid_url"
     )
+    assert "The fix sets the automatic address **x:8123**" in form["description_placeholders"]["summary_text"]
+
+
+@pytest.mark.parametrize(
+    ("counts", "language", "expected"),
+    [
+        ({"ip_address": 1}, "en", "* 🌐 **Server Address:** Incorrect\n  * ⚠️ The webhook URL from the options"),
+        ({"ip_address": 0, "protocol": 3}, "en", "**Webhook protocol:** 3\n  * ⚠️ The webhook URL from the options"),
+        ({"ip_address": 1}, "de", "**Server-Adresse:** Falsch\n  * ⚠️ Die Webhook-URL aus den Optionen"),
+    ],
+)
+def test_with_configuration_issues_the_note_follows_the_address_lines(
+    counts: dict[str, int], language: str, expected: str
+) -> None:
+    form = _repair_form(
+        {"ip_mismatch": 1, "missing": 2, **counts}, language, ha_address="x:8123", address_fallback="insecure_url"
+    )
+    assert expected in form["description_placeholders"]["summary_text"]
+
+
+def test_with_configuration_issues_and_no_fallback_there_is_no_note() -> None:
+    form = _repair_form({"ip_mismatch": 1, "missing": 2, "ip_address": 1}, address_fallback=None)
     assert "webhook URL from the options" not in form["description_placeholders"]["summary_text"]
+
+
+def test_every_url_error_has_a_fallback_reason_in_both_languages() -> None:
+    """A new webhook_url_error key would otherwise reach the repair as a raw key."""
+    errors = {webhook_url_error(url) for url in ("ha.example.com", "http://127.0.0.1", "http://ha.example.com")}
+    assert errors == set(_ADDRESS_FALLBACK_REASONS)
+    assert all(de and en and de != en for de, en in _ADDRESS_FALLBACK_REASONS.values())

@@ -752,7 +752,7 @@ class ComexioRepairFlow(RepairsFlow):
                         "protocol (HTTP/HTTPS) in the Comexio Web-IO device does not match the "
                         "current Home Assistant address. This prevents receiving status updates via webhooks."
                     )
-                if ip_address_c > 0 and (fallback := _address_fallback_note(self.issue_data, is_de)):
+                if fallback := _address_fallback_note(self.issue_data, is_de):
                     summary += f"\n\n{fallback}"
             else:
                 # CASE 2: Configuration issues (with optional IP mismatch)
@@ -798,10 +798,11 @@ class ComexioRepairFlow(RepairsFlow):
                         f"* {ICON_NETWORK} **{'Server-Adresse' if is_de else 'Server Address'}:** "
                         f"{'Falsch' if is_de else 'Incorrect'}"
                     )
-                    if fallback := _address_fallback_note(self.issue_data, is_de):
-                        lines.append(f"  * {fallback}")
                 if p_c > 0:
                     lines.append(f"* {ICON_NETWORK} **{'Webhook-Protokoll' if is_de else 'Webhook protocol'}:** {p_c}")
+                # The fix writes the automatic address and its protocol, whichever of the two is wrong.
+                if i_c > 0 and (fallback := _address_fallback_note(self.issue_data, is_de)):
+                    lines.append(f"  * {fallback}")
 
                 if is_de:
                     footer = f"\n\nWeb-IO-Befehle: {ha_count} (HA) zu {com_count} (Comexio)"
