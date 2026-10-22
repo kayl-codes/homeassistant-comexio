@@ -554,3 +554,5 @@ def test_a_restore_running_when_the_bulk_load_returns_follows_no_rename() -> Non
     coordinator._async_follow_plan_renames = AsyncMock()  # type: ignore[method-assign]
     _cycle(coordinator)
     coordinator._async_follow_plan_renames.assert_not_awaited()
+    coordinator.function_plan_backup.async_backfill_paper_metadata.assert_awaited_once()
+    coordinator._async_audit_orphaned_backups.assert_awaited_once()
