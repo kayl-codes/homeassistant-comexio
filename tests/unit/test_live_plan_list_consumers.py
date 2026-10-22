@@ -254,6 +254,7 @@ def _snapshot_coordinator(live_plans: dict | None) -> ComexioCoordinator:
     coordinator._last_referenced_markers_from_snapshot = live_plans is not None
     coordinator._lp_missing_recheck_pending = False
     coordinator._rename_follow_failed = set()
+    coordinator._rename_move_pending = {}
     coordinator._async_audit_orphaned_backups = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
     coordinator.async_request_refresh = AsyncMock()  # type: ignore[method-assign]

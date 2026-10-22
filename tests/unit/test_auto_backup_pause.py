@@ -34,6 +34,7 @@ def _coordinator(load: AsyncMock | None = None) -> ComexioCoordinator:
     coordinator.unloading = False
     coordinator._restored_as_new = {}
     coordinator._rename_follow_failed = set()
+    coordinator._rename_move_pending = {}
     coordinator._bulk_load_fail_streak = 0
     coordinator._bulk_load_pending = False
     coordinator._plan_omit_streaks = {}

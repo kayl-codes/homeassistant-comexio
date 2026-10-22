@@ -243,6 +243,9 @@ class _FakeCoordinator(SimpleNamespace):
     _forget_rename_follow_failed = ComexioCoordinator._forget_rename_follow_failed
     _log_rename_follow_failed = ComexioCoordinator._log_rename_follow_failed
     _async_follow_vanished_rename = ComexioCoordinator._async_follow_vanished_rename
+    _rename_sources = ComexioCoordinator._rename_sources
+    _async_move_renamed_backups = ComexioCoordinator._async_move_renamed_backups
+    _followed_pick_name = ComexioCoordinator._followed_pick_name
     _handle_vanished_plan_action = ComexioCoordinator._handle_vanished_plan_action
     async_restore_vanished_plan = ComexioCoordinator.async_restore_vanished_plan
     async_newest_backup_field = ComexioCoordinator.async_newest_backup_field
@@ -299,6 +302,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _rename_follow_failed=set(),
         _rename_compare_warned=set(),
         _rename_check_error_logged=set(),
+        _rename_move_pending={},
         request_options_update_without_reload=MagicMock(),
         # Closes the scheduled coroutine (the existence check's full poll) instead of running it.
         hass=SimpleNamespace(async_create_background_task=MagicMock(side_effect=lambda coro, **_kw: coro.close())),
@@ -2564,6 +2568,8 @@ def test_a_failed_rename_move_keeps_the_swapped_pick(api: ComexioAPI, caplog: py
     assert asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht")) is None  # tried again later
     assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht", "19:Test1"]
     coordinator.request_options_update_without_reload.assert_called_once()  # no second write putting it back
+    assert coordinator._rename_move_pending == {(43, "Alt"): "Licht"}
+    assert not coordinator.plan_edits_running
     assert "moving its backups failed; the next backup cycle tries again" in caplog.text
 
 
@@ -2622,6 +2628,13 @@ def test_an_id_renamed_again_during_the_move_keeps_pick_and_backups_together(api
     assert asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht")) is True
     coordinator.function_plan_backup.async_rename_identity.assert_awaited_once_with(43, "Alt", "Licht")
     assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht", "19:Test1"]
+    # The next cycle: "Licht" now holds the plan's backups, the same content on the ID named "Licht 2".
+    coordinator.function_plan_backup.plan_names_for_fub_id_sync = lambda _fub_id: {"Licht"}
+    coordinator.function_plan_backup.newest_auto_hash_sync = lambda _fub_id, _name: plan_hash(RENAMED_PLAN)
+    coordinator.function_plan_backup.async_rename_identity = AsyncMock(return_value=4)
+    asyncio.run(coordinator._async_follow_plan_renames({43: RENAMED_PLAN}, api.fub_data, lambda: False))
+    coordinator.function_plan_backup.async_rename_identity.assert_awaited_once_with(43, "Licht", "Licht 2")
+    assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht 2", "19:Test1"]
 
 
 def test_a_failed_pick_swap_moves_no_backup(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
@@ -2917,21 +2930,28 @@ def test_the_backup_cycle_forgets_failures_of_renames_no_longer_pending(api: Com
     assert coordinator._rename_follow_failed == {(43, "Alt", "Licht", "x")}
 
 
-def test_a_rename_without_a_pick_writes_no_options(api: ComexioAPI) -> None:
+def test_a_rename_without_a_pick_writes_no_options(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
     coordinator, _ = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)}, ["19:Test1"])
     coordinator.function_plan_backup.async_rename_identity.side_effect = [OSError("disk full"), 3]
     assert asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht")) is None
-    assert asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht")) is True
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht")) is True
     coordinator.request_options_update_without_reload.assert_not_called()
+    assert not coordinator._rename_follow_failed
+    assert not coordinator._rename_move_pending
+    assert "3 backup(s) follow" in caplog.text
+    assert "watchdog pick follow" not in caplog.text
 
 
-def test_a_rename_no_longer_pending_forgets_its_failures(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
-    coordinator, _ = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)})
+def test_a_rename_no_longer_pending_forgets_its_failures(api: ComexioAPI) -> None:
+    coordinator, options = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)})
     coordinator._rename_follow_failed = {(43, "Alt", "Licht", "x")}
     api.fub_data["43"] = {"Id": 43, "Name": "Licht 2", "Active": 1}
     assert asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht")) is False
     assert not coordinator._rename_follow_failed
     coordinator.function_plan_backup.async_rename_identity.assert_not_awaited()
+    coordinator.request_options_update_without_reload.assert_not_called()
+    assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Alt", "19:Test1"]
 
 
 def test_each_kind_of_follow_failure_logs_one_traceback_then_debug(
@@ -2947,12 +2967,14 @@ def test_each_kind_of_follow_failure_logs_one_traceback_then_debug(
     assert (len(errors), len(debugs)) == (1, 1)
 
 
-@pytest.mark.parametrize("fub_data", [{"43": "broken"}, {}, None])
-def test_the_failure_prune_survives_a_broken_plan_list(api: ComexioAPI, fub_data: object) -> None:
-    coordinator, _ = _rename_coordinator(api, {})
+@pytest.mark.parametrize(("fub_data", "kept"), [({"43": "broken"}, False), ({}, False), (None, True)])
+def test_the_failure_prune_survives_a_broken_plan_list(api: ComexioAPI, fub_data: object, kept: bool) -> None:
+    """No plan list at all decides nothing: the noted failures stay, nothing moves."""
+    coordinator, _ = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)})
     coordinator._rename_follow_failed = {(43, "Alt", "Licht", "x")}
     asyncio.run(coordinator._async_follow_plan_renames({43: RENAMED_PLAN}, fub_data, lambda: False))  # type: ignore[arg-type]
-    assert not coordinator._rename_follow_failed
+    assert bool(coordinator._rename_follow_failed) is kept
+    coordinator.function_plan_backup.async_rename_identity.assert_not_awaited()
 
 
 def test_an_unexpected_rename_check_error_is_not_muted_by_a_comparison_warning(
@@ -2966,3 +2988,94 @@ def test_an_unexpected_rename_check_error_is_not_muted_by_a_comparison_warning(
     assert "could not compare 'Licht' on its ID" in caplog.text
     assert "Rename check of watchdog pick 'Alt' (ID 43) failed" in caplog.text
     assert not coordinator._rename_checked
+
+
+def test_a_failed_pick_swap_logs_one_traceback_then_debug(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    coordinator, _ = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)})
+    coordinator.request_options_update_without_reload.side_effect = RuntimeError("entry gone")
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht"))
+        asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht"))
+    errors = [
+        r for r in caplog.records if r.levelno == logging.ERROR and "could not take the new name" in r.getMessage()
+    ]
+    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG and "failed again" in r.getMessage()]
+    assert (len(errors), len(debugs)) == (1, 1)
+    assert not coordinator._rename_move_pending  # nothing swapped, nothing to carry on
+
+
+def _failed_move(api: ComexioAPI) -> tuple[_FakeCoordinator, dict[str, Any]]:
+    """Plan "Alt" renamed to "Licht": its pick followed, moving its backups failed."""
+    coordinator, options = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)})
+    coordinator.function_plan_backup.async_rename_identity.side_effect = [OSError("disk full"), 3]
+    assert asyncio.run(coordinator._async_follow_rename(43, "Alt", "Licht")) is None
+    return coordinator, options
+
+
+def test_a_failed_move_follows_even_after_the_plan_was_edited(api: ComexioAPI) -> None:
+    """The content no longer matches the old backups: the noted rename moves them all the same."""
+    coordinator, _ = _failed_move(api)
+    asyncio.run(coordinator._async_follow_plan_renames({43: OTHER_PLAN}, api.fub_data, lambda: False))
+    assert coordinator.function_plan_backup.async_rename_identity.await_args_list[-1].args == (43, "Alt", "Licht")
+    assert not coordinator._rename_move_pending
+
+
+def test_a_failed_move_follows_a_further_rename_with_its_pick(api: ComexioAPI) -> None:
+    coordinator, options = _failed_move(api)
+    api.fub_data["43"] = {"Id": 43, "Name": "Licht 2", "Active": 1}
+    asyncio.run(coordinator._async_follow_plan_renames({43: OTHER_PLAN}, api.fub_data, lambda: False))
+    assert coordinator.function_plan_backup.async_rename_identity.await_args_list[-1].args == (43, "Alt", "Licht 2")
+    assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht 2", "19:Test1"]
+    assert not coordinator._rename_move_pending
+
+
+def test_the_watchdog_follows_a_further_rename_of_a_failed_move_without_an_alarm(api: ComexioAPI) -> None:
+    """The pick "Licht" vanished, its backups still under "Alt": no alarm for a name the user left."""
+    coordinator, options = _failed_move(api)
+    api.fub_data["43"] = {"Id": 43, "Name": "Licht 2", "Active": 1}
+    api.function_plan_load_elements = AsyncMock(return_value=OTHER_PLAN)  # type: ignore[method-assign]
+    asyncio.run(coordinator.async_watch_managed_plans())
+    assert coordinator.function_plan_backup.async_rename_identity.await_args_list[-1].args == (43, "Alt", "Licht 2")
+    assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Licht 2", "19:Test1"]
+    coordinator.plan_watchdog.async_sync_vanished.assert_awaited_with(set(), {})
+
+
+def test_a_plan_renamed_back_before_its_move_takes_its_pick_back(api: ComexioAPI) -> None:
+    coordinator, options = _failed_move(api)
+    api.fub_data["43"] = {"Id": 43, "Name": "Alt", "Active": 1}
+    asyncio.run(coordinator._async_follow_plan_renames({43: RENAMED_PLAN}, api.fub_data, lambda: False))
+    coordinator.function_plan_backup.async_rename_identity.assert_awaited_once()  # only the failed move
+    assert options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["43:Alt", "19:Test1"]
+    assert not coordinator._rename_move_pending
+
+
+def test_a_cancelled_move_is_noted_and_logged(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    coordinator, _ = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)})
+    coordinator.function_plan_backup.async_rename_identity.side_effect = asyncio.CancelledError
+    follow = coordinator._async_follow_rename(43, "Alt", "Licht")
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(follow)
+    assert coordinator._rename_move_pending == {(43, "Alt"): "Licht"}
+    assert "to 'Licht' was cancelled; the next backup cycle tries again" in caplog.text
+    assert not coordinator.plan_edits_running
+
+
+def test_a_deleted_plan_drops_its_noted_move(api: ComexioAPI) -> None:
+    coordinator, _ = _failed_move(api)
+    asyncio.run(coordinator._async_follow_plan_renames({}, {"19": {"Name": "Test1"}}, lambda: False))
+    assert not coordinator._rename_move_pending
+
+
+def test_rename_check_errors_log_one_traceback_then_debug(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    coordinator, _ = _rename_coordinator(api, {(43, "Alt"): plan_hash(RENAMED_PLAN)})
+    api.function_plan_load_elements = AsyncMock(side_effect=[None, KeyError("bug"), KeyError("bug")])  # type: ignore[method-assign]
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(3):
+            asyncio.run(coordinator.async_watch_managed_plans())
+    levels = [
+        r.levelno
+        for r in caplog.records
+        if "could not compare" in r.getMessage() or "Rename check of" in r.getMessage()
+    ]
+    assert levels == [logging.WARNING, logging.ERROR, logging.DEBUG]
+    assert coordinator._rename_check_error_logged == {(43, "Alt", "Licht")}
