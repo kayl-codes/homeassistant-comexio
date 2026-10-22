@@ -5342,6 +5342,8 @@ class ComexioAPI:
                     _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
                     relogin.append(await self._full_login(generation))
                 if not relogin[0]:
+                    if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
+                        return None, SYSTEM_INFO_CERTIFICATE_CHANGED  # _full_login raised the repair
                     return None, f"re-login failed ({self.last_login_error})"
                 return await fetch(), None
         except ComexioCertificateMismatchError:

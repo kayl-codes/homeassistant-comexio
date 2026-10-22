@@ -361,6 +361,35 @@ def test_a_mismatch_at_the_uptime_fetch_drops_the_whole_system_info_reading(
     hook.assert_called_once_with(OTHER)
 
 
+def test_a_mismatch_at_the_retry_after_a_re_login_drops_the_whole_system_info_reading(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    client.get_system_info = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), _mismatch()])
+    client.get_uptime = AsyncMock()
+    client.login = AsyncMock()
+    reading = asyncio.run(comexio_api.get_system_info())
+    assert reading == SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
+    hook.assert_called_once_with(OTHER)
+    client.get_uptime.assert_not_awaited()
+
+
+def test_a_re_login_meeting_another_certificate_names_the_certificate_change(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # The re-login raises the repair; the uptime fetch sends nothing after it, like after any failed re-login.
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.get_uptime = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.login = AsyncMock(side_effect=_mismatch())
+    reading = asyncio.run(comexio_api.get_system_info())
+    assert reading == SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
+    hook.assert_called_once_with(OTHER)
+    assert client.get_system_info.await_count == client.get_uptime.await_count == 1
+
+
 @pytest.mark.parametrize(
     "helper",
     [
