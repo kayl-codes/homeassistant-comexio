@@ -341,8 +341,10 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         """The "external" mode needs a usable external URL in HA's network settings."""
         if user_input.get(CONF_WEBHOOK_ADDRESS_MODE) != WEBHOOK_ADDRESS_EXTERNAL:
             return
-        if webhook_url_error(self.hass.config.external_url) is not None:
-            errors[CONF_WEBHOOK_ADDRESS_MODE] = "no_external_url"
+        if (error := webhook_url_error(self.hass.config.external_url)) is not None:
+            errors[CONF_WEBHOOK_ADDRESS_MODE] = (
+                "insecure_external_url" if error == "insecure_url" else "no_external_url"
+            )
 
     @staticmethod
     def _restore_missing_ignored_fields(

@@ -61,7 +61,7 @@ def _hass(internal_url: str | None = None, external_url: str | None = None, use_
     [
         ("https://ha.example.com", WebhookTarget("ha.example.com:443", True)),
         ("https://ha.example.com/", WebhookTarget("ha.example.com:443", True)),
-        ("http://ha.example.com", WebhookTarget("ha.example.com:80", False)),
+        ("http://ha.fritz.box", WebhookTarget("ha.fritz.box:80", False)),
         ("https://ha.example.com:8443", WebhookTarget("ha.example.com:8443", True)),
         ("  http://192.0.2.10:8123  ", WebhookTarget("192.0.2.10:8123", False)),
         ("https://[fd00::10]:8123", WebhookTarget("[fd00::10]:8123", True)),
@@ -100,6 +100,33 @@ def test_a_loopback_webhook_url_is_refused(url: str) -> None:
     assert webhook_url_error(url) == "loopback_url"
 
 
+@pytest.mark.parametrize("url", ["http://ha.example.com", "http://ha.example.com:8123", "http://8.8.8.8:8123"])
+def test_plain_http_outside_the_local_network_is_refused(url: str) -> None:
+    """The values would cross the internet in cleartext, to a webhook whose id is predictable."""
+    assert webhook_url_target(url) is not None
+    assert webhook_url_error(url) == "insecure_url"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://192.168.178.20:8123",
+        "http://10.0.0.5",
+        "http://[fd00::10]:8123",
+        "http://[fe80::1]:8123",
+        "http://100.101.102.103:8123",  # shared address space: carrier-grade NAT, Tailscale
+        "http://homeassistant:8123",  # single-label name
+        "http://homeassistant.fritz.box:8123",
+        "http://ha.local",
+        "http://ha.home.arpa.",
+        "http://fritz.box",
+        "https://ha.example.com:8123",
+    ],
+)
+def test_plain_http_inside_the_local_network_or_https_is_allowed(url: str) -> None:
+    assert webhook_url_error(url) is None
+
+
 # --- resolver ---
 
 
@@ -113,21 +140,24 @@ def test_the_external_mode_returns_the_external_url_without_searching() -> None:
 
 
 def test_the_custom_mode_returns_its_own_url() -> None:
-    resolver = HaAddressResolver(_hass(), WEBHOOK_ADDRESS_CUSTOM, "http://ha.example.com:8123")
-    assert asyncio.run(resolver.async_target()) == WebhookTarget("ha.example.com:8123", False)
+    resolver = HaAddressResolver(_hass(), WEBHOOK_ADDRESS_CUSTOM, "http://ha.fritz.box:8123")
+    assert asyncio.run(resolver.async_target()) == WebhookTarget("ha.fritz.box:8123", False)
+    assert resolver.fallback_reason is None
 
 
 @pytest.mark.parametrize(
-    ("mode", "external_url", "url"),
+    ("mode", "external_url", "url", "reason"),
     [
-        (WEBHOOK_ADDRESS_EXTERNAL, None, None),
-        (WEBHOOK_ADDRESS_EXTERNAL, "https://localhost", None),
-        (WEBHOOK_ADDRESS_CUSTOM, "https://ha.example.com", None),
-        (WEBHOOK_ADDRESS_CUSTOM, None, "https://ha.example.com/path"),
+        (WEBHOOK_ADDRESS_EXTERNAL, None, None, "invalid_url"),
+        (WEBHOOK_ADDRESS_EXTERNAL, "https://localhost", None, "loopback_url"),
+        (WEBHOOK_ADDRESS_EXTERNAL, "http://ha.example.com", None, "insecure_url"),
+        (WEBHOOK_ADDRESS_CUSTOM, "https://ha.example.com", None, "invalid_url"),
+        (WEBHOOK_ADDRESS_CUSTOM, None, "https://ha.example.com/path", "invalid_url"),
+        (WEBHOOK_ADDRESS_CUSTOM, None, "http://ha.example.com:8123", "insecure_url"),
     ],
 )
 def test_an_unusable_fixed_url_falls_back_to_the_automatic_address_and_warns_once(
-    caplog: pytest.LogCaptureFixture, mode: str, external_url: str | None, url: str | None
+    caplog: pytest.LogCaptureFixture, mode: str, external_url: str | None, url: str | None, reason: str
 ) -> None:
     resolver = HaAddressResolver(_hass(internal_url="http://192.0.2.10:8123", external_url=external_url), mode, url)
     resolver._async_get = AsyncMock(return_value="192.0.2.10:8123")  # type: ignore[method-assign]
@@ -139,6 +169,8 @@ def test_an_unusable_fixed_url_falls_back_to_the_automatic_address_and_warns_onc
     notices = [r for r in caplog.records if "has no usable URL" in r.getMessage()]
     assert [r.levelname for r in notices] == ["WARNING", "DEBUG"]
     assert repr(mode) in notices[0].getMessage()
+    assert reason in notices[0].getMessage()
+    assert resolver.fallback_reason == reason
 
 
 def test_a_fixed_url_that_works_again_warns_again_when_it_breaks(caplog: pytest.LogCaptureFixture) -> None:
@@ -148,8 +180,10 @@ def test_a_fixed_url_that_works_again_warns_again_when_it_breaks(caplog: pytest.
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.comexio.ha_address"):
         asyncio.run(resolver.async_target())
+        assert resolver.fallback_reason == "invalid_url"
         hass.config.external_url = "https://ha.example.com"
         asyncio.run(resolver.async_target())
+        assert resolver.fallback_reason is None
         hass.config.external_url = None
         asyncio.run(resolver.async_target())
 
@@ -520,6 +554,8 @@ def _flow(external_url: str | None = None, options: dict | None = None) -> Comex
     [
         (WEBHOOK_ADDRESS_EXTERNAL, None, {CONF_WEBHOOK_ADDRESS_MODE: "no_external_url"}),
         (WEBHOOK_ADDRESS_EXTERNAL, "https://localhost", {CONF_WEBHOOK_ADDRESS_MODE: "no_external_url"}),
+        (WEBHOOK_ADDRESS_EXTERNAL, "http://ha.example.com", {CONF_WEBHOOK_ADDRESS_MODE: "insecure_external_url"}),
+        (WEBHOOK_ADDRESS_EXTERNAL, "http://ha.fritz.box:8123", {}),
         (WEBHOOK_ADDRESS_EXTERNAL, "https://ha.example.com", {}),
         (WEBHOOK_ADDRESS_AUTO, None, {}),
         (WEBHOOK_ADDRESS_CUSTOM, None, {}),
@@ -540,7 +576,14 @@ def test_the_custom_url_step_shows_the_saved_url() -> None:
     assert result["data_schema"]({}) == {CONF_WEBHOOK_URL: "https://ha.example.com"}
 
 
-@pytest.mark.parametrize(("url", "error"), [("ha.example.com", "invalid_url"), ("http://127.0.0.1", "loopback_url")])
+@pytest.mark.parametrize(
+    ("url", "error"),
+    [
+        ("ha.example.com", "invalid_url"),
+        ("http://127.0.0.1", "loopback_url"),
+        ("http://ha.example.com", "insecure_url"),
+    ],
+)
 def test_the_custom_url_step_refuses_an_unusable_url(url: str, error: str) -> None:
     result = asyncio.run(_flow().async_step_webhook_url({CONF_WEBHOOK_URL: url}))
     assert result["type"] == "form"
@@ -772,7 +815,9 @@ def _issue_coordinator(ip_mismatch: bool, protocol: list[dict]) -> ComexioCoordi
         "function_plan_trigger_orphan": {},
         "ip_mismatch": ip_mismatch,
         "protocol": protocol,
+        "ha_address": "192.0.2.10:8123",
     }
+    coordinator.ha_address = SimpleNamespace(fallback_reason=None)
     return coordinator
 
 
@@ -794,8 +839,23 @@ def test_a_protocol_to_rewrite_offers_the_server_address_fix(
     assert created.call_args.kwargs["translation_placeholders"]["i_count"] == str(ip_count)
 
 
-def _repair_form(counts: dict[str, int], language: str = "en") -> dict[str, Any]:
-    flow = ComexioRepairFlow("sync_mismatch_cx1", {"entry_id": "e1", "counts": counts})
+@pytest.mark.parametrize("reason", [None, "insecure_url"])
+def test_the_issue_carries_the_address_to_write_and_why_it_is_the_automatic_one(
+    monkeypatch: pytest.MonkeyPatch, reason: str | None
+) -> None:
+    created = MagicMock()
+    monkeypatch.setattr(coordinator_module.ir, "async_create_issue", created)
+    coordinator = _issue_coordinator(True, [])
+    coordinator.ha_address.fallback_reason = reason
+
+    coordinator._update_sync_mismatch_issue({"x"}, {}, {}, {})
+
+    data = created.call_args.kwargs["data"]
+    assert (data["ha_address"], data["address_fallback"]) == ("192.0.2.10:8123", reason)
+
+
+def _repair_form(counts: dict[str, int], language: str = "en", **issue_data: Any) -> dict[str, Any]:
+    flow = ComexioRepairFlow("sync_mismatch_cx1", {"entry_id": "e1", "counts": counts, **issue_data})
     flow.hass = SimpleNamespace(  # type: ignore[assignment]
         config=SimpleNamespace(language=language), data={DOMAIN: {"e1": SimpleNamespace(in_sync=False)}}
     )
@@ -876,3 +936,36 @@ def test_an_error_on_the_first_step_keeps_the_custom_mode_from_moving_on() -> No
     result = _init(_flow(), WEBHOOK_ADDRESS_CUSTOM, scan_interval="x")
     assert result["step_id"] == "init"
     assert result["errors"] == {"base": "invalid_number"}
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("en", "unusable (http:// outside the local network). The fix sets the automatic address **192.0.2.10:8123**"),
+        (
+            "de",
+            "nicht nutzbar (http:// außerhalb des lokalen Netzes). Die Korrektur setzt stattdessen die automatische "
+            "Adresse **192.0.2.10:8123**",
+        ),
+    ],
+)
+def test_the_repair_says_when_it_sets_the_automatic_address_instead_of_the_options_url(
+    language: str, expected: str
+) -> None:
+    form = _repair_form(
+        {"ip_mismatch": 1, "ip_address": 1}, language, ha_address="192.0.2.10:8123", address_fallback="insecure_url"
+    )
+    assert expected in form["description_placeholders"]["summary_text"]
+
+
+@pytest.mark.parametrize("issue_data", [{}, {"ha_address": "192.0.2.10:8123", "address_fallback": None}])
+def test_the_repair_adds_no_fallback_note_while_the_options_url_is_used(issue_data: dict[str, Any]) -> None:
+    form = _repair_form({"ip_mismatch": 1, "ip_address": 1}, **issue_data)
+    assert "webhook URL from the options" not in form["description_placeholders"]["summary_text"]
+
+
+def test_a_fallback_without_a_wrong_address_adds_no_note() -> None:
+    form = _repair_form(
+        {"ip_mismatch": 1, "ip_address": 0, "protocol": 3}, ha_address="x:8123", address_fallback="invalid_url"
+    )
+    assert "webhook URL from the options" not in form["description_placeholders"]["summary_text"]

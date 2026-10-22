@@ -1959,6 +1959,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "function_plan_missing_detail": self._function_plan_missing_detail(
                     audit["function_plan_missing"], ha_map, io_meta_by_key
                 ),
+                # The address "update_ip" writes, and why it is the automatic one although the options name an
+                # external/custom URL (a webhook_url_error key; None when the mode's own URL is used).
+                "ha_address": audit.get("ha_address"),
+                "address_fallback": self.ha_address.fallback_reason,
             },
         )
 

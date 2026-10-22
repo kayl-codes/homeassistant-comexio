@@ -192,6 +192,21 @@ async def _async_own_ips() -> frozenset[IPAddress] | None:
     return frozenset(ip for address in configured if (ip := _ip(address)) is not None and not ip.is_loopback)
 
 
+# Shared address space (RFC 6598): carrier-grade NAT and VPN overlays such as Tailscale — not public.
+_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _is_lan_host(host: str) -> bool:
+    """A host reached only inside the local network: a private, link-local or shared-space IP, a single-label
+    name or a name under one of the KNOWN_DOMAINS (fritz.box, local, …). Cleartext there never crosses the
+    internet."""
+    if (ip := _ip(host)) is not None:
+        ip = getattr(ip, "ipv4_mapped", None) or ip
+        return ip.is_private or ip.is_link_local or ip in _SHARED_ADDRESS_SPACE
+    name = host.rstrip(".").lower()
+    return "." not in name or any(name == domain or name.endswith(f".{domain}") for domain in KNOWN_DOMAINS)
+
+
 def host_of(address: str | None) -> str | None:
     """Host part of a stored Web-IO address ("host:port", "[v6]:port" or bare host)."""
     if not address:
@@ -238,10 +253,18 @@ def webhook_url_target(url: str | None) -> WebhookTarget | None:
 
 
 def webhook_url_error(url: str | None) -> str | None:
-    """The options-flow error key of a webhook URL ("invalid_url", "loopback_url"), None when usable."""
+    """The options-flow error key of a webhook URL ("invalid_url", "loopback_url", "insecure_url"), None when usable.
+
+    http:// only for a host inside the local network: elsewhere the pushed values would cross the internet in
+    cleartext, to a webhook whose id is predictable.
+    """
     if (target := webhook_url_target(url)) is None:
         return "invalid_url"
-    return "loopback_url" if is_loopback_address(target.address) else None
+    if is_loopback_address(target.address):
+        return "loopback_url"
+    if not target.https and not _is_lan_host(host_of(target.address) or ""):
+        return "insecure_url"
+    return None
 
 
 def webio_device_hints(webio_devices: Mapping[str, Mapping[str, Any]] | None) -> tuple[str, ...]:
@@ -261,6 +284,9 @@ class HaAddressResolver:
         # Webhook address mode (const.WEBHOOK_ADDRESS_*) and the custom mode's URL.
         self._mode = mode
         self._url = url
+        # Why the external/custom mode's URL was unusable the last time (a webhook_url_error key) and the automatic
+        # address was used instead; None while the mode's own URL is used (or in the automatic mode).
+        self.fallback_reason: str | None = None
         # homeassistant.<domain> name the last search found — known address next to the hints.
         self._guessed_host: str | None = None
         # host -> what was last logged about it; a notice is logged at its level only when it changes.
@@ -287,22 +313,28 @@ class HaAddressResolver:
             return WebhookTarget(await self._async_get(hints), self._auto_https())
 
     def _fixed_target(self) -> WebhookTarget | None:
-        """The target of the external_url / custom mode; None for the automatic address."""
+        """The target of the external_url / custom mode; None for the automatic address.
+
+        An unusable URL (see webhook_url_error) falls back to the automatic address, so the pushes keep reaching
+        HA; fallback_reason tells the repair why it would set that address.
+        """
+        self.fallback_reason = None
         if self._mode == WEBHOOK_ADDRESS_AUTO:
             return None
         url = self.hass.config.external_url if self._mode == WEBHOOK_ADDRESS_EXTERNAL else self._url
-        target = webhook_url_target(url)
-        if target is None or is_loopback_address(target.address):
+        if (error := webhook_url_error(url)) is not None:
+            self.fallback_reason = error
             self._notice(
                 self._mode,
-                "unusable",
+                error,
                 logging.WARNING,
-                "HA address: the webhook address mode %r has no usable URL (%r); using the automatic address",
+                "HA address: the webhook address mode %r has no usable URL (%r: %s); using the automatic address",
                 url,
+                error,
             )
             return None
         self._noticed.pop(self._mode, None)
-        return target
+        return webhook_url_target(url)
 
     def _auto_https(self) -> bool:
         """Whether the automatic address is reached over HTTPS.

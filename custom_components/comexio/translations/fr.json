@@ -196,6 +196,8 @@
       "invalid_schema": "Schéma de nommage invalide. Utilisez uniquement les noms de variables indiqués entre accolades et fermez chaque accolade.",
       "invalid_url": "Saisissez une URL http:// ou https:// avec un hôte, sans chemin, requête ni identifiants.",
       "loopback_url": "Une adresse de bouclage (localhost, 127.x, 0.0.0.0) n'est pas joignable depuis Comexio.",
+      "insecure_url": "Une adresse http:// n'est autorisée que dans le réseau local : ailleurs, les valeurs traverseraient Internet sans chiffrement. Utilisez https://.",
+      "insecure_external_url": "L'URL externe de Home Assistant est une adresse http:// hors du réseau local : les valeurs traverseraient Internet sans chiffrement. Définissez d'abord une URL externe https://.",
       "no_external_url": "Home Assistant n'a pas d'URL externe utilisable. Définissez-la d'abord sous Paramètres → Système → Réseau."
     }
   },

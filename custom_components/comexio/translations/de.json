@@ -196,6 +196,8 @@
       "invalid_schema": "Ungültiges Namensschema. Nur die aufgeführten Variablennamen in geschweiften Klammern verwenden und jede Klammer schließen.",
       "invalid_url": "Gib eine http://- oder https://-URL mit Host ein, ohne Pfad, Query oder Zugangsdaten.",
       "loopback_url": "Eine Loopback-Adresse (localhost, 127.x, 0.0.0.0) ist von Comexio aus nicht erreichbar.",
+      "insecure_url": "Eine http://-Adresse ist nur im lokalen Netz erlaubt: sonst gingen die Werte unverschlüsselt übers Internet. Verwende https://.",
+      "insecure_external_url": "Die externe URL von Home Assistant ist eine http://-Adresse außerhalb des lokalen Netzes: die Werte gingen unverschlüsselt übers Internet. Lege zuerst eine https://-URL fest.",
       "no_external_url": "Home Assistant hat keine nutzbare externe URL. Lege sie zuerst unter Einstellungen → System → Netzwerk fest."
     }
   },
