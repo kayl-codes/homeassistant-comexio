@@ -1,5 +1,6 @@
 """Marker numbers and read-only marker sensors: what the name heuristic makes of a marker name."""
 
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -49,7 +50,7 @@ def test_temperature_marker_accepts_negative_values(name: str) -> None:
     assert number.device_class == NumberDeviceClass.TEMPERATURE
     assert number.native_unit_of_measurement == UnitOfTemperature.CELSIUS
     assert number.native_step == 0.1
-    assert number.native_min_value == MARKER_TEMPERATURE_MIN_VALUE == -273.15
+    assert number.native_min_value == MARKER_TEMPERATURE_MIN_VALUE == -273.0
     assert number.native_max_value == MARKER_TEMPERATURE_MAX_VALUE == 10_000.0
 
 
@@ -107,6 +108,24 @@ def test_knx_without_dpt_falls_back_to_the_temperature_range() -> None:
         MARKER_TEMPERATURE_MIN_VALUE,
         MARKER_TEMPERATURE_MAX_VALUE,
     )
+
+
+@pytest.mark.parametrize(
+    "number",
+    [
+        _number("Temp Korrektur"),
+        _number("Zähler"),
+        _number("Helligkeit %"),
+        _number("Nachlauf", type_raw=MARKER_TYPE_INTERVAL),
+        _knx_number("Temp Bad"),
+        _knx_number("Soll Bad", dpt_min=-273, dpt_max=670760, dpt_step=0.01, dpt_unit="°C"),
+    ],
+    ids=["temperature", "other", "percentage", "interval", "knx-fallback", "knx-dpt"],
+)
+def test_minimum_lies_on_the_step_grid(number: ComexioMarkerNumber) -> None:
+    """The frontend's number input counts its steps from the minimum: a minimum off the step grid (-273.15
+    with step 0.1) rejects every value on the usual grid, e.g. 50 ("nearest values are 49.95 and 50.05")."""
+    assert Decimal(str(number.native_min_value)) % Decimal(str(number.native_step)) == 0
 
 
 @pytest.mark.parametrize(

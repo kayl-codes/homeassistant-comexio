@@ -13,7 +13,7 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - Focus on correctness: logic errors, unhandled edge cases, race conditions, resource leaks, silent failures
   (swallowed exceptions, fallbacks that hide stale or missing data), and wrong use of Home Assistant APIs.
 - Do **not** comment on formatting, import order or line length — ruff (`ruff check` + `ruff format`, line length
-  120, rule sets B, C4, E, F, I, SIM, UP, W) enforces those in CI.
+  120, rule sets B, C4, E, F, FURB, I, PERF, PIE, PLE, PLW, RET, RSE, SIM, UP, W) enforces those in CI.
 - Do not suggest extra defensive checks for service fields already validated by the service schema or entity
   selectors; suggest guards only where data bypasses those validators.
 - Where validation guarantees a dict key exists, prefer `data["key"]` over `data.get("key")` so contract

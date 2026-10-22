@@ -639,7 +639,7 @@ def _plan_sensor_sync(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, **coordi
     monkeypatch.setattr(sensor_module.er, "async_get", lambda _hass: registry)
     coordinator = _coordinator(api, **coordinator_overrides)
     added: list = []
-    sync = sensor_module._PlanRunStateSensorSync(None, coordinator, lambda ents: added.extend(ents))
+    sync = sensor_module._PlanRunStateSensorSync(None, coordinator, added.extend)
     return sync, coordinator, registry, added
 
 
