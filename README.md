@@ -61,6 +61,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
 | `sensor` (diagnostic) | Integration | `Free storage` — free space of the Comexio's internal storage in %, polled every 5 min. |
 | `sensor` (diagnostic) | Integration | `Last boot` — when the Comexio system last started (from its uptime), polled every 5 min. |
+| `sensor` (diagnostic) | Integration | `Connection` — states `https`, `http`, `certificate_changed`, shown as `HTTPS` (encrypted, the pinned certificate), `HTTP` (Comexio serves no HTTPS: not encrypted) or `Certificate changed` (Comexio presents another certificate than the pinned one; nothing is sent until you decide in the repair). The pinned and, while the repair is open, the presented certificate's SHA-256 fingerprint as state attributes. Unavailable while the integration is not loaded — for example after a restart that met a changed certificate. See [Encrypted Connection](#-encrypted-connection-https). |
 | `binary_sensor` (diagnostic, problem) | Integration | `Time server setting` — on while Comexio does not set its clock from a time server (disabled or no server entered); a wrong clock breaks timers and schedules in the function plans. Off only means a server is configured, not that Comexio reaches it. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
 | `button` (configuration) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
@@ -96,6 +97,8 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 
 > [!TIP]
 > **Changing connection details later:** If your Comexio IP address or passwords change, you do **not** need to re-add the integration. Open *Settings → Devices & Services → Comexio → ⋮ → Reconfigure* and update host, username, and passwords directly. Leave password fields blank to keep the existing password.
+>
+> **Admin password changed in Comexio:** If Comexio rejects the stored admin credentials of an existing entry — when the integration starts or on a poll — Home Assistant shows a *Re-authenticate Comexio* prompt under *Settings → Devices & Services*. Enter the current username and password there. Until then, the configuration poll stops and the integration does not try the rejected credentials again — only a Home Assistant restart or a reload of the entry tries them once more, and asks for reauth again if Comexio still refuses them. While you are first adding the integration, rejected credentials show an error in the setup form instead.
 
 > [!NOTE]
 > **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, notifications, and cover detection keywords.
@@ -192,6 +195,8 @@ HA's markers, IOs, KNX objects and triggers only work while the function plans t
 
 User plans that should always run can be added in the options (**Function plan watchdog: also watch user plans**). They get the same repair, sensor and push; **Plan Auto-Start (user plans)** is off by default. A plan HA itself just stopped (sort, connect, restore, bus-load cascade) is not judged for 5 minutes. After Comexio was unreachable (a failed setup attempt, poll or run-state fetch, or an emergency reboot by the bus-load watchdog) the watchdog neither reports nor starts stopped plans until it answers again and for 10 minutes from the first successful read — a rebooting Comexio starts its plans itself; a plan seen running still clears its report.
 
+A picked user plan Comexio no longer has under its ID and name raises a repair and an alarm push. If its ID now holds another plan — the plan was renamed, or deleted and Comexio gave its ID to a new plan — both name that plan, and the repair offers to **watch it instead**. A plan renamed with its content unchanged (same ID, same content as its last backup) is followed on its own, watched or not: its backups continue under the new name instead of turning into orphaned backups, and a watchdog pick takes the new name — no alarm, no repair. The repair offers **take over the rename** only when that failed. A rename together with a content change is not recognised as one.
+
 📖 **[Function Plan Preview guide →](FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
 
 ### 🗂️ Automatic Backups & Restore
@@ -214,6 +219,28 @@ For large installations, marker/Web-IO pairs can be distributed across auto-mana
 Comexio's KNX/EIB gateway objects ("K-Elements") can be imported as HA entities like Markers and IOs — opt in via **Create entities for KNX objects** in the integration options (off by default). Digital objects are automatically classified by their KNX datapoint type, with a Repair-issue-driven flow for genuinely ambiguous DPTs.
 
 📖 **[KNX Objects guide →](KNX.md)** — naming, automatic unit/device-class detection, dimmer & blind (`cover`/`light`) support, DPT classification, the classification Repair flow, and known limitations.
+
+## 🔒 Encrypted Connection (HTTPS)
+
+When Comexio serves HTTPS, the integration connects encrypted and pins Comexio's certificate: at setup, and for existing entries at their next start. Comexio signs its certificate itself, so instead of a certificate authority the integration remembers its SHA-256 fingerprint (trust on first use) and announces the switch in a notification. The fingerprint is the SHA-256 value Comexio's admin page lists under its certificate hashes. Without HTTPS the connection stays on plain HTTP — unencrypted, including the admin login — and every start tries the switch again. *Reconfigure* shows which of the two is in use, and the pinned fingerprint.
+
+A certificate other than the pinned one is never accepted on its own — for example after Comexio generated a new one. The integration then sends nothing more to Comexio and raises a repair that shows the pinned and the new fingerprint; only when you confirm it there is the new certificate pinned. The notify services set under **Function plan watchdog: push to** get an urgent push for it (iOS: critical alert, Android: alarm stream — both through Do Not Disturb) that opens the repairs; it is removed from the phone once the repair is done; a notify service not reachable yet (for example right after a restart) is retried at the next check. A certificate that changes is never accepted automatically, not even when the server's serial number matches: reading it would need a login, which would hand the admin credentials to whoever answers in Comexio's place.
+
+*Reconfigure* asks before it touches the pin: when the host of an encrypted entry answers no HTTPS, it asks whether to switch to unencrypted HTTP; when a new host presents another certificate, it shows the pinned and the presented fingerprint and asks whether to trust it. Apart from the TLS handshake that reads the certificate, nothing — not even the login test — is sent before you confirm.
+
+The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded; after a restart that met a changed certificate the integration does not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: sensor.iosrv1_connection
+    from: https
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: "Comexio connection"
+      message: "The connection to Comexio is no longer HTTPS with the pinned certificate: {{ states('sensor.iosrv1_connection') }}"
+```
 
 ## 🐛 Troubleshooting
 
@@ -297,6 +324,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
 | `sensor` (Diagnose) | Integration | `Freier Speicher` — freier Platz im internen Speicher des Comexio in %, alle 5 min abgefragt. |
 | `sensor` (Diagnose) | Integration | `Letzter Start` — wann das Comexio-System zuletzt gestartet ist (aus seiner Laufzeit), alle 5 min abgefragt. |
+| `sensor` (Diagnose) | Integration | `Verbindung` — Zustände `https`, `http`, `certificate_changed`, angezeigt als `HTTPS` (verschlüsselt, das gepinnte Zertifikat), `HTTP` (Comexio bietet kein HTTPS an: unverschlüsselt) oder `Zertifikat geändert` (Comexio zeigt ein anderes als das gepinnte Zertifikat; bis du in der Reparatur entscheidest, wird nichts gesendet). Der gepinnte und, solange die Reparatur offen ist, der angebotene SHA-256-Fingerabdruck als Attribute. Nicht verfügbar, solange die Integration nicht geladen ist — etwa nach einem Neustart, der auf ein geändertes Zertifikat traf. Siehe [Verschlüsselte Verbindung](#-verschlüsselte-verbindung-https). |
 | `binary_sensor` (Diagnose, Problem) | Integration | `Zeitserver-Setting` — an, solange Comexio seine Uhr nicht von einem Zeitserver stellt (deaktiviert oder kein Server eingetragen); eine falsche Uhr bringt Zeitglieder und Zeitpläne in den Logikplänen durcheinander. Aus heißt nur, dass ein Server eingetragen ist, nicht dass Comexio ihn erreicht. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
 | `button` (Konfiguration) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
@@ -329,6 +357,8 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 
 > [!TIP]
 > **Verbindungsdaten nachträglich ändern:** Wenn sich IP-Adresse oder Passwörter ändern, musst du die Integration **nicht** neu einrichten. Öffne die Integration unter *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu konfigurieren* und passe Host, Benutzername und Passwörter direkt an. Felder für Passwörter leer lassen bedeutet "bestehendes Passwort beibehalten".
+>
+> **Admin-Passwort in Comexio geändert:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten einer bestehenden Integration ab — beim Start der Integration oder bei einer Abfrage —, zeigt Home Assistant unter *Einstellungen → Geräte & Dienste* die Aufforderung *Comexio erneut anmelden*. Dort den aktuellen Benutzernamen und das Passwort eingeben. Bis dahin ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut — nur ein Neustart von Home Assistant oder ein Neuladen der Integration versucht sie noch einmal und fordert erneut zur Anmeldung auf, wenn Comexio sie weiter ablehnt. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
 
 > [!NOTE]
 > **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Benachrichtigungen und Rollladen-Schlüsselwörter.
@@ -428,6 +458,8 @@ Merker, IOs, KNX-Objekte und Trigger von HA funktionieren nur, solange die von d
 
 Eigene Pläne, die immer laufen sollen, lassen sich in den Optionen hinzufügen (**Logikplan-Watchdog: zusätzlich überwachte Pläne**). Sie bekommen dieselbe Reparaturmeldung, denselben Sensor und Push; **Plan Auto-Start (User-Pläne)** ist standardmäßig aus. Einen Plan, den HA selbst gerade gestoppt hat (Sortieren, Verdrahten, Restore, Buslast-Kaskade), bewertet der Watchdog 5 Minuten lang nicht. War Comexio nicht erreichbar (fehlgeschlagener Setup-Versuch, fehlgeschlagener Abruf der Konfiguration oder der Laufzustände, oder Notfall-Neustart durch den Buslast-Watchdog), meldet und startet der Watchdog keine gestoppten Pläne, bis Comexio wieder antwortet, und danach ab dem ersten erfolgreichen Abruf noch 10 Minuten lang — ein neu startender Comexio startet seine Pläne selbst; ein wieder laufender Plan hebt seine Meldung trotzdem auf.
 
+Findet Comexio einen gewählten User-Plan unter seiner ID und seinem Namen nicht mehr, gibt es eine Reparaturmeldung und einen Alarm-Push. Trägt seine ID inzwischen einen anderen Plan — der Plan wurde umbenannt, oder er wurde gelöscht und Comexio hat seine ID neu vergeben —, nennen beide diesen Plan, und die Reparaturmeldung bietet an, **stattdessen ihn zu überwachen**. Ein umbenannter Plan mit unverändertem Inhalt (gleiche ID, gleicher Inhalt wie sein letztes Backup) wird von selbst übernommen, überwacht oder nicht: Seine Backups laufen unter dem neuen Namen weiter, statt zu verwaisten Backups zu werden, und eine Watchdog-Auswahl übernimmt den neuen Namen — kein Alarm, keine Reparaturmeldung. **Umbenennung übernehmen** bietet die Reparaturmeldung nur an, wenn das fehlschlug. Eine Umbenennung zusammen mit einer Inhaltsänderung wird nicht als solche erkannt.
+
 📖 **[Logikplan-Vorschau — Anleitung →](FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
 
 ### 🗂️ Automatische Backups & Restore
@@ -450,6 +482,28 @@ Für große Installationen können Merker/Web-IO-Paare auf automatisch verwaltet
 Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs als HA-Entitäten importieren — Opt-in über **KNX-Objekte als Entitäten anlegen** in den Integrations-Optionen (standardmäßig aus). Digitale Objekte werden automatisch anhand ihres KNX-Datenpunkttyps klassifiziert, für echte mehrdeutige DPTs gibt es einen Repair-Issue-gestützten Flow.
 
 📖 **[Anleitung KNX-Objekte →](KNX.md#-deutsch)** — Benennung, automatische Einheiten-/Device-Class-Erkennung, Dimmer- & Jalousie-Unterstützung (`cover`/`light`), DPT-Klassifizierung, der Klassifizierungs-Reparatur-Flow und bekannte Einschränkungen.
+
+## 🔒 Verschlüsselte Verbindung (HTTPS)
+
+Bietet Comexio HTTPS an, verbindet sich die Integration verschlüsselt und pinnt das Zertifikat des Comexio: bei der Einrichtung, bestehende Einträge beim nächsten Start. Comexio signiert sein Zertifikat selbst, darum merkt sich die Integration statt einer Zertifizierungsstelle dessen SHA-256-Fingerabdruck (Trust on First Use) und meldet die Umstellung in einer Benachrichtigung. Der Fingerabdruck ist der SHA-256-Wert, den die Admin-Seite des Comexio unter seinen Zertifikats-Hashes anzeigt. Ohne HTTPS bleibt die Verbindung auf HTTP — unverschlüsselt, auch der Admin-Login — und jeder Start versucht die Umstellung erneut. *Neu konfigurieren* zeigt, welche der beiden genutzt wird, und den gepinnten Fingerabdruck.
+
+Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Die Integration sendet dann nichts mehr an Comexio und legt eine Reparatur an, die den gepinnten und den neuen Fingerabdruck zeigt; erst wenn du dort bestätigst, wird das neue Zertifikat gepinnt. Die unter **Logikplan-Watchdog: Push an** eingetragenen Benachrichtigungsdienste bekommen dazu einen dringenden Push (iOS: kritische Mitteilung, Android: Alarm-Kanal — beide auch bei „Nicht stören“), der die Reparaturen öffnet; er verschwindet vom Handy, sobald die Reparatur erledigt ist; ein noch nicht erreichbarer Dienst (etwa direkt nach einem Neustart) wird bei der nächsten Prüfung erneut versucht. Ein geändertes Zertifikat wird auch dann nie automatisch übernommen, wenn die Seriennummer des Servers passt: Um sie zu lesen, müsste sich die Integration anmelden und gäbe die Admin-Zugangsdaten an den, der an Comexios Stelle antwortet.
+
+*Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Vor deiner Bestätigung wird nichts gesendet — auch nicht der Login-Test.
+
+Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist; nach einem Neustart, der auf ein geändertes Zertifikat traf, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: sensor.iosrv1_connection
+    from: https
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: "Comexio-Verbindung"
+      message: "Die Verbindung zu Comexio ist nicht mehr HTTPS mit dem gepinnten Zertifikat: {{ states('sensor.iosrv1_connection') }}"
+```
 
 ## 🐛 Fehlerbehebung (Troubleshooting)
 

@@ -586,7 +586,7 @@ def _run_restore(
     vanished_running: bool = False,
     **data: Any,
 ) -> tuple[SimpleNamespace, MagicMock]:
-    api = SimpleNamespace(login=AsyncMock(return_value=logged_in), comexio_version="11.0.2")
+    api = SimpleNamespace(login=AsyncMock(return_value=logged_in), last_login_error=None, comexio_version="11.0.2")
 
     async def fetch_config() -> dict[str, Any]:
         if fetch_error is not None:

@@ -66,7 +66,7 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 | **Show sync notifications** | Display pop-up progress messages during WebIO sync. |
 | **Ignore Web-IO warnings** | Suppress the Repair issue when the Web-IO class is out of sync. |
 | **Show offline extension entities** | Show entities of offline modules as *Unavailable* instead of hiding them. |
-| **Cover detection keywords** | Comma-separated keywords; an analog marker whose name contains one becomes a 0–100 % number/sensor (default `rollo, jalousie, blind, markise, awning`). A marker name with `temp`, `setpoint`, `°C` or the word `Grad` becomes a °C temperature (−273.15 to 10,000); a bare `Soll` does not. |
+| **Cover detection keywords** | Comma-separated keywords; an analog marker whose name contains one becomes a 0–100 % number/sensor (default `rollo, jalousie, blind, markise, awning`). A marker name with `temp`, `setpoint`, `°C` or the word `Grad` becomes a °C temperature (−273 to 10,000); a bare `Soll` does not. |
 
 ---
 
@@ -77,6 +77,8 @@ Open via **⋮ → Reconfigure** on the integration entry. Allows updating host,
 <img src="docs/assets/ui/2_integration_reconf-1_en.png" width="320">
 
 > **Tip:** Leave password fields blank to keep the existing password. The integration runs a connection test before saving and reloads automatically on success.
+
+> **Rejected credentials:** If Comexio refuses the stored admin credentials (when the integration starts or on a poll), HA starts a *Re-authenticate Comexio* flow instead — enter the current username and password there. Until the credentials are updated, the configuration poll stops and the integration does not try the refused credentials again — only a Home Assistant restart or a reload of the entry tries them once more, and starts the reauth flow again if Comexio still refuses them. While the integration is first being added, refused credentials show an error in the setup form instead.
 
 ---
 
@@ -194,7 +196,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 | **Fortschritts-Popups anzeigen** | Fortschrittsmeldungen während des WebIO-Syncs anzeigen. |
 | **Web-IO-Warnung ignorieren** | Reparatur-Issue unterdrücken, wenn die Web-IO-Klasse nicht synchron ist. |
 | **Offline-Extensions anzeigen** | Entitäten offline gegangener Module als *Nicht verfügbar* anzeigen statt ausblenden. |
-| **Schlüsselwörter Rollladen-Erkennung** | Kommaseparierte Liste; ein analoger Merker, dessen Name eines davon enthält, wird zur 0–100-%-Zahl bzw. zum %-Sensor (Standard `rollo, jalousie, blind, markise, awning`). Ein Merkername mit `temp`, `setpoint`, `°C` oder dem Wort `Grad` wird zur °C-Temperatur (−273,15 bis 10 000); ein bloßes `Soll` reicht dafür nicht. |
+| **Schlüsselwörter Rollladen-Erkennung** | Kommaseparierte Liste; ein analoger Merker, dessen Name eines davon enthält, wird zur 0–100-%-Zahl bzw. zum %-Sensor (Standard `rollo, jalousie, blind, markise, awning`). Ein Merkername mit `temp`, `setpoint`, `°C` oder dem Wort `Grad` wird zur °C-Temperatur (−273 bis 10 000); ein bloßes `Soll` reicht dafür nicht. |
 
 ---
 
@@ -205,6 +207,8 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 <img src="docs/assets/ui/2_integration_reconf-1_de.png" width="320">
 
 > **Tipp:** Passwortfelder leer lassen bedeutet "bestehendes Passwort beibehalten". Die Integration führt vor dem Speichern einen Verbindungstest durch und lädt sich bei Erfolg automatisch neu.
+
+> **Abgelehnte Zugangsdaten:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten ab (beim Start der Integration oder bei einer Abfrage), startet HA stattdessen den Ablauf *Comexio erneut anmelden* — dort den aktuellen Benutzernamen und das Passwort eingeben. Bis die Zugangsdaten aktualisiert sind, ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut — nur ein Neustart von Home Assistant oder ein Neuladen der Integration versucht sie noch einmal und startet erneut den Ablauf *Comexio erneut anmelden*, wenn Comexio sie weiter ablehnt. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
 
 ---
 

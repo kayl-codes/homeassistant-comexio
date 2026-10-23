@@ -23,6 +23,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
 
 from .const import (
+    CERTIFICATE_CHANGED_MSG,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_FUNCTION_PLAN_PLAN_MAP,
     DEFAULT_ENABLE_NOTIFICATIONS,
@@ -49,6 +50,7 @@ from .const import (
     IO_PLAN_KIND_IO,
     IO_PLAN_KINDS,
     ISSUE_UNINSTALL_CLEANUP,
+    LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_REJECTED,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
@@ -410,6 +412,8 @@ def _sync_login_error(reason: str | None) -> _SyncLoginError:
         return _SyncLoginError(
             "Comexio rejected the admin login — please check the credentials (reconfigure the integration)."
         )
+    if reason == LOGIN_ERROR_CERTIFICATE:
+        return _SyncLoginError(CERTIFICATE_CHANGED_MSG)
     return _SyncLoginError(
         "Comexio admin login failed — the server is not reachable or not answering. Please try again later."
     )
@@ -2765,11 +2769,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             ctx, fub_id, plan_name, list(dict.fromkeys(all_added)), False, was_active
         )
         err_note = f", {ICON_WARNING} {len(all_errors)} errors" if all_errors else ""
-        line = (
+        return (
             f"• '{one_line(plan_name)}'{' (new)' if is_fresh else ''}: {', '.join(parts)}"
             f" in {_mmss(time.monotonic() - t0)} min{note}{err_note}"
         )
-        return line
 
     async def _wire_io_clusters(
         self, ctx: _SyncContext, io_items: list[_IoRef], progress_state: dict

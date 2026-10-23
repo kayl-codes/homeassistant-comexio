@@ -58,6 +58,10 @@ DEFAULT_SCHEMA_KNX = "K{KnxId} {KnxTitle}"
 # keys for API access
 CONF_API_USERNAME = "api_username"
 CONF_API_PASSWORD = "api_password"  # nosec B105
+# SHA-256 fingerprint (64 lowercase hex digits) of Comexio's TLS certificate, pinned at setup (see
+# certificate.py). Present: every request goes over HTTPS with that pin. Absent: plain HTTP, and
+# each setup tries to switch the entry over.
+CONF_CERTIFICATE_FINGERPRINT = "certificate_fingerprint"
 
 CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
 DEFAULT_ENABLE_NOTIFICATIONS = True
@@ -571,9 +575,11 @@ MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400
 
 # Range of a temperature marker number (is_temperature_marker_name below, user decision
-# 2026-10-17, #179): down to absolute zero so negative correction offsets and outdoor
-# setpoints are settable, up to a generous ceiling that still blocks gross typos.
-MARKER_TEMPERATURE_MIN_VALUE = -273.15
+# 2026-10-17, #179): down to about absolute zero so negative correction offsets and outdoor
+# setpoints are settable, up to a generous ceiling that still blocks gross typos. The
+# minimum is -273, not -273.15: the frontend's number input counts its steps from the
+# minimum, so -273.15 with step 0.1 accepted only values ending in 5 (49.95, 50.05).
+MARKER_TEMPERATURE_MIN_VALUE = -273.0
 MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
 
 # A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
@@ -895,6 +901,13 @@ FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC = 600
 SETUP_UNREACHABLE_ENTRIES = f"{DOMAIN}_setup_unreachable"
 # ComexioAPI.last_login_error when the server could not be reached or answered garbage.
 LOGIN_ERROR_CONNECTION = "connection"
+# ComexioAPI.last_login_error when the server presented another certificate than the pinned one.
+LOGIN_ERROR_CERTIFICATE = "certificate"
+# What a user action learns when its login met LOGIN_ERROR_CERTIFICATE.
+CERTIFICATE_CHANGED_MSG = (
+    "Comexio presents another certificate than the pinned one — nothing is sent to it until you decide "
+    "in Settings → Repairs."
+)
 # ComexioAPI.last_login_error when Comexio answered and refused the credentials (setup and poll ask for reauth).
 LOGIN_ERROR_REJECTED = "rejected"
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
@@ -909,6 +922,10 @@ FUNCTION_PLAN_UNLOAD_WAIT_SEC = 120
 FUNCTION_PLAN_UNLOAD_POLL_SEC = 0.5
 # Longest a deleted plan's Restore (watchdog push or repair) waits for a restore running elsewhere.
 FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC = 120
+# How often that Restore compares the plan now holding the deleted plan's ID, should another take it meanwhile.
+FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS = 3
+# Longest error detail a failed Restore names in its notification (an aiohttp error may carry a whole URL).
+FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX = 200
 # User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
 # (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
@@ -1031,11 +1048,12 @@ def repointed_watchdog_user_plan_picks(
     picks: list[Any] = []
     for value in raw_picks:
         pick = parse_watchdog_user_plan_pick(value)
+        kept = value
         if pick is not None and pick[0] == old_fub_id and pick[1] in movable_names:
-            value = watchdog_user_plan_pick(new_fub_id, plan_name)
+            kept = watchdog_user_plan_pick(new_fub_id, plan_name)
             moved = True
-        if value not in picks:
-            picks.append(value)
+        if kept not in picks:
+            picks.append(kept)
     return picks if moved else None
 
 
@@ -1554,7 +1572,8 @@ def _subtracted_intervals(
     """keep's IDs minus drop's (both merged) — linear in the number of intervals, never in the IDs."""
     result: list[tuple[int, int]] = []
     first = 0
-    for start, end in keep:
+    for keep_start, end in keep:
+        start = keep_start
         while first < len(drop) and drop[first][1] < start:
             first += 1
         cut = first

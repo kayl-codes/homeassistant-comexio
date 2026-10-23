@@ -33,6 +33,8 @@ def _coordinator(load: AsyncMock | None = None) -> ComexioCoordinator:
     coordinator._auto_backup_pause_generation = 0
     coordinator.unloading = False
     coordinator._restored_as_new = {}
+    coordinator._rename_follow_failed = set()
+    coordinator._rename_move_pending = {}
     coordinator._bulk_load_fail_streak = 0
     coordinator._bulk_load_pending = False
     coordinator._plan_omit_streaks = {}
@@ -44,6 +46,7 @@ def _coordinator(load: AsyncMock | None = None) -> ComexioCoordinator:
         fub_data={"7": {"Name": "Pumps"}},
         comexio_version="11.1.4",
         block_settings={},
+        module_configs={},
     )
     coordinator.function_plan_plans = {}
     coordinator._drop_plans_deleted_meanwhile = lambda plans: plans  # type: ignore[method-assign]
@@ -56,6 +59,7 @@ def _coordinator(load: AsyncMock | None = None) -> ComexioCoordinator:
         async_auto_backup=AsyncMock(return_value=[]),
         async_backfill_paper_metadata=AsyncMock(),
         async_backfill_block_keys=AsyncMock(),
+        plan_names_for_fub_id_sync=lambda _fub_id: set(),
     )
     coordinator._async_refresh_service_descriptions = AsyncMock()  # type: ignore[method-assign]
     coordinator._async_audit_orphaned_backups = AsyncMock()  # type: ignore[method-assign]
@@ -74,6 +78,26 @@ def test_a_cycle_backs_up_the_loaded_plans() -> None:
     _cycle(coordinator)
     coordinator.function_plan_backup.async_auto_backup.assert_awaited_once()
     assert coordinator.function_plan_backup.async_auto_backup.await_args.args[0] == PLANS
+
+
+def test_both_backups_get_the_block_settings_and_module_configs_of_the_api() -> None:
+    """Each table reaches its own keyword — the backup stores what the last config fetch read."""
+    coordinator = _coordinator()
+    coordinator.api.block_settings = {"4": {"in_0": "1"}}
+    coordinator.api.module_configs = {"13": {"31": {"name": "Scene"}}}
+    coordinator.api.get_fub_known_format = lambda fub_id: None
+    coordinator.function_plan_backup.async_change_backup = AsyncMock()
+
+    _cycle(coordinator)
+    asyncio.run(coordinator.async_function_plan_change_backup(7, "sort", PLANS[7]))
+
+    for backup_call in (
+        coordinator.function_plan_backup.async_auto_backup,
+        coordinator.function_plan_backup.async_change_backup,
+    ):
+        backup_call.assert_awaited_once()
+        assert backup_call.await_args.kwargs["block_settings"] is coordinator.api.block_settings
+        assert backup_call.await_args.kwargs["module_configs"] is coordinator.api.module_configs
 
 
 def test_a_cycle_during_a_restore_loads_and_backs_up_nothing() -> None:
@@ -507,3 +531,48 @@ def test_a_left_out_plan_counts_before_the_first_poll() -> None:
     coordinator.scraped_plan_ids = None
     _cycle(coordinator)
     assert coordinator._plan_omit_streaks == {8: 1}
+
+
+def test_a_cycle_follows_renames_before_the_auto_backup() -> None:
+    """Followed first, the renamed chain already holds the plan's content: no duplicate snapshot under the new name."""
+    coordinator = _coordinator()
+    order: list[str] = []
+    coordinator._async_follow_plan_renames = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda *_: order.append("follow")
+    )
+    coordinator.function_plan_backup.async_auto_backup.side_effect = lambda *_a, **_k: order.append("backup") or []
+    _cycle(coordinator)
+    assert order == ["follow", "backup"]
+    plans, fub_data, held_back = coordinator._async_follow_plan_renames.await_args.args
+    assert (plans, fub_data, held_back()) == (PLANS, {"7": {"Name": "Pumps"}}, False)
+
+
+def test_a_plan_renamed_during_the_bulk_load_waits_for_the_next_cycle() -> None:
+    """(Sourcery) its loaded content may be the former plan's: matched against those backups, it would move
+    them, and its auto backup would store it under the new name. A plan that kept its name goes on."""
+    plans = {**PLANS, 8: {"elements": {"1": {}}, "connections": {}}}
+
+    async def load(**_: object) -> dict:
+        # 7 renamed or its ID reused meanwhile
+        coordinator.api.fub_data = {"7": {"Name": "Heating"}, "8": {"Name": "Lights"}}
+        return dict(plans)
+
+    coordinator = _coordinator(AsyncMock(side_effect=load))
+    coordinator.api.fub_data = {"7": {"Name": "Pumps"}, "8": {"Name": "Lights"}}
+    coordinator._async_follow_plan_renames = AsyncMock()  # type: ignore[method-assign]
+    _cycle(coordinator)
+    assert coordinator._async_follow_plan_renames.await_args.args[0] == {8: plans[8]}
+    assert coordinator.function_plan_backup.async_auto_backup.await_args.args[0] == {8: plans[8]}
+
+
+def test_a_restore_running_when_the_bulk_load_returns_follows_no_rename() -> None:
+    async def load(**_: object) -> dict:
+        coordinator.pause_auto_backup().__enter__()
+        return dict(PLANS)
+
+    coordinator = _coordinator(AsyncMock(side_effect=load))
+    coordinator._async_follow_plan_renames = AsyncMock()  # type: ignore[method-assign]
+    _cycle(coordinator)
+    coordinator._async_follow_plan_renames.assert_not_awaited()
+    coordinator.function_plan_backup.async_backfill_paper_metadata.assert_awaited_once()
+    coordinator._async_audit_orphaned_backups.assert_awaited_once()

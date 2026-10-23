@@ -253,6 +253,8 @@ def _snapshot_coordinator(live_plans: dict | None) -> ComexioCoordinator:
     # Before the first plan list no snapshot is complete, so the last poll read the stored backups' markers.
     coordinator._last_referenced_markers_from_snapshot = live_plans is not None
     coordinator._lp_missing_recheck_pending = False
+    coordinator._rename_follow_failed = set()
+    coordinator._rename_move_pending = {}
     coordinator._async_audit_orphaned_backups = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
     coordinator.async_request_refresh = AsyncMock()  # type: ignore[method-assign]
@@ -317,10 +319,12 @@ def _full_cycle_coordinator(live_plans: dict | None, bulk_result: dict) -> Comex
     coordinator.api.function_plan_load_all_plans = AsyncMock(return_value=bulk_result)
     coordinator.api.comexio_version = None
     coordinator.api.block_settings = {}
+    coordinator.api.module_configs = {}
     coordinator.function_plan_backup = SimpleNamespace(
         async_auto_backup=AsyncMock(return_value=[]),
         async_backfill_paper_metadata=AsyncMock(),
         async_backfill_block_keys=AsyncMock(),
+        plan_names_for_fub_id_sync=lambda _fub_id: set(),
     )
     coordinator.function_plan_label_maps = MagicMock(return_value=({}, {}, {}))  # type: ignore[method-assign]
     coordinator._current_plan_format = MagicMock(return_value=None)  # type: ignore[method-assign]
