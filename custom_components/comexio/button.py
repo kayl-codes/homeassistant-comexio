@@ -23,6 +23,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
 
 from .const import (
+    CERTIFICATE_CHANGED_MSG,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_PLAN_MAP,
@@ -48,6 +49,7 @@ from .const import (
     ICON_UPLOAD,
     ICON_WARNING,
     ISSUE_UNINSTALL_CLEANUP,
+    LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_REJECTED,
     PLAN_WIRING_ACTIONS,
     RANGE_CHECK_CHECKED,
@@ -433,6 +435,8 @@ def _sync_login_error(reason: str | None) -> _SyncLoginError:
         return _SyncLoginError(
             "Comexio rejected the admin login — please check the credentials (reconfigure the integration)."
         )
+    if reason == LOGIN_ERROR_CERTIFICATE:
+        return _SyncLoginError(CERTIFICATE_CHANGED_MSG)
     return _SyncLoginError(
         "Comexio admin login failed — the server is not reachable or not answering. Please try again later."
     )

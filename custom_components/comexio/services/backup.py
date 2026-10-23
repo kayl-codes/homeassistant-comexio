@@ -54,12 +54,12 @@ from ..function_plan_block_settings import (
 from ..function_plan_module_configs import module_configs_diff, snapshot_module_configs, uses_module_configs
 from ..orphaned_backups import delete_all_orphaned_backup_issues, delete_orphaned_backup_issue
 from ._context import (
-    _LOGIN_FAILED_MSG,
     NO_PLAN_SELECTED_MSG,
     _async_get_service_context,
     _parse_snapshot_field,
     _resolve_backup_identity,
     _resolve_fub_id,
+    login_failed_message,
     service_flag,
 )
 from ._yaml_sync import _refresh_service_descriptions
@@ -1829,7 +1829,7 @@ async def _run_function_plan_restore(
         return
 
     if not await api.login():
-        persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=_TITLE_RESTORE_ERR)
+        persistent_notification.async_create(hass, login_failed_message(api), title=_TITLE_RESTORE_ERR)
         return
 
     live_fub, fetch_error = await _fetch_live_plan(api, fub_id, as_copy)

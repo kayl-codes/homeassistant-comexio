@@ -3,15 +3,22 @@ import asyncio
 import logging
 import time
 
+from aiocomexio import ComexioError, fetch_certificate_fingerprint
 from homeassistant.components import persistent_notification
 from homeassistant.components.repairs import RepairsFlow
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
 from homeassistant.util import slugify
 import voluptuous as vol
 
+from .certificate import (
+    ISSUE_CERTIFICATE_CHANGED,
+    async_clear_certificate_changed,
+    async_report_certificate_changed,
+    certificate_placeholders,
+)
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
     CLEANUP_SCOPE_IO,
@@ -25,8 +32,10 @@ from .cleanup_scope import (
     scope_of_class,
 )
 from .const import (
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
+    CONF_HOST,
     CONF_IMPORT_DISABLED_IGNORED,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_SERVER_ID,
@@ -72,7 +81,7 @@ from .const import (
     uninstall_cleanup_pending_notification_id,
     unreadable_plan_keys,
 )
-from .function_plan_backup import is_orphaned_identity
+from .function_plan_backup import PlanBackupsNotMovedError, is_orphaned_identity
 from .orphaned_backups import ISSUE_ORPHANED_PLAN_BACKUPS, repair_placeholders
 from .plan_watchdog import ISSUE_FUNCTION_PLAN_STOPPED, ISSUE_FUNCTION_PLAN_VANISHED, vanished_plan_restorable
 
@@ -87,6 +96,9 @@ ACTION_DELETE = "delete"
 ACTION_PREVIEW = "preview"
 ACTION_RESTORE = "restore"
 ACTION_UNWATCH = "unwatch"
+# A vanished plan whose ID another plan holds now: watch that plan instead, or take it over as the plan renamed.
+ACTION_WATCH_HOLDER = "watch_holder"
+ACTION_TAKE_OVER_RENAME = "take_over_rename"
 ACTION_START_PLAN = "start"
 ACTION_CLEANUP = "cleanup"
 ACTION_ENABLE = "enable"
@@ -391,6 +403,8 @@ class ComexioRepairFlow(RepairsFlow):
             return await self.async_step_knx_dpt_suffix()
         if self.issue_id.startswith(f"{ISSUE_ORPHANED_PLAN_BACKUPS}_"):
             return await self.async_step_orphaned_backups()
+        if self.issue_id.startswith(f"{ISSUE_CERTIFICATE_CHANGED}_"):
+            return await self.async_step_certificate_changed()
         if self.issue_id.startswith(f"{ISSUE_FUNCTION_PLAN_STOPPED}_"):
             return await self.async_step_function_plan_stopped()
         if self.issue_id.startswith(f"{ISSUE_FUNCTION_PLAN_VANISHED}_"):
@@ -1364,6 +1378,51 @@ class ComexioRepairFlow(RepairsFlow):
             title += f" ({len(failed)} fehlgeschlagen: {names})" if is_de else f" ({len(failed)} failed: {names})"
         return title
 
+    async def async_step_certificate_changed(self, user_input=None):
+        """Show pinned and presented fingerprint; on confirmation pin the presented one if Comexio still shows it.
+
+        Never pins anything the user has not seen: the certificate is read again on confirmation, and
+        a different one than shown is put up for comparison instead.
+        """
+        entry = self.hass.config_entries.async_get_entry(str(self.issue_data.get("entry_id")))
+        if entry is None or CONF_CERTIFICATE_FINGERPRINT not in entry.data:
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason="entry_not_found")
+        shown = str(self.issue_data.get("actual"))
+        placeholders = certificate_placeholders(entry, shown)
+        if user_input is None:
+            return self.async_show_form(step_id="certificate_changed", description_placeholders=placeholders)
+        try:
+            current = await fetch_certificate_fingerprint(entry.data[CONF_HOST])
+        except (ComexioError, ValueError) as err:
+            _LOGGER.warning("Comexio certificate could not be read again for the repair: %s", err)
+            return self.async_abort(reason="cannot_connect", description_placeholders=placeholders)
+        if current == entry.data[CONF_CERTIFICATE_FINGERPRINT]:
+            # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
+            async_clear_certificate_changed(self.hass, entry.entry_id)
+            if entry.state is not ConfigEntryState.LOADED:
+                self.hass.config_entries.async_schedule_reload(entry.entry_id)
+            return self.async_abort(reason="certificate_restored", description_placeholders=placeholders)
+        if current != shown:
+            # Yet another certificate than the one the user just compared: put that one up instead.
+            async_report_certificate_changed(self.hass, entry, current)
+            return self.async_abort(
+                reason="certificate_changed_again", description_placeholders=certificate_placeholders(entry, current)
+            )
+        _LOGGER.warning(
+            "Comexio at %s: certificate %s pinned by the user, replacing %s",
+            entry.data[CONF_HOST],
+            placeholders["actual"],
+            placeholders["pinned"],
+        )
+        # A loaded entry reloads through its update listener on the data change below.
+        reload = entry.state is not ConfigEntryState.LOADED
+        self.hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: current})
+        async_clear_certificate_changed(self.hass, entry.entry_id)  # also removes the push from the phones
+        if reload:
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_create_entry(data={})
+
     async def async_step_orphaned_backups(self, user_input=None):
         """Delete or keep the backups of a deleted plan whose retention has passed, or look at them first."""
         if user_input is None:
@@ -1484,19 +1543,24 @@ class ComexioRepairFlow(RepairsFlow):
         return self.async_create_entry(title=title, data={})
 
     async def async_step_function_plan_vanished(self, user_input=None):
-        """Restore a deleted watched user plan from its newest backup, or stop watching it."""
-        placeholders = one_line_values({key: self.issue_data.get(key, "?") for key in ("plan_name", "fub_id")})
+        """Restore a deleted watched user plan from its newest backup, or stop watching it.
+
+        While another plan holds its ID (issue data current_name: renamed, or the ID reused) also: watch
+        that plan instead, or, its content matching the plan's last backup, take it over as the plan renamed.
+        """
+        holder = None if (raw_holder := self.issue_data.get("current_name")) is None else str(raw_holder)
+        keys = ("plan_name", "fub_id") if holder is None else ("plan_name", "fub_id", "current_name")
+        placeholders = one_line_values({key: self.issue_data.get(key, "?") for key in keys})
         fub_id = int(self.issue_data["fub_id"])
         name = str(self.issue_data.get("plan_name", ""))
-        # A bare-ID pick its backups name ambiguously has no backup identity to restore by.
-        actions = [ACTION_RESTORE, ACTION_UNWATCH] if vanished_plan_restorable(fub_id, name) else [ACTION_UNWATCH]
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
         if user_input is None:
+            actions = await self._async_vanished_plan_actions(coordinator, fub_id, name, holder)
             return self.async_show_form(
                 step_id="function_plan_vanished",
                 description_placeholders=placeholders,
                 data_schema=_action_schema(actions, "function_plan_vanished_action"),
             )
-        coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
         if coordinator is None:
             return self.async_abort(reason="entry_not_found")
         if coordinator.plan_watchdog.vanished is None:
@@ -1510,6 +1574,9 @@ class ComexioRepairFlow(RepairsFlow):
         if user_input["action"] == ACTION_UNWATCH:
             await coordinator.async_unwatch_user_plan(fub_id, name)
             return self.async_create_entry(title="Nicht mehr überwacht" if is_de else "No longer watched", data={})
+        if user_input["action"] in (ACTION_WATCH_HOLDER, ACTION_TAKE_OVER_RENAME) and holder is not None:
+            rename = user_input["action"] == ACTION_TAKE_OVER_RENAME
+            return await self._async_watch_vanished_plan_holder(coordinator, fub_id, name, holder, rename=rename)
         try:
             has_backup = await coordinator.async_newest_backup_field(fub_id, name) is not None
         except Exception:
@@ -1526,6 +1593,79 @@ class ComexioRepairFlow(RepairsFlow):
             name=f"{DOMAIN}_{coordinator.server_id}_restore_plan_{fub_id}",
         )
         return self.async_create_entry(title="Wiederherstellung gestartet" if is_de else "Restore started", data={})
+
+    async def _async_vanished_plan_actions(self, coordinator, fub_id: int, name: str, holder: str | None) -> list[str]:
+        """The vanished plan dialog's choices, the most likely first.
+
+        With another plan on the ID: "take over the rename" when its content matches the plan's last
+        backup (plan_rename_suspected), else "watch it instead". "Restore" only for a plan its backups
+        can be found by (a bare-ID pick its backups name ambiguously has no backup identity), and not
+        for a suspected rename: the restored copy would run beside the renamed original.
+        """
+        if holder is not None and coordinator is not None:
+            if await self._async_rename_suspected(coordinator, fub_id, name, holder):
+                return [ACTION_TAKE_OVER_RENAME, ACTION_UNWATCH]
+            holder_actions = [ACTION_WATCH_HOLDER]
+        else:
+            holder_actions = []
+        restore = [ACTION_RESTORE] if vanished_plan_restorable(fub_id, name) else []
+        return [*restore, *holder_actions, ACTION_UNWATCH]
+
+    @staticmethod
+    async def _async_rename_suspected(coordinator, fub_id: int, name: str, holder: str) -> bool | None:
+        """plan_rename_suspected after loading the backups; None when they fail to load (no rename offered)."""
+        try:
+            await coordinator.function_plan_backup.async_load()
+        except Exception:
+            _LOGGER.warning(
+                "Function plan '%s' (ID %s): backups not readable, no rename offered",
+                one_line(name),
+                fub_id,
+                exc_info=True,
+            )
+            return None
+        return coordinator.plan_rename_suspected(fub_id, name, holder)
+
+    async def _async_watch_vanished_plan_holder(
+        self, coordinator, fub_id: int, name: str, holder: str, *, rename: bool
+    ):
+        """Watch the plan holding a vanished plan's ID instead; as a rename, with the plan's backups moved to it."""
+        placeholders = one_line_values({"plan_name": name, "fub_id": str(fub_id), "current_name": holder})
+        if rename:
+            suspected = await self._async_rename_suspected(coordinator, fub_id, name, holder)
+            if suspected is None:
+                return self.async_abort(reason="backups_not_moved", description_placeholders=placeholders)
+            if not suspected:
+                # Its content changed since the dialog opened: no longer recognisable as the same plan.
+                return self.async_abort(reason="rename_not_confirmed", description_placeholders=placeholders)
+        if (
+            coordinator.unloading
+            or (rename and coordinator._restore_lock.locked())
+            or coordinator.vanished_restore_running(fub_id, name)
+        ):
+            # A restore moves the same backups; after the unload's wait a write would hit a torn-down entry.
+            # This plan's own Restore would build it anew beside the holder, its pick swapped away from it.
+            return self.async_abort(reason="backups_busy")
+        try:
+            # No await since the check: a restore starting from here on refuses until the move ends.
+            with coordinator.plan_edit():
+                done = await coordinator.async_watch_id_holder(fub_id, name, holder, rename=rename)
+        except PlanBackupsNotMovedError:
+            _LOGGER.exception("Function plan '%s' (ID %s): its backups could not be moved", one_line(name), fub_id)
+            return self.async_abort(reason="backups_not_moved", description_placeholders=placeholders)
+        if not done:
+            # Another plan holds the ID by now, or the pick was changed in the options meanwhile.
+            _LOGGER.warning(
+                "Function plan '%s' (ID %s): not switched to '%s', the ID or the pick changed meanwhile",
+                one_line(name),
+                fub_id,
+                one_line(holder),
+            )
+            return self.async_abort(reason="holder_changed", description_placeholders=placeholders)
+        is_de = self.hass.config.language == "de"
+        if rename:
+            return self.async_create_entry(title="Umbenennung übernommen" if is_de else "Rename taken over", data={})
+        return self.async_create_entry(title="Überwachung umgestellt" if is_de else "Now watching it", data={})
 
     async def _async_apply_orphaned_backups_action(
         self, manager, action: str, fub_id: int, plan_name: str

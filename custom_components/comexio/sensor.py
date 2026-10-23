@@ -6,6 +6,7 @@ import pathlib
 from typing import Any
 from urllib.parse import quote
 
+from aiocomexio import format_fingerprint
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -19,8 +20,8 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant, State, callback
-from homeassistant.helpers import entity_registry as er
+from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -28,7 +29,16 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .certificate import (
+    CONNECTION_CERTIFICATE_CHANGED,
+    CONNECTION_HTTP,
+    CONNECTION_STATES,
+    certificate_issue_id,
+    connection_state,
+    presented_fingerprint,
+)
 from .const import (
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_TYPE_INTERVAL,
@@ -65,6 +75,10 @@ from .entity import (
 from .function_plan_backup import summarize_orphaned_backups
 
 _LOGGER = logging.getLogger(__name__)
+
+# Attributes of ComexioConnectionSensor: the pinned certificate and, while the repair is open, the presented one.
+ATTR_PINNED_FINGERPRINT = "pinned_fingerprint"
+ATTR_PRESENTED_FINGERPRINT = "presented_fingerprint"
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -142,6 +156,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioWatchdogEventSensor(coordinator, coordinator.server_id),
             ComexioFreeStorageSensor(coordinator, coordinator.server_id),
             ComexioLastBootSensor(coordinator, coordinator.server_id),
+            ComexioConnectionSensor(coordinator, coordinator.server_id),
         ]
     )
 
@@ -635,6 +650,73 @@ class ComexioLastBootSensor(_ComexioSystemInfoSensor):
     @property
     def native_value(self) -> datetime | None:
         return self.coordinator.system_info.boot_time
+
+
+class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
+    """How HA talks to Comexio: HTTPS with the pinned certificate, plain HTTP, or stopped on a changed certificate.
+
+    Not a CoordinatorEntity: while the entry is loaded it stays available when the polls fail on a changed
+    certificate, which is just when an automation wants to see it. A setup that meets a changed certificate
+    does not load the entry, so after such a restart the sensor is unavailable and the repair alone remains.
+    Follows the certificate_changed repair through the issue registry; a new pin changes the entry data,
+    which reloads the entry and so this sensor.
+    The fingerprints are public certificate hashes, kept out of the recorder only because they never
+    change between states.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = CONNECTION_STATES
+    _attr_translation_key = "connection"
+    _unrecorded_attributes = frozenset({ATTR_PINNED_FINGERPRINT, ATTR_PRESENTED_FINGERPRINT})
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self._attr_unique_id = f"comexio_{server_id}_connection"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return hub_device_info(self.coordinator)
+
+    @property
+    def native_value(self) -> str:
+        return connection_state(self.hass, self.coordinator.config_entry)
+
+    @property
+    def icon(self) -> str:
+        state = self.native_value
+        if state == CONNECTION_HTTP:
+            return "mdi:lock-open-variant"
+        return "mdi:lock-alert" if state == CONNECTION_CERTIFICATE_CHANGED else "mdi:lock"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        entry = self.coordinator.config_entry
+        pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+        presented = presented_fingerprint(self.hass, entry.entry_id)
+        return {
+            ATTR_PINNED_FINGERPRINT: format_fingerprint(pinned) if pinned is not None else None,
+            ATTR_PRESENTED_FINGERPRINT: format_fingerprint(presented) if presented is not None else None,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        issue_id = certificate_issue_id(self.coordinator.config_entry.entry_id)
+
+        @callback
+        def _is_this_issue(data: ir.EventIssueRegistryUpdatedData) -> bool:
+            return data["domain"] == DOMAIN and data["issue_id"] == issue_id
+
+        @callback
+        def _issue_updated(_event: Event[ir.EventIssueRegistryUpdatedData]) -> None:
+            self.async_write_ha_state()
+
+        self.async_on_remove(
+            self.hass.bus.async_listen(
+                ir.EVENT_REPAIRS_ISSUE_REGISTRY_UPDATED, _issue_updated, event_filter=_is_this_issue
+            )
+        )
 
 
 class ComexioExtensionCountSensor(CoordinatorEntity, SensorEntity):
