@@ -61,6 +61,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
 | `sensor` (diagnostic) | Integration | `Free storage` — free space of the Comexio's internal storage in %, polled every 5 min. |
 | `sensor` (diagnostic) | Integration | `Last boot` — when the Comexio system last started (from its uptime), polled every 5 min. |
+| `sensor` (diagnostic) | Integration | `Connection` — states `https`, `http`, `certificate_changed`, shown as `HTTPS` (encrypted, the pinned certificate), `HTTP` (Comexio serves no HTTPS: not encrypted) or `Certificate changed` (Comexio presents another certificate than the pinned one; nothing is sent until you decide in the repair). The pinned and, while the repair is open, the presented certificate's SHA-256 fingerprint as state attributes. Unavailable while the integration is not loaded — for example after a restart that met a changed certificate. See [Encrypted Connection](#-encrypted-connection-https). |
 | `binary_sensor` (diagnostic, problem) | Integration | `Time server setting` — on while Comexio does not set its clock from a time server (disabled or no server entered); a wrong clock breaks timers and schedules in the function plans. Off only means a server is configured, not that Comexio reaches it. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
 | `button` (configuration) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
@@ -219,6 +220,28 @@ Comexio's KNX/EIB gateway objects ("K-Elements") can be imported as HA entities 
 
 📖 **[KNX Objects guide →](KNX.md)** — naming, automatic unit/device-class detection, dimmer & blind (`cover`/`light`) support, DPT classification, the classification Repair flow, and known limitations.
 
+## 🔒 Encrypted Connection (HTTPS)
+
+When Comexio serves HTTPS, the integration connects encrypted and pins Comexio's certificate: at setup, and for existing entries at their next start. Comexio signs its certificate itself, so instead of a certificate authority the integration remembers its SHA-256 fingerprint (trust on first use) and announces the switch in a notification. The fingerprint is the SHA-256 value Comexio's admin page lists under its certificate hashes. Without HTTPS the connection stays on plain HTTP — unencrypted, including the admin login — and every start tries the switch again. *Reconfigure* shows which of the two is in use, and the pinned fingerprint.
+
+A certificate other than the pinned one is never accepted on its own — for example after Comexio generated a new one. The integration then sends nothing more to Comexio and raises a repair that shows the pinned and the new fingerprint; only when you confirm it there is the new certificate pinned. The notify services set under **Function plan watchdog: push to** get an urgent push for it (iOS: critical alert, Android: alarm stream — both through Do Not Disturb) that opens the repairs; it is removed from the phone once the repair is done; a notify service not reachable yet (for example right after a restart) is retried at the next check. A certificate that changes is never accepted automatically, not even when the server's serial number matches: reading it would need a login, which would hand the admin credentials to whoever answers in Comexio's place.
+
+*Reconfigure* asks before it touches the pin: when the host of an encrypted entry answers no HTTPS, it asks whether to switch to unencrypted HTTP; when a new host presents another certificate, it shows the pinned and the presented fingerprint and asks whether to trust it. Apart from the TLS handshake that reads the certificate, nothing — not even the login test — is sent before you confirm.
+
+The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded; after a restart that met a changed certificate the integration does not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: sensor.iosrv1_connection
+    from: https
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: "Comexio connection"
+      message: "The connection to Comexio is no longer HTTPS with the pinned certificate: {{ states('sensor.iosrv1_connection') }}"
+```
+
 ## 🐛 Troubleshooting
 
 - **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a function plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
@@ -301,6 +324,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
 | `sensor` (Diagnose) | Integration | `Freier Speicher` — freier Platz im internen Speicher des Comexio in %, alle 5 min abgefragt. |
 | `sensor` (Diagnose) | Integration | `Letzter Start` — wann das Comexio-System zuletzt gestartet ist (aus seiner Laufzeit), alle 5 min abgefragt. |
+| `sensor` (Diagnose) | Integration | `Verbindung` — Zustände `https`, `http`, `certificate_changed`, angezeigt als `HTTPS` (verschlüsselt, das gepinnte Zertifikat), `HTTP` (Comexio bietet kein HTTPS an: unverschlüsselt) oder `Zertifikat geändert` (Comexio zeigt ein anderes als das gepinnte Zertifikat; bis du in der Reparatur entscheidest, wird nichts gesendet). Der gepinnte und, solange die Reparatur offen ist, der angebotene SHA-256-Fingerabdruck als Attribute. Nicht verfügbar, solange die Integration nicht geladen ist — etwa nach einem Neustart, der auf ein geändertes Zertifikat traf. Siehe [Verschlüsselte Verbindung](#-verschlüsselte-verbindung-https). |
 | `binary_sensor` (Diagnose, Problem) | Integration | `Zeitserver-Setting` — an, solange Comexio seine Uhr nicht von einem Zeitserver stellt (deaktiviert oder kein Server eingetragen); eine falsche Uhr bringt Zeitglieder und Zeitpläne in den Logikplänen durcheinander. Aus heißt nur, dass ein Server eingetragen ist, nicht dass Comexio ihn erreicht. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
 | `button` (Konfiguration) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
@@ -458,6 +482,28 @@ Für große Installationen können Merker/Web-IO-Paare auf automatisch verwaltet
 Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs als HA-Entitäten importieren — Opt-in über **KNX-Objekte als Entitäten anlegen** in den Integrations-Optionen (standardmäßig aus). Digitale Objekte werden automatisch anhand ihres KNX-Datenpunkttyps klassifiziert, für echte mehrdeutige DPTs gibt es einen Repair-Issue-gestützten Flow.
 
 📖 **[Anleitung KNX-Objekte →](KNX.md#-deutsch)** — Benennung, automatische Einheiten-/Device-Class-Erkennung, Dimmer- & Jalousie-Unterstützung (`cover`/`light`), DPT-Klassifizierung, der Klassifizierungs-Reparatur-Flow und bekannte Einschränkungen.
+
+## 🔒 Verschlüsselte Verbindung (HTTPS)
+
+Bietet Comexio HTTPS an, verbindet sich die Integration verschlüsselt und pinnt das Zertifikat des Comexio: bei der Einrichtung, bestehende Einträge beim nächsten Start. Comexio signiert sein Zertifikat selbst, darum merkt sich die Integration statt einer Zertifizierungsstelle dessen SHA-256-Fingerabdruck (Trust on First Use) und meldet die Umstellung in einer Benachrichtigung. Der Fingerabdruck ist der SHA-256-Wert, den die Admin-Seite des Comexio unter seinen Zertifikats-Hashes anzeigt. Ohne HTTPS bleibt die Verbindung auf HTTP — unverschlüsselt, auch der Admin-Login — und jeder Start versucht die Umstellung erneut. *Neu konfigurieren* zeigt, welche der beiden genutzt wird, und den gepinnten Fingerabdruck.
+
+Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Die Integration sendet dann nichts mehr an Comexio und legt eine Reparatur an, die den gepinnten und den neuen Fingerabdruck zeigt; erst wenn du dort bestätigst, wird das neue Zertifikat gepinnt. Die unter **Logikplan-Watchdog: Push an** eingetragenen Benachrichtigungsdienste bekommen dazu einen dringenden Push (iOS: kritische Mitteilung, Android: Alarm-Kanal — beide auch bei „Nicht stören“), der die Reparaturen öffnet; er verschwindet vom Handy, sobald die Reparatur erledigt ist; ein noch nicht erreichbarer Dienst (etwa direkt nach einem Neustart) wird bei der nächsten Prüfung erneut versucht. Ein geändertes Zertifikat wird auch dann nie automatisch übernommen, wenn die Seriennummer des Servers passt: Um sie zu lesen, müsste sich die Integration anmelden und gäbe die Admin-Zugangsdaten an den, der an Comexios Stelle antwortet.
+
+*Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Vor deiner Bestätigung wird nichts gesendet — auch nicht der Login-Test.
+
+Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist; nach einem Neustart, der auf ein geändertes Zertifikat traf, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: sensor.iosrv1_connection
+    from: https
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: "Comexio-Verbindung"
+      message: "Die Verbindung zu Comexio ist nicht mehr HTTPS mit dem gepinnten Zertifikat: {{ states('sensor.iosrv1_connection') }}"
+```
 
 ## 🐛 Fehlerbehebung (Troubleshooting)
 
