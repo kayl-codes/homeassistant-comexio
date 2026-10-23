@@ -1979,6 +1979,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.last_changed_plans = []
             pause_generation = self._auto_backup_pause_generation
             requested = function_plan_ids(self.api.fub_data)
+            names_at_load = self._existing_plan_names(requested)
             load_error: str | None = None
             # Reset after the try, not in a finally: the cycle timeout's handler must still see it set.
             self._bulk_load_pending = True
@@ -2023,10 +2024,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # the snapshot async_mark_restored promotes. The next cycle catches up.
                 _LOGGER.debug("[%s] Function Plan auto backup skipped: a restore ran meanwhile", self.server_id)
             else:
+                steady = self._plans_named_as_at_load(plans, names_at_load)
                 await self._async_follow_plan_renames(
-                    plans, fub_data, lambda: self._auto_backup_held_back(pause_generation)
+                    steady, fub_data, lambda: self._auto_backup_held_back(pause_generation)
                 )
-                await self._async_auto_backup_plans(plans, fub_data, plan_format, pause_generation)
+                await self._async_auto_backup_plans(steady, fub_data, plan_format, pause_generation)
             try:
                 # A restore since the format was read may have changed it: backfill next cycle.
                 await self.function_plan_backup.async_backfill_paper_metadata(
@@ -2099,6 +2101,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
             except Exception:
                 # One plan's failure leaves the others' renames and the auto backup running.
                 _LOGGER.exception("[%s] Function Plan rename check of ID %s failed", self.server_id, fub_id)
+
+    def _plans_named_as_at_load(self, plans: dict[int, dict], names_at_load: dict[int, str]) -> dict[int, dict]:
+        """The loaded plans still named as before their load; the others wait for the next backup cycle.
+
+        Renamed or reused meanwhile, a plan's loaded content and its current name may belong to different
+        plans: matched against the old name's backups, the content would move them to a stranger, and its
+        auto backup would store it under the stranger's name.
+        """
+        names_now = self._existing_plan_names(plans)
+        steady = {fub_id: plan for fub_id, plan in plans.items() if names_now.get(fub_id) == names_at_load.get(fub_id)}
+        if skipped := sorted(plans.keys() - steady.keys()):
+            _LOGGER.debug(
+                "[%s] Function Plan IDs %s were renamed during the bulk load: backed up next cycle",
+                self.server_id,
+                skipped,
+            )
+        return steady
 
     def _forget_stale_rename_state(self, plans: dict[int, dict], fub_data: dict) -> None:
         """Forget rename failures no longer pending (renamed again, plan gone) and noted moves of deleted plans."""

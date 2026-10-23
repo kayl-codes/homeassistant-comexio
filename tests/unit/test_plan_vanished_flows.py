@@ -350,6 +350,7 @@ def _vanished_flow(
         unloading=False,
         _restore_lock=asyncio.Lock(),
         plan_edit=MagicMock(side_effect=contextlib.nullcontext),
+        vanished_restore_running=MagicMock(return_value=False),
     )
     issue_id = vanished_plan_issue_id("cx1", int(issue_data["fub_id"]), issue_data["plan_name"])
     flow = ComexioRepairFlow(issue_id, dict(issue_data))
@@ -546,6 +547,18 @@ def test_watching_the_id_holder_is_not_held_back_by_a_restore() -> None:
 
     assert asyncio.run(submit())["type"] == "create_entry"
     coordinator.async_watch_id_holder.assert_awaited_once_with(47, "Test4", "Test 4", rename=False)
+
+
+@pytest.mark.parametrize("action", [ACTION_WATCH_HOLDER, ACTION_TAKE_OVER_RENAME])
+def test_the_holder_is_not_watched_while_this_plans_restore_runs(action: str) -> None:
+    """(Sourcery) its Restore would build the plan anew beside the holder, its pick swapped away from it."""
+    flow, coordinator = _vanished_flow({(47, "Test4")}, issue_data=REPLACED_DATA)
+    coordinator.plan_rename_suspected.return_value = True
+    coordinator.vanished_restore_running.return_value = True
+    result, _ = _step(flow, {"action": action})
+    assert result["reason"] == "backups_busy"
+    coordinator.vanished_restore_running.assert_called_with(47, "Test4")
+    coordinator.async_watch_id_holder.assert_not_awaited()
 
 
 def test_a_rename_with_unreadable_backups_is_reported_as_not_moved() -> None:

@@ -614,7 +614,8 @@ def test_a_rename_that_could_not_be_saved_is_put_back(
 
 
 def test_a_second_cancel_does_not_stop_the_put_back_on_disk() -> None:
-    """(Sourcery) cancelled again while putting back: every store is still written back."""
+    """(Sourcery) cancelled again while putting back: every store is still written back, and the save ends
+    (releasing the write lock) only then — a later write must not overlap the put-back."""
     written: list[str] = []
     release = asyncio.Event()
 
@@ -639,15 +640,49 @@ def test_a_second_cancel_does_not_stop_the_put_back_on_disk() -> None:
         while written.count("auto") < 2:
             await asyncio.sleep(0)
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()  # still putting back
         release.set()
         async with asyncio.timeout(1):
-            while len(written) < 4:
-                await asyncio.sleep(0)
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
     asyncio.run(run())
     assert written == ["auto", "changes-failed", "auto", "changes"]
+
+
+def test_a_failure_whose_put_back_is_cancelled_is_still_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """(Review) the cancel propagates in its place: the failed save would otherwise leave no trace."""
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def save_auto(_data: dict) -> None:
+        calls.append("auto")
+        if len(calls) > 1:
+            await release.wait()
+
+    async def save_changes(_data: dict) -> None:
+        raise OSError("disk full")
+
+    saves = [
+        (SimpleNamespace(async_save=save_auto), {}, {}),
+        (SimpleNamespace(async_save=save_changes), {}, {}),
+    ]
+
+    async def run() -> None:
+        task = asyncio.create_task(backup_module._async_save_all_or_put_back(saves))
+        while len(calls) < 2:
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        async with asyncio.timeout(1):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert "a lineage move failed (OSError('disk full')), then was cancelled" in caplog.text
 
 
 def test_newest_auto_hash_is_the_newest_auto_snapshots(manager: FunctionPlanBackupManager) -> None:

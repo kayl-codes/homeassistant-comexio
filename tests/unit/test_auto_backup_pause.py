@@ -547,6 +547,24 @@ def test_a_cycle_follows_renames_before_the_auto_backup() -> None:
     assert (plans, fub_data, held_back()) == (PLANS, {"7": {"Name": "Pumps"}}, False)
 
 
+def test_a_plan_renamed_during_the_bulk_load_waits_for_the_next_cycle() -> None:
+    """(Sourcery) its loaded content may be the former plan's: matched against those backups, it would move
+    them, and its auto backup would store it under the new name. A plan that kept its name goes on."""
+    plans = {**PLANS, 8: {"elements": {"1": {}}, "connections": {}}}
+
+    async def load(**_: object) -> dict:
+        # 7 renamed or its ID reused meanwhile
+        coordinator.api.fub_data = {"7": {"Name": "Heating"}, "8": {"Name": "Lights"}}
+        return dict(plans)
+
+    coordinator = _coordinator(AsyncMock(side_effect=load))
+    coordinator.api.fub_data = {"7": {"Name": "Pumps"}, "8": {"Name": "Lights"}}
+    coordinator._async_follow_plan_renames = AsyncMock()  # type: ignore[method-assign]
+    _cycle(coordinator)
+    assert coordinator._async_follow_plan_renames.await_args.args[0] == {8: plans[8]}
+    assert coordinator.function_plan_backup.async_auto_backup.await_args.args[0] == {8: plans[8]}
+
+
 def test_a_restore_running_when_the_bulk_load_returns_follows_no_rename() -> None:
     async def load(**_: object) -> dict:
         coordinator.pause_auto_backup().__enter__()

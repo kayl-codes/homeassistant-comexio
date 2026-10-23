@@ -1565,8 +1565,13 @@ class ComexioRepairFlow(RepairsFlow):
             if not suspected:
                 # Its content changed since the dialog opened: no longer recognisable as the same plan.
                 return self.async_abort(reason="rename_not_confirmed", description_placeholders=placeholders)
-        if coordinator.unloading or (rename and coordinator._restore_lock.locked()):
+        if (
+            coordinator.unloading
+            or (rename and coordinator._restore_lock.locked())
+            or coordinator.vanished_restore_running(fub_id, name)
+        ):
             # A restore moves the same backups; after the unload's wait a write would hit a torn-down entry.
+            # This plan's own Restore would build it anew beside the holder, its pick swapped away from it.
             return self.async_abort(reason="backups_busy")
         try:
             # No await since the check: a restore starting from here on refuses until the move ends.

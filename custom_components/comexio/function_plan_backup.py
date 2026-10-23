@@ -160,8 +160,8 @@ async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
     would sit under two IDs. Re-saving the stores already written takes their change back on
     disk too; when that fails as well it is logged — memory then holds the state before the move.
     A cancelled save is put back as well: memory left moved would hide the old lineage from a retry. Its
-    interrupted store is re-saved too, as its write may still land. The re-saves run shielded: a second
-    cancel stops only the wait for them, not the put-back on disk.
+    interrupted store is re-saved too, as its write may still land. The re-saves finish despite a second
+    cancel (_async_finish_despite_cancel).
     """
     saved: list[_StoreSave] = []
     try:
@@ -173,8 +173,29 @@ async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
             _put_back(data, before)
         if isinstance(err, asyncio.CancelledError):
             saved = saves[: len(saved) + 1]
-        await asyncio.shield(_async_save_put_back(saved))
+        try:
+            await _async_finish_despite_cancel(asyncio.ensure_future(_async_save_put_back(saved)))
+        except asyncio.CancelledError:
+            if not isinstance(err, asyncio.CancelledError):
+                # The cancel propagates instead: the failure behind the put-back would leave no trace.
+                _LOGGER.error("Function Plan backup: a lineage move failed (%r), then was cancelled", err)
+            raise
         raise
+
+
+async def _async_finish_despite_cancel(task: asyncio.Future[None]) -> None:
+    """Wait for task to end even when cancelled meanwhile; then re-raise the first cancel.
+
+    The caller holds the write lock (see _serialized) until the task ends: a later write must not overlap it.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as err:
+            cancelled = cancelled or err
+    if cancelled is not None:
+        raise cancelled
 
 
 async def _async_save_put_back(saved: list[_StoreSave]) -> None:
