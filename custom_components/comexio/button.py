@@ -1472,10 +1472,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if action == "update_ip":
             _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
             return "update_ip"
-        if cls not in self.coordinator.required_webio_classes:
-            # Synced only because its device still exists (e.g. Quickbus with no device selected any
-            # more): a recreate would upload an empty class, for which Comexio creates no device
-            # instance, so the sync failed after deleting the old one.
+        if not json.loads(self._class_webio_json(cls, ctx.class_names[cls]))["commands"]:
+            # Synced only to clear it out (e.g. Quickbus with no device selected any more, every KNX
+            # object ignored): a recreate would upload an empty class, for which Comexio creates no
+            # device instance, so the sync failed after deleting the old one.
             _LOGGER.info("[%s] %s: no command of this class is wanted. Skipping Fast-Track.", self.server_id, label)
             return action
         if cls_action_eta > SYNC_DURATION_RECREATE:
@@ -1521,6 +1521,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         _LOGGER.info("[%s] %s device not deleted (%s). Falling back to Delta-Sync.", self.server_id, label, error)
         return False
 
+    def _class_webio_json(self, cls: str, class_name: str) -> str:
+        """The class template a recreate uploads: every wanted command of the class (pure, no network)."""
+        return self.coordinator.api.generate_webio_json(
+            self.server_id,
+            class_name,
+            self.coordinator.webio_source_data(),
+            webio_class=cls,
+            ignored_marker_ids=self.coordinator.ignored_marker_ids,
+            ignored_knx_ids=self.coordinator.ignored_knx_ids,
+        )
+
     async def _recreate_class(
         self,
         ctx: _SyncContext,
@@ -1535,14 +1546,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         api = ctx.api
         # Built up front (pure, no network) so the status can name the command count — the
         # upload itself gives no progress signal of its own.
-        web_io_json = api.generate_webio_json(
-            self.server_id,
-            class_name,
-            self.coordinator.webio_source_data(),
-            webio_class=cls,
-            ignored_marker_ids=self.coordinator.ignored_marker_ids,
-            ignored_knx_ids=self.coordinator.ignored_knx_ids,
-        )
+        web_io_json = self._class_webio_json(cls, class_name)
         n_commands = len(json.loads(web_io_json)["commands"])
         status_msg = (
             f"{ICON_TOOLS} **Initial Setup ({label})**\nCreating Web-IO class with {n_commands} command(s)..."

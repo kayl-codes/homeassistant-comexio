@@ -1368,6 +1368,7 @@ class IoPlanKind:
     command_name: Callable[[Mapping[str, Any]], str]  # its Web-IO command name
     column_blocks: Callable[[str, list[Mapping[str, Any]]], tuple[dict[str, int], dict[int, str]]]
     stacked: bool  # members share a column while they fit (else one column per member)
+    member_fallback: Callable[[str], str]  # a member with no IO in the data, as shown to the user
 
     def member_ios(self, data: Mapping[str, Any] | None, member: str) -> list[dict[str, Any]]:
         """The IOs of one member in data (coordinator data or a fresh parse)."""
@@ -1376,7 +1377,7 @@ class IoPlanKind:
     def member_label(self, data: Mapping[str, Any] | None, member: str) -> str:
         """A member as shown to the user (repairs, notifications): the extension / "QB3 MT1"."""
         ios = self.member_ios(data, member)
-        return self.member_display(ios[0]) if ios else member
+        return self.member_display(ios[0]) if ios else self.member_fallback(member)
 
 
 def io_plan_member_origins(
@@ -1397,6 +1398,9 @@ def io_plan_member_origins(
     column = row = 0
     for member in members:
         need = rows_needed(member)
+        if not need:  # no IO any more (device gone): it takes no rows, not even a blank one
+            origins[member] = (column, row)
+            continue
         start = row + 1 if row else 0  # a blank row below the device above
         if row and start + need > rows_per_col:
             column, start = column + 1, 0
@@ -1427,6 +1431,7 @@ IO_PLAN_KIND_IO = IoPlanKind(
     command_name=lambda io: f"HA IO {io['ext_name']} {io['identifier']}",
     column_blocks=_io_ident_blocks,
     stacked=False,
+    member_fallback=lambda ext_name: ext_name,
 )
 IO_PLAN_KIND_QUICKBUS = IoPlanKind(
     label="QB",
@@ -1438,6 +1443,7 @@ IO_PLAN_KIND_QUICKBUS = IoPlanKind(
     command_name=quickbus_command_name,
     column_blocks=quickbus_column_blocks,
     stacked=True,
+    member_fallback=lambda device_id: quickbus_device_label(device_id, None),
 )
 IO_PLAN_KINDS = (IO_PLAN_KIND_IO, IO_PLAN_KIND_QUICKBUS)
 

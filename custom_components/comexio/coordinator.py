@@ -7147,7 +7147,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         if wanted := selected_quickbus_devices(options, data or {}):
             skipped = self._skipped_quickbus_devices(wanted, data)
-            self._log_skipped_quickbus_devices(skipped)
+            self._log_skipped_quickbus_devices(data, skipped)
             groups |= {(IO_PLAN_KIND_QUICKBUS.label, device) for device in wanted if device not in skipped}
         return groups
 
@@ -7169,7 +7169,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 skipped[device] = "on an offline extension"
         return skipped
 
-    def _log_skipped_quickbus_devices(self, skipped: dict[str, str]) -> None:
+    def _log_skipped_quickbus_devices(self, data: Mapping[str, Any], skipped: dict[str, str]) -> None:
         """Warn once per change about selected Quickbus devices left out of the QB plans.
 
         managed_io_groups runs on every poll and sync, so an unchanged state stays quiet.
@@ -7181,7 +7181,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.warning(
                 "[%s] Selected Quickbus device '%s' is not wired into a Quickbus function plan: %s",
                 self.server_id,
-                one_line(IO_PLAN_KIND_QUICKBUS.member_label(self.data, device)),
+                one_line(IO_PLAN_KIND_QUICKBUS.member_label(data, device)),
                 reason,
             )
 

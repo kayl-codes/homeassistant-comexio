@@ -5017,7 +5017,7 @@ class ComexioAPI:
         — already threaded it through).
         """
         io_entry = ext_ios.get(ident)
-        label = f"{one_line(kind.member_display(io_entry) if io_entry else ext_name)} {ident}"
+        label = f"{one_line(kind.member_display(io_entry) if io_entry else kind.member_fallback(ext_name))} {ident}"
         if not io_entry:
             return f"{label}: not found in fresh config"
 

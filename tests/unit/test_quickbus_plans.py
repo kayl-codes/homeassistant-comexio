@@ -138,7 +138,7 @@ def test_gap_items_name_their_column_member(quickbus_result: dict[str, Any]) -> 
     # The Quickbus device, not its host extension (BASE), labels the IO in a plan.
     assert io_plan_label(qb_io) == "QB3 BM Diele PIR1"
     assert IO_PLAN_KIND_QUICKBUS.member_label(quickbus_result, "3") == "QB3 BM Diele"
-    assert IO_PLAN_KIND_QUICKBUS.member_label(quickbus_result, "9") == "9"  # gone: the bare id
+    assert IO_PLAN_KIND_QUICKBUS.member_label(quickbus_result, "9") == "QB9"  # gone: its id only
 
 
 def test_managed_io_groups_take_only_present_online_quickbus_devices(
@@ -162,7 +162,7 @@ def test_managed_io_groups_take_only_present_online_quickbus_devices(
 
     assert groups == {("IO", "BASE"), ("QB", "1"), ("QB", "3"), ("QB", "77")}
     assert "'QB2 MT Bad'" in caplog.text
-    assert "'9'" in caplog.text
+    assert "'QB9'" in caplog.text
 
 
 def test_managed_io_groups_take_every_quickbus_device_while_the_option_was_never_saved(
@@ -369,7 +369,7 @@ def test_skipped_quickbus_devices_are_logged_once_per_change(
         groups = coordinator.managed_io_groups()
     assert groups == {("QB", "1")}
     assert "'QB2 MT Bad'" in caplog.text
-    assert "'9'" in caplog.text
+    assert "'QB9'" in caplog.text
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):
@@ -379,7 +379,7 @@ def test_skipped_quickbus_devices_are_logged_once_per_change(
     coordinator.config_entry.options[CONF_FUNCTION_PLAN_QUICKBUS_DEVICES] = ["1", "9"]
     with caplog.at_level(logging.WARNING):
         coordinator.managed_io_groups()
-    assert "'9'" in caplog.text
+    assert "'QB9'" in caplog.text
     assert "MT Bad" not in caplog.text
 
 
@@ -525,8 +525,9 @@ def _rows(sizes: dict[str, int]):
         ({"a": 5, "b": 5}, 10, {"a": (0, 0), "b": (1, 0)}, 2),  # the blank row does not fit any more
         ({"a": 25, "b": 3}, 10, {"a": (0, 0), "b": (3, 0)}, 4),  # taller than a column: wraps on
         ({"a": 2, "b": 25}, 10, {"a": (0, 0), "b": (1, 0)}, 4),  # a tall device starts a fresh column
+        ({"a": 4, "b": 0, "c": 4}, 10, {"a": (0, 0), "b": (0, 4), "c": (0, 5)}, 1),  # b gone: takes no row
     ],
-    ids=["empty", "share", "overflow", "exact", "no-room-for-the-gap", "wrap", "tall-after-small"],
+    ids=["empty", "share", "overflow", "exact", "no-room-for-the-gap", "wrap", "tall-after-small", "gone"],
 )
 def test_quickbus_devices_stack_within_columns(
     sizes: dict[str, int], rows_per_col: int, origins: dict, columns: int
