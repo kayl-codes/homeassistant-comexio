@@ -17,6 +17,7 @@ Snapshots live under .storage/ and are therefore included in Home Assistant's ow
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 from datetime import datetime, timedelta
 import functools
 import logging
@@ -80,6 +81,10 @@ SNAPSHOT_PAPER_UNKNOWN = "paper_unknown"
 _FALLBACK_PAPER = "A3"
 _FALLBACK_DPI = 90
 _FALLBACK_ORIENTATION = "landscape"
+
+
+class PlanBackupsNotMovedError(Exception):
+    """Taking a rename over failed to move the plan's backups (coordinator.async_watch_id_holder); nothing changed."""
 
 
 def _backfill_identity_group(
@@ -155,25 +160,55 @@ async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
     A lineage move spans the auto and the change store: saved in one only, the plan's backups
     would sit under two IDs. Re-saving the stores already written takes their change back on
     disk too; when that fails as well it is logged — memory then holds the state before the move.
+    A cancelled save is put back as well: memory left moved would hide the old lineage from a retry. Its
+    interrupted store is re-saved too, as its write may still land. The re-saves finish despite a second
+    cancel (_async_finish_despite_cancel).
     """
     saved: list[_StoreSave] = []
     try:
         for save in saves:
             await save[0].async_save(save[1])
             saved.append(save)
-    except Exception:
+    except (Exception, asyncio.CancelledError) as err:
         for _store, data, before in saves:
             _put_back(data, before)
-        for store, data, _before in saved:
-            try:
-                await store.async_save(data)
-            except Exception:
-                # Memory holds the state before the move; this store's next save writes it to disk.
-                _LOGGER.exception(
-                    "Function Plan backup: a store could not be put back on disk after a failed lineage move — "
-                    "until its next save it keeps the moved lineage there"
-                )
+        if isinstance(err, asyncio.CancelledError):
+            saved = saves[: len(saved) + 1]
+        try:
+            await _async_finish_despite_cancel(asyncio.ensure_future(_async_save_put_back(saved)))
+        except asyncio.CancelledError:
+            if not isinstance(err, asyncio.CancelledError):
+                # The cancel propagates instead: the failure behind the put-back would leave no trace.
+                _LOGGER.error("Function Plan backup: a lineage move failed (%r), then was cancelled", err)
+            raise
         raise
+
+
+async def _async_finish_despite_cancel(task: asyncio.Future[None]) -> None:
+    """Wait for task to end even when cancelled meanwhile; then re-raise the first cancel.
+
+    The caller holds the write lock (see _serialized) until the task ends: a later write must not overlap it.
+    """
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):  # a further cancel: the first one is raised
+                await asyncio.shield(task)
+        raise
+
+
+async def _async_save_put_back(saved: list[_StoreSave]) -> None:
+    """Write the put-back stores to disk; a store that fails is logged, the others are still written."""
+    for store, data, _before in saved:
+        try:
+            await store.async_save(data)
+        except Exception:
+            # Memory holds the state before the move; this store's next save writes it to disk.
+            _LOGGER.exception(
+                "Function Plan backup: a store could not be put back on disk after a failed lineage move — "
+                "until its next save it keeps the moved lineage there"
+            )
 
 
 async def _async_save_backfill_or_take_back(store: Any, data: dict[str, Any], filled: list[dict[str, Any]]) -> None:
@@ -891,31 +926,7 @@ class FunctionPlanBackupManager:
         auto-backup), re-sorts newest first, and truncates back to the normal slot limits.
         A no-op if old_fub_id has no history for plan_name. Returns the number moved.
         """
-        await self._async_ensure_loaded()
-        old_key, new_key = str(old_fub_id), str(new_fub_id)
-        moved = 0
-        saves: list[_StoreSave] = []
-        for data, store, limit in (
-            (self._auto_data, self._auto_store, FUNCTION_PLAN_AUTO_BACKUP_SLOTS),
-            (self._change_data, self._change_store, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS),
-        ):
-            old_identities = data.get(old_key)
-            old_history = old_identities.pop(plan_name, None) if old_identities else None
-            if old_identities is not None and not old_identities:
-                data.pop(old_key, None)
-            if not old_history:
-                continue
-            before = _copy_keys(data, (old_key, new_key))
-            before[old_key] = {**(before[old_key] or {}), plan_name: old_history}
-            new_identities = data.setdefault(new_key, {})
-            combined = new_identities.get(plan_name, []) + old_history
-            combined.sort(key=lambda s: s.get("captured_at") or "", reverse=True)
-            new_identities[plan_name] = combined[:limit]
-            saves.append((store, data, before))
-            moved += len(old_history)
-        await _async_save_all_or_put_back(saves)
-        # The restored plan is live again under new_fub_id, so the keep decision is not carried over.
-        await self._async_forget_kept_after_move(old_fub_id, plan_name)
+        moved = await self._async_move_identity((old_fub_id, plan_name), (new_fub_id, plan_name))
         if moved:
             _LOGGER.info(
                 "[%s] Function Plan backup: rekeyed %d snapshot(s) of '%s' from fub=%s to fub=%s",
@@ -925,6 +936,61 @@ class FunctionPlanBackupManager:
                 old_fub_id,
                 new_fub_id,
             )
+        return moved
+
+    @_serialized
+    async def async_rename_identity(self, fub_id: int, old_name: str, new_name: str) -> int:
+        """Move one identity's stored backup history from old_name to new_name under the same fub_id.
+
+        For a plan renamed in Comexio (confirmed by the user): its history goes on under the new name
+        instead of being left as an orphaned chain. Combines with the history already captured under
+        the new name (its first auto backup after the rename) as async_rekey_fub_id does. Each moved snapshot
+        takes the new plan_name: listings and restores name the plan as it is called now. Returns the number moved.
+        """
+        moved = await self._async_move_identity((fub_id, old_name), (fub_id, new_name))
+        if moved:
+            _LOGGER.info(
+                "[%s] Function Plan backup: moved %d snapshot(s) of fub=%s from '%s' to its new name '%s'",
+                self._server_id,
+                moved,
+                fub_id,
+                one_line(old_name),
+                one_line(new_name),
+            )
+        return moved
+
+    async def _async_move_identity(self, old: tuple[int, str], new: tuple[int, str]) -> int:
+        """Merge identity old's auto and change history into new's (newest first, slot limits); the number moved.
+
+        Called under the write lock (see _serialized). Saved all or nothing (_async_save_all_or_put_back).
+        The keep decision of old is dropped: its plan is live again under new.
+        """
+        await self._async_ensure_loaded()
+        (old_fub_id, old_name), (new_fub_id, new_name) = old, new
+        old_key, new_key = str(old_fub_id), str(new_fub_id)
+        moved = 0
+        saves: list[_StoreSave] = []
+        for data, store, limit in (
+            (self._auto_data, self._auto_store, FUNCTION_PLAN_AUTO_BACKUP_SLOTS),
+            (self._change_data, self._change_store, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS),
+        ):
+            # Copied before the pop: with old_key == new_key the copy must still hold the old history.
+            before = _copy_keys(data, (old_key, new_key))
+            old_identities = data.get(old_key)
+            old_history = old_identities.pop(old_name, None) if old_identities else None
+            if old_identities is not None and not old_identities:
+                data.pop(old_key, None)
+            if not old_history:
+                continue
+            new_identities = data.setdefault(new_key, {})
+            # Renamed copies: the put-back on a failed save restores the originals from before.
+            combined = new_identities.get(new_name, []) + [{**snap, "plan_name": new_name} for snap in old_history]
+            combined.sort(key=lambda s: s.get("captured_at") or "", reverse=True)
+            new_identities[new_name] = combined[:limit]
+            saves.append((store, data, before))
+            moved += len(old_history)
+        await _async_save_all_or_put_back(saves)
+        await self._async_forget_kept_after_move(old_fub_id, old_name)
         return moved
 
     @_serialized
@@ -1317,6 +1383,12 @@ class FunctionPlanBackupManager:
                     entry["restored_at"] = snap["restored_at"]
                 entries.append(entry)
         return entries
+
+    def newest_auto_hash_sync(self, fub_id: int, plan_name: str) -> str | None:
+        """The plan_hash of an identity's newest auto backup (cache-only); None without one."""
+        snapshot = self._stored_snapshot("auto", fub_id, plan_name, 0)
+        value = None if snapshot is None else snapshot.get("hash")
+        return value if isinstance(value, str) and value else None
 
     def summary(self) -> dict[str, Any]:
         """Return a sync summary from the caches (zeros before the first async_load)."""

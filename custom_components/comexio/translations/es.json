@@ -139,7 +139,9 @@
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Restaurar desde la copia más reciente",
-        "unwatch": "🚫 Dejar de supervisar este plan"
+        "unwatch": "🚫 Dejar de supervisar este plan",
+        "take_over_rename": "✏️ Adoptar el cambio de nombre (las copias se mueven)",
+        "watch_holder": "👁️ Supervisar en su lugar el plan que ahora tiene este ID"
       }
     }
   },
@@ -180,8 +182,8 @@
           "function_plan_backup_retention_months": "Cuando la copia más reciente de un plan eliminado directamente en Comexio supera este plazo, una reparación pregunta si eliminar o conservar sus copias — no se elimina nada sin tu confirmación. Las copias de un plan que sigue existiendo nunca se ven afectadas. La acción 'Function Plan Purge Orphaned Backups' elimina de una vez todas las vencidas.",
           "bus_watchdog_enabled": "Ante una subida sostenida de la carga del bus, reinicia automáticamente los planes de función de clúster gestionados por HA (de atrás hacia adelante) para intentar aliviarla. No es destructivo para el propio sistema Comexio.",
           "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo.",
-          "function_plan_watchdog_notify": "Servicios de notificación (p. ej. notify.mobile_app_tu_telefono) que reciben un push cuando se detiene un plan de funciones vigilado (gestionado por HA, o un plan de usuario elegido abajo). El push tiene un botón «Iniciar plan» y desaparece en cuanto el plan vuelve a ejecutarse. Un plan de usuario vigilado eliminado en Comexio también recibe un push, con los botones «Restaurar» (su copia de seguridad más reciente, como plan nuevo) y «Dejar de vigilar». También reciben un push urgente cuando Comexio presenta otro certificado TLS distinto del fijado. Déjalo vacío para no enviar push; la reparación se crea en cualquier caso.",
-          "function_plan_watchdog_user_plans": "Planes de usuario (no gestionados por Home Assistant) que deben ejecutarse siempre. El watchdog los trata como los planes HA: reparación, sensor de problema y push cuando uno se detiene. El interruptor Inicio automático de planes (planes de usuario) los vuelve a iniciar por sí mismo. Un plan elegido que se eliminó en Comexio no se inicia: su reparación y su push ofrecen restaurarlo desde su copia de seguridad más reciente o dejar de vigilarlo. No incluyas los planes que detienes a propósito (pruebas)."
+          "function_plan_watchdog_notify": "Servicios de notificación (p. ej. notify.mobile_app_tu_telefono) que reciben un push cuando se detiene un plan de funciones vigilado (gestionado por HA, o un plan de usuario elegido abajo). El push tiene un botón «Iniciar plan» y desaparece en cuanto el plan vuelve a ejecutarse. Un plan de usuario vigilado eliminado en Comexio también recibe un push, con los botones «Restaurar» (su copia de seguridad más reciente, como plan nuevo) y «Dejar de vigilar»; si su ID lo tiene ahora otro plan (renombrado, o ID reasignado), solo «Dejar de vigilar» — restáuralo o adopta el cambio de nombre en su reparación. También reciben un push urgente cuando Comexio presenta otro certificado TLS distinto del fijado. Déjalo vacío para no enviar push; la reparación se crea en cualquier caso.",
+          "function_plan_watchdog_user_plans": "Planes de usuario (no gestionados por Home Assistant) que deben ejecutarse siempre. El watchdog los trata como los planes HA: reparación, sensor de problema y push cuando uno se detiene. El interruptor Inicio automático de planes (planes de usuario) los vuelve a iniciar por sí mismo. Un plan elegido que se eliminó en Comexio no se inicia: su reparación y su push ofrecen restaurarlo desde su copia de seguridad más reciente o dejar de vigilarlo. Un plan renombrado en Comexio sin cambios de contenido se sigue automáticamente (la selección y las copias adoptan el nuevo nombre). Si su ID lo tiene ahora otro plan (renombrado, o ID reasignado), la reparación también ofrece supervisar ese plan en su lugar o, si su contenido coincide con la última copia de seguridad, adoptar el cambio de nombre (las copias se mueven). No incluyas los planes que detienes a propósito (pruebas)."
         }
       }
     },
@@ -512,7 +514,32 @@
           "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado.",
           "plan_not_missing": "El plan {plan_name} (ID {fub_id}) ya no falta (restaurado o ya no supervisado). No se cambió nada.",
           "no_backup": "No hay ninguna copia de seguridad de {plan_name} (ID {fub_id}) para restaurarlo. No se cambió nada — puedes dejar de supervisarlo.",
-          "check_pending": "La lista de planes aún no se ha leído desde que se inició Home Assistant, así que todavía no se sabe si {plan_name} (ID {fub_id}) sigue faltando. No se cambió nada; vuelve a intentarlo en un momento."
+          "check_pending": "La lista de planes aún no se ha leído desde que se inició Home Assistant, así que todavía no se sabe si {plan_name} (ID {fub_id}) sigue faltando. No se cambió nada; vuelve a intentarlo en un momento.",
+          "rename_not_confirmed": "El contenido de {current_name} ya no coincide con la última copia de seguridad de {plan_name}, así que no se adoptó el cambio de nombre. No se cambió nada — vuelve a abrir la reparación para elegir de nuevo.",
+          "backups_not_moved": "Las copias de seguridad de {plan_name} no se pudieron mover a {current_name}, así que no se cambió nada. Consulta el registro de Home Assistant.",
+          "holder_changed": "El ID {fub_id} ya no tiene {current_name}, o la selección de {plan_name} se cambió entretanto en las opciones; los planes supervisados quedan como están. Consulta el registro de Home Assistant.",
+          "backups_busy": "Hay una restauración de plan de funciones en curso o la integración se está recargando — mueve y marca copias. Las copias no se han modificado; inténtalo de nuevo cuando haya terminado."
+        }
+      }
+    },
+    "function_plan_replaced": {
+      "title": "Plan de funciones {plan_name} no encontrado con el ID {fub_id}",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de funciones supervisado no encontrado",
+            "description": "El plan de funciones supervisado **{plan_name}** (ID {fub_id}) no se encontró en Comexio: el ID {fub_id} ahora lo tiene el plan **{current_name}**. O bien el plan se renombró, o bien se eliminó y Comexio asignó su ID a otro plan.\n\n**Adoptar el cambio de nombre** se ofrece cuando el contenido de {current_name} coincide con la última copia de seguridad de {plan_name} pero la integración no pudo seguir el cambio de nombre por sí misma (normalmente lo hace): el watchdog supervisa entonces {current_name}, y las copias de {plan_name} continúan con el nuevo nombre. El mismo contenido no demuestra que sea el mismo plan (p. ej. dos planes vacíos).\n**Supervisar {current_name} en su lugar** supervisa el plan que ahora tiene el ID; las copias de seguridad quedan como están.\n**Restaurar** reconstruye {plan_name} a partir de su copia más reciente como un plan nuevo y lo inicia; sigue supervisado con su nuevo ID.\n**Dejar de supervisar** quita {plan_name} de los planes de usuario supervisados."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado.",
+          "plan_not_missing": "El plan {plan_name} (ID {fub_id}) ya no falta (restaurado o ya no supervisado). No se cambió nada.",
+          "no_backup": "No hay ninguna copia de seguridad de {plan_name} (ID {fub_id}) para restaurarlo. No se cambió nada — puedes dejar de supervisarlo.",
+          "check_pending": "La lista de planes aún no se ha leído desde que se inició Home Assistant, así que todavía no se sabe si {plan_name} (ID {fub_id}) sigue faltando. No se cambió nada; vuelve a intentarlo en un momento.",
+          "rename_not_confirmed": "El contenido de {current_name} ya no coincide con la última copia de seguridad de {plan_name}, así que no se adoptó el cambio de nombre. No se cambió nada — vuelve a abrir la reparación para elegir de nuevo.",
+          "backups_not_moved": "Las copias de seguridad de {plan_name} no se pudieron mover a {current_name}, así que no se cambió nada. Consulta el registro de Home Assistant.",
+          "holder_changed": "El ID {fub_id} ya no tiene {current_name}, o la selección de {plan_name} se cambió entretanto en las opciones; los planes supervisados quedan como están. Consulta el registro de Home Assistant.",
+          "backups_busy": "Hay una restauración de plan de funciones en curso o la integración se está recargando — mueve y marca copias. Las copias no se han modificado; inténtalo de nuevo cuando haya terminado."
         }
       }
     },

@@ -139,7 +139,9 @@
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Restore from the newest backup",
-        "unwatch": "🚫 Stop watching this plan"
+        "unwatch": "🚫 Stop watching this plan",
+        "take_over_rename": "✏️ Take over the rename (backups move along)",
+        "watch_holder": "👁️ Watch the plan now holding this ID instead"
       }
     }
   },
@@ -180,8 +182,8 @@
           "function_plan_backup_retention_months": "Once the newest backup of a plan that was deleted directly in Comexio is older than this, a repair asks whether to delete or keep that plan's backups — nothing is deleted without your confirmation. A live plan's backups are never affected. The 'Function Plan Purge Orphaned Backups' action deletes all expired ones at once.",
           "bus_watchdog_enabled": "On a sustained bus-load rise, automatically restart the HA-managed cluster function plans (back to front) to try to relieve it. Non-destructive to the Comexio system itself.",
           "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog.",
-          "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when a watched function plan stops (HA-managed, or a user plan picked below). The push has a 'Start plan' button, and is removed again once the plan runs. A watched user plan deleted in Comexio gets a push too, with 'Restore' (its newest backup, as a new plan) and 'Stop watching' buttons. They also get an urgent push when Comexio presents another TLS certificate than the pinned one. Leave empty for no push; the repair is raised either way.",
-          "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. A picked plan deleted in Comexio is not started: its repair and push offer to restore it from its newest backup or to stop watching it. Leave plans you stop on purpose (tests) out."
+          "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when a watched function plan stops (HA-managed, or a user plan picked below). The push has a 'Start plan' button, and is removed again once the plan runs. A watched user plan deleted in Comexio gets a push too, with 'Restore' (its newest backup, as a new plan) and 'Stop watching' buttons; if its ID now holds another plan (renamed, or the ID reused), only 'Stop watching' — restore it or take the rename over in its repair. They also get an urgent push when Comexio presents another TLS certificate than the pinned one. Leave empty for no push; the repair is raised either way.",
+          "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. A picked plan deleted in Comexio is not started: its repair and push offer to restore it from its newest backup or to stop watching it. A plan renamed in Comexio with its content unchanged is followed on its own (its pick and backups take the new name). If its ID now holds another plan (renamed, or the ID reused), the repair also offers to watch that plan instead or, its content matching the last backup, to take it over as the plan renamed (its backups move along). Leave plans you stop on purpose (tests) out."
         }
       }
     },
@@ -512,7 +514,32 @@
           "entry_not_found": "The associated config entry could not be found — it may have been removed.",
           "plan_not_missing": "The plan {plan_name} (ID {fub_id}) is no longer missing (restored or no longer watched). Nothing was changed.",
           "no_backup": "There is no backup of {plan_name} (ID {fub_id}) to restore it from. Nothing was changed — you can stop watching it instead.",
-          "check_pending": "The plan list was not read since Home Assistant started, so it is not known yet whether {plan_name} (ID {fub_id}) is still missing. Nothing was changed; please try again shortly."
+          "check_pending": "The plan list was not read since Home Assistant started, so it is not known yet whether {plan_name} (ID {fub_id}) is still missing. Nothing was changed; please try again shortly.",
+          "rename_not_confirmed": "The content of {current_name} no longer matches the last backup of {plan_name}, so the rename was not taken over. Nothing was changed — open the repair again to choose anew.",
+          "backups_not_moved": "The backups of {plan_name} could not be moved to {current_name}, so nothing was changed. See the Home Assistant log.",
+          "holder_changed": "ID {fub_id} no longer holds {current_name}, or the pick of {plan_name} was changed in the options meanwhile, so the watched plans were left as they are. See the Home Assistant log.",
+          "backups_busy": "A function plan restore is running, or the integration is reloading — it moves and marks backups. The backups were not changed — try again once it has finished."
+        }
+      }
+    },
+    "function_plan_replaced": {
+      "title": "Function plan {plan_name} not found under ID {fub_id}",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Watched function plan not found",
+            "description": "The watched function plan **{plan_name}** (ID {fub_id}) was not found in Comexio: ID {fub_id} now holds the plan **{current_name}**. Either the plan was renamed, or it was deleted and Comexio gave its ID to another plan.\n\n**Take over the rename** is offered when the content of {current_name} matches the last backup of {plan_name} but the integration could not follow the rename on its own (normally it does): the watchdog then watches {current_name}, and the backups of {plan_name} continue under the new name. The same content does not prove it is the same plan (e.g. two empty plans).\n**Watch {current_name} instead** watches the plan now holding the ID; the backups stay as they are.\n**Restore** rebuilds {plan_name} from its newest backup as a new plan and starts it; it stays watched under its new ID.\n**Stop watching** removes {plan_name} from the watched user plans."
+          }
+        },
+        "abort": {
+          "entry_not_found": "The associated config entry could not be found — it may have been removed.",
+          "plan_not_missing": "The plan {plan_name} (ID {fub_id}) is no longer missing (restored or no longer watched). Nothing was changed.",
+          "no_backup": "There is no backup of {plan_name} (ID {fub_id}) to restore it from. Nothing was changed — you can stop watching it instead.",
+          "check_pending": "The plan list was not read since Home Assistant started, so it is not known yet whether {plan_name} (ID {fub_id}) is still missing. Nothing was changed; please try again shortly.",
+          "rename_not_confirmed": "The content of {current_name} no longer matches the last backup of {plan_name}, so the rename was not taken over. Nothing was changed — open the repair again to choose anew.",
+          "backups_not_moved": "The backups of {plan_name} could not be moved to {current_name}, so nothing was changed. See the Home Assistant log.",
+          "holder_changed": "ID {fub_id} no longer holds {current_name}, or the pick of {plan_name} was changed in the options meanwhile, so the watched plans were left as they are. See the Home Assistant log.",
+          "backups_busy": "A function plan restore is running, or the integration is reloading — it moves and marks backups. The backups were not changed — try again once it has finished."
         }
       }
     },

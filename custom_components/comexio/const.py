@@ -885,6 +885,10 @@ FUNCTION_PLAN_UNLOAD_WAIT_SEC = 120
 FUNCTION_PLAN_UNLOAD_POLL_SEC = 0.5
 # Longest a deleted plan's Restore (watchdog push or repair) waits for a restore running elsewhere.
 FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC = 120
+# How often that Restore compares the plan now holding the deleted plan's ID, should another take it meanwhile.
+FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS = 3
+# Longest error detail a failed Restore names in its notification (an aiohttp error may carry a whole URL).
+FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX = 200
 # User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
 # (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
