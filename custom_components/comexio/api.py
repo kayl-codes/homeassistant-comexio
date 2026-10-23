@@ -7,6 +7,7 @@ from datetime import timedelta
 import hashlib
 import logging
 import math
+import re
 import time
 from typing import Any, NamedTuple, NoReturn
 
@@ -20,6 +21,7 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     CreatedFunctionPlan,
+    PlacedModuleBlock,
     RawConfig,
     SystemInfo,
     config as comexio_config,
@@ -79,6 +81,7 @@ from .const import (
 )
 from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
 from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
+from .function_plan_module_restore import ModuleConfigRestore, is_module_block, place_module_block
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
@@ -147,6 +150,25 @@ async def _attempt[T, F](
         notes = "".join(f" ({note})" for note in getattr(err, "__notes__", ()))
         _LOGGER.warning("%s failed: %s%s", what, err, notes, exc_info=isinstance(err, TypeError))
         return failed
+
+
+# aiocomexio's error for a scene block / Quantum module placed without the created object's id.
+_PLACED_WITHOUT_REF_ID = re.compile(r"element (\d+) was placed, but the answer carries no ref_id")
+
+
+async def _module_block_placed(placing: Awaitable[PlacedModuleBlock]) -> PlacedModuleBlock:
+    """The placed block; one placed without the created object's id comes back with ref_id 0.
+
+    aiocomexio raises ComexioDataError for it, naming the element only in the message — the block
+    is on the plan then, and its caller has to remove it.
+    """
+    try:
+        return await placing
+    except ComexioDataError as err:
+        if (match := _PLACED_WITHOUT_REF_ID.search(str(err))) is None:
+            raise
+        _LOGGER.warning("%s", err)
+        return PlacedModuleBlock(int(match[1]), 0)
 
 
 def plan_format_settable(paper_format: str, dpi: int) -> bool:
@@ -2022,6 +2044,67 @@ class ComexioAPI:
                     {str(name): str(value) for name, value in settings.items()}
                 )
         return saved
+
+    async def function_plan_add_scene_block(self, fub_id: int, x: float, y: float) -> PlacedModuleBlock | None:
+        """Place a new scene block (Comexio's default scene, no pins yet) on a plan.
+
+        Returns its element id and the new scene's id, or None after a warning; a transport
+        failure raises aiohttp.ClientError / TimeoutError. A block placed without a usable scene id
+        in the answer comes back with ref_id 0, so the caller can remove it.
+        """
+        return await _attempt(
+            f"Placing a scene block on function plan {fub_id}",
+            lambda: _module_block_placed(self.client.add_function_plan_scene(int(fub_id), x=float(x), y=float(y))),
+            None,
+            transport_raises=True,
+        )
+
+    async def function_plan_add_quantum_module(
+        self, fub_id: int, type_id: int, *, central: bool, x: float, y: float
+    ) -> PlacedModuleBlock | None:
+        """Place a new Quantum module of type_id (central: the type's central module) with the type's defaults.
+
+        Returns its element id and the new module's id, or None after a warning; a transport
+        failure raises aiohttp.ClientError / TimeoutError. A module placed without a usable module id
+        in the answer comes back with ref_id 0, so the caller can remove it.
+        """
+        return await _attempt(
+            f"Placing a Quantum module of type {type_id} (central={central}) on function plan {fub_id}",
+            lambda: _module_block_placed(
+                self.client.add_function_plan_quantum_module(
+                    int(fub_id), int(type_id), central=central, x=float(x), y=float(y)
+                )
+            ),
+            None,
+            transport_raises=True,
+        )
+
+    async def function_plan_save_scene(self, scene_id: int, config: Mapping[str, Any]) -> bool:
+        """Replace a scene's whole config; True once Comexio confirms, False after a warning.
+
+        A transport failure raises aiohttp.ClientError / TimeoutError.
+        """
+        return await _succeeded(
+            f"Saving the config of scene {scene_id}",
+            lambda: self.client.save_function_plan_scene(int(scene_id), config),
+            transport_raises=True,
+        )
+
+    async def function_plan_save_quantum_settings(
+        self, element_id: int, module_id: int, settings: Mapping[str, str], *, central: bool, name: str | None
+    ) -> bool:
+        """Replace a Quantum module's whole setting set (and a single module's name).
+
+        True once Comexio confirms, False after a warning; a transport failure raises
+        aiohttp.ClientError / TimeoutError.
+        """
+        return await _succeeded(
+            f"Saving the settings of Quantum module {module_id} (element {element_id})",
+            lambda: self.client.save_function_plan_quantum_settings(
+                int(element_id), int(module_id), settings, central=central, name=name
+            ),
+            transport_raises=True,
+        )
 
     async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:
         """Delete elements from a function plan (removes elements + their connections).
@@ -4845,13 +4928,15 @@ class ComexioAPI:
         )
 
     async def function_plan_rebuild_plan_from_snapshot(
-        self, fub_id: int, snapshot: dict[str, Any]
+        self, fub_id: int, snapshot: dict[str, Any], module_restore: ModuleConfigRestore | None = None
     ) -> tuple[dict[str, int], int, list[str]]:
         """Recreate every element and connection from a snapshot on a freshly created (empty) plan.
 
         Snapshot element IDs are plan-local and meaningless on a new plan: pass 1 (re)creates
         every element regardless of type (Marker, WebIO, IO, any catalog function block,
-        Comment, Constant), building an old-id -> new-id map; pass 2 redraws every connection
+        Comment, Constant, scene block, Quantum module), building an old-id -> new-id map; a scene
+        block or Quantum module gets its stored config in pass 1 already (place_module_block, which
+        reports into module_restore), as a scene block's pins come from it; pass 2 redraws every connection
         using that map with its original port positions/polarity (see
         function_plan_catalog.py for why Constants need special handling: their value lives
         in the element's own "name" field, ref_id is always 0).
@@ -4862,7 +4947,9 @@ class ComexioAPI:
         elements = snapshot.get("elements", {})
         connections = snapshot.get("connections", {})
 
-        id_map, warnings = await self._rebuild_all_elements(fub_id, elements)
+        if module_restore is None:
+            module_restore = ModuleConfigRestore.for_snapshot(snapshot)
+        id_map, warnings = await self._rebuild_all_elements(fub_id, elements, module_restore)
         connections_created = 0
         for conn_id, conn in connections.items():
             c_delta, conn_warnings = await self._rebuild_one_connection(fub_id, conn_id, conn, id_map)
@@ -4878,7 +4965,9 @@ class ComexioAPI:
         )
         return id_map, connections_created, warnings
 
-    async def _rebuild_all_elements(self, fub_id: int, elements: dict[str, Any]) -> tuple[dict[str, int], list[str]]:
+    async def _rebuild_all_elements(
+        self, fub_id: int, elements: dict[str, Any], module_restore: ModuleConfigRestore
+    ) -> tuple[dict[str, int], list[str]]:
         """(Re)create every snapshot element on a fresh plan. Returns ({old_id: new_id}, warnings)."""
         id_map: dict[str, int] = {}
         warnings: list[str] = []
@@ -4892,6 +4981,8 @@ class ComexioAPI:
                 new_id = await self.function_plan_add_comment_element(fub_id, text, x=x, y=y)
             elif elem_type == FUNCTION_PLAN_CONSTANT_TYPE:
                 new_id = await self.function_plan_add_constant_element(fub_id, elem.get("name", "0"), x=x, y=y)
+            elif is_module_block(elem_type):
+                new_id = await place_module_block(self, fub_id, str(old_id), elem, module_restore)
             else:
                 new_id = await self.function_plan_add_element(
                     fub_id=fub_id, ref_id=ref_id, element_type=elem_type, x=x, y=y

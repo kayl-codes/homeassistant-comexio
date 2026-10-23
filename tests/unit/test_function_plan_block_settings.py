@@ -26,6 +26,7 @@ from custom_components.comexio.function_plan_block_settings import (
     snapshot_block_settings,
 )
 from custom_components.comexio.function_plan_module_configs import SNAPSHOT_MODULE_CONFIGS
+from custom_components.comexio.function_plan_module_restore import ModuleConfigRestore
 from custom_components.comexio.services import backup as backup_service
 from tests.common import load_json_fixture
 
@@ -375,6 +376,7 @@ def _in_place_apply(block_settings: dict[str, Any]) -> dict[str, Any]:
         "recovered_comments": 0,
         "comment_warnings": [],
         "block_settings": block_settings,
+        "module_configs": ModuleConfigRestore(None),
     }
 
 
@@ -461,8 +463,7 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
             async_mark_restored=AsyncMock(side_effect=lambda *_a: order.append("mark") or False)
         ),
     )
-    # Element 4 also carries a scene config: the line names it by its restored id too.
-    snapshot = _snapshot(plan, SETTINGS) | {"hash": "h", SNAPSHOT_MODULE_CONFIGS: {"4": {"type": "13", "config": {}}}}
+    snapshot = _snapshot(plan, SETTINGS) | {"hash": "h", SNAPSHOT_MODULE_CONFIGS: {}}
 
     with patch.object(backup_service.persistent_notification, "async_create") as notify:
         asyncio.run(
@@ -475,10 +476,7 @@ def test_in_place_restore_writes_the_settings_after_run_fup(plan: dict[str, Any]
     assert saved == {"104": SETTINGS["4"], "107": SETTINGS["7"]}
     assert notify.call_args.kwargs["title"].endswith("OK")
     assert f"Block settings: {backup_service.ICON_SUCCESS} 4 written" in notify.call_args.args[1]
-    assert (
-        "Scene/Quantum configs: ⚠️ not restored (not supported yet) — check element(s) #104 in Comexio\n"
-        in (notify.call_args.args[1])
-    )
+    assert "Scene/Quantum configs" not in notify.call_args.args[1]
     # The restored snapshot itself is handed over (found by identity, not by its pre-restore slot),
     # and a snapshot that is not found in the history is reported instead of silently not marked.
     mark_args = coordinator.function_plan_backup.async_mark_restored.await_args.args

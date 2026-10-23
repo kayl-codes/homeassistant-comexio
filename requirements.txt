@@ -1,2 +1,2 @@
-aiocomexio==0.7.0
+aiocomexio==0.8.0
 idna>=3.15
