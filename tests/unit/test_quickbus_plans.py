@@ -139,6 +139,7 @@ def test_gap_items_name_their_column_member(quickbus_result: dict[str, Any]) -> 
     assert io_plan_label(qb_io) == "QB3 BM Diele PIR1"
     assert IO_PLAN_KIND_QUICKBUS.member_label(quickbus_result, "3") == "QB3 BM Diele"
     assert IO_PLAN_KIND_QUICKBUS.member_label(quickbus_result, "9") == "QB9"  # gone: its id only
+    assert IO_PLAN_KIND_IO.member_label(quickbus_result, "UD9") == "UD9"
 
 
 def test_managed_io_groups_take_only_present_online_quickbus_devices(
@@ -526,8 +527,23 @@ def _rows(sizes: dict[str, int]):
         ({"a": 25, "b": 3}, 10, {"a": (0, 0), "b": (3, 0)}, 4),  # taller than a column: wraps on
         ({"a": 2, "b": 25}, 10, {"a": (0, 0), "b": (1, 0)}, 4),  # a tall device starts a fresh column
         ({"a": 4, "b": 0, "c": 4}, 10, {"a": (0, 0), "b": (0, 4), "c": (0, 5)}, 1),  # b gone: takes no row
+        ({"a": 0, "b": 4}, 10, {"a": (0, 0), "b": (0, 0)}, 1),  # gone first
+        ({"a": 4, "b": 0}, 10, {"a": (0, 0), "b": (0, 4)}, 1),  # gone last: no extra column
+        ({"a": 10, "b": 0}, 10, {"a": (0, 0), "b": (1, 0)}, 1),  # gone after a full column
     ],
-    ids=["empty", "share", "overflow", "exact", "no-room-for-the-gap", "wrap", "tall-after-small", "gone"],
+    ids=[
+        "empty",
+        "share",
+        "overflow",
+        "exact",
+        "no-room-for-the-gap",
+        "wrap",
+        "tall-after-small",
+        "gone",
+        "gone-first",
+        "gone-last",
+        "gone-after-full-column",
+    ],
 )
 def test_quickbus_devices_stack_within_columns(
     sizes: dict[str, int], rows_per_col: int, origins: dict, columns: int
@@ -546,3 +562,16 @@ def test_io_extensions_keep_one_column_each() -> None:
         "UD1": (1, 0),
     }
     assert io_plan_columns(IO_PLAN_KIND_IO, list(sizes), _rows(sizes), 10) == 2
+
+
+@pytest.mark.parametrize(
+    ("kind", "member", "label"), [(IO_PLAN_KIND_QUICKBUS, "9", "QB9"), (IO_PLAN_KIND_IO, "UD9", "UD9")]
+)
+def test_a_pair_of_a_member_gone_from_the_config_names_the_member(
+    comexio_api: ComexioAPI, kind: Any, member: str, label: str
+) -> None:
+    error = asyncio.run(
+        comexio_api._function_plan_add_single_io_pair(1, member, "Q1", {}, {}, {}, [], (0, 0, 10), kind=kind)
+    )
+
+    assert error == f"{label} Q1: not found in fresh config"
