@@ -4,7 +4,10 @@
       "server_id_exists": "Dieser Instanz-Name wird bereits verwendet.",
       "cannot_connect": "Verbindung zu Comexio fehlgeschlagen.",
       "invalid_auth": "Ungültige Anmeldedaten (UI User/Pass).",
-      "unknown": "Unerwarteter Fehler aufgetreten."
+      "unknown": "Unerwarteter Fehler aufgetreten.",
+      "certificate_changed": "Comexio zeigt ein anderes Zertifikat als das gespeicherte. Bitte unter Einstellungen → Reparaturen prüfen.",
+      "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut.",
+      "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches."
     },
     "step": {
       "user": {
@@ -27,6 +30,7 @@
       },
       "reconfigure": {
         "title": "Comexio-Verbindung neu konfigurieren",
+        "description": "Verbindung: **{protocol}**\nGepinntes Zertifikat (SHA-256): `{fingerprint}`\n\nSobald Comexio HTTPS anbietet, verbindet sich die Integration verschlüsselt und pinnt das Zertifikat automatisch. HTTP bedeutet: Comexio bietet kein HTTPS an, die Verbindung ist unverschlüsselt.",
         "data": {
           "host": "Host / IP-Adresse",
           "username": "Benutzername (Admin-Oberfläche)",
@@ -38,6 +42,14 @@
           "password": "Leer lassen, um das bestehende Passwort beizubehalten.",
           "api_password": "Leer lassen, um das bestehende Passwort beizubehalten."
         }
+      },
+      "reconfigure_http": {
+        "title": "Auf unverschlüsseltes HTTP wechseln?",
+        "description": "**{host}** bietet kein HTTPS an. Das gepinnte Zertifikat:\n`{pinned}`\n\nWenn du fortfährst, verbindet sich Home Assistant über reines HTTP – unverschlüsselt, auch der Admin-Login – und verwirft das gepinnte Zertifikat. Der nächste Start pinnt das Zertifikat, das Comexio dann vorlegt.\n\nSoll Comexio HTTPS anbieten (oder ist es gerade nur nicht erreichbar), schließe diesen Dialog – dann ändert sich nichts."
+      },
+      "reconfigure_certificate": {
+        "title": "Anderem Zertifikat vertrauen?",
+        "description": "**{host}** legt ein anderes Zertifikat vor als das gepinnte.\n\nGepinnt (SHA-256):\n`{pinned}`\n\nVorgelegt (SHA-256):\n`{actual}`\n\nVergleiche den vorgelegten Wert mit dem SHA-256, den die Comexio-Adminseite unter den Zertifikats-Hashes anzeigt. Fahre nur fort, wenn beide übereinstimmen – dann wird das neue Zertifikat gepinnt. Andernfalls schließe diesen Dialog – dann ändert sich nichts."
       },
       "reauth_confirm": {
         "title": "Comexio erneut anmelden",
@@ -127,7 +139,9 @@
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Aus dem neuesten Backup wiederherstellen",
-        "unwatch": "🚫 Diesen Plan nicht mehr überwachen"
+        "unwatch": "🚫 Diesen Plan nicht mehr überwachen",
+        "take_over_rename": "✏️ Umbenennung übernehmen (Backups ziehen mit)",
+        "watch_holder": "👁️ Stattdessen den Plan überwachen, der diese ID jetzt trägt"
       }
     }
   },
@@ -168,8 +182,8 @@
           "function_plan_backup_retention_months": "Ist das neueste Backup eines direkt in Comexio gelöschten Plans älter als diese Frist, fragt eine Reparaturmeldung, ob seine Backups gelöscht oder behalten werden — ohne deine Bestätigung wird nichts gelöscht. Backups eines noch existierenden Plans sind davon nie betroffen. Die Action 'Function Plan Purge Orphaned Backups' löscht alle abgelaufenen auf einmal.",
           "bus_watchdog_enabled": "Bei anhaltendem Anstieg der Busauslastung werden die von HA verwalteten Cluster-Logikpläne automatisch (von hinten nach vorne) neu gestartet, um die Auslastung zu entlasten. Greift nicht destruktiv in die Comexio-Anlage selbst ein.",
           "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust.",
-          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Wird ein überwachter eigener Plan in Comexio gelöscht, kommt ebenfalls ein Push, mit den Knöpfen „Wiederherstellen“ (aus seinem neuesten Backup, als neuer Plan) und „Nicht mehr überwachen“. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
-          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Ein gewählter Plan, der in Comexio gelöscht wurde, wird nicht gestartet: Reparaturmeldung und Push bieten an, ihn aus seinem neuesten Backup wiederherzustellen oder ihn nicht mehr zu überwachen. Absichtlich gestoppte Pläne (Tests) hier nicht auswählen."
+          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Wird ein überwachter eigener Plan in Comexio gelöscht, kommt ebenfalls ein Push, mit den Knöpfen „Wiederherstellen“ (aus seinem neuesten Backup, als neuer Plan) und „Nicht mehr überwachen“; trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), nur „Nicht mehr überwachen“ — Wiederherstellen oder Umbenennung übernehmen dann in der Reparaturmeldung. Zeigt Comexio ein anderes TLS-Zertifikat als das gepinnte, bekommen sie außerdem einen dringenden Push. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
+          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Ein gewählter Plan, der in Comexio gelöscht wurde, wird nicht gestartet: Reparaturmeldung und Push bieten an, ihn aus seinem neuesten Backup wiederherzustellen oder ihn nicht mehr zu überwachen. Ein in Comexio umbenannter Plan mit unverändertem Inhalt wird von selbst übernommen (Auswahl und Backups folgen dem neuen Namen). Trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), bietet die Reparaturmeldung zusätzlich an, stattdessen diesen Plan zu überwachen oder – wenn sein Inhalt dem letzten Backup entspricht – die Umbenennung zu übernehmen (die Backups ziehen mit). Absichtlich gestoppte Pläne (Tests) hier nicht auswählen."
         }
       }
     },
@@ -260,6 +274,14 @@
       },
       "last_boot": {
         "name": "Letzter Start"
+      },
+      "connection": {
+        "name": "Verbindung",
+        "state": {
+          "https": "HTTPS (verschlüsselt)",
+          "http": "HTTP (unverschlüsselt)",
+          "certificate_changed": "Zertifikat geändert"
+        }
       }
     },
     "binary_sensor": {
@@ -492,7 +514,32 @@
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
           "plan_not_missing": "Der Plan {plan_name} (ID {fub_id}) fehlt nicht mehr (wiederhergestellt oder nicht mehr überwacht). Es wurde nichts geändert.",
           "no_backup": "Es gibt kein Backup von {plan_name} (ID {fub_id}), aus dem er wiederhergestellt werden kann. Es wurde nichts geändert — du kannst ihn stattdessen nicht mehr überwachen.",
-          "check_pending": "Die Planliste wurde seit dem Start von Home Assistant noch nicht gelesen, daher ist noch unklar, ob {plan_name} (ID {fub_id}) noch fehlt. Es wurde nichts geändert; bitte gleich erneut versuchen."
+          "check_pending": "Die Planliste wurde seit dem Start von Home Assistant noch nicht gelesen, daher ist noch unklar, ob {plan_name} (ID {fub_id}) noch fehlt. Es wurde nichts geändert; bitte gleich erneut versuchen.",
+          "rename_not_confirmed": "Der Inhalt von {current_name} entspricht nicht mehr dem letzten Backup von {plan_name}, daher wurde die Umbenennung nicht übernommen. Es wurde nichts geändert — öffne die Reparatur erneut, um neu zu wählen.",
+          "backups_not_moved": "Die Backups von {plan_name} konnten nicht zu {current_name} verschoben werden, daher wurde nichts geändert. Siehe das Home-Assistant-Protokoll.",
+          "holder_changed": "ID {fub_id} trägt nicht mehr {current_name}, oder die Auswahl von {plan_name} wurde inzwischen in den Optionen geändert; die überwachten Pläne bleiben daher, wie sie sind. Siehe das Home-Assistant-Protokoll.",
+          "backups_busy": "Gerade läuft eine Logikplan-Wiederherstellung, oder die Integration wird neu geladen — dabei werden Backups verschoben und markiert. An den Backups wurde nichts geändert — versuche es erneut, sobald sie abgeschlossen ist."
+        }
+      }
+    },
+    "function_plan_replaced": {
+      "title": "Logikplan {plan_name} unter ID {fub_id} nicht gefunden",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Überwachter Logikplan nicht gefunden",
+            "description": "Der überwachte Logikplan **{plan_name}** (ID {fub_id}) wurde in Comexio nicht gefunden: ID {fub_id} trägt jetzt den Plan **{current_name}**. Entweder wurde der Plan umbenannt, oder er wurde gelöscht und Comexio hat seine ID an einen anderen Plan vergeben.\n\n**Umbenennung übernehmen** wird angeboten, wenn der Inhalt von {current_name} dem letzten Backup von {plan_name} entspricht, die Integration die Umbenennung aber nicht selbst übernehmen konnte (normalerweise tut sie das): Der Watchdog überwacht dann {current_name}, und die Backups von {plan_name} laufen unter dem neuen Namen weiter. Gleicher Inhalt beweist nicht, dass es derselbe Plan ist (z. B. zwei leere Pläne).\n**Stattdessen {current_name} überwachen** überwacht den Plan, der die ID jetzt trägt; die Backups bleiben, wie sie sind.\n**Wiederherstellen** baut {plan_name} aus seinem neuesten Backup als neuen Plan wieder auf und startet ihn; er bleibt unter seiner neuen ID überwacht.\n**Nicht mehr überwachen** nimmt {plan_name} aus den überwachten Benutzerplänen."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "plan_not_missing": "Der Plan {plan_name} (ID {fub_id}) fehlt nicht mehr (wiederhergestellt oder nicht mehr überwacht). Es wurde nichts geändert.",
+          "no_backup": "Es gibt kein Backup von {plan_name} (ID {fub_id}), aus dem er wiederhergestellt werden kann. Es wurde nichts geändert — du kannst ihn stattdessen nicht mehr überwachen.",
+          "check_pending": "Die Planliste wurde seit dem Start von Home Assistant noch nicht gelesen, daher ist noch unklar, ob {plan_name} (ID {fub_id}) noch fehlt. Es wurde nichts geändert; bitte gleich erneut versuchen.",
+          "rename_not_confirmed": "Der Inhalt von {current_name} entspricht nicht mehr dem letzten Backup von {plan_name}, daher wurde die Umbenennung nicht übernommen. Es wurde nichts geändert — öffne die Reparatur erneut, um neu zu wählen.",
+          "backups_not_moved": "Die Backups von {plan_name} konnten nicht zu {current_name} verschoben werden, daher wurde nichts geändert. Siehe das Home-Assistant-Protokoll.",
+          "holder_changed": "ID {fub_id} trägt nicht mehr {current_name}, oder die Auswahl von {plan_name} wurde inzwischen in den Optionen geändert; die überwachten Pläne bleiben daher, wie sie sind. Siehe das Home-Assistant-Protokoll.",
+          "backups_busy": "Gerade läuft eine Logikplan-Wiederherstellung, oder die Integration wird neu geladen — dabei werden Backups verschoben und markiert. An den Backups wurde nichts geändert — versuche es erneut, sobald sie abgeschlossen ist."
         }
       }
     },
@@ -517,6 +564,23 @@
           "import_enabled": "Der Import dieser Kategorie ist wieder eingeschaltet. Es wurde nichts geändert.",
           "sync_running": "Gerade läuft ein Sync, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert — öffne diese Reparatur erneut, wenn er abgeschlossen ist.",
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt."
+        }
+      }
+    },
+    "certificate_changed": {
+      "title": "Comexio {server_id}: Zertifikat geändert",
+      "fix_flow": {
+        "step": {
+          "certificate_changed": {
+            "title": "Comexio-Zertifikat geändert",
+            "description": "Comexio **{server_id}** ({host}) zeigt ein anderes TLS-Zertifikat als das bei der Einrichtung gespeicherte. Bis du entscheidest, sendet Home Assistant nichts dorthin.\n\nGespeichert (SHA-256):\n`{pinned}`\n\nJetzt gezeigt (SHA-256):\n`{actual}`\n\nVergleiche den neuen Wert mit dem SHA-256-Wert, den die Comexio-Admin-Seite unter den Zertifikats-Hashes anzeigt. Stimmt er überein — etwa weil in Comexio ein neues Zertifikat erzeugt wurde —, bestätige, um ihn zu speichern; die Integration wird neu geladen. Stimmt er nicht überein, antwortet etwas anderes an Comexios Stelle: nicht bestätigen, Dialog schließen und das Netzwerk prüfen."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde eventuell entfernt.",
+          "cannot_connect": "Das Comexio-Zertifikat konnte nicht erneut gelesen werden ({host}). Nichts wurde geändert — bitte erneut versuchen, sobald Comexio erreichbar ist.",
+          "certificate_restored": "Comexio zeigt wieder das gespeicherte Zertifikat. Nichts wurde geändert.",
+          "certificate_changed_again": "Comexio zeigt jetzt noch ein anderes Zertifikat:\n`{actual}`\n\nNichts wurde geändert. Öffne die Reparatur erneut, um dieses zu vergleichen."
         }
       }
     }

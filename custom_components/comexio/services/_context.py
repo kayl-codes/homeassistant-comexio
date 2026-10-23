@@ -18,11 +18,13 @@ import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 
 from ..const import (
+    CERTIFICATE_CHANGED_MSG,
     DOMAIN,
     FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH as _LAYOUT_COLUMN_WIDTH,
     FUNCTION_PLAN_LAYOUT_X_MARKER as _LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
+    LOGIN_ERROR_CERTIFICATE,
     one_line,
 )
 from ..coordinator import ComexioCoordinator
@@ -35,6 +37,13 @@ _NO_INSTANCE_MSG = (
     "Please try again in a moment."
 )
 _LOGIN_FAILED_MSG = "Comexio admin login failed."
+
+
+def login_failed_message(api) -> str:
+    """What a service tells the user about a failed admin login; names a changed certificate."""
+    return CERTIFICATE_CHANGED_MSG if api.last_login_error == LOGIN_ERROR_CERTIFICATE else _LOGIN_FAILED_MSG
+
+
 NO_PLAN_SELECTED_MSG = (
     "No plan selected — the 'Plan' selector is empty or shows 'Orphaned plans'. "
     "Please specify the plan (fub_id) explicitly."
@@ -198,7 +207,7 @@ async def _async_get_service_context(
             return None
 
     if do_login and not await api.login():
-        persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=error_title)
+        persistent_notification.async_create(hass, login_failed_message(api), title=error_title)
         return None
 
     return coordinator, api, fub_id

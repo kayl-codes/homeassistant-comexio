@@ -4,7 +4,10 @@
       "server_id_exists": "Ce nom d'instance est déjà utilisé.",
       "cannot_connect": "La connexion à Comexio a échoué.",
       "invalid_auth": "Identifiants invalides (Interface Utilisateur/Mot de passe).",
-      "unknown": "Une erreur inattendue s'est produite."
+      "unknown": "Une erreur inattendue s'est produite.",
+      "certificate_changed": "Comexio présente un autre certificat que celui enregistré. Vérifiez-le sous Paramètres → Réparations.",
+      "certificate_unstable": "Comexio a présenté lors du test de connexion un autre certificat qu'un instant auparavant. Quelque chose dans le réseau répond peut-être à sa place — vérifiez-le et réessayez.",
+      "invalid_host": "Ce n’est pas un nom d’hôte ni une adresse IP (éventuellement avec :port) – sans http://, chemins, etc."
     },
     "step": {
       "user": {
@@ -27,6 +30,7 @@
       },
       "reconfigure": {
         "title": "Reconfigurer la connexion Comexio",
+        "description": "Connexion : **{protocol}**\nCertificat épinglé (SHA-256) : `{fingerprint}`\n\nDès que Comexio propose HTTPS, l’intégration se connecte de manière chiffrée et épingle le certificat automatiquement. HTTP signifie que Comexio ne propose pas HTTPS : la connexion n’est pas chiffrée.",
         "data": {
           "host": "Hôte / Adresse IP",
           "username": "Nom d'utilisateur (Admin)",
@@ -38,6 +42,14 @@
           "password": "Laisser vide pour conserver le mot de passe existant.",
           "api_password": "Laisser vide pour conserver le mot de passe existant."
         }
+      },
+      "reconfigure_http": {
+        "title": "Passer en HTTP non chiffré ?",
+        "description": "**{host}** ne propose pas HTTPS. Le certificat épinglé :\n`{pinned}`\n\nSi vous continuez, Home Assistant se connecte en HTTP simple – non chiffré, y compris la connexion administrateur – et abandonne le certificat épinglé. Le prochain démarrage épingle le certificat que Comexio présentera alors.\n\nSi Comexio doit proposer HTTPS (ou n’est simplement pas joignable pour le moment), fermez cette fenêtre et rien ne change."
+      },
+      "reconfigure_certificate": {
+        "title": "Faire confiance à un autre certificat ?",
+        "description": "**{host}** présente un certificat différent du certificat épinglé.\n\nÉpinglé (SHA-256) :\n`{pinned}`\n\nPrésenté (SHA-256) :\n`{actual}`\n\nComparez la valeur présentée avec le SHA-256 que la page d’administration de Comexio affiche dans les empreintes de certificat. Ne continuez que si elles correspondent – le nouveau certificat est alors épinglé. Sinon, fermez cette fenêtre et rien ne change."
       },
       "reauth_confirm": {
         "title": "Réauthentifier Comexio",
@@ -127,7 +139,9 @@
     "function_plan_vanished_action": {
       "options": {
         "restore": "♻️ Restaurer depuis la sauvegarde la plus récente",
-        "unwatch": "🚫 Ne plus surveiller ce plan"
+        "unwatch": "🚫 Ne plus surveiller ce plan",
+        "take_over_rename": "✏️ Reprendre le renommage (les sauvegardes suivent)",
+        "watch_holder": "👁️ Surveiller à la place le plan qui porte maintenant cet ID"
       }
     }
   },
@@ -168,8 +182,8 @@
           "function_plan_backup_retention_months": "Dès que la sauvegarde la plus récente d'un plan supprimé directement dans Comexio dépasse ce délai, une réparation demande s'il faut supprimer ou conserver ses sauvegardes — rien n'est supprimé sans votre confirmation. Les sauvegardes d'un plan existant ne sont jamais concernées. L'action 'Function Plan Purge Orphaned Backups' supprime d'un coup toutes celles qui ont expiré.",
           "bus_watchdog_enabled": "En cas de hausse durable de la charge du bus, redémarre automatiquement les plans fonctionnels de cluster gérés par HA (de l'arrière vers l'avant) pour tenter de la soulager. Non destructif pour le système Comexio lui-même.",
           "bus_watchdog_auto_reboot": "Si la charge du bus dépasse en moyenne 90 % pendant 5 minutes, déclenche un redémarrage COMPLET et IMMÉDIAT de Comexio, sans confirmation. Désactivé par défaut — à activer une fois que vous faites confiance au mécanisme.",
-          "function_plan_watchdog_notify": "Services de notification (p. ex. notify.mobile_app_votre_telephone) qui reçoivent un push lorsqu'un plan de fonctions surveillé s'arrête (géré par HA, ou plan utilisateur choisi ci-dessous). Le push comporte un bouton « Démarrer le plan » et disparaît dès que le plan s'exécute de nouveau. Un plan utilisateur surveillé supprimé dans Comexio reçoit aussi un push, avec les boutons « Restaurer » (sa sauvegarde la plus récente, comme nouveau plan) et « Ne plus surveiller ». Laisser vide pour aucun push ; la réparation est créée dans tous les cas.",
-          "function_plan_watchdog_user_plans": "Plans utilisateur (non gérés par Home Assistant) qui doivent toujours s'exécuter. Le watchdog les traite comme les plans HA : réparation, capteur de problème et push lorsqu'un plan s'arrête. L'interrupteur Démarrage auto des plans (plans utilisateur) les redémarre lui-même. Un plan choisi supprimé dans Comexio n'est pas démarré : sa réparation et son push proposent de le restaurer depuis sa sauvegarde la plus récente ou de ne plus le surveiller. N'y mettez pas les plans arrêtés volontairement (tests)."
+          "function_plan_watchdog_notify": "Services de notification (p. ex. notify.mobile_app_votre_telephone) qui reçoivent un push lorsqu'un plan de fonctions surveillé s'arrête (géré par HA, ou plan utilisateur choisi ci-dessous). Le push comporte un bouton « Démarrer le plan » et disparaît dès que le plan s'exécute de nouveau. Un plan utilisateur surveillé supprimé dans Comexio reçoit aussi un push, avec les boutons « Restaurer » (sa sauvegarde la plus récente, comme nouveau plan) et « Ne plus surveiller » ; si son ID porte maintenant un autre plan (renommé, ou ID réattribué), seulement « Ne plus surveiller » — restaurez-le ou reprenez le renommage dans sa réparation. Ils reçoivent aussi un push urgent lorsque Comexio présente un autre certificat TLS que celui épinglé. Laisser vide pour aucun push ; la réparation est créée dans tous les cas.",
+          "function_plan_watchdog_user_plans": "Plans utilisateur (non gérés par Home Assistant) qui doivent toujours s'exécuter. Le watchdog les traite comme les plans HA : réparation, capteur de problème et push lorsqu'un plan s'arrête. L'interrupteur Démarrage auto des plans (plans utilisateur) les redémarre lui-même. Un plan choisi supprimé dans Comexio n'est pas démarré : sa réparation et son push proposent de le restaurer depuis sa sauvegarde la plus récente ou de ne plus le surveiller. Un plan renommé dans Comexio sans changement de contenu est suivi automatiquement (la sélection et les sauvegardes prennent le nouveau nom). Si son ID porte maintenant un autre plan (renommé, ou ID réattribué), la réparation propose aussi de surveiller ce plan à la place ou, si son contenu correspond à la dernière sauvegarde, de reprendre le renommage (les sauvegardes suivent). N'y mettez pas les plans arrêtés volontairement (tests)."
         }
       }
     },
@@ -260,6 +274,14 @@
       },
       "last_boot": {
         "name": "Dernier démarrage"
+      },
+      "connection": {
+        "name": "Connexion",
+        "state": {
+          "https": "HTTPS (chiffrée)",
+          "http": "HTTP (non chiffrée)",
+          "certificate_changed": "Certificat modifié"
+        }
       }
     },
     "binary_sensor": {
@@ -492,7 +514,32 @@
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
           "plan_not_missing": "Le plan {plan_name} (ID {fub_id}) ne manque plus (restauré ou plus surveillé). Rien n'a été modifié.",
           "no_backup": "Il n'existe aucune sauvegarde de {plan_name} (ID {fub_id}) pour le restaurer. Rien n'a été modifié — vous pouvez cesser de le surveiller.",
-          "check_pending": "La liste des plans n'a pas encore été lue depuis le démarrage de Home Assistant ; on ne sait donc pas encore si {plan_name} (ID {fub_id}) manque toujours. Rien n'a été modifié ; veuillez réessayer dans un instant."
+          "check_pending": "La liste des plans n'a pas encore été lue depuis le démarrage de Home Assistant ; on ne sait donc pas encore si {plan_name} (ID {fub_id}) manque toujours. Rien n'a été modifié ; veuillez réessayer dans un instant.",
+          "rename_not_confirmed": "Le contenu de {current_name} ne correspond plus à la dernière sauvegarde de {plan_name} ; le renommage n'a donc pas été repris. Rien n'a été modifié — rouvrez la réparation pour choisir à nouveau.",
+          "backups_not_moved": "Les sauvegardes de {plan_name} n'ont pas pu être déplacées vers {current_name} ; rien n'a donc été modifié. Consultez le journal de Home Assistant.",
+          "holder_changed": "L'ID {fub_id} ne porte plus {current_name}, ou la sélection de {plan_name} a été modifiée entre-temps dans les options ; les plans surveillés restent donc tels quels. Consultez le journal de Home Assistant.",
+          "backups_busy": "Une restauration de plan de fonctions est en cours, ou l'intégration est en train de se recharger — elle déplace et marque des sauvegardes. Les sauvegardes n'ont pas été modifiées — réessayez une fois l'opération terminée."
+        }
+      }
+    },
+    "function_plan_replaced": {
+      "title": "Plan de fonctions {plan_name} introuvable sous l'ID {fub_id}",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de fonctions surveillé introuvable",
+            "description": "Le plan de fonctions surveillé **{plan_name}** (ID {fub_id}) est introuvable dans Comexio : l'ID {fub_id} porte maintenant le plan **{current_name}**. Soit le plan a été renommé, soit il a été supprimé et Comexio a attribué son ID à un autre plan.\n\n**Reprendre le renommage** est proposé lorsque le contenu de {current_name} correspond à la dernière sauvegarde de {plan_name} mais que l'intégration n'a pas pu suivre le renommage d'elle-même (normalement elle le fait) : le watchdog surveille alors {current_name}, et les sauvegardes de {plan_name} continuent sous le nouveau nom. Un contenu identique ne prouve pas qu'il s'agit du même plan (p. ex. deux plans vides).\n**Surveiller {current_name} à la place** surveille le plan qui porte maintenant l'ID ; les sauvegardes restent telles quelles.\n**Restaurer** reconstruit {plan_name} à partir de sa sauvegarde la plus récente en tant que nouveau plan et le démarre ; il reste surveillé sous son nouvel ID.\n**Ne plus surveiller** retire {plan_name} des plans utilisateur surveillés."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "plan_not_missing": "Le plan {plan_name} (ID {fub_id}) ne manque plus (restauré ou plus surveillé). Rien n'a été modifié.",
+          "no_backup": "Il n'existe aucune sauvegarde de {plan_name} (ID {fub_id}) pour le restaurer. Rien n'a été modifié — vous pouvez cesser de le surveiller.",
+          "check_pending": "La liste des plans n'a pas encore été lue depuis le démarrage de Home Assistant ; on ne sait donc pas encore si {plan_name} (ID {fub_id}) manque toujours. Rien n'a été modifié ; veuillez réessayer dans un instant.",
+          "rename_not_confirmed": "Le contenu de {current_name} ne correspond plus à la dernière sauvegarde de {plan_name} ; le renommage n'a donc pas été repris. Rien n'a été modifié — rouvrez la réparation pour choisir à nouveau.",
+          "backups_not_moved": "Les sauvegardes de {plan_name} n'ont pas pu être déplacées vers {current_name} ; rien n'a donc été modifié. Consultez le journal de Home Assistant.",
+          "holder_changed": "L'ID {fub_id} ne porte plus {current_name}, ou la sélection de {plan_name} a été modifiée entre-temps dans les options ; les plans surveillés restent donc tels quels. Consultez le journal de Home Assistant.",
+          "backups_busy": "Une restauration de plan de fonctions est en cours, ou l'intégration est en train de se recharger — elle déplace et marque des sauvegardes. Les sauvegardes n'ont pas été modifiées — réessayez une fois l'opération terminée."
         }
       }
     },
@@ -517,6 +564,23 @@
           "import_enabled": "L'import de cette catégorie est de nouveau activé. Rien n'a été modifié.",
           "sync_running": "Une synchronisation, une vérification de plage Web-IO ou un rechargement de l'intégration est en cours. Rien n'a été modifié — rouvrez cette réparation une fois terminé.",
           "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée."
+        }
+      }
+    },
+    "certificate_changed": {
+      "title": "Comexio {server_id} : certificat modifié",
+      "fix_flow": {
+        "step": {
+          "certificate_changed": {
+            "title": "Certificat Comexio modifié",
+            "description": "Comexio **{server_id}** ({host}) présente un autre certificat TLS que celui enregistré lors de la configuration. Tant que vous n'avez pas décidé, Home Assistant ne lui envoie rien.\n\nEnregistré (SHA-256) :\n`{pinned}`\n\nPrésenté maintenant (SHA-256) :\n`{actual}`\n\nComparez la nouvelle valeur avec la valeur SHA-256 que la page d'administration de Comexio affiche parmi les empreintes du certificat. Si elle correspond — par exemple parce qu'un nouveau certificat a été généré dans Comexio —, confirmez pour l'enregistrer ; l'intégration est rechargée. Si elle ne correspond pas, autre chose répond à la place de Comexio : ne confirmez pas, fermez ce dialogue et vérifiez votre réseau."
+          }
+        },
+        "abort": {
+          "entry_not_found": "L'entrée de configuration associée est introuvable — elle a peut-être été supprimée.",
+          "cannot_connect": "Le certificat de Comexio n'a pas pu être relu ({host}). Rien n'a été modifié — réessayez quand Comexio sera joignable.",
+          "certificate_restored": "Comexio présente de nouveau le certificat enregistré. Rien n'a été modifié.",
+          "certificate_changed_again": "Comexio présente maintenant encore un autre certificat :\n`{actual}`\n\nRien n'a été modifié. Rouvrez la réparation pour comparer celui-ci."
         }
       }
     }

@@ -3,6 +3,7 @@ import contextlib
 import logging
 import socket
 
+from aiocomexio import format_fingerprint
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
@@ -11,9 +12,19 @@ from homeassistant.util import slugify
 import voluptuous as vol
 
 from .api import ComexioAPI
+from .certificate import (
+    async_read_fingerprint,
+    async_replaced_fingerprint,
+    async_report_certificate_changed,
+    connection_placeholders,
+    is_valid_host,
+    notify_https_disabled,
+    notify_https_enabled,
+)
 from .const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_COVER_KEYWORDS,
     CONF_HOST,
     CONF_PASSWORD,
@@ -24,6 +35,7 @@ from .const import (
     DEFAULT_HOST,
     DOMAIN,
     KNOWN_DOMAINS,
+    LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
@@ -50,11 +62,30 @@ class ServerIdExists(HomeAssistantError):
     """Error to indicate the Server ID is already in use."""
 
 
+class CertificateChanged(HomeAssistantError):
+    """Error to indicate Comexio presents another certificate than the pinned one."""
+
+    def __init__(self, actual: str | None) -> None:
+        super().__init__("Comexio presents another certificate than the pinned one")
+        self.actual = actual
+
+
+# What a reconfigure does to the entry's HTTPS (see _async_pin_for_host).
+_HTTPS_ENABLED = "enabled"
+_HTTPS_DROPPED = "dropped"
+_HTTPS_REPLACED = "replaced"
+# The changes the user confirms first, and the step that asks.
+_HTTPS_CONFIRM_STEPS = {_HTTPS_DROPPED: "reconfigure_http", _HTTPS_REPLACED: "reconfigure_certificate"}
+
+
 class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Comexio with detailed validation."""
 
     VERSION = 1
     MINOR_VERSION = CONFIG_ENTRY_MINOR_VERSION
+
+    # The reconfigure settings waiting in a confirmation step (see _HTTPS_CONFIRM_STEPS).
+    _pending_reconfigure: dict
 
     async def async_step_user(self, user_input=None):
         """Handle the initial setup step when a user adds the integration."""
@@ -116,12 +147,17 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors[CONF_SERVER_ID] = "server_id_exists"
                         raise ServerIdExists
 
-                # 2. Validation: Test connection with the provided UI credentials
-                await self._test_connection(user_input)
+                # 2. Validation: Test connection with the provided UI credentials — over HTTPS
+                # with the certificate pinned when Comexio serves it, else plain HTTP.
+                fingerprint = await async_read_fingerprint(user_input[CONF_HOST])
+                await self._test_connection(user_input, fingerprint)
 
                 # Store the cleaned server ID and coerce scan_interval to int
                 user_input[CONF_SERVER_ID] = chosen_id
                 user_input["scan_interval"] = int(user_input["scan_interval"])
+                if fingerprint is not None:
+                    user_input[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+                    notify_https_enabled(self.hass, chosen_id, user_input[CONF_HOST], fingerprint)
                 _LOGGER.info("Config entry created for server: %s", chosen_id)
 
                 return self.async_create_entry(
@@ -136,6 +172,9 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
+            except CertificateChanged:
+                # Read a moment ago, refused at the login: there is no entry (and no repair) yet.
+                errors["base"] = "certificate_unstable"
             except Exception as e:
                 _LOGGER.exception("Unexpected error during setup: %s", e)
                 errors["base"] = "unknown"
@@ -182,27 +221,44 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_reconfigure(self, user_input=None):
         """Handle reconfiguration of connection credentials."""
-        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
-        errors = {}
+        entry = self._get_reconfigure_entry()
+        if user_input is None:
+            return self._show_reconfigure_form(entry.data, {})
 
-        if user_input is not None:
-            merged = {**entry.data, **user_input}
-            if not user_input.get(CONF_PASSWORD):
-                merged[CONF_PASSWORD] = entry.data.get(CONF_PASSWORD, "")
-            if not user_input.get(CONF_API_PASSWORD):
-                merged[CONF_API_PASSWORD] = entry.data.get(CONF_API_PASSWORD, "")
+        merged = {**entry.data, **user_input}
+        if not user_input.get(CONF_PASSWORD):
+            merged[CONF_PASSWORD] = entry.data.get(CONF_PASSWORD, "")
+        if not user_input.get(CONF_API_PASSWORD):
+            merged[CONF_API_PASSWORD] = entry.data.get(CONF_API_PASSWORD, "")
 
-            errors = await self._connection_errors(merged)
-            if not errors:
-                clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
-                return self.async_update_reload_and_abort(
-                    entry,
-                    title=f"Comexio {entry.data[CONF_SERVER_ID]} ({merged[CONF_HOST]})",
-                    data=merged,
-                    options=clean_options,
-                )
+        if not is_valid_host(merged[CONF_HOST]):
+            # Not "no HTTPS": a pinned entry would be asked to switch to plain HTTP for a typo.
+            return self._show_reconfigure_form(merged, {"base": "invalid_host"})
+        try:
+            https_change = await self._async_pin_for_host(entry, merged)
+        except CertificateChanged as err:
+            return self._show_reconfigure_form(merged, {"base": self._certificate_error(entry, merged, err.actual)})
+        if https_change in _HTTPS_CONFIRM_STEPS:
+            # No request is sent before the user agreed (only the TLS handshake that read the certificate):
+            # neither credentials over plain HTTP nor to that certificate.
+            self._pending_reconfigure = merged
+            return self._show_https_confirm(entry, merged, https_change)
+        return await self._async_apply_reconfigure(entry, merged, https_change)
 
-        conf = entry.data
+    async def async_step_reconfigure_http(self, user_input=None):
+        """Confirmed: the pinned entry goes back to plain HTTP, as its host answered no HTTPS."""
+        return await self._async_apply_reconfigure(
+            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_DROPPED
+        )
+
+    async def async_step_reconfigure_certificate(self, user_input=None):
+        """Confirmed: the new host's certificate replaces the pinned one."""
+        return await self._async_apply_reconfigure(
+            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_REPLACED
+        )
+
+    def _show_reconfigure_form(self, conf, errors: dict[str, str]):
+        """The reconfigure form, prefilled from conf: the entry, or after an error what the user entered."""
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=vol.Schema(
@@ -215,7 +271,82 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders=connection_placeholders(self._get_reconfigure_entry().data),
         )
+
+    def _show_https_confirm(self, entry, merged, https_change: str):
+        """The confirmation step of a reconfigure that drops or replaces the pin, with the fingerprints involved."""
+        placeholders = {
+            "host": merged[CONF_HOST],
+            "pinned": format_fingerprint(entry.data[CONF_CERTIFICATE_FINGERPRINT]),
+        }
+        if https_change == _HTTPS_REPLACED:
+            placeholders["actual"] = format_fingerprint(merged[CONF_CERTIFICATE_FINGERPRINT])
+        return self.async_show_form(step_id=_HTTPS_CONFIRM_STEPS[https_change], description_placeholders=placeholders)
+
+    async def _async_apply_reconfigure(self, entry, merged, https_change: str | None):
+        """Test the login with the merged settings and store them; the form again with the errors if it fails."""
+        errors = await self._connection_errors(entry, merged)
+        if errors:
+            return self._show_reconfigure_form(merged, errors)
+        self._notify_https_change(entry, merged, https_change)
+        clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
+        return self.async_update_reload_and_abort(
+            entry,
+            title=f"Comexio {entry.data[CONF_SERVER_ID]} ({merged[CONF_HOST]})",
+            data=merged,
+            options=clean_options,
+        )
+
+    @staticmethod
+    async def _async_pin_for_host(entry, merged) -> str | None:
+        """Read the certificate of the reconfigured host into merged; how the entry's HTTPS changes, None if not.
+
+        An entry on plain HTTP pins the certificate its host serves, like at setup (_HTTPS_ENABLED). A pinned
+        entry never changes its pin without asking: a host that answers no HTTPS — switched off, or just not
+        reachable this moment — goes to plain HTTP only once the user confirms it (_HTTPS_DROPPED), and so
+        does another host with another certificate (_HTTPS_REPLACED, both fingerprints shown). A changed
+        certificate on the pinned host raises CertificateChanged before any login: the certificate_changed
+        repair's business, never accepted along with other settings.
+        """
+        pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+        fingerprint = await async_read_fingerprint(merged[CONF_HOST])
+        if fingerprint is None:
+            return None if merged.pop(CONF_CERTIFICATE_FINGERPRINT, None) is None else _HTTPS_DROPPED
+        if pinned is None:
+            merged[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+            return _HTTPS_ENABLED
+        if fingerprint == pinned:
+            return None
+        if merged[CONF_HOST] == entry.data.get(CONF_HOST):
+            raise CertificateChanged(fingerprint)
+        merged[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+        return _HTTPS_REPLACED
+
+    def _certificate_error(self, entry, merged, actual: str | None) -> str:
+        """Error key of a login test refused for the certificate; raises the repair for the pinned one.
+
+        Only the entry's own host with its own pin is the repair's case: the repair checks that host. Another
+        host — even one that presented the pinned certificate a moment ago — goes through reconfigure again.
+        """
+        if (
+            actual is None
+            or merged.get(CONF_CERTIFICATE_FINGERPRINT) != entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+            or merged[CONF_HOST] != entry.data[CONF_HOST]
+        ):
+            # A certificate read a moment ago and refused at the login: nothing pinned to compare with.
+            return "certificate_unstable"
+        async_report_certificate_changed(self.hass, entry, actual)
+        return "certificate_changed"
+
+    def _notify_https_change(self, entry, merged, https_change: str | None) -> None:
+        """Tell the user when a reconfigure switched the entry to HTTPS or back to plain HTTP."""
+        server_id = entry.data[CONF_SERVER_ID]
+        if https_change in (_HTTPS_ENABLED, _HTTPS_REPLACED):
+            notify_https_enabled(self.hass, server_id, merged[CONF_HOST], merged[CONF_CERTIFICATE_FINGERPRINT])
+        elif https_change == _HTTPS_DROPPED:
+            _LOGGER.warning("Comexio at %s serves no HTTPS — the entry is back on plain HTTP", merged[CONF_HOST])
+            notify_https_disabled(self.hass, server_id, merged[CONF_HOST])
 
     async def async_step_reauth(self, entry_data):
         """Start when Comexio refuses the stored admin credentials (at setup or on a poll)."""
@@ -227,11 +358,11 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
-            errors = await self._connection_errors({**entry.data, **user_input})
+            data_updates, errors = await self._reauth_test(entry, user_input)
             if not errors:
                 # Like reconfigure: credentials left in options from older versions would shadow the new ones.
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
-                return self.async_update_reload_and_abort(entry, data_updates=user_input, options=clean_options)
+                return self.async_update_reload_and_abort(entry, data_updates=data_updates, options=clean_options)
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -245,21 +376,51 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def _connection_errors(self, user_input) -> dict[str, str]:
-        """Form errors of a login test with these credentials; empty when it succeeds.
+    async def _reauth_test(self, entry, user_input) -> tuple[dict, dict[str, str]]:
+        """The entry data to update and the form errors of a reauth's login test.
 
-        _test_connection turns every other failure into CannotConnect (and logs it).
+        Tested over the transport the next setup uses (async_create_api): an entry not yet pinned tries
+        HTTPS first and is pinned when the login works there. Comexio refusing the credentials over
+        HTTPS is the answer — a test over plain HTTP could pass where the setup is refused again, an
+        endless reauth. Only when the HTTPS login cannot connect does the test fall back to HTTP, as
+        the setup does.
+        """
+        merged = {**entry.data, **user_input}
+        if CONF_CERTIFICATE_FINGERPRINT in merged:
+            return user_input, await self._connection_errors(entry, merged)
+        fingerprint = await async_read_fingerprint(merged[CONF_HOST])
+        if fingerprint is not None:
+            pinned = {**user_input, CONF_CERTIFICATE_FINGERPRINT: fingerprint}
+            errors = await self._connection_errors(entry, {**merged, **pinned})
+            if not errors:
+                notify_https_enabled(self.hass, entry.data[CONF_SERVER_ID], merged[CONF_HOST], fingerprint)
+                return pinned, errors
+            if errors != {"base": "cannot_connect"}:
+                return user_input, errors
+            _LOGGER.warning(
+                "Comexio at %s serves HTTPS but its login cannot be reached there — testing over plain HTTP",
+                merged[CONF_HOST],
+            )
+        return user_input, await self._connection_errors(entry, merged)
+
+    async def _connection_errors(self, entry, merged) -> dict[str, str]:
+        """Form errors of a login test of entry with the settings merged; empty when it succeeds.
+
+        The test goes over HTTPS with merged's pinned certificate, if any. _test_connection turns every
+        other failure into CannotConnect (and logs it).
         """
         try:
-            await self._test_connection(user_input)
+            await self._test_connection(merged, merged.get(CONF_CERTIFICATE_FINGERPRINT))
         except CannotConnect:
             return {"base": "cannot_connect"}
         except InvalidAuth:
             return {"base": "invalid_auth"}
+        except CertificateChanged as err:
+            return {"base": self._certificate_error(entry, merged, err.actual)}
         return {}
 
-    async def _test_connection(self, user_input):
-        """Test if the login works using UI credentials."""
+    async def _test_connection(self, user_input, fingerprint: str | None = None):
+        """Test if the login works using UI credentials, over HTTPS with fingerprint pinned if given."""
         api = None
 
         try:
@@ -268,18 +429,25 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input[CONF_HOST],
                 user_input[CONF_USERNAME],
                 user_input[CONF_PASSWORD],
+                fingerprint=fingerprint,
             )
 
             _LOGGER.debug("Testing login credentials for %s", user_input[CONF_HOST])
             success = await api.login()
             if not success:
+                if api.last_login_error == LOGIN_ERROR_CERTIFICATE:
+                    mismatch = api.certificate_mismatch
+                    raise CertificateChanged(mismatch.actual if mismatch is not None else None)
                 if api.last_login_error == LOGIN_ERROR_CONNECTION:
+                    # aiohttp reports a foreign certificate on a host name with several addresses as one.
+                    if (actual := await async_replaced_fingerprint(api)) is not None:
+                        raise CertificateChanged(actual)
                     _LOGGER.error("Login test could not reach Comexio at %s", user_input[CONF_HOST])
                     raise CannotConnect
                 _LOGGER.error("Login test failed for user %s", user_input[CONF_USERNAME])
                 raise InvalidAuth
         except Exception as e:
-            if not isinstance(e, InvalidAuth | CannotConnect):
+            if not isinstance(e, InvalidAuth | CannotConnect | CertificateChanged):
                 _LOGGER.exception("Connection test failed: %s", e)
                 raise CannotConnect from e
             raise
