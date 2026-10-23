@@ -111,6 +111,27 @@ def _with_quickbus_ios(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
     return {**parsed_data, "io": [*parsed_data.get("io", []), *parsed_data.get(QUICKBUS_IO_DATA_KEY, [])]}
 
 
+class _MismatchReportingClient(ComexioClient):
+    """ComexioClient that hands every certificate other than the pinned one to on_mismatch before raising it.
+
+    aiocomexio turns each transport failure into a ComexioError in _transport_error, so this one place sees
+    the mismatch of every request — also of the direct client calls whose callers report any ComexioError
+    as a plain failure.
+    """
+
+    def __init__(
+        self, *args: Any, on_mismatch: Callable[[ComexioCertificateMismatchError], None], **kwargs: Any
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_mismatch = on_mismatch
+
+    def _transport_error(self, what: str, err: aiohttp.ClientError | TimeoutError) -> ComexioError:
+        error = super()._transport_error(what, err)
+        if isinstance(error, ComexioCertificateMismatchError):
+            self._on_mismatch(error)
+        return error
+
+
 def _raise_transport_error(err: ComexioConnectionError) -> NoReturn:
     """Re-raise the aiohttp.ClientError / TimeoutError behind err, else err itself.
 
@@ -640,6 +661,11 @@ class ComexioAPI:
         # Called with the presented fingerprint on every mismatch met here, so the certificate_changed
         # repair comes up with the first request that meets it, not only with the next full poll.
         self.on_certificate_mismatch: Callable[[str], None] | None = None
+        # Grows with every mismatch kept (a request the client and its caller both report counts twice) and
+        # is never reset, so a poll tells whether one came up while it ran even when a login or config fetch
+        # alongside it cleared certificate_mismatch; last_certificate_mismatch is not cleared either.
+        self.certificate_mismatch_count = 0
+        self.last_certificate_mismatch: ComexioCertificateMismatchError | None = None
         # The presented fingerprint last logged at ERROR: a mismatch that persists is logged once, then
         # at debug (the repair is up). Cleared by a login or config fetch that gets through.
         self._mismatch_logged: str | None = None
@@ -868,8 +894,9 @@ class ComexioAPI:
         )
 
     def _new_client(self, session: aiohttp.ClientSession) -> ComexioClient:
-        host, username, password, api_user, api_pass, fingerprint = self._credentials()
-        return ComexioClient(
+        credentials = self._credentials()
+        host, username, password, api_user, api_pass, fingerprint = credentials
+        return _MismatchReportingClient(
             host,
             username,
             password,
@@ -877,7 +904,21 @@ class ComexioAPI:
             api_username=api_user,
             api_password=api_pass,
             fingerprint=fingerprint or None,
+            on_mismatch=lambda err: self._client_met_certificate_mismatch(err, credentials),
         )
+
+    def _client_met_certificate_mismatch(
+        self, err: ComexioCertificateMismatchError, client_credentials: tuple[str, ...]
+    ) -> None:
+        """A request of a client built with client_credentials met another certificate than its pin.
+
+        The caller logs the failed request; this only keeps the mismatch and raises the repair. A client
+        whose settings a reconfigure replaced checked an old pin, so its mismatch names nothing in force.
+        """
+        if self._login_outdated(client_credentials):
+            _LOGGER.debug("A request with replaced connection settings met another certificate: %s", err)
+            return
+        self._keep_certificate_mismatch(err)
 
     @property
     def client(self) -> ComexioClient:
@@ -1157,7 +1198,12 @@ class ComexioAPI:
         else:
             _LOGGER.error("%s, the certificate changed: %s", what, err)
             self._mismatch_logged = err.actual
-        self.certificate_mismatch = err
+        self._keep_certificate_mismatch(err)
+
+    def _keep_certificate_mismatch(self, err: ComexioCertificateMismatchError) -> None:
+        """Keep the mismatch (certificate_mismatch, certificate_mismatch_count), hand it to on_certificate_mismatch."""
+        self.certificate_mismatch = self.last_certificate_mismatch = err
+        self.certificate_mismatch_count += 1
         if self.on_certificate_mismatch is not None:
             self.on_certificate_mismatch(err.actual)
 

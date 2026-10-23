@@ -990,6 +990,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
         self._full_poll_running = True
+        mismatches_before = self.api.certificate_mismatch_count
         try:
             data = await self._async_fetch_and_audit()
         except UNREACHABLE_ERRORS:
@@ -1002,8 +1003,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._full_poll_running = False
         if self._last_poll_scraped:
             self._note_comexio_reachable()
-            # A request of this poll (or one alongside it) that met another certificate keeps its repair.
-            if self.api.certificate_mismatch is None:
+            # A request of this poll (or one alongside it) that met another certificate keeps its repair,
+            # also when a login or config fetch alongside it cleared certificate_mismatch since.
+            if self.api.certificate_mismatch is None and self.api.certificate_mismatch_count == mismatches_before:
                 self._clear_certificate_changed()
         # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
         # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
@@ -1145,9 +1147,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.available_source_counts = source_counts
         return final_data
 
-    def _fail_poll_on_certificate_mismatch(self) -> None:
-        """Raise UpdateFailed when a request of this poll met another certificate than the pinned one."""
-        if (mismatch := self.api.certificate_mismatch) is not None:
+    def _fail_poll_on_certificate_mismatch(self, mismatches_before: int) -> None:
+        """Raise UpdateFailed when a request of this poll met another certificate than the pinned one.
+
+        mismatches_before: api.certificate_mismatch_count right before the config fetch. A mismatch counted since
+        then fails the poll also when a login alongside cleared api.certificate_mismatch meanwhile.
+        """
+        mismatch = self.api.certificate_mismatch
+        if self.api.certificate_mismatch_count != mismatches_before:
+            mismatch = self.api.last_certificate_mismatch
+        if mismatch is not None:
             # Nothing more goes out to a server that is not the pinned one; the repair asks the user.
             self._report_certificate_changed(mismatch.actual)
             raise UpdateFailed(f"Comexio presents another certificate than the pinned one — see Repairs: {mismatch}")
@@ -1160,8 +1169,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Fetch current raw configuration from the Comexio API. A plan HA starts or stops
         # while this poll runs keeps that state over the older Active flag in raw_config.
         run_state_mark = self.api.run_state_mark()
+        mismatches_before = self.api.certificate_mismatch_count
         raw_config = await self.api.get_raw_config()
-        self._fail_poll_on_certificate_mismatch()
+        self._fail_poll_on_certificate_mismatch(mismatches_before)
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
         if self.api.config_relogin_unreachable:
             # The re-login after a lapsed session (e.g. a reboot) got no reply.
@@ -1179,7 +1189,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         live_states, knx_live_states = await self.api.get_live_states(*_source_max_ids(raw_config))
         if live_states is None:
             # Kept values must not pass as current ones while another certificate answers.
-            self._fail_poll_on_certificate_mismatch()
+            self._fail_poll_on_certificate_mismatch(mismatches_before)
             # Fetch/parse failure this cycle (see get_live_states' docstring) — keep last
             # known values instead of letting parse_config default every item to 0/off.
             _LOGGER.warning("[%s] Live states fetch failed; keeping last known values", self.server_id)
@@ -1200,7 +1210,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # KNX objects needs. get_knx_dpt_catalog() never raises (own contract, {} on
         # failure), so an unreachable/failed fetch just leaves every KNX analog item on its
         # generic fallback range rather than failing this whole poll.
-        knx_dpt_catalog = await self.api.get_knx_dpt_catalog() if import_knx else None
+        knx_dpt_catalog = None
+        if import_knx:
+            knx_dpt_catalog = await self.api.get_knx_dpt_catalog()
+            # The catalog keeps its last known-good value; nothing more goes out to this server.
+            self._fail_poll_on_certificate_mismatch(mismatches_before)
         if import_knx and knx_dpt_catalog:
             await self._maybe_persist_knx_dpt_catalog()
         parsed_data = self.api.parse_config(

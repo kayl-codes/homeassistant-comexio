@@ -14,6 +14,7 @@ from aiocomexio import (
     ComexioResponseError,
     RawConfig,
 )
+import aiohttp
 import pytest
 
 from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, api as api_module, certificate
@@ -448,9 +449,70 @@ def test_a_mismatch_without_a_mismatch_hook_is_a_warning(helper, expected, caplo
 
 
 def test_a_mismatch_without_a_hook_is_kept_for_the_caller(comexio_api: ComexioAPI, client: MagicMock) -> None:
-    client.set_marker_value = AsyncMock(side_effect=_mismatch())
+    err = _mismatch()
+    client.set_marker_value = AsyncMock(side_effect=err)
     assert asyncio.run(comexio_api.set_value("marker", 7, 1)) is False
+    assert comexio_api.certificate_mismatch is err
+
+
+def _fingerprint_mismatch() -> aiohttp.ServerFingerprintMismatch:
+    return aiohttp.ServerFingerprintMismatch(bytes.fromhex(PINNED), bytes.fromhex(OTHER), "192.168.1.10", 443)
+
+
+def test_a_direct_client_request_reports_another_certificate(comexio_api: ComexioAPI) -> None:
+    # delete_single_command turns any ComexioError into False; the client reports the mismatch before that.
+    comexio_api.fingerprint = PINNED
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    comexio_api.session.request.side_effect = _fingerprint_mismatch()
+    assert asyncio.run(comexio_api.delete_single_command(1, 2)) is False
     assert comexio_api.certificate_mismatch is not None
+    assert comexio_api.certificate_mismatch.actual == OTHER
+    assert comexio_api.certificate_mismatch_count == 1
+    hook.assert_called_once_with(OTHER)
+
+
+def test_a_client_on_replaced_settings_reports_no_mismatch(comexio_api: ComexioAPI) -> None:
+    # It checked a pin no longer in force; a repair would name a certificate the user did not compare with it.
+    comexio_api.fingerprint = PINNED
+    old = comexio_api.client
+    comexio_api.fingerprint = OTHER
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    error = old._transport_error("Deleting Web-IO command", _fingerprint_mismatch())
+    assert isinstance(error, ComexioCertificateMismatchError)
+    assert comexio_api.certificate_mismatch is None
+    assert comexio_api.certificate_mismatch_count == 0
+    hook.assert_not_called()
+
+
+def test_a_connection_error_reports_no_mismatch(comexio_api: ComexioAPI) -> None:
+    comexio_api.fingerprint = PINNED
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    error = comexio_api.client._transport_error("Deleting Web-IO command", aiohttp.ClientConnectionError("down"))
+    assert isinstance(error, ComexioConnectionError)
+    assert comexio_api.certificate_mismatch is None
+    assert comexio_api.certificate_mismatch_count == 0
+    hook.assert_not_called()
+
+
+def test_a_login_meeting_another_certificate_through_the_client_logs_once(
+    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The client and the login both keep the mismatch; the repair report is idempotent, the ERROR comes once.
+    comexio_api.fingerprint = PINNED
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    comexio_api.session.request.side_effect = _fingerprint_mismatch()
+    assert asyncio.run(comexio_api.login()) is False
+    assert comexio_api.last_login_error == LOGIN_ERROR_CERTIFICATE
+    assert comexio_api.certificate_mismatch is not None
+    assert comexio_api.certificate_mismatch.actual == OTHER
+    assert {call.args for call in hook.call_args_list} == {(OTHER,)}
+    assert [record.levelno for record in caplog.records if "certificate changed" in record.getMessage()] == [
+        logging.ERROR
+    ]
 
 
 @pytest.mark.parametrize(
