@@ -1,9 +1,11 @@
 """Repairs for the backups of deleted function plans (function_plan_backup.py, orphaned_backups.py)."""
 
 import asyncio
+import copy
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -565,3 +567,143 @@ def test_purge_with_no_plan_left_deletes_every_expired_plan(manager: FunctionPla
 def test_the_fix_flow_shows_the_plan_names_of_its_issue_data_on_one_line() -> None:
     placeholders = orphaned_backups.repair_placeholders({"plan_name": "Hall\nway", "current_plan": "Pumps\r\n2"})
     assert (placeholders["plan_name"], placeholders["current_plan"]) == ("Hall way", "Pumps 2")
+
+
+# (cq) A plan renamed in Comexio: its backups continue under the new name once the user takes the rename over.
+
+
+def test_a_renamed_plan_takes_its_backups_along(manager: FunctionPlanBackupManager) -> None:
+    async def run() -> int:
+        await manager.async_load()
+        manager._auto_data["2"]["Heating"] = [_snap(RECENT)]  # the first auto backup after the rename
+        await manager.async_keep_orphaned(2, "Pumps")
+        return await manager.async_rename_identity(2, "Pumps", "Heating")
+
+    assert asyncio.run(run()) == 3
+    auto = FakeStore.saved[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"]
+    assert list(auto["2"]) == ["Heating"]
+    assert [snap["captured_at"] for snap in auto["2"]["Heating"]] == [RECENT, OLD, OLD]  # newest first
+    # (Sourcery) listings and restores name the moved snapshots as the plan is called now
+    assert all(snap.get("plan_name") == "Heating" for snap in auto["2"]["Heating"][1:])
+    assert FakeStore.saved[f"{DOMAIN}_logikplan_changes_{SERVER_ID}"]["2"] == {
+        "Heating": [{**_snap(OLD), "plan_name": "Heating"}]
+    }
+    assert _kept_saved() == []  # live again under its new name: no longer an orphan to keep
+
+
+@pytest.mark.parametrize("error", [OSError("disk full"), asyncio.CancelledError("unload")])
+def test_a_rename_that_could_not_be_saved_is_put_back(
+    manager: FunctionPlanBackupManager, monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    """(Sourcery) a cancelled save too: memory left moved would hide the old lineage from the retry."""
+    auto_payloads: list[dict] = []
+    change_payloads: list[dict] = []
+
+    def save_changes(data: dict) -> None:
+        change_payloads.append(copy.deepcopy(data))
+        if len(change_payloads) == 1:
+            raise error
+
+    auto_save = AsyncMock(side_effect=lambda data: auto_payloads.append(copy.deepcopy(data)))
+    change_save = AsyncMock(side_effect=save_changes)
+
+    async def run() -> None:
+        await manager.async_load()
+        monkeypatch.setattr(manager._auto_store, "async_save", auto_save)
+        monkeypatch.setattr(manager._change_store, "async_save", change_save)
+        with pytest.raises(type(error)):
+            await manager.async_rename_identity(2, "Pumps", "Heating")
+
+    asyncio.run(run())
+    assert auto_save.await_count == 2  # saved moved, then put back on disk
+    # A cancelled write may still land: its store is put back on disk too; a failed one wrote nothing.
+    assert change_save.await_count == (2 if isinstance(error, asyncio.CancelledError) else 1)
+    assert manager._auto_data["2"] == {"Pumps": [_snap(OLD), _snap(OLD)]}
+    assert manager._change_data["2"] == {"Pumps": [_snap(OLD)]}
+    # (Sourcery) and on disk: the auto store saved the move, then the lineage before it
+    assert [payload["2"] for payload in auto_payloads] == [
+        {"Heating": [{**_snap(OLD), "plan_name": "Heating"}] * 2},
+        {"Pumps": [_snap(OLD), _snap(OLD)]},
+    ]
+    if isinstance(error, asyncio.CancelledError):  # its write may have landed: put back too
+        assert change_payloads[-1]["2"] == {"Pumps": [_snap(OLD)]}
+
+
+def test_a_second_cancel_does_not_stop_the_put_back_on_disk() -> None:
+    """(Sourcery) cancelled again while putting back: every store is still written back, and the save ends
+    (releasing the write lock) only then — a later write must not overlap the put-back."""
+    written: list[str] = []
+    release = asyncio.Event()
+
+    async def save_auto(_data: dict) -> None:
+        written.append("auto")
+        if len(written) > 1:  # the put-back waits; the task is cancelled again meanwhile
+            await release.wait()
+
+    async def save_changes(_data: dict) -> None:
+        if "changes-failed" not in written:
+            written.append("changes-failed")
+            raise asyncio.CancelledError
+        written.append("changes")
+
+    saves = [
+        (SimpleNamespace(async_save=save_auto), {}, {}),
+        (SimpleNamespace(async_save=save_changes), {}, {}),
+    ]
+
+    async def run() -> None:
+        task = asyncio.create_task(backup_module._async_save_all_or_put_back(saves))
+        while written.count("auto") < 2:
+            await asyncio.sleep(0)
+        task.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()  # still putting back
+        release.set()
+        async with asyncio.timeout(1):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert written == ["auto", "changes-failed", "auto", "changes"]
+
+
+def test_a_failure_whose_put_back_is_cancelled_is_still_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """(Review) the cancel propagates in its place: the failed save would otherwise leave no trace."""
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def save_auto(_data: dict) -> None:
+        calls.append("auto")
+        if len(calls) > 1:
+            await release.wait()
+
+    async def save_changes(_data: dict) -> None:
+        raise OSError("disk full")
+
+    saves = [
+        (SimpleNamespace(async_save=save_auto), {}, {}),
+        (SimpleNamespace(async_save=save_changes), {}, {}),
+    ]
+
+    async def run() -> None:
+        task = asyncio.create_task(backup_module._async_save_all_or_put_back(saves))
+        while len(calls) < 2:
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        async with asyncio.timeout(1):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert "a lineage move failed (OSError('disk full')), then was cancelled" in caplog.text
+
+
+def test_newest_auto_hash_is_the_newest_auto_snapshots(manager: FunctionPlanBackupManager) -> None:
+    asyncio.run(manager.async_load())
+    manager._auto_data["2"]["Pumps"][0]["hash"] = "abc"
+    assert manager.newest_auto_hash_sync(2, "Pumps") == "abc"
+    assert manager.newest_auto_hash_sync(1, "Lights") is None  # a snapshot without a hash
+    assert manager.newest_auto_hash_sync(9, "Gone") is None
