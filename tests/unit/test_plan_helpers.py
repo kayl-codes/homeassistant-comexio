@@ -91,6 +91,27 @@ def test_a_fresh_io_plan_takes_the_extension(created: int | None, placed: int | 
     assert asyncio.run(coordinator._join_or_create_io_plan("A", {}, 2, PREFIX)) == placed
 
 
+def test_joins_in_one_run_keep_only_the_final_plan_name() -> None:
+    plan_map = {"HA - IO [A]": 47, "Lights": 3}
+    coordinator = _coordinator(
+        api=SimpleNamespace(fub_data={"47": {"Name": "HA - IO [A]"}, "3": {"Name": "Lights"}}),
+        config_entry=SimpleNamespace(options={"logikplan_plan_map": plan_map}),
+        _distrusted_fub_ids=set(),
+        _function_plan_prefix=lambda: PREFIX,
+        _function_plan_cluster_size=lambda: 150,
+        _plan_rows_per_col=lambda _fid, _orientation=None: 10,
+        _io_rows_needed=lambda _ext, _kind: 4,
+        _rename_io_plan=AsyncMock(return_value=True),
+        _persist_plan_map=AsyncMock(),
+    )
+
+    asyncio.run(coordinator.resolve_io_clusters(["A", "B", "C"]))
+
+    # B and C join plan 47 one after the other: neither the old name nor the intermediate
+    # "[A,B]" may stay in plan_map, or the watchdog warns about plans that do not exist.
+    coordinator._persist_plan_map.assert_awaited_once_with({"HA - IO [A,B,C]": 47}, removals={"HA - IO [A]"})
+
+
 def test_source_link_names_the_first_plan_wiring_the_source() -> None:
     coordinator = _coordinator()
     wired_in = {5, 8}

@@ -7287,7 +7287,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         placed_in: dict[str, int] = {}
         fresh_orientations: dict[int, str] = {}
         created_plans: set[int] = set()
-        plan_map_updates: dict[str, int] = {}
         failed_exts: list[str] = []
 
         for ext in ext_names:
@@ -7307,7 +7306,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if fub_id not in membership:
                 created_plans.add(fub_id)
                 membership[fub_id] = [ext]
-            plan_map_updates[self._io_plan_name(prefix, membership[fub_id], kind)] = fub_id
 
         # Origins only once every member is placed: a later join appends to the plan, which never
         # moves an earlier member (see io_plan_member_origins).
@@ -7316,9 +7314,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
             rows_per_col = self._plan_rows_per_col(fub_id, fresh_orientations.get(fub_id))
             result[ext] = (fub_id, self.io_plan_origins(membership[fub_id], kind, rows_per_col)[ext])
 
-        if plan_map_updates or stale:
-            await self._persist_plan_map(plan_map_updates, removals=set(stale))
+        # Final names only: several joins in one run rename a plan step by step, and the names it
+        # carried before ([1], [1,2]) are no plan any more — left in plan_map, the watchdog warned
+        # about each of them.
+        final_names = {fid: self._io_plan_name(prefix, membership[fid], kind) for fid in set(placed_in.values())}
+        plan_map_updates = {name: fid for fid, name in final_names.items()}
+        removals = set(stale) | self._superseded_plan_map_names(final_names)
+        if plan_map_updates or removals:
+            await self._persist_plan_map(plan_map_updates, removals=removals)
         return result, created_plans, failed_exts
+
+    def _superseded_plan_map_names(self, final_names: dict[int, str]) -> set[str]:
+        """plan_map names pointing at one of these plans under a name other than its final one."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(raw_map, dict):
+            return set()
+        return {
+            name
+            for name, fid in raw_map.items()
+            if str(fid).isdigit() and int(fid) in final_names and final_names[int(fid)] != name
+        }
 
     async def _join_or_create_io_plan(
         self,
