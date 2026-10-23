@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioResponseError
+from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioError, ComexioResponseError
 from aiocomexio.function_plan import plan_hash
 import pytest
 
@@ -18,6 +18,7 @@ from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
+    FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
@@ -234,6 +235,7 @@ class _FakeCoordinator(SimpleNamespace):
     _holder_and_pick_unchanged = ComexioCoordinator._holder_and_pick_unchanged
     _async_settle_rename_changed_meanwhile = ComexioCoordinator._async_settle_rename_changed_meanwhile
     _async_suspected_rename_holder = ComexioCoordinator._async_suspected_rename_holder
+    _async_read_plan_list = ComexioCoordinator._async_read_plan_list
     _async_follow_vanished_renames = ComexioCoordinator._async_follow_vanished_renames
     _async_plan_holds_backup_of = ComexioCoordinator._async_plan_holds_backup_of
     _async_follow_rename = ComexioCoordinator._async_follow_rename
@@ -1750,6 +1752,7 @@ def _restore_coordinator(api: ComexioAPI, outcome: Any) -> _FakeCoordinator:
             coordinator.config_entry.options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["52:Test4"]}
 
     coordinator.hass.services = SimpleNamespace(async_call=AsyncMock(side_effect=restore))
+    coordinator._async_read_plan_list = AsyncMock()  # type: ignore[method-assign]
     return coordinator
 
 
@@ -1807,6 +1810,7 @@ def test_a_vanished_plan_without_a_backup_is_not_restored(api: ComexioAPI, from_
         config_entry=SimpleNamespace(options={CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4"]}),
     )
     coordinator.plan_watchdog.async_push_no_backup = AsyncMock()
+    coordinator._async_read_plan_list = AsyncMock()  # type: ignore[method-assign]
     coordinator.hass.services = SimpleNamespace(async_call=AsyncMock())
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=from_push)) is False
     coordinator.hass.services.async_call.assert_not_called()
@@ -2508,8 +2512,158 @@ def test_a_restore_whose_backups_cannot_be_read_for_the_rename_check_is_not_run(
     coordinator.function_plan_backup.async_load = AsyncMock(side_effect=OSError("store unreadable"))
     assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
     coordinator.hass.services.async_call.assert_not_called()
-    assert "it failed (OSError)" in notifications.call_args.args[1]
+    assert "it failed (OSError): store unreadable" in notifications.call_args.args[1]
     coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4")
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_restore_sees_a_rename_the_last_poll_missed(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(Sourcery) the cached plan list showed the ID free: the fresh read finds the plan renamed onto it."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+    coordinator._async_read_plan_list.side_effect = lambda: api._fub_data.update(
+        {"47": {"Id": 47, "Name": "Test 4", "Active": 1}}
+    )
+    coordinator._async_plan_holds_backup_of = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=False)) is False
+    coordinator._async_plan_holds_backup_of.assert_awaited_once_with(47, "Test4", "Test 4")
+    coordinator.hass.services.async_call.assert_not_called()
+    assert "ID 47 now holds 'Test 4' with its content" in notifications.call_args.args[1]
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_holder_gone_from_the_id_during_the_rename_check_refuses_no_restore(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery) the comparison awaits: a holder that left the ID meanwhile no longer stands for a rename."""
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", MagicMock())
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["47"] = {"Id": 47, "Name": "Test 4", "Active": 1}
+
+    async def holds(*_args: Any) -> bool:
+        api._fub_data.pop("47")  # deleted while its content was compared
+        return True
+
+    coordinator._async_plan_holds_backup_of = AsyncMock(side_effect=holds)  # type: ignore[method-assign]
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=False)) is True
+    coordinator.hass.services.async_call.assert_called_once()
+    assert coordinator.config_entry.options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["52:Test4"]  # pick moved
+    assert "ID 47 changed from 'Test 4' to no plan during the rename check" in caplog.text
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_a_plan_taking_the_id_during_the_rename_check_is_compared_in_turn(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Review) the plan that took the ID meanwhile was never compared: the list read after the compare shows it,
+    and it is compared before the restore runs."""
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", MagicMock())
+    coordinator = _restore_coordinator(api, True)
+    names = ["Test 4", "Other"]  # each read of the plan list: the first shows the renamed plan, the next another
+
+    def read_plan_list() -> None:
+        api._fub_data["47"] = {"Id": 47, "Name": names.pop(0) if names else "Other", "Active": 1}
+
+    coordinator._async_read_plan_list.side_effect = read_plan_list
+    holds = AsyncMock(side_effect=lambda *args: args[2] == "Test 4")
+    coordinator._async_plan_holds_backup_of = holds  # type: ignore[method-assign]
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=False)) is True
+    assert [c.args for c in coordinator._async_plan_holds_backup_of.await_args_list] == [
+        (47, "Test4", "Test 4"),
+        (47, "Test4", "Other"),
+    ]
+    coordinator.hass.services.async_call.assert_called_once()
+    assert "ID 47 changed from 'Test 4' to 'Other' during the rename check" in caplog.text
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_an_id_that_keeps_changing_fails_the_restore(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(Review) no holder stays put long enough to be compared: no restore, rather than a copy beside it."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["47"] = {"Id": 47, "Name": "Plan 0", "Active": 1}
+
+    async def holds(_fub_id: int, _name: str, holder: str) -> bool:
+        api._fub_data["47"] = {"Id": 47, "Name": f"{holder}+", "Active": 1}
+        return True
+
+    coordinator._async_plan_holds_backup_of = AsyncMock(side_effect=holds)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
+    assert coordinator._async_plan_holds_backup_of.await_count == FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS
+    coordinator.hass.services.async_call.assert_not_called()
+    assert "it failed (ComexioError): the plan on ID 47 kept changing" in notifications.call_args.args[1]
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+def test_an_id_freed_on_the_last_rename_check_restores(api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(Review) the last compare ends with the ID free: nothing holds it, so that is no "kept changing"."""
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", MagicMock())
+    coordinator = _restore_coordinator(api, True)
+    api._fub_data["47"] = {"Id": 47, "Name": "Plan 0", "Active": 1}
+
+    async def holds(_fub_id: int, _name: str, holder: str) -> bool:
+        if coordinator._async_plan_holds_backup_of.await_count == FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS:
+            api._fub_data.pop("47")
+        else:
+            api._fub_data["47"] = {"Id": 47, "Name": f"{holder}+", "Active": 1}
+        return True
+
+    coordinator._async_plan_holds_backup_of = AsyncMock(side_effect=holds)  # type: ignore[method-assign]
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=False)) is True
+    coordinator.hass.services.async_call.assert_called_once()
+
+
+@pytest.mark.usefixtures("fast_restore_wait")
+@pytest.mark.parametrize(
+    "error", [ComexioError("the plan list could not be read"), ComexioConnectionError("down"), ComexioError()]
+)
+def test_an_unread_plan_list_fails_the_restore_with_its_cause(
+    api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """(Review) the user learns why, and the push offers Restore again: nothing was decided about a rename."""
+    notifications = MagicMock()
+    monkeypatch.setattr("custom_components.comexio.coordinator.persistent_notification.async_create", notifications)
+    coordinator = _restore_coordinator(api, True)
+    coordinator._async_read_plan_list.side_effect = error
+    assert asyncio.run(coordinator.async_restore_vanished_plan(47, "Test4", from_push=True)) is False
+    coordinator.hass.services.async_call.assert_not_called()
+    message = notifications.call_args.args[1]
+    if str(error):
+        assert f"it failed ({type(error).__name__}): {error}" in message
+    else:  # no dangling ": " for an error without a message
+        assert "it failed (ComexioError)" in message
+        assert "it failed (ComexioError):" not in message
+    coordinator.plan_watchdog.async_push_restore_failed.assert_awaited_once_with(47, "Test4")
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        {},
+        {"FubModules": {}},
+        {"Fubs": None},
+        {"Fubs": {"47": {"Id": 47, "Name": "Test 4"}}},
+        {"Fubs": {}},
+        ComexioConnectionError("down"),
+    ],
+    ids=["empty", "fubs-undecoded", "fubs-no-dict", "read", "read-no-plans", "raised"],
+)
+def test_the_plan_list_read_for_a_restore_fails_loudly(page: Any) -> None:
+    """(Sourcery) an unread list must fail the restore, not pass for "ID free"; a read one becomes the cache."""
+    get_raw_config = AsyncMock(side_effect=page) if isinstance(page, Exception) else AsyncMock(return_value=page)
+    coordinator = SimpleNamespace(api=SimpleNamespace(get_raw_config=get_raw_config, parse_config=MagicMock()))
+    read = ComexioCoordinator._async_read_plan_list(coordinator)  # type: ignore[arg-type]
+    if isinstance(page, dict) and isinstance(page.get("Fubs"), dict):
+        asyncio.run(read)
+        coordinator.api.parse_config.assert_called_once_with(page)
+    else:
+        with pytest.raises(ComexioError):
+            asyncio.run(read)
+        coordinator.api.parse_config.assert_not_called()
 
 
 @pytest.mark.parametrize(("new_fub_id", "expected"), [(47, "stays on ID 47"), (50, "moved from ID 47 to ID 50")])
@@ -2522,6 +2676,7 @@ def test_a_restored_pick_logs_its_move_only_when_the_id_changed(
     with caplog.at_level(logging.INFO):
         coordinator._repoint_vanished_pick("Test4", 47, new_fub_id)
     assert expected in caplog.text
+    assert "moved from ID 47 to ID 47" not in caplog.text  # (Sourcery) not logged beside the right line
     (new_options,) = coordinator.request_options_update_without_reload.call_args.args
     assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == [f"{new_fub_id}:Test4"]
 

@@ -1,6 +1,7 @@
 """Repairs for the backups of deleted function plans (function_plan_backup.py, orphaned_backups.py)."""
 
 import asyncio
+import copy
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -595,8 +596,16 @@ def test_a_rename_that_could_not_be_saved_is_put_back(
     manager: FunctionPlanBackupManager, monkeypatch: pytest.MonkeyPatch, error: BaseException
 ) -> None:
     """(Sourcery) a cancelled save too: memory left moved would hide the old lineage from the retry."""
+    auto_payloads: list[dict] = []
+    change_payloads: list[dict] = []
 
-    auto_save, change_save = AsyncMock(), AsyncMock(side_effect=[error, None])
+    def save_changes(data: dict) -> None:
+        change_payloads.append(copy.deepcopy(data))
+        if len(change_payloads) == 1:
+            raise error
+
+    auto_save = AsyncMock(side_effect=lambda data: auto_payloads.append(copy.deepcopy(data)))
+    change_save = AsyncMock(side_effect=save_changes)
 
     async def run() -> None:
         await manager.async_load()
@@ -611,6 +620,13 @@ def test_a_rename_that_could_not_be_saved_is_put_back(
     assert change_save.await_count == (2 if isinstance(error, asyncio.CancelledError) else 1)
     assert manager._auto_data["2"] == {"Pumps": [_snap(OLD), _snap(OLD)]}
     assert manager._change_data["2"] == {"Pumps": [_snap(OLD)]}
+    # (Sourcery) and on disk: the auto store saved the move, then the lineage before it
+    assert [payload["2"] for payload in auto_payloads] == [
+        {"Heating": [{**_snap(OLD), "plan_name": "Heating"}] * 2},
+        {"Pumps": [_snap(OLD), _snap(OLD)]},
+    ]
+    if isinstance(error, asyncio.CancelledError):  # its write may have landed: put back too
+        assert change_payloads[-1]["2"] == {"Pumps": [_snap(OLD)]}
 
 
 def test_a_second_cancel_does_not_stop_the_put_back_on_disk() -> None:

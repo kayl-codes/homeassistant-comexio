@@ -105,6 +105,8 @@ from .const import (
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD,
     FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
+    FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS,
+    FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
@@ -5394,7 +5396,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.exception(
                 "[%s] Restore of function plan '%s' (ID %s) failed", self.server_id, one_line(name), fub_id
             )
-            self._notify_vanished_restore_not_run(fub_id, name, f"it failed ({type(err).__name__})")
+            detail = one_line(err)[:FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX]
+            reason = f"it failed ({type(err).__name__})" + (f": {detail}" if detail else "")
+            self._notify_vanished_restore_not_run(fub_id, name, reason)
         if from_push and offer_restore:
             await self.plan_watchdog.async_push_restore_failed(fub_id, name)
         elif from_push:
@@ -5423,17 +5427,46 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Compared live (_async_plan_holds_backup_of): a holder without a backup of its own yet counts, one whose
         content changed since its newest backup does not. Only when that cannot be compared does the backup
-        hint decide (plan_rename_suspected).
+        hint decide (plan_rename_suspected). The plan list is read afresh first (_async_read_plan_list); should
+        another plan take the ID while one is compared, that one is compared in turn.
         """
+        await self._async_read_plan_list()
         holder = self._existing_plan_names([fub_id]).get(fub_id)
+        for _attempt in range(FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS):
+            if holder is None or holder == name:
+                return None
+            # Unreadable backups raise here (a failed restore), rather than an empty cache letting the restore run.
+            await self.function_plan_backup.async_load()
+            holds = await self._async_plan_holds_backup_of(fub_id, name, holder)
+            if holds is None:
+                holds = self.plan_rename_suspected(fub_id, name, holder)
+            await self._async_read_plan_list()  # the compare awaits: another plan may have taken the ID meanwhile
+            current = self._existing_plan_names([fub_id]).get(fub_id)
+            if current == holder:
+                return holder if holds else None
+            _LOGGER.info(
+                "[%s] Function plan ID %s changed from '%s' to %s during the rename check",
+                self.server_id,
+                fub_id,
+                one_line(holder),
+                "no plan" if current is None else f"'{one_line(current)}'",
+            )
+            holder = current
         if holder is None or holder == name:
             return None
-        # Unreadable backups raise here (a failed restore), rather than an empty cache letting the restore run.
-        await self.function_plan_backup.async_load()
-        holds = await self._async_plan_holds_backup_of(fub_id, name, holder)
-        if holds is None:
-            holds = self.plan_rename_suspected(fub_id, name, holder)
-        return holder if holds else None
+        raise ComexioError(f"the plan on ID {fub_id} kept changing")
+
+    async def _async_read_plan_list(self) -> None:
+        """Read Comexio's plan list afresh; raises when it cannot be read.
+
+        The cached one is up to a poll interval old: a plan renamed onto a freed ID since would go unseen,
+        and a Restore would build a copy beside it.
+        """
+        raw_config = await self.api.get_raw_config()
+        # aiocomexio decodes each page variable on its own: a page whose $Fubs did not decode keeps the stale list.
+        if not isinstance(raw_config.get("Fubs"), dict):
+            raise ComexioError("the plan list could not be read")
+        self.api.parse_config(raw_config)
 
     def _notify_vanished_restore_not_run(
         self, fub_id: int, name: str, reason: str, *, hint: str = "Choose Restore again."
