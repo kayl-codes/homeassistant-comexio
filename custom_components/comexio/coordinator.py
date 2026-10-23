@@ -4799,15 +4799,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
         The user picks are not among them: such a pick raises its own repair (_vanished_user_plans).
         Empty without a live plan list: a failed fetch, or a cache holding only the plans HA itself
         created or looked up, must not read as every other plan gone. Once a poll read an empty
-        plan list, every entry is unresolved (#140).
+        plan list, every entry is unresolved (#140). An ID another entry still resolves is not
+        unresolved: HA renamed the plan itself (a cluster join) and the old name is merely left over
+        until the next sync prunes it — the watchdog keeps watching the plan under its new name.
         """
         if self.live_plan_list() is None:
             return frozenset()
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         identities = [(str(fub_id), name) for name, fub_id in raw_map.items()] if isinstance(raw_map, dict) else []
         live = self._existing_plan_names(fub_id for fub_id, _ in identities if fub_id.isdigit())
+        resolved = {fub_id for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) == name}
         return frozenset(
-            (int(fub_id), name) for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) != name
+            (int(fub_id), name)
+            for fub_id, name in identities
+            if fub_id.isdigit() and fub_id not in resolved and live.get(int(fub_id)) != name
         )
 
     def _warn_unresolved_watch_picks(self) -> None:
