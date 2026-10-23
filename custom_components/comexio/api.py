@@ -1141,7 +1141,8 @@ class ComexioAPI:
         name a certificate checked against a pin no longer in force) and not success (the caller would
         mark the old client logged in and go on with the new, logged-out one). All report "connection"
         instead, so the caller simply tries again with the new settings. A refusal still counts for
-        the credentials themselves.
+        the credentials themselves, and after a change of only the pin it stays "rejected": the pin is
+        the transport, Comexio refused these very credentials whichever certificate it showed.
         """
         credentials = self._admin_login_part(client_credentials)
         refusal_key = self._refusal_key(credentials)
