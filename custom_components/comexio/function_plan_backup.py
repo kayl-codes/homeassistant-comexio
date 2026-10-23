@@ -17,6 +17,7 @@ Snapshots live under .storage/ and are therefore included in Home Assistant's ow
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 from datetime import datetime, timedelta
 import functools
 import logging
@@ -188,14 +189,13 @@ async def _async_finish_despite_cancel(task: asyncio.Future[None]) -> None:
 
     The caller holds the write lock (see _serialized) until the task ends: a later write must not overlap it.
     """
-    cancelled: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as err:
-            cancelled = cancelled or err
-    if cancelled is not None:
-        raise cancelled
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):  # a further cancel: the first one is raised
+                await asyncio.shield(task)
+        raise
 
 
 async def _async_save_put_back(saved: list[_StoreSave]) -> None:
