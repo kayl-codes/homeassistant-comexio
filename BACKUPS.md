@@ -83,9 +83,12 @@ bring the plan back, so the integration never deletes them on its own:
    appears, one per plan. It shows the former ID, the plan that holds this ID now (if
    any), the number of backups and the date of the newest one.
 
-   A plan **renamed** in Comexio counts as deleted too: its backups from before the rename
-   keep the old name, the new ones are stored under the new name. If the plan now holding
-   the ID is your renamed plan, the repair is about its older history.
+   A plan **renamed** in Comexio with its content unchanged (same ID, same content as its
+   newest backup) is followed: its backups move to the new name and none of them become
+   orphaned. Only a rename together with a content change (or a move that failed) counts as
+   deleted: its backups from before the rename keep the old name, the new ones are stored
+   under the new name. If the plan now holding the ID is your renamed plan, the repair is
+   about its older history.
 3. **Your decision:**
    - **Load into the plan preview** switches the plan card to **Orphaned plans** and shows
      the plan's newest backup. It decides nothing — the repair stays open.
@@ -122,7 +125,7 @@ To delete backups without waiting for a repair:
 | `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans (`include_recent: true`: of any age). |
 | `comexio.function_plan_keep_backups` | Keep a deleted plan's backups for good, or take that back (`keep: false`). |
 | `sensor` **Backups** (diagnostic) | Number of stored snapshots, details per plan as attributes. |
-| `sensor` **Backups (deleted plans)** (diagnostic) | Number of snapshots of deleted or renamed plans, the plans as attributes. |
+| `sensor` **Backups (deleted plans)** (diagnostic) | Number of snapshots of deleted plans (and of plans renamed with a content change), the plans as attributes. |
 | `select` **Backup** | Picks the snapshot the plan preview shows; in the **Orphaned plans** view, a deleted plan's backup. |
 
 ---
@@ -219,10 +222,12 @@ sich der Plan zurückholen, deshalb löscht die Integration sie nie von selbst:
    diese ID jetzt belegt (falls vorhanden), die Anzahl der Backups und das Datum des
    neuesten.
 
-   Ein in Comexio **umbenannter** Plan zählt ebenfalls als gelöscht: Seine Backups von vor
-   der Umbenennung tragen den alten Namen, die neuen liegen unter dem neuen Namen. Ist der
-   Plan, der die ID jetzt belegt, dein umbenannter Plan, geht es in der Meldung um seine
-   ältere Historie.
+   Ein in Comexio **umbenannter** Plan mit unverändertem Inhalt (gleiche ID, gleicher Inhalt
+   wie sein neuestes Backup) wird übernommen: Seine Backups wandern zum neuen Namen, keines
+   wird verwaist. Nur eine Umbenennung zusammen mit einer Inhaltsänderung (oder eine
+   fehlgeschlagene Übernahme) zählt als gelöscht: Seine Backups von vor der Umbenennung
+   tragen den alten Namen, die neuen liegen unter dem neuen Namen. Ist der Plan, der die ID
+   jetzt belegt, dein umbenannter Plan, geht es in der Meldung um seine ältere Historie.
 3. **Deine Entscheidung:**
    - **In Vorschau laden** schaltet die Plan-Karte auf **Orphaned plans** und zeigt das
      neueste Backup des Plans. Es entscheidet nichts — die Meldung bleibt offen.
@@ -262,5 +267,5 @@ Backups löschen, ohne auf eine Meldung zu warten:
 | `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen (`include_recent: true`: jeden Alters). |
 | `comexio.function_plan_keep_backups` | Die Backups eines gelöschten Plans dauerhaft behalten oder das zurücknehmen (`keep: false`). |
 | `sensor` **Backups** (Diagnose) | Anzahl gespeicherter Snapshots, Details je Plan als Attribute. |
-| `sensor` **Backups (gelöschter Pläne)** (Diagnose) | Anzahl der Snapshots gelöschter oder umbenannter Pläne, die Pläne als Attribute. |
+| `sensor` **Backups (gelöschter Pläne)** (Diagnose) | Anzahl der Snapshots gelöschter Pläne (und mit Inhaltsänderung umbenannter Pläne), die Pläne als Attribute. |
 | `select` **Backup** | Wählt den Snapshot, den die Plan-Vorschau zeigt; in der Ansicht **Orphaned plans** ein Backup eines gelöschten Plans. |
