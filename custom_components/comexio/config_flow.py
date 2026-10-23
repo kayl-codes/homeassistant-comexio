@@ -239,7 +239,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except CertificateChanged as err:
             return self._show_reconfigure_form(merged, {"base": self._certificate_error(entry, merged, err.actual)})
         if https_change in _HTTPS_CONFIRM_STEPS:
-            # Nothing is sent before the user agreed: neither credentials over plain HTTP nor to that certificate.
+            # No request is sent before the user agreed (only the TLS handshake that read the certificate):
+            # neither credentials over plain HTTP nor to that certificate.
             self._pending_reconfigure = merged
             return self._show_https_confirm(entry, merged, https_change)
         return await self._async_apply_reconfigure(entry, merged, https_change)
