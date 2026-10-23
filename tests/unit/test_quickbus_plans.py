@@ -1,0 +1,547 @@
+"""Quickbus IOs in managed column plans ("HA - QB [..]"): naming, membership, audit, wiring, repair text."""
+
+import asyncio
+import copy
+import logging
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+
+from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.button import ComexioSyncButton, _merge_io_items, _parse_io_from_webio_name
+from custom_components.comexio.const import (
+    CONF_FUNCTION_PLAN_IO_EXTENSIONS,
+    CONF_FUNCTION_PLAN_PLAN_MAP,
+    CONF_FUNCTION_PLAN_PLAN_PREFIX,
+    CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
+    FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH,
+    FUNCTION_PLAN_LAYOUT_X_MARKER,
+    FUNCTION_PLAN_LAYOUT_Y_START,
+    FUNCTION_PLAN_LAYOUT_Y_STEP,
+    IO_PLAN_KIND_IO,
+    IO_PLAN_KIND_QUICKBUS,
+    QUICKBUS_IO_DATA_KEY,
+    SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
+    SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    io_plan_columns,
+    io_plan_gap_item,
+    io_plan_item_member,
+    io_plan_kind_of,
+    io_plan_label,
+    io_plan_member_origins,
+    quickbus_column_blocks,
+    selected_quickbus_devices,
+    webio_quickbus_ios,
+)
+from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.options_flow import _quickbus_device_options
+from custom_components.comexio.repairs import _function_plan_gap_lines, _function_plan_option_label
+from custom_components.comexio.services._grid import _io_header_slots, _io_ref_slots
+from custom_components.comexio.services.plan_actions import _sort_compute_positions
+from tests.common import load_json_fixture
+from tests.unit.test_quickbus import _QUICKBUS_IO_INPUT_TYPES, _QUICKBUS_IO_TYPES
+
+PREFIX = "HA"
+
+
+@pytest.fixture
+def quickbus_result(parsing_api: ComexioAPI) -> dict[str, Any]:
+    parsing_api.io_types = _QUICKBUS_IO_TYPES
+    parsing_api.io_input_types = _QUICKBUS_IO_INPUT_TYPES
+    return parsing_api.parse_config(load_json_fixture("config_quickbus.json"))
+
+
+def _qb_io(result: dict[str, Any], io_id: str) -> dict[str, Any]:
+    return next(io for io in result[QUICKBUS_IO_DATA_KEY] if io["id"] == io_id)
+
+
+def _coordinator(options: dict[str, Any], data: dict[str, Any], offline: set[str] | None = None) -> ComexioCoordinator:
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.config_entry = SimpleNamespace(options=options)
+    coordinator.data = data
+    coordinator.offline_extensions = offline or set()
+    coordinator.server_id = "test"
+    return coordinator
+
+
+# --- plan names and membership ---
+
+
+@pytest.mark.parametrize(
+    ("name", "kind", "members"),
+    [
+        ("HA - QB [1,3]", IO_PLAN_KIND_QUICKBUS, ["1", "3"]),
+        ("HA - QB [1]", IO_PLAN_KIND_IO, None),  # an IO plan never claims a QB plan ...
+        ("HA - IO [BASE]", IO_PLAN_KIND_QUICKBUS, None),  # ... nor the other way round
+        ("Other - QB [1]", IO_PLAN_KIND_QUICKBUS, None),
+    ],
+)
+def test_column_plan_members_from_the_plan_name(name: str, kind: Any, members: list[str] | None) -> None:
+    assert ComexioCoordinator._io_plan_members(name, PREFIX, kind) == members
+
+
+def test_a_quickbus_plan_name_round_trips() -> None:
+    name = ComexioCoordinator._io_plan_name(PREFIX, ["1", "2"], IO_PLAN_KIND_QUICKBUS)
+
+    assert name == "HA - QB [1,2]"
+    assert ComexioCoordinator._io_plan_members(name, PREFIX, IO_PLAN_KIND_QUICKBUS) == ["1", "2"]
+
+
+def test_membership_and_column_plan_lookup_keep_the_kinds_apart() -> None:
+    fub_data = {"4": {"Name": "HA - IO [BASE]"}, "5": {"Name": "HA - QB [1,2]"}, "6": {"Name": "Lights"}}
+    coordinator = _coordinator({}, {})
+    coordinator.api = SimpleNamespace(fub_data=fub_data)
+    coordinator._distrusted_fub_ids = set()
+    coordinator._function_plan_prefix = lambda: PREFIX  # type: ignore[method-assign]
+
+    assert coordinator._io_plan_membership(PREFIX, IO_PLAN_KIND_QUICKBUS) == {5: ["1", "2"]}
+    assert coordinator._io_plan_membership(PREFIX, IO_PLAN_KIND_IO) == {4: ["BASE"]}
+    assert coordinator.managed_column_plan(5) == (IO_PLAN_KIND_QUICKBUS, ["1", "2"])
+    assert coordinator.managed_column_plan(4) == (IO_PLAN_KIND_IO, ["BASE"])
+    assert coordinator.managed_column_plan(6) is None
+    assert coordinator.io_cluster_plan_contains("HA - QB [1,2]", "2", IO_PLAN_KIND_QUICKBUS)
+    assert not coordinator.io_cluster_plan_contains("HA - QB [1,2]", "2")
+
+
+# --- column layout ---
+
+
+def test_a_quickbus_column_lists_its_ios_by_io_id_under_the_device_name(quickbus_result: dict[str, Any]) -> None:
+    ios = IO_PLAN_KIND_QUICKBUS.member_ios(quickbus_result, "1")
+    rows, headers = quickbus_column_blocks("1", list(reversed(ios)))
+
+    # Comexio's own order (IO Id 201..204), not the type-group order of an extension column.
+    assert rows == {"G1": 1, "G18": 2, "TL1": 3, "R": 4}
+    assert list(headers) == [0]
+    assert "MT Flur" in headers[0]
+    assert quickbus_column_blocks("1", []) == ({}, {})
+
+
+# --- audit items ---
+
+
+def test_gap_items_name_their_column_member(quickbus_result: dict[str, Any]) -> None:
+    qb_io = _qb_io(quickbus_result, "301")
+    plain_io = quickbus_result["io"][0]
+
+    qb_item = io_plan_gap_item("HA QB3 BM Diele PIR1", qb_io)
+    io_item = io_plan_gap_item("HA IO BASE I1", plain_io)
+
+    assert qb_item == {"name": "HA QB3 BM Diele PIR1", "quickbus_device": "3", "identifier": "PIR1"}
+    assert io_item == {"name": "HA IO BASE I1", "ext_name": "BASE", "identifier": "I1"}
+    assert io_plan_item_member(qb_item) == (IO_PLAN_KIND_QUICKBUS, "3")
+    assert io_plan_item_member(io_item) == (IO_PLAN_KIND_IO, "BASE")
+    assert io_plan_item_member({"name": "x", "marker_id": 5}) is None
+    assert io_plan_kind_of(qb_io) is IO_PLAN_KIND_QUICKBUS
+    # The Quickbus device, not its host extension (BASE), labels the IO in a plan.
+    assert io_plan_label(qb_io) == "QB3 BM Diele PIR1"
+    assert IO_PLAN_KIND_QUICKBUS.member_label(quickbus_result, "3") == "QB3 BM Diele"
+    assert IO_PLAN_KIND_QUICKBUS.member_label(quickbus_result, "9") == "9"  # gone: the bare id
+
+
+def test_managed_io_groups_take_only_present_online_quickbus_devices(
+    quickbus_result: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    data = copy.deepcopy(quickbus_result)
+    for io in data[QUICKBUS_IO_DATA_KEY]:
+        if io["quickbus"]["name"] == "MT Bad":
+            io["offline"] = True
+    # A second device carrying the name "BM Diele" is a member of its own: ids, not names, identify them.
+    data[QUICKBUS_IO_DATA_KEY].append(
+        {**_qb_io(data, "302"), "id": "999", "quickbus": {"device_id": 77, "name": "BM Diele"}}
+    )
+    options = {
+        CONF_FUNCTION_PLAN_IO_EXTENSIONS: ["BASE", "UD1"],
+        CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: ["1", "2", "3", "77", "9"],
+    }
+
+    with caplog.at_level(logging.WARNING):
+        groups = _coordinator(options, data, offline={"UD1"}).managed_io_groups()
+
+    assert groups == {("IO", "BASE"), ("QB", "1"), ("QB", "3"), ("QB", "77")}
+    assert "'QB2 MT Bad'" in caplog.text
+    assert "'9'" in caplog.text
+
+
+def test_managed_io_groups_take_every_quickbus_device_while_the_option_was_never_saved(
+    quickbus_result: dict[str, Any],
+) -> None:
+    options = {CONF_FUNCTION_PLAN_IO_EXTENSIONS: ["BASE", "UD1"]}
+
+    assert _coordinator(options, quickbus_result, offline={"UD1"}).managed_io_groups() == {
+        ("IO", "BASE"),
+        ("QB", "1"),
+        ("QB", "2"),
+        ("QB", "3"),
+    }
+
+
+def test_managed_io_groups_with_no_quickbus_device_selected_are_the_online_extensions(
+    quickbus_result: dict[str, Any],
+) -> None:
+    options = {CONF_FUNCTION_PLAN_IO_EXTENSIONS: ["BASE", "UD1"], CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: []}
+
+    assert _coordinator(options, quickbus_result, offline={"UD1"}).managed_io_groups() == {("IO", "BASE")}
+
+
+@pytest.mark.parametrize(
+    ("options", "devices"),
+    [
+        ({}, {"1", "2", "3"}),  # never saved: every device
+        ({CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: ["2"]}, {"2"}),
+        ({CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: []}, set()),
+    ],
+)
+def test_only_selected_quickbus_devices_get_web_io_commands(
+    parsing_api: ComexioAPI, quickbus_result: dict[str, Any], options: dict[str, Any], devices: set[str]
+) -> None:
+    """A command of an unselected device is never wired, so it would push nothing to HA."""
+    assert selected_quickbus_devices(options, quickbus_result) == devices
+    coordinator = _coordinator(options, quickbus_result)
+    coordinator.ignored_ids_for = lambda _cls: set()  # type: ignore[method-assign]
+    expected_ids = {
+        io["id"] for io in quickbus_result[QUICKBUS_IO_DATA_KEY] if str(io["quickbus"]["device_id"]) in devices
+    }
+
+    source = coordinator.webio_source_data()
+    ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
+    commands = parsing_api.build_webio_commands("test", source)
+
+    assert {io["id"] for io in webio_quickbus_ios(options, quickbus_result)} == expected_ids
+    assert {io["id"] for io in source[QUICKBUS_IO_DATA_KEY]} == expected_ids
+    assert {key[len("QB") :] for key in ha_map if key.startswith("QB")} == expected_ids
+    assert {c["Name"] for c in commands if c["Name"].startswith("HA QB")} == {
+        ha_map[f"QB{io_id}"]["name"] for io_id in expected_ids
+    }
+    assert source["io"] == quickbus_result["io"]  # IO extensions are untouched
+
+
+@pytest.mark.parametrize(
+    ("groups", "wired", "expected_member"),
+    [
+        ({("QB", "3")}, set(), "3"),  # managed, unwired: a gap
+        ({("QB", "3")}, {("301", "55")}, None),  # wired
+        ({("IO", "BASE")}, set(), None),  # its host extension is managed, the device is not
+    ],
+    ids=["gap", "wired", "not-managed"],
+)
+def test_gap_item_of_a_quickbus_io(
+    quickbus_result: dict[str, Any], groups: set, wired: set, expected_member: str | None
+) -> None:
+    item = ComexioCoordinator._function_plan_gap_item(
+        "QB301", "HA QB3 BM Diele PIR1", {"webIoId": 55}, (None, wired, None), _qb_io(quickbus_result, "301"), groups
+    )
+
+    assert (item or {}).get("quickbus_device") == expected_member
+
+
+def test_missing_detail_counts_quickbus_devices_apart_from_extensions(quickbus_result: dict[str, Any]) -> None:
+    coordinator = _coordinator({}, quickbus_result)
+    coordinator.ignored_ids_for = lambda _cls: set()  # type: ignore[method-assign]
+    ha_map, io_meta_by_key = coordinator._build_ha_audit_map(quickbus_result)
+    missing = [
+        io_plan_gap_item("a", _qb_io(quickbus_result, "301")),
+        io_plan_gap_item("b", _qb_io(quickbus_result, "211")),
+        io_plan_gap_item("c", _qb_io(quickbus_result, "213")),
+        io_plan_gap_item("d", quickbus_result["io"][0]),
+    ]
+
+    detail = coordinator._function_plan_missing_detail(missing, ha_map, io_meta_by_key)
+
+    assert detail["quickbus_by_device"] == {"QB3 BM Diele": [1, 2], "QB2 MT Bad": [2, 2]}
+    assert detail["ios_by_ext"] == {"BASE": [1, 1]}
+
+
+def test_dangling_quickbus_debris_is_removed_by_the_quickbus_class(quickbus_result: dict[str, Any]) -> None:
+    coordinator = _coordinator({}, quickbus_result)
+    coordinator._dangling_source_ids = lambda source_type, *_args: {"301", "11"} if source_type == "1" else set()  # type: ignore[method-assign]
+    mismatches: set[str] = set()
+
+    items = coordinator._function_plan_dangling_items(
+        quickbus_result, (set(), set(), set(), set(), set(), set()), False, {("QB", "3")}, mismatches
+    )
+
+    by_ref = {item["ref_id"]: item for item in items}
+    assert by_ref["301"]["name"] == "QB3 BM Diele PIR1"
+    assert by_ref["301"]["webio_class"] == "quickbus"
+    assert by_ref["11"]["webio_class"] == "io"
+
+
+# --- sync wiring ---
+
+
+def test_created_quickbus_commands_resolve_to_their_device() -> None:
+    known = {"HA QB3 BM Diele PIR1": ("QB", "3", "PIR1")}
+
+    assert _parse_io_from_webio_name("HA QB3 BM Diele PIR1", known) == ("QB", "3", "PIR1")
+    assert _parse_io_from_webio_name("HA IO UD1 Q3", known) == ("IO", "UD1", "Q3")
+    assert _parse_io_from_webio_name("HA QB9 Unknown G1", known) is None
+
+
+def test_merge_io_items_keeps_managed_members_and_every_gap() -> None:
+    created = [("QB", "1", "G1"), ("QB", "2", "G1"), ("IO", "BASE", "I1")]
+    gaps = [
+        {"name": "x", "quickbus_device": "1", "identifier": "G1"},  # also created: once
+        {"name": "y", "quickbus_device": "3", "identifier": "PIR1"},
+        {"name": "z", "marker_id": 5},  # not a column-plan item
+    ]
+
+    merged = _merge_io_items(created, gaps, {("QB", "1"), ("IO", "BASE")})
+
+    assert merged == [("QB", "1", "G1"), ("IO", "BASE", "I1"), ("QB", "3", "PIR1")]
+
+
+def test_quickbus_pairs_are_wired_to_their_quickbus_commands(
+    parsing_api: ComexioAPI, quickbus_result: dict[str, Any]
+) -> None:
+    fresh = {**quickbus_result, "webio_commands": {"HA QB1 MT Flur G18": {"webIoId": 502}}}
+    api = parsing_api
+    api._reload_config_until_commands_ready = AsyncMock(return_value=fresh)
+    api.function_plan_load_elements = AsyncMock(return_value={})
+    api._function_plan_existing_refs = lambda _plan: ({}, [])
+    api.get_fub_canvas_bounds = lambda _fub: (2000.0, 2000.0)
+    api._function_plan_wire_ref_pair = AsyncMock(return_value=None)
+
+    added, errors = asyncio.run(
+        api.function_plan_add_io_pairs(7, "1", ["G18", "R"], column_index=1, kind=IO_PLAN_KIND_QUICKBUS, row_offset=6)
+    )
+
+    # R has no Web-IO command yet: reported, G18 wired to its own command.
+    assert added == ["G18"]
+    assert len(errors) == 1
+    assert "HA QB1 MT Flur R" in errors[0]
+    expected_names = api._reload_config_until_commands_ready.call_args.args[0]
+    assert expected_names(fresh) == {"HA QB1 MT Flur G18", "HA QB1 MT Flur R"}
+    args = api._function_plan_wire_ref_pair.call_args.args
+    assert args[:5] == (7, 1, 202, 502, "binary")
+    assert args[5] == "QB1 MT Flur G18"
+    # Row 2 under the device header, which starts at row 6 of column 1 (stacked below another device).
+    assert args[8][0] == FUNCTION_PLAN_LAYOUT_X_MARKER + FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH
+    assert args[8][2] == FUNCTION_PLAN_LAYOUT_Y_START + (6 + 2) * FUNCTION_PLAN_LAYOUT_Y_STEP
+
+
+# --- repair text ---
+
+
+def test_repair_text_names_quickbus_devices() -> None:
+    qb_by_device = {"QB1 MT Flur": [4, 4], "QB3 BM Diele": [1, 2]}
+    detail = {"markers_by_plan": {}, "ios_by_ext": {}, "quickbus_by_device": qb_by_device}
+
+    lines = _function_plan_gap_lines(5, detail)
+
+    assert "Quickbus device QB1 MT Flur not yet in a QB cluster plan:** all 4 IOs" in lines[0]
+    assert "Quickbus device QB3 BM Diele partially wired:** 1 of 2 IOs missing" in lines[1]
+    assert "Wire in Function Plan (QB1 MT Flur +4 IOs, QB3 BM Diele +1 IOs," in _function_plan_option_label(
+        5, detail, " ~1 min"
+    )
+
+
+@pytest.mark.parametrize(
+    ("ios_by_ext", "qb_by_device", "noun"),
+    [
+        ({}, {"MT Flur": [4, 4]}, "Add Quickbus device to Function Plan"),
+        ({}, {"MT Flur": [4, 4], "MT Bad": [2, 2]}, "Add Quickbus devices to Function Plan"),
+        ({"BASE": [1, 1]}, {"MT Flur": [4, 4]}, "Add extensions and Quickbus devices to Function Plan"),
+        ({"BASE": [1, 1]}, {}, "Add extension to Function Plan"),
+    ],
+)
+def test_repair_option_names_whole_members(ios_by_ext: dict, qb_by_device: dict, noun: str) -> None:
+    detail = {"markers_by_plan": {}, "ios_by_ext": ios_by_ext, "quickbus_by_device": qb_by_device}
+
+    assert noun in _function_plan_option_label(5, detail, "")
+
+
+# --- review follow-ups: log dedupe, wiring split, grid, sort, ETA, options ---
+
+
+def test_skipped_quickbus_devices_are_logged_once_per_change(
+    quickbus_result: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    data = copy.deepcopy(quickbus_result)
+    for io in data[QUICKBUS_IO_DATA_KEY]:
+        if io["quickbus"]["name"] == "MT Bad":
+            io["offline"] = True
+    coordinator = _coordinator({CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: ["1", "2", "9"]}, data)
+
+    with caplog.at_level(logging.WARNING):
+        groups = coordinator.managed_io_groups()
+    assert groups == {("QB", "1")}
+    assert "'QB2 MT Bad'" in caplog.text
+    assert "'9'" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        coordinator.managed_io_groups()  # every poll calls this — an unchanged state stays quiet
+    assert not caplog.text
+
+    coordinator.config_entry.options[CONF_FUNCTION_PLAN_QUICKBUS_DEVICES] = ["1", "9"]
+    with caplog.at_level(logging.WARNING):
+        coordinator.managed_io_groups()
+    assert "'9'" in caplog.text
+    assert "MT Bad" not in caplog.text
+
+
+def test_wire_io_clusters_wires_each_kind_on_its_own() -> None:
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button._wire_io_kind_clusters = AsyncMock(side_effect=[(["io"], 1, 0), (["qb"], 2, 1)])  # type: ignore[method-assign]
+    items = [("IO", "BASE", "I1"), ("QB", "1", "G1"), ("QB", "1", "G18")]
+
+    lines, added, errors = asyncio.run(button._wire_io_clusters(SimpleNamespace(), items, {}))
+
+    calls = button._wire_io_kind_clusters.await_args_list
+    assert [(c.args[1], c.args[2]) for c in calls] == [
+        (IO_PLAN_KIND_IO, {"BASE": ["I1"]}),
+        (IO_PLAN_KIND_QUICKBUS, {"1": ["G1", "G18"]}),
+    ]
+    assert (lines, added, errors) == (["io", "qb"], 3, 1)
+
+
+def test_wire_io_clusters_skips_a_kind_without_items() -> None:
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button._wire_io_kind_clusters = AsyncMock(return_value=([], 1, 0))  # type: ignore[method-assign]
+
+    asyncio.run(button._wire_io_clusters(SimpleNamespace(), [("QB", "2", "G1")], {}))
+
+    assert [c.args[1] for c in button._wire_io_kind_clusters.await_args_list] == [IO_PLAN_KIND_QUICKBUS]
+
+
+def test_quickbus_grid_slots_stack_devices_in_a_column(quickbus_result: dict[str, Any]) -> None:
+    coordinator = _coordinator({}, quickbus_result)
+    members = ["1", "2", "3"]
+
+    # 10 rows per column: MT Flur (header + 4 IOs), a blank row and MT Bad (header + 2 IOs) share
+    # column 0; BM Diele (3 rows) no longer fits below them and opens column 1.
+    slots = _io_ref_slots(coordinator, members, 10, IO_PLAN_KIND_QUICKBUS)
+    headers = _io_header_slots(coordinator, members, 10, IO_PLAN_KIND_QUICKBUS)
+
+    y = [FUNCTION_PLAN_LAYOUT_Y_START + row * FUNCTION_PLAN_LAYOUT_Y_STEP for row in range(10)]
+    assert slots == {
+        201: (0, y[1]),
+        202: (0, y[2]),
+        203: (0, y[3]),
+        204: (0, y[4]),
+        211: (0, y[7]),
+        213: (0, y[8]),
+        301: (FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH, y[1]),
+        302: (FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH, y[2]),
+    }
+    assert [(x, y) for x, y, _text in headers] == [
+        (FUNCTION_PLAN_LAYOUT_X_MARKER, y[0]),
+        (FUNCTION_PLAN_LAYOUT_X_MARKER, y[6]),
+        (FUNCTION_PLAN_LAYOUT_X_MARKER + FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH, y[0]),
+    ]
+    assert "MT Flur" in headers[0][2]
+    assert "MT Bad" in headers[1][2]
+    assert "BM Diele" in headers[2][2]
+
+
+def test_sort_of_a_quickbus_plan_uses_its_column_grid(quickbus_result: dict[str, Any]) -> None:
+    data = {**quickbus_result, "io": []}  # only the Quickbus data decides for a QB plan
+    coordinator = _coordinator({}, data)
+    coordinator.managed_column_plan = lambda _fid: (IO_PLAN_KIND_QUICKBUS, ["1"])  # type: ignore[method-assign]
+
+    _positions, _n_pairs, _n_single, sort_line, headers, members = _sort_compute_positions(
+        coordinator, {"elements": {}, "connections": {}}, 5, 4000, 10, 10, FUNCTION_PLAN_LAYOUT_Y_STEP
+    )
+
+    assert "QB pairs restored" in sort_line
+    assert members == ["1"]
+    assert len(headers) == 1
+
+
+def test_sort_of_a_column_plan_without_its_data_is_skipped(quickbus_result: dict[str, Any]) -> None:
+    data = {**quickbus_result, QUICKBUS_IO_DATA_KEY: []}  # Quickbus import off
+    coordinator = _coordinator({}, data)
+    coordinator.managed_column_plan = lambda _fid: (IO_PLAN_KIND_QUICKBUS, ["1"])  # type: ignore[method-assign]
+    elements = {"1": {"reference": {"type": 2, "id": 7}, "x": 0, "y": 0}}
+
+    positions, _n_pairs, _n_single, sort_line, _headers, _members = _sort_compute_positions(
+        coordinator, {"elements": elements, "connections": {}}, 5, 4000, 10, 10, FUNCTION_PLAN_LAYOUT_Y_STEP
+    )
+
+    # Not the marker sort: that would scramble the column grid.
+    assert positions == []
+    assert "sort skipped" in sort_line
+
+
+def test_missing_eta_counts_quickbus_plans_apart_from_io_plans() -> None:
+    coordinator = _coordinator(
+        {CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - QB [1]": 7}, CONF_FUNCTION_PLAN_PLAN_PREFIX: PREFIX}, {}
+    )
+    coordinator.api = SimpleNamespace(fub_data={"7": {"Name": "HA - QB [1]"}})
+    coordinator._distrusted_fub_ids = set()
+    coordinator.function_plan_plans = {7: {"elements": {str(i): {} for i in range(10)}}}
+    qb_items = [{"name": f"HA QB1 MT Flur G{i}", "quickbus_device": "1", "identifier": f"G{i}"} for i in range(3)]
+    # An IO extension named like the device id belongs to its own (new, empty) IO plan.
+    io_item = {"name": "HA IO 1 I1", "ext_name": "1", "identifier": "I1"}
+
+    eta = coordinator._function_plan_missing_eta_sec([*qb_items, io_item])
+
+    expected = (
+        2 * SYNC_DURATION_FUNCTION_PLAN_FINALIZE
+        + (10 + 2 * 3) * SYNC_DURATION_FUNCTION_PLAN_ELEMENT
+        + 2 * SYNC_DURATION_FUNCTION_PLAN_ELEMENT
+    )
+    assert eta == round(expected)
+
+
+def test_options_offer_online_quickbus_devices_by_id_and_saved_ones(quickbus_result: dict[str, Any]) -> None:
+    data = copy.deepcopy(quickbus_result)
+    for io in data[QUICKBUS_IO_DATA_KEY]:
+        if io["quickbus"]["name"] == "MT Bad":
+            io["offline"] = True
+        elif io["quickbus"]["name"] == "BM Diele":
+            io["quickbus"] = {**io["quickbus"], "name": "BM, Diele"}  # any name: the id is the value
+    data[QUICKBUS_IO_DATA_KEY].append({**_qb_io(data, "302"), "id": "999", "quickbus": {"device_id": 10, "name": ""}})
+
+    options = _quickbus_device_options(data, {CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: [9, "1", "9"]})
+
+    # Numeric id order (10 after 3), the gone id 9 last and once.
+    assert options == [
+        {"value": "1", "label": "QB1 MT Flur"},
+        {"value": "3", "label": "QB3 BM, Diele"},
+        {"value": "10", "label": "QB10"},
+        {"value": "9", "label": "QB9"},
+    ]
+    assert _quickbus_device_options({}, {}) == []
+
+
+# --- stacking Quickbus devices within a plan's columns ---
+
+
+def _rows(sizes: dict[str, int]):
+    return lambda member: sizes[member]
+
+
+@pytest.mark.parametrize(
+    ("sizes", "rows_per_col", "origins", "columns"),
+    [
+        ({}, 10, {}, 0),
+        ({"a": 4, "b": 4}, 10, {"a": (0, 0), "b": (0, 5)}, 1),  # two fit one column, a blank row apart
+        ({"a": 4, "b": 4, "c": 3}, 10, {"a": (0, 0), "b": (0, 5), "c": (1, 0)}, 2),  # c does not fit below
+        ({"a": 4, "b": 5, "c": 2}, 10, {"a": (0, 0), "b": (0, 5), "c": (1, 0)}, 2),  # exactly full
+        ({"a": 5, "b": 5}, 10, {"a": (0, 0), "b": (1, 0)}, 2),  # the blank row does not fit any more
+        ({"a": 25, "b": 3}, 10, {"a": (0, 0), "b": (3, 0)}, 4),  # taller than a column: wraps on
+        ({"a": 2, "b": 25}, 10, {"a": (0, 0), "b": (1, 0)}, 4),  # a tall device starts a fresh column
+    ],
+    ids=["empty", "share", "overflow", "exact", "no-room-for-the-gap", "wrap", "tall-after-small"],
+)
+def test_quickbus_devices_stack_within_columns(
+    sizes: dict[str, int], rows_per_col: int, origins: dict, columns: int
+) -> None:
+    members = list(sizes)
+
+    assert io_plan_member_origins(IO_PLAN_KIND_QUICKBUS, members, _rows(sizes), rows_per_col) == origins
+    assert io_plan_columns(IO_PLAN_KIND_QUICKBUS, members, _rows(sizes), rows_per_col) == columns
+
+
+def test_io_extensions_keep_one_column_each() -> None:
+    sizes = {"BASE": 2, "UD1": 2}
+
+    assert io_plan_member_origins(IO_PLAN_KIND_IO, list(sizes), _rows(sizes), 10) == {
+        "BASE": (0, 0),
+        "UD1": (1, 0),
+    }
+    assert io_plan_columns(IO_PLAN_KIND_IO, list(sizes), _rows(sizes), 10) == 2

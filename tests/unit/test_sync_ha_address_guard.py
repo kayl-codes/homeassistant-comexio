@@ -16,7 +16,13 @@ import pytest
 
 from custom_components.comexio import button as button_module
 from custom_components.comexio.button import ComexioSyncButton, _SyncContext
-from custom_components.comexio.const import SYNC_DURATION_RECREATE, SYNC_DURATION_WRITE, WEBIO_CLASSES, WebioClass
+from custom_components.comexio.const import (
+    SYNC_DURATION_DELETE,
+    SYNC_DURATION_RECREATE,
+    SYNC_DURATION_WRITE,
+    WEBIO_CLASSES,
+    WebioClass,
+)
 from custom_components.comexio.coordinator import _device_ip_mismatch
 from custom_components.comexio.ha_address import HaAddressResolver, is_loopback_address
 
@@ -182,6 +188,7 @@ def test_an_unexpected_error_still_logs_its_traceback() -> None:
 
 
 _FAST_TRACK_MISSING = [{}] * (SYNC_DURATION_RECREATE // SYNC_DURATION_WRITE + 1)  # ETA above the threshold
+_FAST_TRACK_ORPHANS = [{}] * (SYNC_DURATION_RECREATE // SYNC_DURATION_DELETE + 1)
 
 
 def test_no_fast_track_with_a_loopback_address() -> None:
@@ -208,6 +215,20 @@ def test_fast_track_with_a_reachable_address() -> None:
 
     assert action == "recreate"
     button.coordinator.api.webio_device_delete_error.assert_awaited_once_with("7")
+
+
+def test_no_fast_track_for_a_class_with_no_wanted_command() -> None:
+    """Quickbus with no device selected: its device is synced (orphans removed), never rebuilt empty."""
+    button = _button(REACHABLE)
+    button.coordinator.required_webio_classes = [c for c in WEBIO_CLASSES if c != WebioClass.QUICKBUS]
+    ctx = _ctx(button, REACHABLE)
+    with patch.object(button_module, "webio_still_present", AsyncMock(return_value=None)):
+        action = asyncio.run(
+            button._decide_effective_action(ctx, WebioClass.QUICKBUS, "7", [], [], [], _FAST_TRACK_ORPHANS, False)
+        )
+
+    assert action == "full_sync"
+    button.coordinator.api.webio_device_delete_error.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

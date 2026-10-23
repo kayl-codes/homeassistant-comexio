@@ -1,4 +1,5 @@
 # Version: 0.8.0
+from collections.abc import Mapping
 import logging
 from typing import Any
 
@@ -20,6 +21,7 @@ from .const import (
     CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
+    CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
@@ -33,6 +35,7 @@ from .const import (
     DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DEFAULT_SCHEMA_IO,
     DOMAIN,
+    QUICKBUS_IO_DATA_KEY,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
     SourceCategory,
@@ -44,6 +47,9 @@ from .const import (
     parse_ignored_marker_tokens,
     parse_watchdog_user_plan_pick,
     prune_import_disabled_ignored,
+    quickbus_device_id,
+    quickbus_device_label,
+    selected_quickbus_devices,
     watchdog_user_plan_pick,
 )
 
@@ -166,6 +172,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         coordinator_data = getattr(coordinator, "data", None) or {}
         ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
         ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
+        quickbus_options = _quickbus_device_options(coordinator_data, conf)
 
         # Marker + KNX share the same schema/import/ignored-ids field shape (registry-driven
         # via ignore_list_categories — the source categories that support an ignore-list);
@@ -266,6 +273,20 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             # so there is nothing to translate them against.
             SelectSelectorConfig(options=ext_names, multiple=True, mode=SelectSelectorMode.DROPDOWN)
         )
+        if quickbus_options:
+            # Only with Quickbus devices to pick (or a saved pick to drop) — a dead field otherwise.
+            schema_dict[
+                vol.Optional(
+                    CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
+                    default=[
+                        option["value"]
+                        for option in quickbus_options
+                        if option["value"] in selected_quickbus_devices(conf, coordinator_data)
+                    ],
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(options=quickbus_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
+            )
         schema_dict[
             vol.Required(
                 CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
@@ -371,3 +392,22 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             if not merged_options.get(cat.ignored_conf_key, "").strip():
                 merged_options.pop(cat.ignored_conf_key, None)
         return self.async_create_entry(title="", data=merged_options)
+
+
+def _quickbus_device_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[SelectOptionDict]:
+    """Quickbus devices for the QB cluster multi-select: value = device id, label "QB3 MT1".
+
+    Live devices first (by id), excluding those on an offline extension, then saved selections
+    that are gone — kept choosable so they can be deselected.
+    """
+    names: dict[str, str] = {}
+    for io in coordinator_data.get(QUICKBUS_IO_DATA_KEY, []):
+        if not io.get("offline"):
+            names.setdefault(quickbus_device_id(io), io["quickbus"].get("name") or "")
+    live = sorted(names, key=lambda device: (len(device), device))
+    saved = dict.fromkeys(str(device) for device in conf.get(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES, []))
+    gone = [device for device in saved if device not in names]
+    return [
+        SelectOptionDict(value=device, label=one_line(quickbus_device_label(device, names.get(device))))
+        for device in [*live, *gone]
+    ]

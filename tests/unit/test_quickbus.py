@@ -2,6 +2,7 @@
 
 import json
 import re
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -11,6 +12,7 @@ from custom_components.comexio import _quickbus_entity_uids
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.cleanup_scope import CLEANUP_SCOPE_QUICKBUS, CLEANUP_SCOPES, webio_classes_in_scope
 from custom_components.comexio.const import (
+    CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
     WebioClass,
@@ -113,6 +115,7 @@ def test_quickbus_audit_map_names_match_the_web_io_commands(
     """The audit expects exactly the commands the sync creates — else every poll reports them missing."""
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
+    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
 
     ha_map, io_meta_by_key = coordinator._build_ha_audit_map(quickbus_result)
 
@@ -125,8 +128,10 @@ def test_quickbus_audit_map_names_match_the_web_io_commands(
         assert expected["type"] == ("digital" if commands[expected["name"]]["TypeId"] == 1 else "analog")
     assert ha_map["QB204"]["type"] == "analog"
     assert ha_map["QB201"]["type"] == "digital"
-    # Not wired into managed function plans (this PR): no IO meta, so no wiring gap is reported.
-    assert not set(io_meta_by_key) & quickbus_keys
+    # Every Quickbus IO has its IO meta — the wiring check of the QB cluster plans reads it.
+    assert {key: io_meta_by_key[key] for key in quickbus_keys} == {
+        source_audit_key(_QUICKBUS_CATEGORY, io["id"]): io for io in quickbus_result["quickbus_io"]
+    }
 
 
 @pytest.mark.parametrize(("import_quickbus", "expected"), [(True, 8), (False, 0)])
@@ -243,11 +248,14 @@ def test_entity_cleanup_treats_ios_of_an_offline_host_as_offline(include_offline
     assert offline == (set() if include_offline else {"comexio_iosrv1_qb201"})
 
 
+_QB_IO = {"id": "201", "quickbus": {"device_id": 1, "name": "MT1"}}
+
+
 @pytest.mark.parametrize(
     ("quickbus_ios", "expected"),
     [
         ([], (WebioClass.MARKER, WebioClass.IO)),
-        ([{"id": "201"}], (WebioClass.MARKER, WebioClass.IO, WebioClass.QUICKBUS)),
+        ([_QB_IO], (WebioClass.MARKER, WebioClass.IO, WebioClass.QUICKBUS)),
     ],
 )
 def test_quickbus_class_is_only_required_with_a_quickbus_io(
@@ -258,9 +266,15 @@ def test_quickbus_class_is_only_required_with_a_quickbus_io(
     assert required_webio_classes({}, {QUICKBUS_IO_DATA_KEY: quickbus_ios}) == expected
 
 
+def test_quickbus_class_is_not_required_without_a_selected_device() -> None:
+    """A Quickbus IO reaches HA only through its wired plan pair: no selected device, no [QB] class."""
+    conf = {CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: []}
+    assert WebioClass.QUICKBUS not in required_webio_classes(conf, {QUICKBUS_IO_DATA_KEY: [_QB_IO]})
+
+
 def test_quickbus_class_is_not_required_while_its_import_is_off() -> None:
     conf = {"import_quickbus": False}
-    assert WebioClass.QUICKBUS not in required_webio_classes(conf, {QUICKBUS_IO_DATA_KEY: [{"id": "201"}]})
+    assert WebioClass.QUICKBUS not in required_webio_classes(conf, {QUICKBUS_IO_DATA_KEY: [_QB_IO]})
 
 
 def _missing_class_coordinator(conf: dict[str, Any]) -> ComexioCoordinator:
@@ -273,7 +287,7 @@ def _missing_class_coordinator(conf: dict[str, Any]) -> ComexioCoordinator:
     return coordinator
 
 
-@pytest.mark.parametrize(("quickbus_ios", "missing"), [([], False), ([{"id": "201"}], True)])
+@pytest.mark.parametrize(("quickbus_ios", "missing"), [([], False), ([_QB_IO], True)])
 def test_missing_quickbus_class_is_reported_only_with_a_quickbus_io(
     monkeypatch: pytest.MonkeyPatch, quickbus_ios: list[dict[str, Any]], missing: bool
 ) -> None:
@@ -292,7 +306,7 @@ def test_missing_quickbus_class_is_reported_only_with_a_quickbus_io(
         assert create_issue.call_args.kwargs["data"]["missing_classes"] == [WebioClass.QUICKBUS]
 
 
-@pytest.mark.parametrize(("quickbus_ios", "required"), [([], False), ([{"id": "201"}], True)])
+@pytest.mark.parametrize(("quickbus_ios", "required"), [([], False), ([_QB_IO], True)])
 def test_coordinator_requires_the_quickbus_class_from_its_current_data(
     quickbus_ios: list[dict[str, Any]], required: bool
 ) -> None:
@@ -323,6 +337,7 @@ def _audit(ha_map: dict[str, Any], com_commands: dict[str, Any]) -> dict[str, li
 def test_synced_quickbus_commands_audit_clean(parsing_api: ComexioAPI, quickbus_result: dict[str, Any]) -> None:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
+    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
     ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
 
     found = _audit(ha_map, _comexio_commands(parsing_api, quickbus_result))
@@ -335,6 +350,7 @@ def test_a_quickbus_command_of_a_renamed_device_is_an_orphan(
 ) -> None:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
+    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
     ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
     commands = _comexio_commands(parsing_api, quickbus_result)
     commands["HA QB9 Old G1"] = {"typeId": 1, "cmdId": "99", "webioClass": WebioClass.QUICKBUS}
@@ -351,6 +367,7 @@ def test_a_quickbus_command_of_a_renamed_device_is_renamed_in_place(
     """Device id + identifier still pin the IO: rename the command, never delete and recreate it."""
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
+    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
     ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
     commands = _comexio_commands(parsing_api, quickbus_result)
     commands["HA QB1 Old Name G1"] = commands.pop("HA QB1 MT Flur G1")
@@ -369,6 +386,7 @@ def test_a_missing_quickbus_command_is_created_in_the_quickbus_class(
 ) -> None:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
+    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
     ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
     commands = _comexio_commands(parsing_api, quickbus_result)
     del commands["HA QB1 MT Flur G1"]

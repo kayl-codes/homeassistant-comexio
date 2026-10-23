@@ -24,7 +24,6 @@ import voluptuous as vol
 
 from .const import (
     CONF_ENABLE_NOTIFICATIONS,
-    CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_PLAN_MAP,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
@@ -47,6 +46,8 @@ from .const import (
     ICON_TOOLS,
     ICON_UPLOAD,
     ICON_WARNING,
+    IO_PLAN_KIND_IO,
+    IO_PLAN_KINDS,
     ISSUE_UNINSTALL_CLEANUP,
     LOGIN_ERROR_REJECTED,
     RANGE_CHECK_CHECKED,
@@ -64,10 +65,12 @@ from .const import (
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
+    IoPlanKind,
     MarkerKind,
     SourceCategory,
     WebioClass,
     category_by_fub_module_type,
+    io_plan_item_member,
     one_line,
     source_category,
     trigger_pair_categories,
@@ -194,6 +197,10 @@ def _mark_cancelled(ctx: "_SyncContext", msg: str) -> str:
     """
     ctx.failed_writes.append("cancelled by user")
     return f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
+
+
+# (column-plan kind label, member, identifier) of one IO / Quickbus pair to wire.
+_IoRef = tuple[str, str, str]
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -1461,6 +1468,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if action == "update_ip":
             _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
             return "update_ip"
+        if cls not in self.coordinator.required_webio_classes:
+            # Synced only because its device still exists (e.g. Quickbus with no device selected any
+            # more): a recreate would upload an empty class, for which Comexio creates no device
+            # instance, so the sync failed after deleting the old one.
+            _LOGGER.info("[%s] %s: no command of this class is wanted. Skipping Fast-Track.", self.server_id, label)
+            return action
         if cls_action_eta > SYNC_DURATION_RECREATE:
             return "recreate" if await self._async_fast_track(ctx, cls, class_dev_id, cls_action_eta) else action
         _LOGGER.info(
@@ -1521,7 +1534,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         web_io_json = api.generate_webio_json(
             self.server_id,
             class_name,
-            self.coordinator.data,
+            self.coordinator.webio_source_data(),
             webio_class=cls,
             ignored_marker_ids=self.coordinator.ignored_marker_ids,
             ignored_knx_ids=self.coordinator.ignored_knx_ids,
@@ -1908,7 +1921,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     cmd["Name"]
                     for cmd in ctx.api.build_webio_commands(
                         self.server_id,
-                        self.coordinator.data,
+                        self.coordinator.webio_source_data(),
                         webio_class=cls,
                         ignored_marker_ids=self.coordinator.ignored_marker_ids,
                         ignored_knx_ids=self.coordinator.ignored_knx_ids,
@@ -1944,11 +1957,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     def _classify_created_names(
         created_names: list[str],
         clustered_cats: list[SourceCategory],
-        known_io_names: dict[str, tuple[str, str]],
-    ) -> tuple[dict[WebioClass, list[int]], list[tuple[str, str]]]:
+        known_io_names: dict[str, _IoRef],
+    ) -> tuple[dict[WebioClass, list[int]], list[_IoRef]]:
         """Split freshly-created Web-IO command names into per-category source ids and IO refs."""
         source_ids_by_cat: dict[WebioClass, list[int]] = {}
-        created_io_refs: list[tuple[str, str]] = []
+        created_io_refs: list[_IoRef] = []
         for name in created_names:
             for cat in clustered_cats:
                 if (sid := _parse_source_id_from_webio_name(name, cat.audit_key_prefix)) is not None:
@@ -1977,10 +1990,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Wire every Web-IO command created in this run into its managed cluster plan.
 
         Marker commands are distributed across marker cluster plans (one per ID range),
-        IO commands across the IO cluster plan of their extension — but only for the
-        extensions the user opted into (CONF_FUNCTION_PLAN_IO_EXTENSIONS), and never for
-        an extension that is currently offline (its hardware isn't there, so wiring it is
-        pointless; the next sync picks it up once it's back).
+        IO commands across the IO cluster plan of their extension and Quickbus commands across
+        the QB cluster plan of their device — but only for the extensions / devices the user
+        opted into, and never for one that is currently offline (its hardware isn't there, so
+        wiring it is pointless; the next sync picks it up once it's back) — see
+        coordinator.managed_io_groups.
 
         For a full sync (or the standalone wiring-only action), pairs the audit found
         already existing but not yet wired (gap_items) are merged in too — a Fast-Track
@@ -1988,12 +2002,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         still be closed here, not just pairs freshly created in this run.
         Returns per-plan summary lines for the final sync notification.
         """
-        managed_exts = set(self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
-        managed_exts -= self.coordinator.offline_extensions or set()
-
+        managed_groups = self.coordinator.managed_io_groups()
         known_io_names = {
-            f"HA IO {io['ext_name']} {io['identifier']}": (io["ext_name"], io["identifier"])
-            for io in self.coordinator.data.get("io", [])
+            kind.command_name(io): (kind.label, kind.member_of(io), io["identifier"])
+            for kind in IO_PLAN_KINDS
+            for io in self.coordinator.data.get(kind.data_key, [])
         }
         # Range-clustered categories (Marker + KNX): one pipeline, only the id prefix / plan
         # label differ. IO stays a separate branch (per-extension plans, composite key).
@@ -2008,7 +2021,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             gap_io_items = []
 
         source_ids_by_cat = {k: list(dict.fromkeys(v)) for k, v in source_ids_by_cat.items() if v}
-        io_items = _merge_io_items(created_io_refs, gap_io_items, managed_exts)
+        io_items = _merge_io_items(created_io_refs, gap_io_items, managed_groups)
         if not source_ids_by_cat and not io_items:
             return []
 
@@ -2759,38 +2772,65 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return line
 
     async def _wire_io_clusters(
-        self, ctx: _SyncContext, io_items: list[dict[str, str]], progress_state: dict
+        self, ctx: _SyncContext, io_items: list[_IoRef], progress_state: dict
     ) -> tuple[list[str], int, int]:
-        """Resolve the IO cluster plans and add the pairs. Returns (lines, added, errors)."""
-        by_ext: dict[str, list[str]] = {}
-        for item in io_items:
-            by_ext.setdefault(item["ext_name"], []).append(item["identifier"])
+        """Add the IO / Quickbus pairs to their column plans, one kind after the other.
 
-        ext_plans, created_plans, failed_exts = await self.coordinator.resolve_io_clusters(sorted(by_ext))
+        Returns (lines, added, errors) over both kinds.
+        """
+        summary: list[str] = []
+        added = errors = 0
+        for kind in IO_PLAN_KINDS:
+            by_member: dict[str, list[str]] = {}
+            for label, member, ident in io_items:
+                if label == kind.label:
+                    by_member.setdefault(member, []).append(ident)
+            if not by_member:
+                continue
+            lines, kind_added, kind_errors = await self._wire_io_kind_clusters(ctx, kind, by_member, progress_state)
+            summary.extend(lines)
+            added += kind_added
+            errors += kind_errors
+        return summary, added, errors
+
+    async def _wire_io_kind_clusters(
+        self, ctx: _SyncContext, kind: IoPlanKind, by_ext: dict[str, list[str]], progress_state: dict
+    ) -> tuple[list[str], int, int]:
+        """Resolve the column plans of one kind and add the pairs. Returns (lines, added, errors)."""
+        ext_plans, created_plans, failed_exts = await self.coordinator.resolve_io_clusters(sorted(by_ext), kind)
         # Surface a resolve failure to the user, not just the log — see _wire_source_clusters.
         summary: list[str] = [
-            f"{ICON_WARNING} IO cluster plan for '{ext}' could not be resolved/created — see log" for ext in failed_exts
+            f"{ICON_WARNING} {kind.label} cluster plan for '{one_line(ext)}' could not be resolved/created — see log"
+            for ext in failed_exts
         ]
         errors = len(failed_exts)
-        ctx.failed_writes.extend(f"IO cluster plan for '{ext}': {_FAILURE_NOT_RESOLVED}" for ext in failed_exts)
+        ctx.failed_writes.extend(
+            f"{kind.label} cluster plan for '{one_line(ext)}': {_FAILURE_NOT_RESOLVED}" for ext in failed_exts
+        )
         if not ext_plans:
             if not failed_exts:
-                _LOGGER.warning("[%s] Cluster plan wiring: no IO cluster plan available", self.server_id)
-                summary.append(f"{ICON_WARNING} No IO cluster plan available — see log.")
-                ctx.failed_writes.append("IO cluster plan: none available")
+                _LOGGER.warning("[%s] Cluster plan wiring: no %s cluster plan available", self.server_id, kind.label)
+                summary.append(f"{ICON_WARNING} No {kind.label} cluster plan available — see log.")
+                ctx.failed_writes.append(f"{kind.label} cluster plan: none available")
                 errors = 1
             return summary, 0, errors
 
-        plan_exts: dict[int, list[tuple[str, int]]] = {}
-        for ext, (fub_id, column) in ext_plans.items():
-            plan_exts.setdefault(fub_id, []).append((ext, column))
+        plan_exts: dict[int, list[tuple[str, tuple[int, int]]]] = {}
+        for ext, (fub_id, origin) in ext_plans.items():
+            plan_exts.setdefault(fub_id, []).append((ext, origin))
 
         added = 0
         for fub_id, ext_cols in plan_exts.items():
             if getattr(self.coordinator, "cancel_sync", False):
                 break
             line, lp_added, lp_errors = await self._add_io_pairs_to_plan(
-                ctx, fub_id, sorted(ext_cols, key=lambda t: t[1]), by_ext, fub_id in created_plans, progress_state
+                ctx,
+                fub_id,
+                sorted(ext_cols, key=lambda t: t[1]),
+                by_ext,
+                fub_id in created_plans,
+                progress_state,
+                kind,
             )
             if lp_errors:
                 ctx.failed_writes.append(_plan_failure(self._plan_name(fub_id), f"{len(lp_errors)} error(s)"))
@@ -2943,12 +2983,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self,
         ctx: _SyncContext,
         fub_id: int,
-        ext_cols: list[tuple[str, int]],
+        ext_cols: list[tuple[str, tuple[int, int]]],
         by_ext: dict[str, list[str]],
         is_fresh: bool,
         progress_state: dict,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
     ) -> tuple[str, list[str], list[str]]:
-        """Add the missing IO pairs of one or more extensions to one IO cluster plan.
+        """Add the missing IO pairs of one or more members (extensions / Quickbus devices) to one column plan.
 
         Unlike marker plans there is never a sort pass: every IO pair lands in its
         deterministic slot (see api.function_plan_add_io_pairs), so finalizing is just
@@ -2957,19 +2998,23 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """
         api = ctx.api
         plan_name = self._plan_name(fub_id)
-        stale_exts = [ext for ext, _ in ext_cols if not self.coordinator.io_cluster_plan_contains(plan_name, ext)]
+        stale_exts = [
+            one_line(ext) for ext, _ in ext_cols if not self.coordinator.io_cluster_plan_contains(plan_name, ext, kind)
+        ]
         if stale_exts:
             _LOGGER.error(
-                "[%s] Aborting IO pair write to fub=%s: plan is now named '%s', no longer a managed IO "
+                "[%s] Aborting %s pair write to fub=%s: plan is now named '%s', no longer a managed %s "
                 "cluster plan for %s — it was renamed/repurposed since resolve_io_clusters() ran",
                 self.server_id,
+                kind.label,
                 fub_id,
                 one_line(plan_name),
+                kind.label,
                 stale_exts,
             )
             return (
                 f"{ICON_WARNING} fub {fub_id} ('{one_line(plan_name)}'): aborted — no longer matches "
-                f"expected IO cluster for {stale_exts}",
+                f"expected {kind.label} cluster for {stale_exts}",
                 [],
                 [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
             )
@@ -2983,22 +3028,25 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             step_info="Function Plan: adding IO pairs",
         )
         await self.coordinator.async_function_plan_change_backup(
-            fub_id, f"add_io_pairs {[f'{ext}:{len(by_ext[ext])}' for ext, _ in ext_cols]}"
+            fub_id, f"add_io_pairs {[f'{one_line(ext)}:{len(by_ext[ext])}' for ext, _ in ext_cols]}"
         )
         await api.function_plan_stop_fup(fub_id)
 
         added: list[str] = []
         errors: list[str] = []
-        for ext, column in ext_cols:
+        for ext, (column, row_offset) in ext_cols:
             lp_added, lp_errors = await api.function_plan_add_io_pairs(
                 fub_id,
                 ext,
                 by_ext[ext],
                 column_index=column,
                 progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+                kind=kind,
+                row_offset=row_offset,
             )
             progress_state["done"] += len(by_ext[ext])
-            added.extend(f"{ext} {ident}" for ident in lp_added)
+            label = one_line(kind.member_label(self.coordinator.data, ext))
+            added.extend(f"{label} {ident}" for ident in lp_added)
             errors.extend(lp_errors)
         if errors:
             _LOGGER.warning("[%s] function_plan_add_io_pairs errors: %s", self.server_id, errors)
@@ -3039,31 +3087,36 @@ def _parse_source_id_from_webio_name(name: str, prefix: str) -> int | None:
     return None
 
 
-def _parse_io_from_webio_name(name: str, known_names: dict[str, tuple[str, str]]) -> tuple[str, str] | None:
-    """Extract (ext_name, identifier) from a Web-IO command name like 'HA IO UD1 Q3'.
+def _parse_io_from_webio_name(name: str, known_names: dict[str, _IoRef]) -> _IoRef | None:
+    """Extract (kind label, member, identifier) from a Web-IO command name like 'HA IO UD1 Q3'.
 
-    Tries an exact reverse lookup against the known (ext_name, identifier) pairs first, since
-    a positional `name.split()` misparses an extension name that itself contains spaces. Falls
-    back to the positional heuristic only for names with no known counterpart.
+    Tries an exact reverse lookup against the known IO and Quickbus commands first, since a
+    positional `name.split()` misparses an extension name that itself contains spaces (and
+    cannot tell a Quickbus device from its host extension). Falls back to the positional
+    heuristic only for IO names with no known counterpart.
     """
     if ref := known_names.get(name):
         return ref
     parts = name.split()
     if len(parts) >= 4 and parts[0] == "HA" and parts[1] == "IO":
-        return parts[2], parts[3]
+        return IO_PLAN_KIND_IO.label, parts[2], parts[3]
     return None
 
 
-def _merge_io_items(created_refs: list[tuple[str, str]], gap_items: list[dict], managed_exts: set[str]) -> list[dict]:
-    """Merge freshly created IO commands (managed extensions only) with audit gap items,
-    deduplicated by (ext_name, identifier)."""
-    merged: dict[tuple[str, str], dict] = {}
-    for ext, ident in created_refs:
-        if ext in managed_exts:
-            merged[(ext, ident)] = {"ext_name": ext, "identifier": ident}
+def _merge_io_items(
+    created_refs: list[_IoRef], gap_items: list[dict], managed_groups: set[tuple[str, str]]
+) -> list[_IoRef]:
+    """Merge freshly created IO / Quickbus commands (managed members only) with audit gap items,
+    deduplicated by (kind label, member, identifier)."""
+    merged = dict.fromkeys(ref for ref in created_refs if ref[:2] in managed_groups)
+    if unmanaged := [ref for ref in created_refs if ref[:2] not in managed_groups]:
+        _LOGGER.debug("Created IO commands not wired (member not managed): %s", unmanaged)
     for item in gap_items:
-        merged.setdefault((item["ext_name"], item["identifier"]), item)
-    return list(merged.values())
+        if (member := io_plan_item_member(item)) is not None:
+            merged.setdefault((member[0].label, member[1], item["identifier"]))
+        else:
+            _LOGGER.warning("Function plan gap item without a column-plan member skipped: %s", item)
+    return list(merged)
 
 
 class ComexioMarkerTriggerButton(ComexioMarkerEntity, ButtonEntity):

@@ -80,11 +80,11 @@ def test_io_plan_membership_skips_distrusted_and_foreign_plans() -> None:
     assert coordinator._io_plan_membership(PREFIX) == {4: ["A"], 5: ["B", "C"]}
 
 
-@pytest.mark.parametrize(("created", "placed"), [(None, None), (9, (9, 0))], ids=["create-failed", "created"])
-def test_a_fresh_io_plan_places_the_extension_in_column_0(created: int | None, placed: tuple | None) -> None:
+@pytest.mark.parametrize(("created", "placed"), [(None, None), (9, 9)], ids=["create-failed", "created"])
+def test_a_fresh_io_plan_takes_the_extension(created: int | None, placed: int | None) -> None:
     coordinator = _coordinator(
         _io_plan_rows_per_col=lambda _orientation: 10,
-        _io_rows_needed=lambda _ext: 4,
+        _io_rows_needed=lambda _ext, _kind: 4,
         _create_managed_plan=AsyncMock(return_value=created),
     )
 

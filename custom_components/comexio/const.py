@@ -1,5 +1,5 @@
 from bisect import bisect_right
-from collections.abc import Iterable, Iterator, Mapping, Set as AbstractSet
+from collections.abc import Callable, Iterable, Iterator, Mapping, Set as AbstractSet
 from dataclasses import dataclass
 import logging
 import re
@@ -29,6 +29,7 @@ from aiocomexio.knx import (
     KNX_DPT_DIGITAL_AMBIGUOUS as KNX_DPT_DIGITAL_AMBIGUOUS,
     KNX_DPT_DIGITAL_DEVICE_CLASS as KNX_DPT_DIGITAL_DEVICE_CLASS,
 )
+from aiocomexio.webio import quickbus_command_name
 from homeassistant.util import slugify
 
 _LOGGER = logging.getLogger(__name__)
@@ -139,6 +140,10 @@ FUNCTION_PLAN_KNX_CLUSTER_SIZE = 50
 # by one). Extensions-per-plan capacity derives from CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN:
 # 50 → 1, 100 → 2, 150 → 3 extensions per plan; each extension fills exactly one column.
 CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
+# Quickbus cluster plans ("HA - QB [1,3]"): opted-in Quickbus device ids (str). The plan name
+# lists the device ids; a plan has as many columns as an IO plan has extensions, and devices
+# stack within a column while they fit its height (see io_plan_member_origins).
+CONF_FUNCTION_PLAN_QUICKBUS_DEVICES = "logikplan_quickbus_devices"
 
 
 # Web-IO class split: HA maintains separate Web-IO device classes on the Comexio
@@ -178,8 +183,8 @@ class SourceCategory:
     function plans. Physical IOs are the odd one out (ext/identifier composite keys,
     one cluster plan per extension, binary_sensor support) and keep some special
     handling at the call sites where genericity isn't reachable. Quickbus IOs share the
-    IOs' $FubModules group but are keyed by their IO Id, read-only and not wired into
-    managed plans (yet). Adding a further Comexio module type = one more entry in
+    IOs' $FubModules group but are keyed by their IO Id, read-only and wired into their
+    own column plans ("HA - QB [..]", see IoPlanKind). Adding a further Comexio module type = one more entry in
     SOURCE_CATEGORIES.
     """
 
@@ -270,7 +275,7 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
     # IOs of Quickbus devices (Multitouch gestures, motion sensors, ...): same $FubModules group
     # as the IOs, so it must stay after IO here — category_by_fub_module_type("1") is the IO
     # category. Read-only entities (no known API write path), one HA device per Quickbus device,
-    # Web-IO commands in their own class, not wired into managed plans (#86). Named with the IO
+    # Web-IO commands in their own class, wired into QB cluster plans (IO_PLAN_KIND_QUICKBUS). Named with the IO
     # schema: aiocomexio renders {ExtName} as the Quickbus device's name.
     WebioClass.QUICKBUS: SourceCategory(
         key=WebioClass.QUICKBUS,
@@ -323,13 +328,45 @@ def active_webio_classes(conf: Mapping[str, Any]) -> tuple[WebioClass, ...]:
 def required_webio_classes(conf: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[WebioClass, ...]:
     """The opted-in Web-IO classes that must exist on the server (audit "missing class", sync create).
 
-    The Quickbus class only once the server has a Quickbus IO: import_quickbus is on by default,
-    so without this every installation without a Quickbus device would get an empty [QB] class
-    created and, until then, a "missing Web-IO class" repair. data: the (imported) parse result.
+    The Quickbus class only once a selected Quickbus device has an IO (webio_quickbus_ios):
+    import_quickbus is on by default, so without this every installation without a Quickbus
+    device would get an empty [QB] class created and, until then, a "missing Web-IO class"
+    repair — and a Quickbus IO only reaches HA through its wired plan pair, so a class for no
+    selected device is of no use. data: the (imported) parse result.
     """
     return tuple(
-        cls for cls in active_webio_classes(conf) if cls != WebioClass.QUICKBUS or data.get(QUICKBUS_IO_DATA_KEY)
+        cls for cls in active_webio_classes(conf) if cls != WebioClass.QUICKBUS or webio_quickbus_ios(conf, data)
     )
+
+
+def quickbus_device_id(io: Mapping[str, Any]) -> str:
+    """Quickbus device id of a Quickbus IO, as it is stored in the options and named in QB plan names."""
+    return str(io["quickbus"]["device_id"])
+
+
+def selected_quickbus_devices(conf: Mapping[str, Any], data: Mapping[str, Any]) -> set[str]:
+    """Quickbus device ids selected for the QB plans; every device while the option was never saved.
+
+    Comexio refuses writes to a Quickbus IO, so its value reaches HA only through a Web-IO command
+    wired in a QB plan — all devices by default, the user can deselect some.
+    """
+    if CONF_FUNCTION_PLAN_QUICKBUS_DEVICES in conf:
+        return {str(device_id) for device_id in conf[CONF_FUNCTION_PLAN_QUICKBUS_DEVICES]}
+    return {quickbus_device_id(io) for io in data.get(QUICKBUS_IO_DATA_KEY, [])}
+
+
+def webio_quickbus_ios(conf: Mapping[str, Any], data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The Quickbus IOs that get a Web-IO command: those of the selected devices.
+
+    A command of an unselected device would never be wired, so it would push nothing.
+    """
+    selected = selected_quickbus_devices(conf, data)
+    return [io for io in data.get(QUICKBUS_IO_DATA_KEY, []) if quickbus_device_id(io) in selected]
+
+
+def quickbus_device_label(device_id: str, name: str | None) -> str:
+    """Display label of a Quickbus device, as in its Web-IO command names: "QB3 MT1"."""
+    return f"QB{device_id} {one_line(name)}" if name else f"QB{device_id}"
 
 
 def import_disabled_issue_id(webio_class: str, server_id: str) -> str:
@@ -1269,6 +1306,151 @@ def io_group_headers(identifiers: list[str]) -> dict[int, str]:
     io_column_rows — both are computed together in _io_row_blocks so they can't diverge.
     """
     return _io_row_blocks(identifiers)[1]
+
+
+def _io_ident_blocks(_member: str, ios: list[Mapping[str, Any]]) -> tuple[dict[str, int], dict[int, str]]:
+    """Rows + type-group headers of an extension column (see _io_row_blocks)."""
+    return _io_row_blocks([io["identifier"] for io in ios])
+
+
+def _quickbus_io_order(io: Mapping[str, Any]) -> tuple[int, str]:
+    """Comexio's own order of a Quickbus device's IOs: by IO Id (a malformed Id sorts last)."""
+    io_id = str(io.get("id"))
+    return (int(io_id), io_id) if io_id.isascii() and io_id.isdecimal() else (2**31, io_id)
+
+
+def quickbus_column_blocks(member: str, ios: list[Mapping[str, Any]]) -> tuple[dict[str, int], dict[int, str]]:
+    """Rows + header of a Quickbus device block: its name as the one header, then its IOs in Comexio's order.
+
+    The type-group rows of an extension column do not fit: G1, TL1, R or HUM name no IO type.
+    member: the device id — the header shows the device name the IOs carry.
+    """
+    rows = {io["identifier"]: row for row, io in enumerate(sorted(ios, key=_quickbus_io_order), start=1)}
+    name = ios[0]["quickbus"].get("name") if ios else None
+    return rows, ({0: io_group_header_text(one_line(name or quickbus_device_label(member, None)))} if rows else {})
+
+
+@dataclass(frozen=True, kw_only=True)
+class IoPlanKind:
+    """One kind of managed column plan: IO extensions ("HA - IO [..]") or Quickbus devices ("HA - QB [..]").
+
+    Both wire each IO of a member (an extension / a Quickbus device) to its Web-IO command at a
+    deterministic slot and share the column count (50/100/150 pairs → 1/2/3 columns per plan).
+    An extension fills a column of its own; Quickbus devices often bring only a handful of IOs,
+    so they stack within a column while they fit its height (stacked). Only what tells the
+    kinds apart lives here.
+    """
+
+    label: str  # plan-name label: "{prefix} - {label} [A,B]"
+    data_key: str  # coordinator-data key of the IOs ("io" / "quickbus_io")
+    conf_key: str  # entry.options key of the opted-in members
+    member_noun: str  # English noun of one member for logs and messages
+    member_of: Callable[[Mapping[str, Any]], str]  # member an IO belongs to (extension name / device id)
+    member_display: Callable[[Mapping[str, Any]], str]  # its member as shown to the user
+    command_name: Callable[[Mapping[str, Any]], str]  # its Web-IO command name
+    column_blocks: Callable[[str, list[Mapping[str, Any]]], tuple[dict[str, int], dict[int, str]]]
+    stacked: bool  # members share a column while they fit (else one column per member)
+
+    def member_ios(self, data: Mapping[str, Any] | None, member: str) -> list[dict[str, Any]]:
+        """The IOs of one member in data (coordinator data or a fresh parse)."""
+        return [io for io in (data or {}).get(self.data_key, []) if self.member_of(io) == member]
+
+    def member_label(self, data: Mapping[str, Any] | None, member: str) -> str:
+        """A member as shown to the user (repairs, notifications): the extension / "QB3 MT1"."""
+        ios = self.member_ios(data, member)
+        return self.member_display(ios[0]) if ios else member
+
+
+def io_plan_member_origins(
+    kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int], rows_per_col: int
+) -> dict[str, tuple[int, int]]:
+    """(column, first row) of every member of a column plan, in membership order.
+
+    An extension gets the column of its membership index. Quickbus devices fill a column top
+    to bottom, one blank row apart, and move on to the next column once the next device would
+    not fit — membership order never changes and a new device is appended, so a placed device
+    keeps its slot. A device taller than a column starts a fresh column and wraps into the ones
+    after it.
+    rows_needed: rows of one member incl. its header.
+    """
+    if not kind.stacked:
+        return {member: (index, 0) for index, member in enumerate(members)}
+    origins: dict[str, tuple[int, int]] = {}
+    column = row = 0
+    for member in members:
+        need = rows_needed(member)
+        start = row + 1 if row else 0  # a blank row below the device above
+        if row and start + need > rows_per_col:
+            column, start = column + 1, 0
+        origins[member] = (column, start)
+        row = start + need
+        if row >= rows_per_col:
+            column, row = column - (-row // rows_per_col), 0
+    return origins
+
+
+def io_plan_columns(kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int], rows_per_col: int) -> int:
+    """Columns a column plan's members take (see io_plan_member_origins)."""
+    if not kind.stacked:
+        return len(members)
+    if not members:
+        return 0
+    column, row = io_plan_member_origins(kind, members, rows_needed, rows_per_col)[members[-1]]
+    return column - (-(row + rows_needed(members[-1])) // rows_per_col)
+
+
+IO_PLAN_KIND_IO = IoPlanKind(
+    label="IO",
+    data_key="io",
+    conf_key=CONF_FUNCTION_PLAN_IO_EXTENSIONS,
+    member_noun="extension",
+    member_of=lambda io: io["ext_name"],
+    member_display=lambda io: io["ext_name"],
+    command_name=lambda io: f"HA IO {io['ext_name']} {io['identifier']}",
+    column_blocks=_io_ident_blocks,
+    stacked=False,
+)
+IO_PLAN_KIND_QUICKBUS = IoPlanKind(
+    label="QB",
+    data_key=QUICKBUS_IO_DATA_KEY,
+    conf_key=CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
+    member_noun="Quickbus device",
+    member_of=quickbus_device_id,
+    member_display=lambda io: quickbus_device_label(quickbus_device_id(io), io["quickbus"].get("name")),
+    command_name=quickbus_command_name,
+    column_blocks=quickbus_column_blocks,
+    stacked=True,
+)
+IO_PLAN_KINDS = (IO_PLAN_KIND_IO, IO_PLAN_KIND_QUICKBUS)
+
+
+def io_plan_kind_of(io: Mapping[str, Any]) -> IoPlanKind:
+    """Column-plan kind of an IO: Quickbus for an IO of a Quickbus device, IO otherwise."""
+    return IO_PLAN_KIND_QUICKBUS if io.get("quickbus") else IO_PLAN_KIND_IO
+
+
+# Key of the member in a missing-wiring item of a column plan: "ext_name" for an IO extension,
+# "quickbus_device" for a Quickbus device (both items also carry "name" and "identifier").
+_IO_PLAN_ITEM_MEMBER_KEYS = {IO_PLAN_KIND_IO.label: "ext_name", IO_PLAN_KIND_QUICKBUS.label: "quickbus_device"}
+
+
+def io_plan_gap_item(name: str, io: Mapping[str, Any]) -> dict[str, Any]:
+    """Missing-wiring item of one IO in its column plan (audit function_plan_missing)."""
+    kind = io_plan_kind_of(io)
+    return {"name": name, _IO_PLAN_ITEM_MEMBER_KEYS[kind.label]: kind.member_of(io), "identifier": io["identifier"]}
+
+
+def io_plan_item_member(item: Mapping[str, Any]) -> tuple[IoPlanKind, str] | None:
+    """(kind, member) of a column-plan missing-wiring item, None for a marker/KNX item."""
+    for kind in IO_PLAN_KINDS:
+        if (member := item.get(_IO_PLAN_ITEM_MEMBER_KEYS[kind.label])) is not None:
+            return kind, member
+    return None
+
+
+def io_plan_label(io: Mapping[str, Any]) -> str:
+    """Display label of an IO in a column plan: "<extension or Quickbus device> <identifier>"."""
+    return f"{io_plan_kind_of(io).member_display(io)} {io['identifier']}"
 
 
 # need for ha ip dns validation, to avoid false positives
