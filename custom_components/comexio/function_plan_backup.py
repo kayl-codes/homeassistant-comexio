@@ -679,11 +679,13 @@ class FunctionPlanBackupManager:
             return []
         changed_identities: list[dict[str, Any]] = []
         rollback: list[tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]] = []
+        # Any unreadable entry may be an unlisted plan's ("08" for 8): its name is unknown then.
+        list_unreadable = bool(unreadable_plan_keys(fub_data))
         for fub_id, plan_data in plans.items():
             key = str(fub_id)
-            if key in fub_data and not (info := function_plan_info(fub_data, key)):
+            if (key in fub_data or list_unreadable) and not (info := function_plan_info(fub_data, key)):
                 # An unreadable entry would store this plan under the bogus identity (id, "id"); the poll warns.
-                _LOGGER.debug("Auto backup skips plan %s: its plan list entry %r is unreadable", key, fub_data[key])
+                _LOGGER.debug("Auto backup skips plan %s: its plan list entry %r is unreadable", key, fub_data.get(key))
                 continue
             new_hash = plan_hash(plan_data)
             plan_name = info.get("Name", key) if key in fub_data else key

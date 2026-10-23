@@ -5260,8 +5260,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             name,
             old_fub_id,
             new_fub_id,
-            # An unreadable entry at the old ID may be the plan another one holds: keep the bare pick.
-            old_id_still_live=str(old_fub_id) in self.api.fub_data,
+            # Any unreadable entry may be a plan holding the old ID ("05" for 5): keep the bare pick.
+            old_id_still_live=str(old_fub_id) in self.api.fub_data or bool(unreadable_plan_keys(self.api.fub_data)),
         )
         if picks is None:
             return

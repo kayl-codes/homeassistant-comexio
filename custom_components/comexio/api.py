@@ -72,11 +72,13 @@ from .const import (
     function_plan_id,
     function_plan_ids,
     function_plan_info,
+    function_plans,
     io_column_rows,
     io_sort_key,
     is_valid_entity_name_schema,
     knx_loopback_command_name,
     one_line,
+    unreadable_plan_keys,
 )
 from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
 from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
@@ -2410,7 +2412,7 @@ class ComexioAPI:
         once more (_find_created_plan); None then means the plan may exist without an id.
         """
         paper, orient = _plan_paper_and_orientation(paper_format, orientation)
-        known_ids = set(self._fub_data)
+        known_ids = {str(fid) for fid in self._fub_data}
 
         async def create() -> CreatedFunctionPlan | None:
             try:
@@ -2448,13 +2450,14 @@ class ComexioAPI:
                 if fubs is not None
                 else "reading the config failed (see the error above)"
             )
+        # Readable entries only: an entry carrying an Id other than its key may be another plan.
+        listing = dict(iter_group(fubs))
+        if bad_keys := unreadable_plan_keys(listing):
+            reason += f"; the unreadable plan list entries {bad_keys!r} are skipped"
         matches = [
             (fub_id, info)
-            for fid, info in iter_group(fubs)
-            if (fub_id := function_plan_id(fid)) is not None
-            and fid not in known_ids
-            and isinstance(info, dict)
-            and info.get("Name") == plan_name
+            for fub_id, info in function_plans(listing)
+            if str(fub_id) not in known_ids and info.get("Name") == plan_name
         ]
         if len(matches) == 1:
             fub_id, info = matches[0]

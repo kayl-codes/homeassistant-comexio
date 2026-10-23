@@ -203,12 +203,8 @@ def test_a_full_sync_acts_on_carried_plan_findings_only_while_the_plan_list_is_r
 
     gap_items = button._wire_created_pairs.await_args.args[2]
     dangling = [call.args[7] for call in button._sync_class.await_args_list if call.args[1] == WebioClass.MARKER]
-    expected = (
-        (_PLAN_FINDINGS["function_plan_missing"], [_PLAN_FINDINGS["function_plan_dangling"]])
-        if acted_on
-        else ([], [[]])
-    )
-    assert (gap_items, dangling) == expected
+    assert gap_items == (_PLAN_FINDINGS["function_plan_missing"] if acted_on else [])
+    assert dangling == [_PLAN_FINDINGS["function_plan_dangling"] if acted_on else []]
     assert ("plan list has unreadable entries (x)" in button.coordinator.sync_progress_text) is not acted_on
 
 

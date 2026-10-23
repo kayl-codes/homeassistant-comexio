@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.comexio import api as api_module, coordinator as coordinator_module, repairs
+from custom_components.comexio import (
+    api as api_module,
+    coordinator as coordinator_module,
+    function_plan_backup as backup_module,
+    repairs,
+)
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
@@ -17,8 +22,10 @@ from custom_components.comexio.const import (
     unreadable_plan_keys,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator, _readable_plan_ids
+from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
 from custom_components.comexio.services import _context, _yaml_sync, misc
 from custom_components.comexio.services._context import _available_plans_str, _resolve_fub_id
+from tests.common import load_json_fixture
 
 # Plan 7 is the only real plan: "08" and "x" are no plan ids as str(fub_id) spells them, "9" carries no plan info.
 MALFORMED_FUBS = {"7": {"Name": "Pumps"}, "08": {"Name": "Pumps"}, "x": {"Name": "Pumps"}, "9": "garbage"}
@@ -183,6 +190,59 @@ def test_a_created_plan_is_found_despite_a_non_canonical_twin(comexio_api: Comex
 
     assert created is not None
     assert created.fub_id == 12
+
+
+def test_a_created_plan_is_not_taken_from_an_entry_whose_id_differs_from_its_key(comexio_api: ComexioAPI) -> None:
+    """The entry under "12" carries plan 13: returning 12 could make a restore write into another plan."""
+    comexio_api.get_raw_config = AsyncMock(return_value={"Fubs": {"12": {"Id": 13, "Name": "Pumps"}}})  # type: ignore[method-assign]
+
+    assert asyncio.run(comexio_api._find_created_plan("Pumps", set())) is None
+
+
+def test_a_created_plan_is_found_in_a_plan_list_sent_as_an_array(comexio_api: ComexioAPI) -> None:
+    """Comexio sends a gap-free id group as a JSON array: the index is the plan id."""
+    fubs = [{"Id": 0, "Name": "Lights"}, {"Id": 1, "Name": "Pumps"}]
+    comexio_api.get_raw_config = AsyncMock(return_value={"Fubs": fubs})  # type: ignore[method-assign]
+
+    created = asyncio.run(comexio_api._find_created_plan("Pumps", {"0"}))
+
+    assert created is not None
+    assert created.fub_id == 1
+
+
+@pytest.mark.parametrize(
+    ("plans", "fub_data", "identities"),
+    [
+        ({8: "plan"}, {}, [(8, "8")]),
+        ({8: "plan"}, {"08": {"Name": "Pumps"}}, []),
+        ({7: "plan"}, {"7": {"Name": "Pumps"}, "08": {"Name": "Lights"}}, [(7, "Pumps")]),
+    ],
+    ids=["unlisted", "maybe-08", "readable-next-to-an-unreadable-entry"],
+)
+def test_the_auto_backup_skips_a_plan_the_list_may_hide_behind_an_unreadable_entry(
+    monkeypatch: pytest.MonkeyPatch, plans: dict, fub_data: dict, identities: list
+) -> None:
+    """Behind "08", plan 8 has an unknown name: backed up, it would land under the bogus identity (8, "8")."""
+    saved: dict = {}
+
+    class _Store:
+        def __init__(self, _hass, _version, key: str) -> None:
+            self.key = key
+
+        async def async_load(self):
+            return saved.get(self.key)
+
+        async def async_save(self, data) -> None:
+            saved[self.key] = data
+
+    monkeypatch.setattr(backup_module, "Store", _Store)
+    fixture = load_json_fixture("function_plan.json")
+    plan = {"elements": fixture["elements"], "connections": fixture["connections"]}
+    manager = FunctionPlanBackupManager(MagicMock(), "cx1", None)
+
+    changed = asyncio.run(manager.async_auto_backup(dict.fromkeys(plans, plan), fub_data))
+
+    assert [(entry["fub_id"], entry["plan_name"]) for entry in changed] == identities
 
 
 def test_service_plan_name_resolves_to_the_real_plan() -> None:
@@ -359,9 +419,13 @@ def test_the_pre_change_backup_skips_a_plan_whose_list_entry_is_unreadable(entry
     assert coordinator.function_plan_backup.async_change_backup.await_count == int(stored)
 
 
-@pytest.mark.parametrize(("old_entry", "still_live"), [("garbage", True), (None, False)], ids=["unreadable", "gone"])
-def test_a_restore_keeps_the_bare_pick_while_the_old_id_entry_is_unreadable(old_entry, still_live: bool) -> None:
-    coordinator = _coordinator({} if old_entry is None else {"5": old_entry})
+@pytest.mark.parametrize(
+    ("fub_data", "still_live"),
+    [({"5": "garbage"}, True), ({"05": {"Name": "Lights"}}, True), ({}, False), ({"7": {"Name": "Pumps"}}, False)],
+    ids=["unreadable", "maybe-behind-an-unreadable-key", "gone", "gone-from-a-readable-list"],
+)
+def test_a_restore_keeps_the_bare_pick_while_the_old_id_entry_is_unreadable(fub_data: dict, still_live: bool) -> None:
+    coordinator = _coordinator(fub_data)
     coordinator.config_entry = SimpleNamespace(options={})
     with patch.object(coordinator_module, "repointed_watchdog_user_plan_picks", return_value=None) as repoint:
         coordinator._repoint_vanished_pick("Pumps", 5, 6)
