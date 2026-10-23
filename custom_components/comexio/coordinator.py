@@ -7169,7 +7169,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 skipped[device] = "on an offline extension"
         return skipped
 
-    def _log_skipped_quickbus_devices(self, data: Mapping[str, Any], skipped: dict[str, str]) -> None:
+    def _log_skipped_quickbus_devices(self, data: Mapping[str, Any] | None, skipped: dict[str, str]) -> None:
         """Warn once per change about selected Quickbus devices left out of the QB plans.
 
         managed_io_groups runs on every poll and sync, so an unchanged state stays quiet.
