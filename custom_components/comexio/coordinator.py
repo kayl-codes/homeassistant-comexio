@@ -364,6 +364,16 @@ def _plan_ref_ids(elements: dict[str, Any]) -> tuple[set[str], set[str], set[str
     return marker_ids, io_ids, knx_ids
 
 
+def _plan_source_ref_ids(plan_data: dict[str, Any], source_type: str) -> set[str]:
+    """ref_ids of the `source_type` (marker "2" / IO "1" / KNX "11") elements in one plan."""
+    ids: set[str] = set()
+    for elem in (plan_data.get("elements") or {}).values():
+        ref = elem.get("reference") or {}
+        if str(ref.get("type")) == source_type:
+            ids.add(str(ref.get("ref_id")))
+    return ids
+
+
 def _count_by_ref(by_ref: dict[int, list[int]]) -> int:
     """Total id count across all source categories of a per-ref_type trigger-audit map."""
     return sum(len(ids) for ids in by_ref.values())
@@ -1784,30 +1794,43 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 items.append({"name": knx_by_id.get(rid, f"K{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_KNX})
                 mismatches.add(f"function_plan_dangling_K{rid}")
         if managed_io_groups:
-            # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
-            # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
-            # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
-            io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
-            managed_kinds = {label for label, _member in managed_io_groups}
-            for rid, fub_ids in self._dangling_source_ids("1", wired_io, connected_io).items():
-                io = io_by_id.get(rid)
-                kind = self._dangling_io_kind(io, fub_ids)
-                if kind.label not in managed_kinds:
-                    # Its kind has no managed member: no sync pass of its class would remove it.
-                    _LOGGER.debug(
-                        "[%s] Dangling IO%s in plans %s not reported: no %s member is managed",
-                        self.server_id,
-                        rid,
-                        fub_ids,
-                        kind.label,
-                    )
-                    continue
-                name = io_plan_label(io) if io else f"IO#{rid}"
-                # The class whose sync pass removes the debris: a Quickbus IO's commands live in the
-                # Quickbus class, which may be synced while the IO class is opted out.
-                cls = WEBIO_CLASS_QUICKBUS if kind is IO_PLAN_KIND_QUICKBUS else WEBIO_CLASS_IO
-                items.append({"name": name, "ref_id": rid, "webio_class": cls})
-                mismatches.add(f"function_plan_dangling_IO{rid}")
+            items.extend(self._dangling_io_items(final_data, wired_io, connected_io, managed_io_groups, mismatches))
+        return items
+
+    def _dangling_io_items(
+        self,
+        final_data: dict[str, Any],
+        wired_io: set[tuple[str, str]] | None,
+        connected_io: set[str] | None,
+        managed_io_groups: set[tuple[str, str]],
+        mismatches: set[str],
+    ) -> list[dict[str, Any]]:
+        """IO part of _function_plan_dangling_items: debris of every IO plan kind with a managed member."""
+        # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
+        # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
+        # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
+        io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
+        managed_kinds = {label for label, _member in managed_io_groups}
+        items: list[dict[str, Any]] = []
+        for rid, fub_ids in self._dangling_source_ids("1", wired_io, connected_io).items():
+            io = io_by_id.get(rid)
+            kind = self._dangling_io_kind(io, fub_ids)
+            if kind.label not in managed_kinds:
+                # Its kind has no managed member: no sync pass of its class would remove it.
+                _LOGGER.debug(
+                    "[%s] Dangling IO%s in plans %s not reported: no %s member is managed",
+                    self.server_id,
+                    rid,
+                    fub_ids,
+                    kind.label,
+                )
+                continue
+            name = io_plan_label(io) if io else f"IO#{rid}"
+            # The class whose sync pass removes the debris: a Quickbus IO's commands live in the
+            # Quickbus class, which may be synced while the IO class is opted out.
+            cls = WEBIO_CLASS_QUICKBUS if kind is IO_PLAN_KIND_QUICKBUS else WEBIO_CLASS_IO
+            items.append({"name": name, "ref_id": rid, "webio_class": cls})
+            mismatches.add(f"function_plan_dangling_IO{rid}")
         return items
 
     def _dangling_io_kind(self, io: Mapping[str, Any] | None, fub_ids: list[int]) -> IoPlanKind:
@@ -8577,11 +8600,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for fub_id, plan_data in self.function_plan_plans.items():
             if fub_id not in relevant_fub_ids or not self._is_managed_function_plan(fub_id):
                 continue
-            present_ids: set[str] = set()
-            for elem in (plan_data.get("elements") or {}).values():
-                ref = elem.get("reference") or {}
-                if str(ref.get("type")) == source_type:
-                    present_ids.add(str(ref.get("ref_id")))
+            present_ids = _plan_source_ref_ids(plan_data, source_type)
             if not present_ids:
                 continue
             plan_wired_ids = {rid for rid, _ in self._plan_wired_pairs(plan_data, source_type)}

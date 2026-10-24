@@ -149,21 +149,22 @@ def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
             lines.append(f"* {ICON_PUZZLE} **{cluster_noun} {one_line(plan_name)} missing:** all {gap} {item_noun}")
         else:
             lines.append(f"* {ICON_LINK} **{item_noun_cap} not wired in {one_line(plan_name)}:** {gap} of {total}")
-    for ext, (gap, total) in detail.get("ios_by_ext", {}).items():
-        if gap == total:
-            lines.append(f"* {ICON_PUZZLE} **Extension {ext} not yet in an IO cluster plan:** all {gap} IOs")
-        else:
-            lines.append(f"* {ICON_PUZZLE} **Extension {ext} partially wired:** {gap} of {total} IOs missing")
-    for device, (gap, total) in detail.get("quickbus_by_device", {}).items():
-        if gap == total:
-            lines.append(
-                f"* {ICON_PUZZLE} **Quickbus device {one_line(device)} not yet in a QB cluster plan:** all {gap} IOs"
-            )
-        else:
-            lines.append(
-                f"* {ICON_PUZZLE} **Quickbus device {one_line(device)} partially wired:** {gap} of {total} IOs missing"
-            )
+    lines.extend(
+        _io_column_gap_line(f"Extension {ext}", "an IO", gap, total)
+        for ext, (gap, total) in detail.get("ios_by_ext", {}).items()
+    )
+    lines.extend(
+        _io_column_gap_line(f"Quickbus device {one_line(device)}", "a QB", gap, total)
+        for device, (gap, total) in detail.get("quickbus_by_device", {}).items()
+    )
     return lines
+
+
+def _io_column_gap_line(member: str, plan_noun: str, gap: int, total: int) -> str:
+    """Summary bullet for one IO extension / Quickbus device with missing wiring."""
+    if gap == total:
+        return f"* {ICON_PUZZLE} **{member} not yet in {plan_noun} cluster plan:** all {gap} IOs"
+    return f"* {ICON_PUZZLE} **{member} partially wired:** {gap} of {total} IOs missing"
 
 
 def _column_noun(n_extensions: int, n_quickbus_devices: int) -> str:

@@ -301,6 +301,21 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
         )
 
 
+def _sort_row_step(coordinator: ComexioCoordinator, fub_id: int) -> int:
+    """Vertical distance between two rows of the sorted plan."""
+    if coordinator.is_trigger_plan(fub_id):
+        return FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
+    if coordinator.is_knx_cluster_plan(fub_id):
+        # A KNX bridge pair's two WebIO hops already sit FUNCTION_PLAN_LAYOUT_ROW_HEIGHT apart
+        # (see _grid.py's _KNX_LOOPBACK_Y_OFFSET). Using that SAME value for the pair-to-pair
+        # row_step too (tried 2026-09-20) made every row in the plan perfectly equidistant, with
+        # no visual gap between one pair and the next — user report: "alles press an press".
+        # FUNCTION_PLAN_KNX_LAYOUT_Y_STEP keeps the within-pair hop gap tight while restoring a
+        # visibly larger gap between pairs (see its own docstring in const.py for the numbers).
+        return FUNCTION_PLAN_KNX_LAYOUT_Y_STEP
+    return FUNCTION_PLAN_LAYOUT_Y_STEP
+
+
 async def async_sort_function_plan(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -329,18 +344,7 @@ async def async_sort_function_plan(
     if was_active is None:
         was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
 
-    if coordinator.is_trigger_plan(fub_id):
-        row_step = FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
-    elif coordinator.is_knx_cluster_plan(fub_id):
-        # A KNX bridge pair's two WebIO hops already sit FUNCTION_PLAN_LAYOUT_ROW_HEIGHT apart
-        # (see _grid.py's _KNX_LOOPBACK_Y_OFFSET). Using that SAME value for the pair-to-pair
-        # row_step too (tried 2026-09-20) made every row in the plan perfectly equidistant, with
-        # no visual gap between one pair and the next — user report: "alles press an press".
-        # FUNCTION_PLAN_KNX_LAYOUT_Y_STEP keeps the within-pair hop gap tight while restoring a
-        # visibly larger gap between pairs (see its own docstring in const.py for the numbers).
-        row_step = FUNCTION_PLAN_KNX_LAYOUT_Y_STEP
-    else:
-        row_step = FUNCTION_PLAN_LAYOUT_Y_STEP
+    row_step = _sort_row_step(coordinator, fub_id)
     canvas_label, x_max, rows_per_col, max_cols = _sort_canvas_bounds(api, fub_id, canvas_format, row_step)
 
     plan_data = await api.function_plan_load_elements(fub_id)

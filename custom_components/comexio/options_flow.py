@@ -153,13 +153,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # below (keep already-saved selections choosable even once no longer "current").
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
         available_counts = getattr(coordinator, "available_source_counts", None) or {}
-        hidden_cats = {
-            cat.key
-            for cat in source_cats
-            if available_counts
-            and not available_counts.get(cat.key)
-            and not conf.get(cat.import_conf_key, cat.import_default)
-        }
+        hidden_cats = _hidden_source_categories(source_cats, available_counts, conf)
 
         if user_input is not None:
             self._normalize_user_input(user_input, conf, errors, hidden_cats)
@@ -170,8 +164,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # excluding offline extensions (no hardware present — wiring them is pointless),
         # but keeping already-saved selections choosable so they can be deselected.
         coordinator_data = getattr(coordinator, "data", None) or {}
-        ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
-        ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
+        ext_names = _io_extension_options(coordinator_data, conf)
         quickbus_options = _quickbus_device_options(coordinator_data, conf)
 
         # Marker + KNX share the same schema/import/ignored-ids field shape (registry-driven
@@ -392,6 +385,24 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             if not merged_options.get(cat.ignored_conf_key, "").strip():
                 merged_options.pop(cat.ignored_conf_key, None)
         return self.async_create_entry(title="", data=merged_options)
+
+
+def _hidden_source_categories(source_cats, available_counts: Mapping[str, int], conf: Mapping[str, Any]) -> set[str]:
+    """Categories without objects on the server and not opted in; none while the counts are unknown."""
+    return {
+        cat.key
+        for cat in source_cats
+        if available_counts
+        and not available_counts.get(cat.key)
+        and not conf.get(cat.import_conf_key, cat.import_default)
+    }
+
+
+def _io_extension_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[str]:
+    """Online extension names, plus saved picks that are offline or gone so they can be deselected."""
+    ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
+    ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
+    return ext_names
 
 
 def _quickbus_device_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[SelectOptionDict]:
