@@ -303,14 +303,23 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         A loaded entry's update listener reloads it when the changes land; HA's own reload on top would load it
         twice (and is refused from HA 2026.12 for entries with an update listener). Without a listener run — the
-        entry is not loaded (a setup refused on the credentials), or nothing changed — the flow schedules the
-        reload: a reauth must restart the polls the refused login stopped, even with unchanged credentials.
+        entry is not loaded (a setup refused on the credentials), or nothing changed — the flow starts the
+        reload: a reauth must restart the polls the refused login stopped, even with unchanged credentials. On a
+        loaded entry it goes through the coordinator like the listener's, so it never cuts into a running sync.
         """
-        listener_reloads = entry.state is config_entries.ConfigEntryState.LOADED
+        loaded = entry.state is config_entries.ConfigEntryState.LOADED
         before = (entry.title, dict(entry.data), dict(entry.options))
         result = self.async_update_and_abort(entry, **changes)
-        if not listener_reloads or (entry.title, dict(entry.data), dict(entry.options)) == before:
+        if loaded and (entry.title, dict(entry.data), dict(entry.options)) != before:
+            return result
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id) if loaded else None
+        if coordinator is None:
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        else:
+            self.hass.async_create_task(
+                coordinator.async_reload_entry(f"{self.source} without changes"),
+                f"comexio reload after {self.source} {entry.entry_id}",
+            )
         return result
 
     @staticmethod
