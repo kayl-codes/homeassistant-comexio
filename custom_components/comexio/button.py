@@ -2998,9 +2998,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     ) -> tuple[str, list[str], list[str]]:
         """Add the missing IO pairs of one or more members (extensions / Quickbus devices) to one column plan.
 
-        Unlike marker plans there is never a sort pass: every IO pair lands in its
-        deterministic slot (see api.function_plan_add_io_pairs), so finalizing is just
-        reactivating the plan (fresh plans and plans that were active before the stop).
+        Every IO pair lands in its deterministic slot (see api.function_plan_add_io_pairs), so
+        finalizing is just reactivating the plan (fresh plans and plans that were active before
+        the stop) — except an existing stacked (Quickbus) plan, which gets a sort pass to keep
+        its members from overlapping once an earlier member's IO count changed.
         Returns (summary_line, added_labels, errors).
         """
         api = ctx.api
@@ -3058,6 +3059,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if errors:
             _LOGGER.warning("[%s] function_plan_add_io_pairs errors: %s", self.server_id, errors)
 
+        if added and kind.stacked and not is_fresh:
+            # Stacked origins follow each member's current IO count, but pairs already in the plan
+            # stay where they were placed: a member above that lost or gained IOs (also between the
+            # cached data the origins came from and the fresh reload) leaves the new pairs
+            # overlapping old ones. The sort restores the whole grid from one snapshot, headers
+            # included, and reactivates the plan.
+            note = await self._sort_and_reactivate(ctx, fub_id, plan_name, was_active)
+            return (
+                _plan_summary_line(plan_name, is_fresh, len(added), n_total, "IO pairs", t0, note, errors),
+                added,
+                errors,
+            )
+
         if added:
             n_headers = await async_resync_io_group_headers(self.coordinator, api, fub_id)
             _LOGGER.info(
@@ -3113,16 +3127,19 @@ def _parse_io_from_webio_name(name: str, known_names: dict[str, _IoRef]) -> _IoR
 def _merge_io_items(
     created_refs: list[_IoRef], gap_items: list[dict], managed_groups: set[tuple[str, str]]
 ) -> list[_IoRef]:
-    """Merge freshly created IO / Quickbus commands (managed members only) with audit gap items,
+    """Merge freshly created IO / Quickbus commands and audit gap items of managed members,
     deduplicated by (kind label, member, identifier)."""
     merged = dict.fromkeys(ref for ref in created_refs if ref[:2] in managed_groups)
     if unmanaged := [ref for ref in created_refs if ref[:2] not in managed_groups]:
         _LOGGER.debug("Created IO commands not wired (member not managed): %s", unmanaged)
     for item in gap_items:
-        if (member := io_plan_item_member(item)) is not None:
+        if (member := io_plan_item_member(item)) is None:
+            _LOGGER.warning("Function plan gap item without a column-plan member skipped: %s", item)
+        elif (member[0].label, member[1]) in managed_groups:
             merged.setdefault((member[0].label, member[1], item["identifier"]))
         else:
-            _LOGGER.warning("Function plan gap item without a column-plan member skipped: %s", item)
+            # Recorded by an earlier audit; the member was deselected or went offline since.
+            _LOGGER.debug("Function plan gap item not wired (member not managed any more): %s", item)
     return list(merged)
 
 

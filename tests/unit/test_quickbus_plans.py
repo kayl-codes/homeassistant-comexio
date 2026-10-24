@@ -5,7 +5,7 @@ import copy
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,6 +16,7 @@ from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
     CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
+    DOMAIN,
     FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH,
     FUNCTION_PLAN_LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_Y_START,
@@ -38,6 +39,7 @@ from custom_components.comexio.const import (
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.options_flow import _quickbus_device_options
 from custom_components.comexio.repairs import _function_plan_gap_lines, _function_plan_option_label
+from custom_components.comexio.services import misc as services_misc
 from custom_components.comexio.services._grid import _io_header_slots, _io_ref_slots
 from custom_components.comexio.services.plan_actions import _sort_compute_positions
 from tests.common import load_json_fixture
@@ -255,19 +257,47 @@ def test_missing_detail_counts_quickbus_devices_apart_from_extensions(quickbus_r
     assert detail["ios_by_ext"] == {"BASE": [1, 1]}
 
 
-def test_dangling_quickbus_debris_is_removed_by_the_quickbus_class(quickbus_result: dict[str, Any]) -> None:
+_NO_WIRING = (set(), set(), set(), set(), set(), set())
+_QB_PLAN, _IO_PLAN = 70, 80
+
+
+def _dangling_coordinator(quickbus_result: dict[str, Any], dangling: dict[str, list[int]]) -> ComexioCoordinator:
     coordinator = _coordinator({}, quickbus_result)
-    coordinator._dangling_source_ids = lambda source_type, *_args: {"301", "11"} if source_type == "1" else set()  # type: ignore[method-assign]
-    mismatches: set[str] = set()
+    coordinator._dangling_source_ids = lambda source_type, *_args: dangling if source_type == "1" else {}  # type: ignore[method-assign]
+    plans = {_QB_PLAN: (IO_PLAN_KIND_QUICKBUS, ["3"]), _IO_PLAN: (IO_PLAN_KIND_IO, ["BASE"])}
+    coordinator.managed_column_plan = plans.get  # type: ignore[method-assign]
+    return coordinator
+
+
+def test_dangling_quickbus_debris_is_removed_by_the_quickbus_class(quickbus_result: dict[str, Any]) -> None:
+    # 301 is a QB IO; 999 is gone from the data and sat in a QB plan, 998 gone from an IO plan.
+    dangling = {"301": [_QB_PLAN], "999": [_QB_PLAN], "998": [_IO_PLAN], "11": [_IO_PLAN]}
+    coordinator = _dangling_coordinator(quickbus_result, dangling)
 
     items = coordinator._function_plan_dangling_items(
-        quickbus_result, (set(), set(), set(), set(), set(), set()), False, {("QB", "3")}, mismatches
+        quickbus_result, _NO_WIRING, False, {("QB", "3"), ("IO", "BASE")}, set()
     )
 
     by_ref = {item["ref_id"]: item for item in items}
     assert by_ref["301"]["name"] == "QB3 BM Diele PIR1"
     assert by_ref["301"]["webio_class"] == "quickbus"
+    assert by_ref["999"]["webio_class"] == "quickbus"
+    assert by_ref["998"]["webio_class"] == "io"
     assert by_ref["11"]["webio_class"] == "io"
+
+
+def test_dangling_debris_of_a_kind_without_a_selected_member_is_not_reported(
+    quickbus_result: dict[str, Any],
+) -> None:
+    # Only Quickbus devices are managed: the IO class is not synced, so IO debris would stay a
+    # repair nobody can clear.
+    coordinator = _dangling_coordinator(quickbus_result, {"301": [_QB_PLAN], "11": [_IO_PLAN], "998": [_IO_PLAN]})
+    mismatches: set[str] = set()
+
+    items = coordinator._function_plan_dangling_items(quickbus_result, _NO_WIRING, False, {("QB", "3")}, mismatches)
+
+    assert [item["ref_id"] for item in items] == ["301"]
+    assert mismatches == {"function_plan_dangling_IO301"}
 
 
 # --- sync wiring ---
@@ -281,15 +311,16 @@ def test_created_quickbus_commands_resolve_to_their_device() -> None:
     assert _parse_io_from_webio_name("HA QB9 Unknown G1", known) is None
 
 
-def test_merge_io_items_keeps_managed_members_and_every_gap() -> None:
+def test_merge_io_items_keeps_managed_members_only() -> None:
     created = [("QB", "1", "G1"), ("QB", "2", "G1"), ("IO", "BASE", "I1")]
     gaps = [
         {"name": "x", "quickbus_device": "1", "identifier": "G1"},  # also created: once
         {"name": "y", "quickbus_device": "3", "identifier": "PIR1"},
+        {"name": "w", "quickbus_device": "4", "identifier": "G1"},  # deselected since the audit
         {"name": "z", "marker_id": 5},  # not a column-plan item
     ]
 
-    merged = _merge_io_items(created, gaps, {("QB", "1"), ("IO", "BASE")})
+    merged = _merge_io_items(created, gaps, {("QB", "1"), ("QB", "3"), ("IO", "BASE")})
 
     assert merged == [("QB", "1", "G1"), ("IO", "BASE", "I1"), ("QB", "3", "PIR1")]
 
@@ -408,6 +439,97 @@ def test_wire_io_clusters_skips_a_kind_without_items() -> None:
     assert [c.args[1] for c in button._wire_io_kind_clusters.await_args_list] == [IO_PLAN_KIND_QUICKBUS]
 
 
+@pytest.mark.parametrize(
+    ("kind", "is_fresh", "added", "sorted_"),
+    [
+        (IO_PLAN_KIND_QUICKBUS, False, ["G1"], True),
+        (IO_PLAN_KIND_QUICKBUS, True, ["G1"], False),
+        (IO_PLAN_KIND_QUICKBUS, False, [], False),
+        (IO_PLAN_KIND_IO, False, ["G1"], False),
+    ],
+    ids=["existing-stacked-plan", "fresh-plan", "nothing-added", "io-plan"],
+)
+def test_pairs_added_to_an_existing_stacked_plan_restore_its_grid(
+    monkeypatch: pytest.MonkeyPatch, kind: Any, is_fresh: bool, added: list[str], sorted_: bool
+) -> None:
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button.server_id = "test"
+    button.coordinator = SimpleNamespace(  # type: ignore[assignment]
+        io_cluster_plan_contains=lambda *_args: True,
+        async_function_plan_change_backup=AsyncMock(),
+        data={},
+    )
+    button._plan_name = lambda _fub_id: "HA - QB [1,3]"  # type: ignore[method-assign]
+    button._sort_and_reactivate = AsyncMock(return_value=", sorted")  # type: ignore[method-assign]
+    resync = AsyncMock(return_value=1)
+    monkeypatch.setattr("custom_components.comexio.button.async_resync_io_group_headers", resync)
+    api = SimpleNamespace(
+        fub_data={"7": {"Active": True}},
+        function_plan_stop_fup=AsyncMock(),
+        function_plan_add_io_pairs=AsyncMock(return_value=(added, [])),
+        function_plan_run_fup=AsyncMock(return_value=True),
+    )
+    ctx = SimpleNamespace(api=api, update_status=lambda *_args, **_kwargs: None, failed_writes=[])
+
+    line, _added, _errors = asyncio.run(
+        button._add_io_pairs_to_plan(ctx, 7, [("3", (0, 5))], {"3": ["G1"]}, is_fresh, {"done": 0}, kind)
+    )
+
+    if sorted_:
+        button._sort_and_reactivate.assert_awaited_once_with(ctx, 7, "HA - QB [1,3]", True)
+        assert ", sorted" in line
+    else:
+        button._sort_and_reactivate.assert_not_awaited()
+    assert resync.await_count == int(bool(added) and not sorted_)
+
+
+def test_dangling_source_ids_names_every_plan_an_id_dangles_in() -> None:
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    elements = {"1": {"reference": {"type": "1", "ref_id": "301"}}, "2": {"reference": {"type": "1", "ref_id": "11"}}}
+    coordinator.function_plan_plans = {
+        70: {"elements": elements},
+        80: {"elements": elements},
+        90: {"elements": elements},
+    }
+    coordinator._function_plan_check_fub_ids = lambda: {70, 80}  # type: ignore[method-assign]
+    coordinator._is_managed_function_plan = lambda _fub_id: True  # type: ignore[method-assign]
+    coordinator._plan_wired_pairs = lambda plan, _type: (
+        {("11", "x")} if plan is coordinator.function_plan_plans[80] else set()
+    )  # type: ignore[method-assign]
+    coordinator._plan_connected_source_ids = lambda _plan, _type: set()  # type: ignore[method-assign]
+
+    dangling = coordinator._dangling_source_ids("1", set(), set())
+
+    # 90 is no managed plan of the audit; 11 is wired in 80.
+    assert {rid: sorted(fub_ids) for rid, fub_ids in dangling.items()} == {"301": [70, 80], "11": [70]}
+
+
+@pytest.mark.parametrize("upload", [False, True], ids=["preview", "upload"])
+def test_generate_web_io_service_builds_from_the_selected_quickbus_devices(
+    monkeypatch: pytest.MonkeyPatch, upload: bool
+) -> None:
+    source = {"quickbus_io": ["selected only"]}
+    api = SimpleNamespace(generate_webio_json=MagicMock(return_value="{}"))
+    coordinator = SimpleNamespace(
+        api=api,
+        server_id="test",
+        config_entry=SimpleNamespace(data={}, options={}),
+        required_webio_classes=("quickbus",),
+        data={"quickbus_io": ["every device"]},
+        webio_source_data=lambda: source,
+        ignored_marker_ids=set(),
+        ignored_knx_ids=set(),
+    )
+    monkeypatch.setattr(services_misc.persistent_notification, "async_create", MagicMock())
+    monkeypatch.setattr(services_misc, "_upload_webio_class", AsyncMock(return_value="ok"))
+    hass = SimpleNamespace(data={DOMAIN: {"e1": coordinator}})
+    call = SimpleNamespace(data={"config_entry": "e1", "upload": upload})
+
+    asyncio.run(services_misc.handle_generate_web_io(hass, call))
+
+    assert api.generate_webio_json.call_args.args[2] is source
+
+
 def test_quickbus_grid_slots_stack_devices_in_a_column(quickbus_result: dict[str, Any]) -> None:
     coordinator = _coordinator({}, quickbus_result)
     members = ["1", "2", "3"]
@@ -507,6 +629,23 @@ def test_options_offer_online_quickbus_devices_by_id_and_saved_ones(quickbus_res
         {"value": "9", "label": "QB9"},
     ]
     assert _quickbus_device_options({}, {}) == []
+
+
+def test_options_keep_an_offline_quickbus_device_selected_while_never_saved(quickbus_result: dict[str, Any]) -> None:
+    data = copy.deepcopy(quickbus_result)
+    for io in data[QUICKBUS_IO_DATA_KEY]:
+        if io["quickbus"]["name"] == "MT Bad":
+            io["offline"] = True
+
+    options = _quickbus_device_options(data, {})
+
+    # Every device is selected by default: the offline one stays offered (after the live ones),
+    # so saving the form does not drop it.
+    assert options == [
+        {"value": "1", "label": "QB1 MT Flur"},
+        {"value": "3", "label": "QB3 BM Diele"},
+        {"value": "2", "label": "QB2 MT Bad"},
+    ]
 
 
 # --- stacking Quickbus devices within a plan's columns ---

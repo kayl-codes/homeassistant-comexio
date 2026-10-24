@@ -397,17 +397,22 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 def _quickbus_device_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[SelectOptionDict]:
     """Quickbus devices for the QB cluster multi-select: value = device id, label "QB3 MT1".
 
-    Live devices first (by id), excluding those on an offline extension, then saved selections
-    that are gone — kept choosable so they can be deselected.
+    Live devices first (by id), excluding those on an offline extension, then selected devices
+    that are offline or gone — kept choosable so saving the form never drops them by accident
+    (while the option was never saved, every device is selected).
     """
     names: dict[str, str] = {}
+    offline: set[str] = set()
     for io in coordinator_data.get(QUICKBUS_IO_DATA_KEY, []):
-        if not io.get("offline"):
-            names.setdefault(quickbus_device_id(io), io["quickbus"].get("name") or "")
-    live = sorted(names, key=lambda device: (len(device), device))
-    saved = dict.fromkeys(str(device) for device in conf.get(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES, []))
-    gone = [device for device in saved if device not in names]
+        device = quickbus_device_id(io)
+        names.setdefault(device, io["quickbus"].get("name") or "")
+        if io.get("offline"):
+            offline.add(device)
+    by_id = sorted(names, key=lambda device: (len(device), device))
+    live = [device for device in by_id if device not in offline]
+    selected = dict.fromkeys(str(device) for device in conf.get(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES, by_id))
+    kept = [device for device in selected if device not in live]
     return [
         SelectOptionDict(value=device, label=one_line(quickbus_device_label(device, names.get(device))))
-        for device in [*live, *gone]
+        for device in [*live, *kept]
     ]

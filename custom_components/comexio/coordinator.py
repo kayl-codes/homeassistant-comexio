@@ -1788,15 +1788,36 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
             # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
             io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
-            for rid in self._dangling_source_ids("1", wired_io, connected_io):
+            managed_kinds = {label for label, _member in managed_io_groups}
+            for rid, fub_ids in self._dangling_source_ids("1", wired_io, connected_io).items():
                 io = io_by_id.get(rid)
+                kind = self._dangling_io_kind(io, fub_ids)
+                if kind.label not in managed_kinds:
+                    # Its kind has no managed member: no sync pass of its class would remove it.
+                    _LOGGER.debug(
+                        "[%s] Dangling IO%s in plans %s not reported: no %s member is managed",
+                        self.server_id,
+                        rid,
+                        fub_ids,
+                        kind.label,
+                    )
+                    continue
                 name = io_plan_label(io) if io else f"IO#{rid}"
                 # The class whose sync pass removes the debris: a Quickbus IO's commands live in the
                 # Quickbus class, which may be synced while the IO class is opted out.
-                cls = WEBIO_CLASS_QUICKBUS if io and io.get("quickbus") else WEBIO_CLASS_IO
+                cls = WEBIO_CLASS_QUICKBUS if kind is IO_PLAN_KIND_QUICKBUS else WEBIO_CLASS_IO
                 items.append({"name": name, "ref_id": rid, "webio_class": cls})
                 mismatches.add(f"function_plan_dangling_IO{rid}")
         return items
+
+    def _dangling_io_kind(self, io: Mapping[str, Any] | None, fub_ids: list[int]) -> IoPlanKind:
+        """Kind of a dangling IO element: from the IO itself, else (IO gone) from the plan it sits in."""
+        if io:
+            return IO_PLAN_KIND_QUICKBUS if io.get("quickbus") else IO_PLAN_KIND_IO
+        in_qb_plan = any(
+            (plan := self.managed_column_plan(fub_id)) and plan[0] is IO_PLAN_KIND_QUICKBUS for fub_id in fub_ids
+        )
+        return IO_PLAN_KIND_QUICKBUS if in_qb_plan else IO_PLAN_KIND_IO
 
     def _audit_trigger_constructs(
         self, final_data: dict[str, Any], mismatches: set[str]
@@ -8533,7 +8554,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         source_type: str,
         wired_pairs: set[tuple[str, str]] | None,
         connected_ids: set[str] | None,
-    ) -> set[str]:
+    ) -> dict[str, list[int]]:
         """ref_ids of marker ("2") / IO ("1") elements present in a managed plan but never
         paired with a WebIO element there AND without any other connection either —
         Function-Plan debris left behind when a Web-IO command/element was removed (e.g.
@@ -8547,11 +8568,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         wired or otherwise connected in one, genuinely orphaned in another — so subtracting
         a floor combined across all plans (as an earlier version of this method did) would
         hide real debris in the second plan just because the first one still uses it.
+        Maps each ref_id to the plans it dangles in.
         """
         if wired_pairs is None or connected_ids is None or not self.function_plan_plans:
-            return set()
+            return {}
         relevant_fub_ids = self._function_plan_check_fub_ids()
-        dangling: set[str] = set()
+        dangling: dict[str, list[int]] = {}
         for fub_id, plan_data in self.function_plan_plans.items():
             if fub_id not in relevant_fub_ids or not self._is_managed_function_plan(fub_id):
                 continue
@@ -8564,7 +8586,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 continue
             plan_wired_ids = {rid for rid, _ in self._plan_wired_pairs(plan_data, source_type)}
             plan_connected_ids = self._plan_connected_source_ids(plan_data, source_type)
-            dangling.update(present_ids - plan_wired_ids - plan_connected_ids)
+            for rid in present_ids - plan_wired_ids - plan_connected_ids:
+                dangling.setdefault(rid, []).append(fub_id)
         return dangling
 
     async def delete_dangling_plan_elements(self, source_type: str, ref_ids: list[str]) -> dict[str, Any]:
