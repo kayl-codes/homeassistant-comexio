@@ -14,10 +14,12 @@ so the run_fup payload a backup stores does not carry them:
   $CombinedModuleCentralSettingData
 
 A snapshot keeps them per element under SNAPSHOT_MODULE_CONFIGS:
-{element id: {"type": "13" | "20" | "21", "config": {...}}}. Restoring them is not done yet.
+{element id: {"type": "13" | "20" | "21", "config": {...}}}. A restore writes them back
+(function_plan_module_restore) with scene_config_to_save / quantum_settings_to_save; Comexio has
+no request for a Quantum module's rules, rules_not_matching names the ones that differ.
 """
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 import json
 import logging
 from typing import Any
@@ -47,6 +49,8 @@ _RULE_FIELDS_NOT_DIFFED = frozenset({"Id", _MODULE_ID, "RandomId"})
 _ROW_KEYS = {"settings": "Name", "rules": "Id"}
 # A row field that is missing, null or empty names nothing.
 _BLANK = (None, "")
+# Comexio's own id of a scene's channel, scene and value rows.
+_ROW_ID = "id"
 
 # {element type: {key: config}} — scenes by element id, Quantum modules by module id. A type whose
 # table the page did not carry (readably) is absent.
@@ -241,6 +245,15 @@ def uses_module_configs(snapshot: Mapping[str, Any]) -> bool:
     return any(_module_elements(snapshot.get("elements") or {}))
 
 
+def scene_block_ids(snapshot: Mapping[str, Any]) -> list[str]:
+    """Element ids of a snapshot's scene blocks."""
+    return [
+        elem_id
+        for elem_id, elem_type, _ref in _module_elements(snapshot.get("elements") or {})
+        if elem_type == SCENE_TYPE
+    ]
+
+
 def _module_elements(elements: Mapping[str, Any]) -> Iterator[tuple[str, str, Mapping[str, Any]]]:
     """(element id, element type, reference) of the scene blocks and Quantum modules among elements."""
     for elem_id, elem in elements.items():
@@ -357,3 +370,86 @@ def _text(value: Any) -> str:
 
 def _id_order(key: str) -> tuple[int, str]:
     return (int(key), "") if key.isdigit() else (0, key)
+
+
+def scene_config_to_save(config: Mapping[str, Any]) -> dict[str, Any]:
+    """A stored scene config as a restore saves it onto a scene: without its row ids.
+
+    The ids are rows of the scene the backup was read from. Without them the save replaces the
+    target scene's rows with new ones; a value row names its channel by the channel's position
+    (common_id, the key of the common table), not by a row id, so the pairing survives.
+    """
+    saved = {key: value for key, value in config.items() if key != _ROW_ID}
+    if "common" in saved:
+        saved["common"] = _map_rows(saved["common"], _without_row_id)
+    if "scene" in saved:
+        saved["scene"] = _map_rows(saved["scene"], _scene_without_row_ids)
+    return saved
+
+
+def _scene_without_row_ids(row: Mapping[str, Any]) -> dict[str, Any]:
+    scene = _without_row_id(row)
+    if "data" in scene:
+        scene["data"] = _map_rows(scene["data"], _without_row_id)
+    return scene
+
+
+def _without_row_id(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key != _ROW_ID}
+
+
+def _map_rows(raw: Any, convert: Callable[[Mapping[str, Any]], dict[str, Any]]) -> Any:
+    """raw with convert applied to each object row, in its own shape (PHP list or object keyed by row)."""
+    if isinstance(raw, list):
+        return [convert(row) if isinstance(row, Mapping) else row for row in raw]
+    if isinstance(raw, Mapping):
+        return {key: convert(row) if isinstance(row, Mapping) else row for key, row in raw.items()}
+    return raw
+
+
+def quantum_settings_to_save(config: Mapping[str, Any]) -> dict[str, str]:
+    """{setting: value} of a stored Quantum config as Comexio's module dialog sends them (strings)."""
+    settings = config.get("settings")
+    if not isinstance(settings, Mapping):
+        return {}
+    return {str(name): _setting_text(value) for name, value in settings.items()}
+
+
+def _setting_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def rules_not_matching(wanted: Mapping[str, Any], live: Mapping[str, Any], settings: Iterable[str]) -> list[str]:
+    """The events (ByDay) of the rules that differ between a stored Quantum config and the live one.
+
+    Rules are matched by the event they react to: a module created by a restore numbers its rule
+    rows anew. A rule only one side has counts. The name of a rule whose event is one of the
+    settings (user_event_N) is left out: it follows that setting, which the restore writes.
+    """
+    named = frozenset(settings)
+    want, have = _rules_by_event(wanted), _rules_by_event(live)
+    return sorted(
+        (
+            event
+            for event in set(want) | set(have)
+            if _rule(want.get(event), event in named) != _rule(have.get(event), event in named)
+        ),
+        key=_id_order,
+    )
+
+
+def _rules_by_event(config: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    return {str(rule.get("ByDay") or f"#{row_id}"): rule for row_id, rule in _items(config.get("rules"))}
+
+
+def _rule(rule: Mapping[str, Any] | None, name_follows_setting: bool) -> dict[str, str] | None:
+    """A rule's fields as compared; null and empty count alike (Comexio stores either for an unset group)."""
+    if rule is None:
+        return None
+    return {
+        key: "" if value in _BLANK else _text(value)
+        for key, value in rule.items()
+        if key not in _RULE_FIELDS_NOT_DIFFED and not (name_follows_setting and key == "Name")
+    }
