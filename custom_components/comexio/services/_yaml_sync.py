@@ -26,6 +26,8 @@ from ..const import (
     FUNCTION_PLAN_SERVICE_VISUALIZE,
     TIMESTAMP_DISPLAY_FORMAT,
     distinct_one_line,
+    function_plan_ids,
+    function_plans,
 )
 from ..coordinator import ComexioCoordinator
 from ._context import format_plan_label
@@ -115,7 +117,7 @@ def _collect_plan_options(hass: HomeAssistant) -> tuple[list[str], list[str], li
     entry_ids: list[str] = []
     for entry_id, coordinator in _iter_active_coordinators(hass):
         entry_ids.append(entry_id)
-        for fub_id, fub in coordinator.api.fub_data.items():
+        for fub_id, fub in function_plans(coordinator.api.fub_data):
             name = fub.get("Name", "")
             if not name:
                 continue
@@ -147,12 +149,19 @@ async def _update_services_yaml_plans(hass: HomeAssistant) -> None:
         _LOGGER.warning("Could not update services.yaml with plan labels: %s", exc)
 
 
-def _build_restore_options(restore_plans: list[tuple[int, str, bool, int]]) -> list[dict]:
+def _plan_state_label(is_live: bool | None) -> str:
+    """'live', 'deleted', or 'unknown' while no whole plan list was read."""
+    if is_live is None:
+        return "unknown"
+    return "live" if is_live else "deleted"
+
+
+def _build_restore_options(restore_plans: list[tuple[int, str, bool | None, int]]) -> list[dict]:
     """{label, value} dropdown options for the fub_id field of the restore-related services."""
     return [
         {
             "label": (
-                f"{distinct_one_line(name)} — fub {fub_id} ({'live' if is_live else 'deleted'}, "
+                f"{distinct_one_line(name)} — fub {fub_id} ({_plan_state_label(is_live)}, "
                 f"{count} snapshot{'s' if count != 1 else ''})"
             ),
             "value": f"{fub_id}:{name}",
@@ -218,7 +227,7 @@ _SERVICE_DESCRIPTIONS_CACHE_KEY = "_service_descriptions_cache"
 
 
 def _update_services_yaml_backup_options(
-    restore_plans: list[tuple[int, str, bool, int]], snapshot_options: list[dict]
+    restore_plans: list[tuple[int, str, bool | None, int]], snapshot_options: list[dict]
 ) -> dict | None:
     """Blocking read/modify/write of services.yaml's backup-related dropdowns; executor job only.
 
@@ -259,12 +268,15 @@ async def _refresh_service_descriptions(hass: HomeAssistant) -> None:
     options are cached and compared first, so the blocking file rewrite and schema push
     are skipped whenever nothing actually changed since the last refresh.
     """
-    restore_plans: list[tuple[int, str, bool, int]] = []
+    restore_plans: list[tuple[int, str, bool | None, int]] = []
     snapshot_options: list[dict] = []
     for _entry_id, coordinator in _iter_active_coordinators(hass):
-        live_fub_ids = {int(k) for k in coordinator.api.fub_data}
+        # Judged by live_plan_list(): before a poll read the whole plan list (or while it holds an
+        # unreadable entry) a backed-up plan is neither live nor deleted, but unknown.
+        live = coordinator.live_plan_list()
+        live_fub_ids = None if live is None else function_plan_ids(live)
         for fub_id, name, count in await coordinator.function_plan_backup.async_backed_up_plans():
-            restore_plans.append((fub_id, name, fub_id in live_fub_ids, count))
+            restore_plans.append((fub_id, name, None if live_fub_ids is None else fub_id in live_fub_ids, count))
         backups = await coordinator.function_plan_backup.async_list_backups()
         snapshot_options.extend(_build_snapshot_options(backups))
     cache_key = (tuple(restore_plans), tuple((opt["label"], opt["value"]) for opt in snapshot_options))

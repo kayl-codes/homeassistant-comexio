@@ -176,7 +176,10 @@ from .const import (
     entity_id_migration_target,
     extension_device_name,
     format_ignored_ids,
+    function_plan_id,
     function_plan_ids,
+    function_plan_info,
+    function_plans,
     fw_update_signal,
     ignored_id_in_ranges,
     import_disabled_issue_id,
@@ -196,6 +199,7 @@ from .const import (
     split_ignored_ids,
     system_info_signal,
     trigger_pair_categories,
+    unreadable_plan_keys,
     watchdog_user_plan_pick,
     webio_class_label,
     webio_class_name,
@@ -258,6 +262,16 @@ _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 # e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache). For the same
 # reason _function_plan_snapshot_complete() counts a seeded entry as a missing plan.
 _SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
+# Audit buckets and mismatch keys derived from the function plans (see _carry_over_plan_audit).
+_PLAN_AUDIT_BUCKETS = (
+    "function_plan_missing",
+    "function_plan_dangling",
+    "function_plan_trigger_missing",
+    "function_plan_trigger_orphan",
+    "knx_bridge_missing",
+    "knx_bridge_loopback_missing",
+)
+_PLAN_AUDIT_KEY_PREFIXES = ("function_plan_", "knx_bridge_")
 
 _UNINSTALL_CLEANUP_LOG = "[%s] Uninstall cleanup: %s"
 
@@ -365,6 +379,21 @@ def _format_by_ref(by_ref: dict[int, list[int]]) -> str:
         for ref_type, ids in by_ref.items()
         for mid in ids
     )
+
+
+def _readable_plan_ids(raw_config: Mapping[str, Any]) -> set[int] | None:
+    """Plan ids of a config page's plan list ($Fubs), None when it was not read or holds an unreadable entry.
+
+    aiocomexio decodes each page variable on its own, so $FubModules alone does not prove $Fubs
+    was read; an empty plan list still decodes to a dict. A list with an entry function_plans
+    skips counts as unread too: the skipped entry may be a plan, which must not read as deleted.
+    """
+    if not isinstance(fubs := raw_config.get("Fubs"), dict):
+        return None
+    if bad_keys := unreadable_plan_keys(fubs):
+        _LOGGER.debug("$Fubs entries %r are no readable plan — plan list counts as unread", bad_keys)
+        return None
+    return function_plan_ids(fubs)
 
 
 def _source_max_ids(raw_config: dict[str, Any]) -> tuple[int, int]:
@@ -611,6 +640,7 @@ async def webio_still_present(lookup: Callable[[str], Awaitable[Any]], name: str
 # Details of a plan-cleanup step that did not complete, as (plan name, detail) in the
 # "failures" lists of unwire_webio_commands / delete_dangling_plan_elements.
 PLAN_LOAD_FAILED = "could not be loaded, cleanup skipped"
+PLAN_ENTRY_UNREADABLE = "plan list entry unreadable, cleanup skipped"
 PLAN_DELETE_FAILED = "element deletion failed"
 PLAN_CMD_NOT_FOUND = "Web-IO command not found, not deleted"
 
@@ -790,6 +820,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.sync_progress_pct: int | None = None
         self.sync_current_step: str | None = None
         self.last_audit_results: dict[str, Any] = {}
+        # The last plan-derived audit findings of a readable plan list (buckets None: none yet), kept
+        # while the plan list is unreadable. Own attributes: a reload or a missing class empties
+        # last_audit_results.
+        self._plan_audit_buckets: dict[str, Any] | None = None
+        self._plan_audit_mismatches: set[str] = set()
         # (webio_class value, source id) tuples — markers and KNX objects share a numeric id
         # namespace, so the category tag keeps the cleanup button routing them apart.
         self._cleanup_entity_ids: list[tuple[str, int]] = []
@@ -978,6 +1013,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Full polls in a row that read the config page but no plan list ($Fubs); api.parse_config
         # keeps the cached plans then (see FUNCTION_PLAN_LIST_UNREAD_THRESHOLD).
         self._plan_list_unread_polls = 0
+        self._reported_unreadable_plan_keys: list[str] = []
         self._plan_run_state_last_fetch: float = 0.0
         # Set while a run-state fetch is in flight: a slow answer must not overlap the next preview
         # tick or timer tick, whose newer answer an older one finishing last would overwrite.
@@ -1055,12 +1091,28 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "[%s] Plan list ($Fubs) readable again after %s polls", self.server_id, self._plan_list_unread_polls
                 )
             self._plan_list_unread_polls = 0
+            self._reported_unreadable_plan_keys = []
             return
         # A skipped poll (sync running) or a failed page fetch read nothing at all — no plan list to miss.
         if not self._last_poll_scraped:
             return
         self._plan_list_unread_polls += 1
-        if self._plan_list_unread_polls == 1:
+        # Warned whenever the unreadable entries change, also after the list was already unread for another reason.
+        if bad_keys := unreadable_plan_keys(self.api.fub_data):
+            if bad_keys == self._reported_unreadable_plan_keys:
+                return
+            self._reported_unreadable_plan_keys = bad_keys
+            _LOGGER.warning(
+                "[%s] Plan list ($Fubs) has entries %r that are no readable plan, so it counts as unread until "
+                "they are fixed in Comexio: deleted plans are not judged, the function plan watchdog pauses "
+                "(no auto-start), the Web-IO/KNX wiring audit pauses, ignored-source leftovers in HA's plans "
+                "behind those entries are reported but not cleaned up, no managed plan is created, those entries "
+                "get no backup, and the run-state sensors turn unavailable after %s such polls",
+                self.server_id,
+                bad_keys,
+                FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
+            )
+        elif self._plan_list_unread_polls == 1:
             _LOGGER.warning(
                 "[%s] Config poll brought no readable plan list ($Fubs); keeping the last known plans. Plans "
                 "created or deleted in Comexio are not picked up meanwhile, and the run-state sensors turn "
@@ -1205,10 +1257,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # credentials_refused also covers a refusal the preview or system info login met first,
             # while the main session still works.
             raise ConfigEntryAuthFailed(f"Comexio at {self.api.host} rejected the stored credentials")
-        # aiocomexio decodes each page variable on its own, so $FubModules alone does not
-        # prove $Fubs was read; an empty plan list still decodes to a dict.
-        if isinstance(fubs := raw_config.get("Fubs"), dict):
-            self._polled_plan_ids = function_plan_ids(fubs)
+        self._polled_plan_ids = _readable_plan_ids(raw_config)
 
         live_states, knx_live_states = await self.api.get_live_states(*_source_max_ids(raw_config))
         if live_states is None:
@@ -1373,23 +1422,31 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # online the next poll flags any remaining gaps again.
         managed_io_exts: set[str] = set(self.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
         managed_io_exts -= self.offline_extensions or set()
-        wired = self._audit_wired_pairs(has_active_plan, managed_io_exts)
-        wired_knx_webio_pairs = wired[2]
+        # Whether this audit's plan checks waited for unloaded plans. The flag spans cycles (only the
+        # backup cycle clears it), so it is cleared just around these synchronous checks and restored.
+        recheck_pending = self._lp_missing_recheck_pending
+        self._lp_missing_recheck_pending = False
+        try:
+            wired = self._audit_wired_pairs(has_active_plan, managed_io_exts)
+            wired_knx_webio_pairs = wired[2]
 
-        mismatches: set[str] = {"ip_address"} if ip_mismatch else set()
-        found = self._compare_audit_maps(
-            ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_exts, mismatches
-        )
-        dangling_items = self._function_plan_dangling_items(
-            final_data, wired, has_active_plan, managed_io_exts, mismatches
-        )
-        trigger_missing_by_ref, trigger_orphan_by_ref = self._audit_trigger_constructs(final_data, mismatches)
+            mismatches: set[str] = {"ip_address"} if ip_mismatch else set()
+            found = self._compare_audit_maps(
+                ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_exts, mismatches
+            )
+            dangling_items = self._function_plan_dangling_items(
+                final_data, wired, has_active_plan, managed_io_exts, mismatches
+            )
+            trigger_missing_by_ref, trigger_orphan_by_ref = self._audit_trigger_constructs(final_data, mismatches)
 
-        # KNX write path (Entwurf A "Merker-Brücke") audit, incl. Phase 7's API-Loopback
-        # fan-out check — see _audit_knx_bridge_items's own docstring for the full rationale.
-        knx_bridge_missing_items, knx_bridge_loopback_missing_items = self._audit_knx_bridge_items(
-            has_active_plan, final_data["knx"], ha_map, wired_knx_webio_pairs, mismatches
-        )
+            # KNX write path (Entwurf A "Merker-Brücke") audit, incl. Phase 7's API-Loopback
+            # fan-out check — see _audit_knx_bridge_items's own docstring for the full rationale.
+            knx_bridge_missing_items, knx_bridge_loopback_missing_items = self._audit_knx_bridge_items(
+                has_active_plan, final_data["knx"], ha_map, wired_knx_webio_pairs, mismatches
+            )
+            plan_checks_deferred = self._lp_missing_recheck_pending
+        finally:
+            self._lp_missing_recheck_pending = recheck_pending or self._lp_missing_recheck_pending
 
         # DPT1.x classification for digital KNX objects with no [RO]/[TRIG]/[K<id>] suffix
         # yet (real ETS imports never carry Comexio's own naming convention) — see
@@ -1398,7 +1455,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self._auto_suffix_unambiguous_knx(final_data["knx"])
             self._audit_knx_dpt_ambiguous(final_data["knx"])
 
-        self.last_audit_results = {
+        results = {
             "type": found["type"],
             "missing": found["missing"],
             "rename": found["rename"],
@@ -1415,14 +1472,48 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "knx_bridge_missing": knx_bridge_missing_items,
             "knx_bridge_loopback_missing": knx_bridge_loopback_missing_items,
         }
+        plan_audit_known = self._carry_over_plan_audit(results, mismatches, plan_checks_deferred)
+        self.last_audit_results = results
 
         # Include pending entity cleanups (ignored markers/KNX with remaining HA entities) in mismatches
         for cls_val, mid in self._cleanup_entity_ids:
             mismatches.add(f"cleanup_entity_{cls_val}_{mid}")
 
-        self._log_audit_summary(mismatches)
-        self._update_sync_mismatch_issue(mismatches, ha_map, com_map, io_meta_by_key)
+        if plan_audit_known or mismatches:
+            self._log_audit_summary(mismatches, plan_audit_known=plan_audit_known)
+        # Unknown plan findings: the open repair keeps its own (see _update_sync_mismatch_issue).
+        self._update_sync_mismatch_issue(mismatches, ha_map, com_map, io_meta_by_key, plan_audit_known=plan_audit_known)
         return True
+
+    def _carry_over_plan_audit(self, results: dict[str, Any], mismatches: set[str], plan_checks_deferred: bool) -> bool:
+        """Keep the last plan-derived findings while the plan list has unreadable entries.
+
+        The plan-derived checks are deferred then (unknown, not "in sync"): their fresh empty result
+        would clear an open repair and log the installation as in sync. False when the plan findings
+        are unknown: the list is unreadable and no readable one was fully audited since setup.
+        """
+        if not unreadable_plan_keys(self.api.fub_data):
+            # A check waiting for unloaded plans judged nothing: keep what is known.
+            if not plan_checks_deferred:
+                self._plan_audit_buckets = {bucket: results[bucket] for bucket in _PLAN_AUDIT_BUCKETS}
+                self._plan_audit_mismatches = {key for key in mismatches if key.startswith(_PLAN_AUDIT_KEY_PREFIXES)}
+            return True
+        mismatches.difference_update({key for key in mismatches if key.startswith(_PLAN_AUDIT_KEY_PREFIXES)})
+        if self._plan_audit_buckets is None:
+            return False
+        results.update(self._plan_audit_buckets)
+        mismatches.update(self._plan_audit_mismatches)
+        return True
+
+    def _open_plan_findings(self) -> tuple[dict[str, Any], Any]:
+        """The plan-derived counts and missing-wiring detail of the open sync_mismatch repair ({} / None: none)."""
+        issue = ir.async_get(self.hass).async_get_issue(DOMAIN, f"sync_mismatch_{self.server_id}")
+        if issue is None or issue.translation_key != "sync_mismatch":
+            return {}, None
+        data = issue.data or {}
+        counts = data.get("counts", {})
+        keys = (*_PLAN_AUDIT_BUCKETS, "function_plan_missing_eta_sec")
+        return {key: counts[key] for key in keys if key in counts}, data.get("function_plan_missing_detail")
 
     def _build_ha_audit_map(
         self, final_data: dict[str, Any]
@@ -1807,7 +1898,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 mismatches.update(f"function_plan_trigger_{kind}_{prefix}{mid}" for mid in ids)
         return missing_by_ref, orphan_by_ref
 
-    def _log_audit_summary(self, mismatches: set[str]) -> None:
+    def _log_audit_summary(self, mismatches: set[str], *, plan_audit_known: bool = True) -> None:
         """AUDIT SUMMARY LOGGING of last_audit_results — only when the result changed since the last poll."""
         if not mismatches:
             if self.last_summary_hash is not None:
@@ -1833,6 +1924,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.last_summary_hash = current_summary_content
         self._last_logged_mismatches = mismatch_keys
         self._log_audit_details(len(mismatches))
+        if not plan_audit_known:
+            _LOGGER.warning(
+                "[%s] Function plan findings unknown: the plan list has unreadable entries, so the plan "
+                "counts above are not judged",
+                self.server_id,
+            )
 
     def _log_audit_details(self, mismatch_count: int) -> None:
         """The consolidated warning plus the per-category audit summary of last_audit_results."""
@@ -1921,9 +2018,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ha_map: dict[str, dict[str, Any]],
         com_map: dict[str, list[dict[str, Any]]],
         io_meta_by_key: dict[str, dict[str, Any]],
+        *,
+        plan_audit_known: bool = True,
     ) -> None:
-        """Manage the sync_mismatch repair issue in the Home Assistant UI from last_audit_results."""
-        if not mismatches:
+        """Manage the sync_mismatch repair issue in the Home Assistant UI from last_audit_results.
+
+        plan_audit_known False: the plan findings are unknown, so the open repair's are kept, not zeroed.
+        """
+        open_counts, open_detail = ({}, None) if plan_audit_known else self._open_plan_findings()
+        if not mismatches and not any(open_counts.get(bucket) for bucket in _PLAN_AUDIT_BUCKETS):
             ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
             return
         audit = self.last_audit_results
@@ -1945,6 +2048,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "knx_bridge_loopback_missing": len(audit["knx_bridge_loopback_missing"]),
             "all": len(mismatches),
         }
+        missing_detail = self._function_plan_missing_detail(audit["function_plan_missing"], ha_map, io_meta_by_key)
+        if open_counts:
+            issue_data_counts.update(open_counts)
+            missing_detail = open_detail
         ir.async_create_issue(
             self.hass,
             DOMAIN,
@@ -1965,9 +2072,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             data={
                 "entry_id": self.config_entry.entry_id,
                 "counts": issue_data_counts,
-                "function_plan_missing_detail": self._function_plan_missing_detail(
-                    audit["function_plan_missing"], ha_map, io_meta_by_key
-                ),
+                "function_plan_missing_detail": missing_detail,
             },
         )
 
@@ -2132,7 +2237,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if held_back():
                 return
             try:
-                live_name = fub_data.get(str(fub_id), {}).get("Name")
+                # An unreadable entry ("07", or an Id other than its key) names no plan of this ID.
+                live_name = function_plan_info(fub_data, fub_id).get("Name")
                 if not live_name:
                     continue
                 for old_name in self._rename_sources(fub_id, live_name, plan_data):
@@ -2163,9 +2269,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _forget_stale_rename_state(self, plans: dict[int, dict], fub_data: dict) -> None:
         """Forget rename failures no longer pending (renamed again, plan gone) and noted moves of deleted plans."""
         # A failure noted for a rename no longer pending logs afresh next time.
-        live = {(fub_id, fub.get("Name")) for fub_id in plans if isinstance(fub := fub_data.get(str(fub_id)), dict)}
+        live = {(fub_id, fub.get("Name")) for fub_id in plans if (fub := function_plan_info(fub_data, fub_id))}
         self._rename_follow_failed = {key for key in self._rename_follow_failed if (key[0], key[2]) in live}
-        if fub_data:  # an empty plan list decides nothing
+        # An empty plan list decides nothing, nor one with an unreadable entry: it may be the plan ("05" for 5).
+        if fub_data and not unreadable_plan_keys(fub_data):
             for fub_id, old_name in [key for key in self._rename_move_pending if str(key[0]) not in fub_data]:
                 self._drop_rename_move_pending(fub_id, old_name, "the plan is gone from Comexio")
 
@@ -2571,7 +2678,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         A plan whose format was not readable (e.g. $Paper did not decode) is left out: the
         backups then neither store a guessed format nor take the guess for a format change.
         """
-        return {key: fmt for key in fub_data if (fmt := self.api.get_fub_known_format(int(key))) is not None}
+        return {
+            key: fmt
+            for key in fub_data
+            if (fub_id := function_plan_id(key)) is not None
+            and (fmt := self.api.get_fub_known_format(fub_id)) is not None
+        }
 
     async def async_function_plan_change_backup(
         self, fub_id: int, operation: str, plan_data: dict | None = None
@@ -2584,7 +2696,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if not plan_data:
                 _LOGGER.warning("[%s] Pre-change backup skipped: plan %s could not be loaded", self.server_id, fub_id)
                 return
-            plan_name = self.api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+            # Unreadable, or not readably listed while the list has unreadable entries (one may be this plan).
+            if not function_plan_info(self.api.fub_data, fub_id) and (
+                str(fub_id) in self.api.fub_data or unreadable_plan_keys(self.api.fub_data)
+            ):
+                _LOGGER.warning(
+                    "[%s] Pre-change backup skipped: the plan list entry of plan %s is unreadable",
+                    self.server_id,
+                    fub_id,
+                )
+                return
+            plan_name = function_plan_info(self.api.fub_data, fub_id).get("Name", str(fub_id))
             # Unknown stays unstored (None) rather than a guessed A4 a restore would then rebuild.
             paper, dpi, orientation = self.api.get_fub_known_format(fub_id) or (None, None, None)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
@@ -2632,7 +2754,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         if match := _PLAN_LABEL_ID_SUFFIX_RE.search(lp_state.state):
             return int(match.group(1))
-        return next((int(fid) for fid, fi in self.api.fub_data.items() if fi.get("Name") == lp_state.state), None)
+        return next((fid for fid, fi in function_plans(self.api.fub_data) if fi.get("Name") == lp_state.state), None)
 
     def orphaned_plans_view_active(self) -> bool:
         """Whether the 'Plan' selector shows the orphaned-plans view."""
@@ -3492,8 +3614,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Only a poll's $Fubs read is complete (see scraped_plan_ids): before it the cache is empty
         or holds just plans HA itself created or looked up, and judging by it would show every
         other backed-up plan as deleted. After it an empty cache means no plan is left in Comexio.
+        None as well while the cache holds an entry function_plans skips (see unreadable_plan_keys).
         """
-        return None if self.scraped_plan_ids is None else self.api.fub_data
+        if self.scraped_plan_ids is None or unreadable_plan_keys(self.api.fub_data):
+            return None
+        return self.api.fub_data
 
     def orphaned_backup_options(self) -> list[tuple[str, dict[str, Any]]]:
         """(label, choice) rows of the backup selector's orphaned-plans view (cache-only)."""
@@ -4734,8 +4859,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 fub_id = int(value)
             except (TypeError, ValueError):
                 continue
-            fub = self.api.fub_data.get(str(fub_id))
-            if isinstance(fub, dict):
+            if fub := function_plan_info(self.api.fub_data, fub_id):
                 plans[fub_id] = str(fub.get("Name") or fub_id)
         return plans
 
@@ -4938,15 +5062,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """async_watch_managed_plans' check, run under _plan_watch_check_lock."""
         if self.live_plan_list() is None:
             # Until a poll read the whole plan list, the cache holds only the plans HA created or looked
-            # up: judging by it would drop every other watched plan without a word and clear its repair.
-            # Logged once: the list never turns None again, and a list that stays unreadable is
-            # reported by _track_plan_list_read.
+            # up, and a list with an unreadable entry may hide a watched plan: judging by either would
+            # drop a watched plan without a word and clear its repair. Logged once per wait; a list that
+            # stays unread is reported by _track_plan_list_read.
             if not self._plan_watch_deferred:
                 _LOGGER.info(
-                    "[%s] Function plan watchdog waits for the first poll that reads the plan list", self.server_id
+                    "[%s] Function plan watchdog waits for a poll that reads the whole plan list", self.server_id
                 )
                 self._plan_watch_deferred = True
             return False
+        self._plan_watch_deferred = False
         in_grace = self._plan_watch_held()
         self._warn_unresolved_watch_picks()
         user_plans = self._watched_user_plan_names()
@@ -5629,7 +5754,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             name,
             old_fub_id,
             new_fub_id,
-            old_id_still_live=str(old_fub_id) in self.api.fub_data,
+            # Any unreadable entry may be a plan holding the old ID ("05" for 5): keep the bare pick.
+            old_id_still_live=str(old_fub_id) in self.api.fub_data or bool(unreadable_plan_keys(self.api.fub_data)),
         )
         if picks is None:
             return
@@ -5683,7 +5809,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         if not isinstance(raw_picks, list):
             return False
-        id_reused = str(fub_id) in self.api.fub_data and self.api.function_plan_name(fub_id) != name
+        # An unreadable entry for the ID is no known reuse: function_plan_name would read it as plan "<id>".
+        id_reused = bool(function_plan_info(self.api.fub_data, fub_id)) and self.api.function_plan_name(fub_id) != name
         dropped = {(fub_id, name)} if id_reused else {(fub_id, name), (fub_id, None)}
         kept = [value for value in raw_picks if parse_watchdog_user_plan_pick(value) not in dropped]
         if len(kept) == len(raw_picks):
@@ -6506,7 +6633,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         audited_ids = single_ids | {sid for sid in sources_by_id if ignored_id_in_ranges(sid, ranges)}
         # Only managed plans: the cleanup never touches a user's own plan (e.g. the one the
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
-        lp_plans = await self._load_managed_plan_check_data()
+        # A plan whose list entry is unreadable may be managed: its wiring counts (unknown, not clean).
+        lp_plans = await self._load_managed_plan_check_data(include_unknown=True)
         ref_type = int(category.fub_module_type)
         ids_with_entities = set(self.marker_entities_by_id(list(audited_ids), category.unique_id_infix).keys())
         _LOGGER.debug(
@@ -6902,24 +7030,35 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if (
             cached is not None
             and cached not in self._distrusted_fub_ids
-            and fub_data.get(str(cached), {}).get("Name") == plan_name
+            and function_plan_info(fub_data, cached).get("Name") == plan_name
         ):
             return cached, False
 
-        for fid_str, fub_info in fub_data.items():
-            fid = int(fid_str)
+        for fid, fub_info in function_plans(fub_data):
             # Skip a plan _verify_new_plan_is_empty rejected but couldn't fully remove — see
             # _distrusted_fub_ids' docstring. Without this, a plain by-name match would silently
             # re-adopt the still-contaminated plan the moment fub_data gets refreshed again.
             if fid not in self._distrusted_fub_ids and fub_info.get("Name") == plan_name:
-                _LOGGER.info("[%s] Found cluster plan '%s' (fub_id=%s)", self.server_id, one_line(plan_name), fid_str)
+                _LOGGER.info("[%s] Found cluster plan '%s' (fub_id=%s)", self.server_id, one_line(plan_name), fid)
                 return fid, False
 
         fub_id = await self._create_managed_plan(plan_name)
         return fub_id, fub_id is not None
 
     async def _create_managed_plan(self, plan_name: str, orientation: str = _ORIENT_LANDSCAPE) -> int | None:
-        """Create a managed A3 cluster plan carrying the 'administrated by HA' comment."""
+        """Create a managed A3 cluster plan carrying the 'administrated by HA' comment.
+
+        Refused while the plan list holds an unreadable entry: it may be this very plan, and creating
+        it again would leave two plans of the same name.
+        """
+        if bad_keys := unreadable_plan_keys(self.api.fub_data):
+            _LOGGER.error(
+                "[%s] Not creating cluster plan '%s': the plan list has unreadable entries %r",
+                self.server_id,
+                one_line(plan_name),
+                bad_keys,
+            )
+            return None
         _LOGGER.info("[%s] Creating cluster plan '%s'", self.server_id, one_line(plan_name))
         fub_id = await self.api.create_fup(
             plan_name=plan_name, paper_format=_MANAGED_PLAN_PAPER, orientation=orientation
@@ -7109,9 +7248,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         capacity here either (see _resolve_single_cluster_plan's analogous check for Marker/KNX).
         """
         result: dict[int, list[str]] = {}
-        for fid_str, fub_info in self.api.fub_data.items():
-            fid = int(fid_str) if fid_str.lstrip("-").isdigit() else None
-            if fid is None or fid in self._distrusted_fub_ids:
+        for fid, fub_info in function_plans(self.api.fub_data):
+            if fid in self._distrusted_fub_ids:
                 continue
             if members := self._io_plan_members(str(fub_info.get("Name", "")), prefix):
                 result[fid] = members
@@ -7187,12 +7325,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plan_map_updates: dict[str, int] = {}
         failed_exts: list[str] = []
 
+        # An unreadable entry may be the IO plan of an extension not found in membership: joining or
+        # creating would place that extension in a second plan and wire its IOs twice.
+        bad_keys = unreadable_plan_keys(self.api.fub_data)
         for ext in ext_names:
             placed = next(
                 ((fid, members.index(ext)) for fid, members in membership.items() if ext in members),
                 None,
             )
-            if placed is None:
+            if placed is None and bad_keys:
+                _LOGGER.error(
+                    "[%s] Not placing '%s' in an IO cluster plan: the plan list has unreadable entries %r",
+                    self.server_id,
+                    ext,
+                    bad_keys,
+                )
+            elif placed is None:
                 placed = await self._join_or_create_io_plan(ext, membership, capacity, prefix)
             if placed is None:
                 _LOGGER.error("[%s] Failed to resolve/create IO cluster plan for '%s'", self.server_id, ext)
@@ -7246,7 +7394,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _rename_io_plan(self, fub_id: int, new_name: str) -> bool:
         """Rename a managed IO plan (membership join), keeping paper/DPI/orientation as-is."""
-        fub = self.api.fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self.api.fub_data, fub_id)
         paper = _PAPER_NAME_BY_ID.get(str(fub.get("Paper")), _MANAGED_PLAN_PAPER)
         dpi = int(fub.get("Resolution", 90))
         orientation = _ORIENT_PORTRAIT if str(fub.get("Orientation")) == "1" else _ORIENT_LANDSCAPE
@@ -7272,10 +7420,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         _persist_plan_map.
         """
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-        if not isinstance(raw_map, dict) or not fub_data:
+        if not isinstance(raw_map, dict) or not fub_data or unreadable_plan_keys(fub_data):
             # No live $Fubs snapshot to compare against — an empty/unpopulated fub_data must
             # never be read as "every plan is gone", or a single fetch hiccup would wipe the
-            # whole map.
+            # whole map; nor a listing with an unreadable entry, which may be a mapped plan.
             return {}
         stale = {
             name: int(fid)
@@ -7302,9 +7450,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plain heads-up rather than an actionable repair.
         """
         names_to_ids: dict[str, list[int]] = {}
-        for fid, fub in self.api.fub_data.items():
+        for fid, fub in function_plans(self.api.fub_data):
             if name := fub.get("Name"):
-                names_to_ids.setdefault(name, []).append(int(fid))
+                names_to_ids.setdefault(name, []).append(fid)
         duplicates = {name: ids for name, ids in names_to_ids.items() if len(ids) > 1}
 
         issue_id = f"duplicate_plan_names_{self.server_id}"
@@ -7383,6 +7531,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Prefers the bulk snapshot from the backup cycle; plans missing there are fetched
         directly. Returns {fub_id: {"elements": ..., "connections": ...}}; failed plans
         are skipped, and their fub_ids appended to load_failures when the caller passes one.
+        So are plans without a readable plan list entry while the list has unreadable entries:
+        whether such a plan is managed is unknown (its name is), so a cleanup filtering by
+        _is_managed_function_plan would skip it in silence (see plan_load_failures).
 
         A _SEEDED_EMPTY_PLAN_MARKER entry (a plan _create_managed_plan created and verified
         empty earlier in this same run, not yet refreshed by a real bulk load) counts as a
@@ -7403,26 +7554,52 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     load_failures.append(fub_id)
             if plan_data:
                 plans[fub_id] = plan_data
+        if load_failures is not None:
+            load_failures.extend(self._plans_without_readable_entry(plans))
         if not plans:
             _LOGGER.debug("[%s] No function plans available for link check", self.server_id)
         return plans
 
-    async def _load_managed_plan_check_data(self, load_failures: list[int] | None = None) -> dict[int, dict]:
+    def _plans_without_readable_entry(self, fub_ids: Iterable[int]) -> list[int]:
+        """The fub_ids without a readable plan list entry, [] while the list has no unreadable entries."""
+        if not unreadable_plan_keys(self.api.fub_data):
+            return []
+        return [fub_id for fub_id in fub_ids if not function_plan_info(self.api.fub_data, fub_id)]
+
+    async def _load_managed_plan_check_data(
+        self, load_failures: list[int] | None = None, *, include_unknown: bool = False
+    ) -> dict[int, dict]:
         """_load_function_plan_check_data without the plans outside HA's naming and the trigger plan.
 
+        include_unknown keeps the cluster plans HA mapped whose plan list entry is unreadable
+        (managed by name is unknown then, see _plans_without_readable_entry): the read-only audit
+        counts their wiring, so a leftover there stays a finding instead of reading as clean; the
+        cleanup leaves them out and reports them as skipped (plan_load_failures). A selector-only
+        plan may be the user's own and the trigger plan is the trigger audit's, so neither is kept.
+
         The ignored-source audit and its cleanup share this set, so the audit never flags
-        wiring in a plan the cleanup may not touch (see _is_managed_function_plan). The trigger
+        wiring in a plan the cleanup may not touch (see _is_managed_function_plan) — except the
+        unknown-entry plans above, which the cleanup reports as skipped. The trigger
         plan is left to the trigger-pair audit: an ignored [TRIG] source no longer counts as a
         trigger source (_trigger_ids_by_ref), so its Source+Flanke pair is reported as orphaned
         and removed as a whole — the generic cleanup would only see the source wired to its
         Flanke, keep it, and flag it again on every audit.
         """
         plans = await self._load_function_plan_check_data(load_failures)
+        unknown = set(self._plans_without_readable_entry(plans)) if include_unknown else set()
+        unknown &= self._mapped_cluster_plan_ids()
         return {
             fub_id: plan_data
             for fub_id, plan_data in plans.items()
-            if self._is_managed_function_plan(fub_id) and not self._is_live_trigger_plan(fub_id)
+            if fub_id in unknown or (self._is_managed_function_plan(fub_id) and not self._is_live_trigger_plan(fub_id))
         }
+
+    def _mapped_cluster_plan_ids(self) -> set[int]:
+        """fub_ids of the plans HA created (CONF_FUNCTION_PLAN_PLAN_MAP), the trigger plan left out."""
+        plan_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(plan_map, dict):
+            return set()
+        return {int(fub_id) for name, fub_id in plan_map.items() if name != FUNCTION_PLAN_TRIGGER_PLAN_NAME}
 
     def _is_live_trigger_plan(self, fub_id: int) -> bool:
         """is_trigger_plan, confirmed by the live plan name (same freshness guard as _audit_trigger_pairs).
@@ -7613,12 +7790,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
 
     def plan_load_failures(self, fub_ids: list[int]) -> list[tuple[str, str]]:
-        """(name, PLAN_LOAD_FAILED) for each managed plan that could not be loaded for a cleanup."""
+        """(name, detail) for each plan a cleanup skipped (see _load_function_plan_check_data).
+
+        PLAN_LOAD_FAILED for a managed plan that could not be loaded, PLAN_ENTRY_UNREADABLE for a
+        plan without a readable plan list entry while the list has unreadable entries.
+        """
+        entries_unknown = bool(unreadable_plan_keys(self.api.fub_data))
         return [
-            (self.api.function_plan_name(fub_id), PLAN_LOAD_FAILED)
+            (self.api.function_plan_name(fub_id), detail)
             for fub_id in dict.fromkeys(fub_ids)
-            if self._is_managed_function_plan(fub_id)
+            if (detail := self._skipped_plan_detail(fub_id, entries_unknown))
         ]
+
+    def _skipped_plan_detail(self, fub_id: int, entries_unknown: bool) -> str | None:
+        """plan_load_failures' detail for fub_id, None for a plan a cleanup may skip in silence (not managed)."""
+        if entries_unknown and not function_plan_info(self.api.fub_data, fub_id):
+            return PLAN_ENTRY_UNREADABLE
+        return PLAN_LOAD_FAILED if self._is_managed_function_plan(fub_id) else None
 
     def _check_source_function_plan_link(self, source_id: int, plans: dict[int, dict], ref_type: int = 2) -> int | None:
         """Check if the source (marker=2/KNX=11) is wired in any of the pre-loaded managed plans.
@@ -8197,10 +8385,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         startup race (no plans loaded yet at all) is still caught even when relevant_fub_ids
         itself is empty (legacy CONF_FUNCTION_PLAN_FUB_ID == "auto"); a snapshot emptied because
         no plan is left counts as loaded, so the audit reports deleted managed plans (#140).
+        A plan list with an unreadable entry is not loaded: that entry may be a relevant plan.
         """
-        if not self._function_plan_snapshot_loaded():
+        if not self._function_plan_snapshot_loaded() or unreadable_plan_keys(self.api.fub_data):
             return False
-        existing_fub_ids = {int(fub_id) for fub_id in self.api.fub_data}
+        existing_fub_ids = function_plan_ids(self.api.fub_data)
         return (relevant_fub_ids & existing_fub_ids) <= self.function_plan_plans.keys()
 
     async def _ensure_relevant_plans_cached(self, relevant_fub_ids: set[int], *, force: bool = False) -> bool:
@@ -8267,7 +8456,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cache is already correctly read as "not ready" by _knx_bridge_marker_by_k_id()/
         _wired_source_webio_pairs returning None, so they're free to ignore the return value.
         """
-        existing_fub_ids = {int(fub_id) for fub_id in self.api.fub_data}
+        existing_fub_ids = function_plan_ids(self.api.fub_data)
         fetched: dict[int, dict] = {}
         candidates = relevant_fub_ids & existing_fub_ids
         to_fetch = candidates if force else {fub_id for fub_id in candidates if fub_id not in self.function_plan_plans}
@@ -8685,8 +8874,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         plan_map = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
         fub_id = plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
-        if fub_id is None or self.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
-            return list(trigger_source_ids), []
+        if (
+            fub_id is None
+            or function_plan_info(self.api.fub_data, fub_id).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME
+        ):
+            # The trigger plan may be an unreadable entry: unknown, not "every source missing".
+            return None if unreadable_plan_keys(self.api.fub_data) else (list(trigger_source_ids), [])
         if fub_id not in self.function_plan_plans:
             return None
         flanke_ref_id = self.api.flanke_ref_id()
