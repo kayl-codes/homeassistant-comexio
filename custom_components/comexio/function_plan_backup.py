@@ -387,6 +387,19 @@ def _paper_format_changed(previous: Mapping[str, Any], current: tuple[Any, Any, 
     return stored != (str(current[0]), int(current[1]), str(current[2]))
 
 
+def _auto_backup_plan_name(fub_data: dict[str, Any], key: str, list_unreadable: bool) -> str | None:
+    """The name plan key is backed up under (its ID when unlisted), None while its entry is or may be unreadable.
+
+    An unreadable entry would store the plan under the bogus identity (id, "id"); the poll warns about it.
+    """
+    if key not in fub_data and not list_unreadable:
+        return key
+    if info := function_plan_info(fub_data, key):
+        return info.get("Name", key)
+    _LOGGER.debug("Auto backup skips plan %s: its plan list entry %r is unreadable", key, fub_data.get(key))
+    return None
+
+
 def _auto_backup_reason(
     history: list[dict[str, Any]],
     new_hash: str,
@@ -718,12 +731,9 @@ class FunctionPlanBackupManager:
         list_unreadable = bool(unreadable_plan_keys(fub_data))
         for fub_id, plan_data in plans.items():
             key = str(fub_id)
-            if (key in fub_data or list_unreadable) and not (info := function_plan_info(fub_data, key)):
-                # An unreadable entry would store this plan under the bogus identity (id, "id"); the poll warns.
-                _LOGGER.debug("Auto backup skips plan %s: its plan list entry %r is unreadable", key, fub_data.get(key))
+            if (plan_name := _auto_backup_plan_name(fub_data, key, list_unreadable)) is None:
                 continue
             new_hash = plan_hash(plan_data)
-            plan_name = info.get("Name", key) if key in fub_data else key
             history = self._auto_data.setdefault(key, {}).setdefault(plan_name, [])
             plan_settings = _plan_settings(block_settings, plan_data)
             plan_configs = _plan_module_configs(module_configs, plan_data)
