@@ -149,24 +149,45 @@ def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
             lines.append(f"* {ICON_PUZZLE} **{cluster_noun} {one_line(plan_name)} missing:** all {gap} {item_noun}")
         else:
             lines.append(f"* {ICON_LINK} **{item_noun_cap} not wired in {one_line(plan_name)}:** {gap} of {total}")
-    for ext, (gap, total) in detail.get("ios_by_ext", {}).items():
-        if gap == total:
-            lines.append(f"* {ICON_PUZZLE} **Extension {ext} not yet in an IO cluster plan:** all {gap} IOs")
-        else:
-            lines.append(f"* {ICON_PUZZLE} **Extension {ext} partially wired:** {gap} of {total} IOs missing")
+    lines.extend(
+        _io_column_gap_line(f"Extension {ext}", "an IO", gap, total)
+        for ext, (gap, total) in detail.get("ios_by_ext", {}).items()
+    )
+    lines.extend(
+        _io_column_gap_line(f"Quickbus device {one_line(device)}", "a QB", gap, total)
+        for device, (gap, total) in detail.get("quickbus_by_device", {}).items()
+    )
     return lines
+
+
+def _io_column_gap_line(member: str, plan_noun: str, gap: int, total: int) -> str:
+    """Summary bullet for one IO extension / Quickbus device with missing wiring."""
+    if gap == total:
+        return f"* {ICON_PUZZLE} **{member} not yet in {plan_noun} cluster plan:** all {gap} IOs"
+    return f"* {ICON_PUZZLE} **{member} partially wired:** {gap} of {total} IOs missing"
+
+
+def _column_noun(n_extensions: int, n_quickbus_devices: int) -> str:
+    """Noun of the column-plan members an add-missing action adds (extensions / Quickbus devices)."""
+    if not n_quickbus_devices:
+        return "extension" if n_extensions == 1 else "extensions"
+    if not n_extensions:
+        return "Quickbus device" if n_quickbus_devices == 1 else "Quickbus devices"
+    return "extensions and Quickbus devices"
 
 
 def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> str:
     """Label of the add-missing repair action, worded by gap kind.
 
-    Entirely missing cluster plans get "Add Function Plan(s)", whole extensions
-    "Add extension(s) to Function Plan"; individual missing connections
+    Entirely missing cluster plans get "Add Function Plan(s)", whole extensions / Quickbus
+    devices "Add extension(s) to Function Plan"; individual missing connections
     (partially wired plans/extensions, legacy issues) keep "Wire in Function Plan".
     """
     markers_by_plan = detail.get("markers_by_plan", {}) if detail else {}
     ios_by_ext = detail.get("ios_by_ext", {}) if detail else {}
-    if not markers_by_plan and not ios_by_ext:
+    qb_by_device = detail.get("quickbus_by_device", {}) if detail else {}
+    columns = [*ios_by_ext.values(), *qb_by_device.values()]
+    if not markers_by_plan and not columns:
         return f"{ICON_LINK} Wire in Function Plan ({lp_missing_c}x{eta})"
     parts = []
     if marker_gap := sum(gap for name, (gap, _total) in markers_by_plan.items() if not _is_knx_cluster_plan(name)):
@@ -174,17 +195,17 @@ def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> st
     if knx_gap := sum(gap for name, (gap, _total) in markers_by_plan.items() if _is_knx_cluster_plan(name)):
         parts.append(f"{knx_gap} KNX objects")
     parts.extend(f"{ext} +{gap} IOs" for ext, (gap, _total) in ios_by_ext.items())
+    parts.extend(f"{one_line(device)} +{gap} IOs" for device, (gap, _total) in qb_by_device.items())
     detail_str = f"({', '.join(parts)},{eta})"
     all_whole = all(gap == total for gap, total in markers_by_plan.values()) and all(
-        gap == total for gap, total in ios_by_ext.values()
+        gap == total for gap, total in columns
     )
     if not all_whole:
         return f"{ICON_LINK} Wire in Function Plan {detail_str}"
     if markers_by_plan:
-        noun = "Function Plan" if len(markers_by_plan) == 1 and not ios_by_ext else "Function Plans"
+        noun = "Function Plan" if len(markers_by_plan) == 1 and not columns else "Function Plans"
         return f"{ICON_PUZZLE} Add {noun} {detail_str}"
-    noun = "extension" if len(ios_by_ext) == 1 else "extensions"
-    return f"{ICON_PUZZLE} Add {noun} to Function Plan {detail_str}"
+    return f"{ICON_PUZZLE} Add {_column_noun(len(ios_by_ext), len(qb_by_device))} to Function Plan {detail_str}"
 
 
 _CLEANUP_SCOPE_LABELS = {
@@ -676,10 +697,15 @@ class ComexioRepairFlow(RepairsFlow):
             lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
             # Fallback for stale issues created before the coordinator started storing an
             # exact estimate: approximate the affected-plan count from the detail split (one
-            # finalize cost per marker-cluster plan / IO extension) instead of a flat single
+            # finalize cost per marker-cluster plan / IO extension / Quickbus device) instead of a flat single
             # SYNC_DURATION_FUNCTION_PLAN_FINALIZE, which would undercount multi-plan repairs.
             affected_plan_count = (
-                max(1, len(lp_detail.get("markers_by_plan", {})) + len(lp_detail.get("ios_by_ext", {})))
+                max(
+                    1,
+                    len(lp_detail.get("markers_by_plan", {}))
+                    + len(lp_detail.get("ios_by_ext", {}))
+                    + len(lp_detail.get("quickbus_by_device", {})),
+                )
                 if lp_detail
                 else 1
             )

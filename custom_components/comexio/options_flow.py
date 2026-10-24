@@ -1,4 +1,5 @@
 # Version: 0.8.0
+from collections.abc import Mapping
 import logging
 from typing import Any
 
@@ -20,6 +21,7 @@ from .const import (
     CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
+    CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
@@ -33,6 +35,7 @@ from .const import (
     DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DEFAULT_SCHEMA_IO,
     DOMAIN,
+    QUICKBUS_IO_DATA_KEY,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
     SourceCategory,
@@ -44,6 +47,9 @@ from .const import (
     parse_ignored_marker_tokens,
     parse_watchdog_user_plan_pick,
     prune_import_disabled_ignored,
+    quickbus_device_id,
+    quickbus_device_label,
+    selected_quickbus_devices,
     watchdog_user_plan_pick,
 )
 
@@ -147,13 +153,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # below (keep already-saved selections choosable even once no longer "current").
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
         available_counts = getattr(coordinator, "available_source_counts", None) or {}
-        hidden_cats = {
-            cat.key
-            for cat in source_cats
-            if available_counts
-            and not available_counts.get(cat.key)
-            and not conf.get(cat.import_conf_key, cat.import_default)
-        }
+        hidden_cats = _hidden_source_categories(source_cats, available_counts, conf)
 
         if user_input is not None:
             self._normalize_user_input(user_input, conf, errors, hidden_cats)
@@ -164,8 +164,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # excluding offline extensions (no hardware present — wiring them is pointless),
         # but keeping already-saved selections choosable so they can be deselected.
         coordinator_data = getattr(coordinator, "data", None) or {}
-        ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
-        ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
+        ext_names = _io_extension_options(coordinator_data, conf)
+        quickbus_options = _quickbus_device_options(coordinator_data, conf)
 
         # Marker + KNX share the same schema/import/ignored-ids field shape (registry-driven
         # via ignore_list_categories — the source categories that support an ignore-list);
@@ -266,6 +266,20 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             # so there is nothing to translate them against.
             SelectSelectorConfig(options=ext_names, multiple=True, mode=SelectSelectorMode.DROPDOWN)
         )
+        if quickbus_options:
+            # Only with Quickbus devices to pick (or a saved pick to drop) — a dead field otherwise.
+            schema_dict[
+                vol.Optional(
+                    CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
+                    default=[
+                        option["value"]
+                        for option in quickbus_options
+                        if option["value"] in selected_quickbus_devices(conf, coordinator_data)
+                    ],
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(options=quickbus_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
+            )
         schema_dict[
             vol.Required(
                 CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
@@ -371,3 +385,45 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             if not merged_options.get(cat.ignored_conf_key, "").strip():
                 merged_options.pop(cat.ignored_conf_key, None)
         return self.async_create_entry(title="", data=merged_options)
+
+
+def _hidden_source_categories(source_cats, available_counts: Mapping[str, int], conf: Mapping[str, Any]) -> set[str]:
+    """Categories without objects on the server and not opted in; none while the counts are unknown."""
+    return {
+        cat.key
+        for cat in source_cats
+        if available_counts
+        and not available_counts.get(cat.key)
+        and not conf.get(cat.import_conf_key, cat.import_default)
+    }
+
+
+def _io_extension_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[str]:
+    """Online extension names, plus saved picks that are offline or gone so they can be deselected."""
+    ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
+    ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
+    return ext_names
+
+
+def _quickbus_device_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[SelectOptionDict]:
+    """Quickbus devices for the QB cluster multi-select: value = device id, label "QB3 MT1".
+
+    Live devices first (by id), excluding those on an offline extension, then selected devices
+    that are offline or gone — kept choosable so saving the form never drops them by accident
+    (while the option was never saved, every device is selected).
+    """
+    names: dict[str, str] = {}
+    offline: set[str] = set()
+    for io in coordinator_data.get(QUICKBUS_IO_DATA_KEY, []):
+        device = quickbus_device_id(io)
+        names.setdefault(device, io["quickbus"].get("name") or "")
+        if io.get("offline"):
+            offline.add(device)
+    by_id = sorted(names, key=lambda device: (len(device), device))
+    live = [device for device in by_id if device not in offline]
+    selected = dict.fromkeys(str(device) for device in conf.get(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES, by_id))
+    kept = [device for device in selected if device not in live]
+    return [
+        SelectOptionDict(value=device, label=one_line(quickbus_device_label(device, names.get(device))))
+        for device in [*live, *kept]
+    ]

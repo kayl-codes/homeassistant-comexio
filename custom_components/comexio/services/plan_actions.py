@@ -301,6 +301,21 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
         )
 
 
+def _sort_row_step(coordinator: ComexioCoordinator, fub_id: int) -> int:
+    """Vertical distance between two rows of the sorted plan."""
+    if coordinator.is_trigger_plan(fub_id):
+        return FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
+    if coordinator.is_knx_cluster_plan(fub_id):
+        # A KNX bridge pair's two WebIO hops already sit FUNCTION_PLAN_LAYOUT_ROW_HEIGHT apart
+        # (see _grid.py's _KNX_LOOPBACK_Y_OFFSET). Using that SAME value for the pair-to-pair
+        # row_step too (tried 2026-09-20) made every row in the plan perfectly equidistant, with
+        # no visual gap between one pair and the next — user report: "alles press an press".
+        # FUNCTION_PLAN_KNX_LAYOUT_Y_STEP keeps the within-pair hop gap tight while restoring a
+        # visibly larger gap between pairs (see its own docstring in const.py for the numbers).
+        return FUNCTION_PLAN_KNX_LAYOUT_Y_STEP
+    return FUNCTION_PLAN_LAYOUT_Y_STEP
+
+
 async def async_sort_function_plan(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -312,8 +327,8 @@ async def async_sort_function_plan(
 ) -> dict | None:
     """Sort all plan elements by marker/KNX ID, snapping every element to the exact grid.
 
-    Managed IO cluster plans ('{prefix} - IO [...]') are not marker-sorted — their
-    deterministic extension-column grid (io_column_rows) is restored instead.
+    Managed IO / Quickbus cluster plans ('{prefix} - IO [...]' / '{prefix} - QB [...]') are not
+    marker-sorted — their deterministic column grid (IoPlanKind.column_blocks) is restored instead.
 
     Returns a result dict (success, pairs, orphans, act_note, activated, duration) or
     None when the plan could not be loaded or is empty. With notify=False no persistent
@@ -329,18 +344,7 @@ async def async_sort_function_plan(
     if was_active is None:
         was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
 
-    if coordinator.is_trigger_plan(fub_id):
-        row_step = FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
-    elif coordinator.is_knx_cluster_plan(fub_id):
-        # A KNX bridge pair's two WebIO hops already sit FUNCTION_PLAN_LAYOUT_ROW_HEIGHT apart
-        # (see _grid.py's _KNX_LOOPBACK_Y_OFFSET). Using that SAME value for the pair-to-pair
-        # row_step too (tried 2026-09-20) made every row in the plan perfectly equidistant, with
-        # no visual gap between one pair and the next — user report: "alles press an press".
-        # FUNCTION_PLAN_KNX_LAYOUT_Y_STEP keeps the within-pair hop gap tight while restoring a
-        # visibly larger gap between pairs (see its own docstring in const.py for the numbers).
-        row_step = FUNCTION_PLAN_KNX_LAYOUT_Y_STEP
-    else:
-        row_step = FUNCTION_PLAN_LAYOUT_Y_STEP
+    row_step = _sort_row_step(coordinator, fub_id)
     canvas_label, x_max, rows_per_col, max_cols = _sort_canvas_bounds(api, fub_id, canvas_format, row_step)
 
     plan_data = await api.function_plan_load_elements(fub_id)
@@ -355,7 +359,7 @@ async def async_sort_function_plan(
     if not new_positions:
         if notify:
             persistent_notification.async_create(
-                hass, "No elements in plan.", title=f"Function Plan Sort Plan {fub_id}"
+                hass, sort_line or "No elements in plan.", title=f"Function Plan Sort Plan {fub_id}"
             )
         return None
 
@@ -415,18 +419,30 @@ def _sort_compute_positions(
     # of being sorted into the grid as orphans.
     pinned = _pinned_template_positions(plan_data, x_max)
     pinned_ids = {eid for eid, _x, _y in pinned}
-    io_members = coordinator.managed_io_plan_members(fub_id)
+    column_plan = coordinator.managed_column_plan(fub_id)
+    io_members = column_plan[1] if column_plan else None
     header_slots: list[tuple[float, float, str]] = []
-    if io_members and (coordinator.data or {}).get("io"):
-        # Managed IO cluster plan: the marker sort would scramble the extension grid —
+    if column_plan and not (coordinator.data or {}).get(column_plan[0].data_key):
+        # A managed column plan without its IO data (Quickbus import off, failed parse): the
+        # marker sort would scramble its column grid, so leave the plan as it is.
+        sort_line = (
+            f"Plan {fub_id} is a managed {column_plan[0].label} plan, but no {column_plan[0].label} IOs are"
+            " loaded — sort skipped to keep its column grid."
+        )
+        _LOGGER.warning("Function Plan Sort: %s", sort_line)
+        return [], 0, 0, sort_line, header_slots, io_members
+    if column_plan:
+        # Managed IO / Quickbus cluster plan: the marker sort would scramble the column grid —
         # restore the deterministic column layout the wire path produced instead.
-        placed, n_pairs, leftovers = _assign_io_grid_positions(coordinator, plan_data, io_members, rows_per_col)
+        kind, members = column_plan
+        placed, n_pairs, leftovers = _assign_io_grid_positions(coordinator, plan_data, members, rows_per_col, kind)
         leftovers = [eid for eid in leftovers if eid not in pinned_ids]
         new_positions = placed + _park_leftover_positions(placed, leftovers, rows_per_col) + pinned
         n_single = len(leftovers)
-        header_slots = _io_header_slots(coordinator, io_members, rows_per_col)
+        header_slots = _io_header_slots(coordinator, members, rows_per_col, kind)
         sort_line = (
-            f"{n_pairs} IO pairs restored in the extension grid [{','.join(io_members)}]"
+            f"{n_pairs} {kind.label} pairs restored in the {kind.member_noun} grid"
+            f" [{','.join(one_line(m) for m in members)}]"
             f" + {n_single} further elements parked to the right + {len(header_slots)} block headers."
         )
     else:

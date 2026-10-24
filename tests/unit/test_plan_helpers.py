@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import WebioClass, function_plan_id, source_category
+from custom_components.comexio.const import IO_PLAN_KIND_QUICKBUS, WebioClass, function_plan_id, source_category
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 PREFIX = "HA"
@@ -80,15 +80,86 @@ def test_io_plan_membership_skips_distrusted_and_foreign_plans() -> None:
     assert coordinator._io_plan_membership(PREFIX) == {4: ["A"], 5: ["B", "C"]}
 
 
-@pytest.mark.parametrize(("created", "placed"), [(None, None), (9, (9, 0))], ids=["create-failed", "created"])
-def test_a_fresh_io_plan_places_the_extension_in_column_0(created: int | None, placed: tuple | None) -> None:
+@pytest.mark.parametrize(("created", "placed"), [(None, None), (9, 9)], ids=["create-failed", "created"])
+def test_a_fresh_io_plan_takes_the_extension(created: int | None, placed: int | None) -> None:
     coordinator = _coordinator(
         _io_plan_rows_per_col=lambda _orientation: 10,
-        _io_rows_needed=lambda _ext: 4,
+        _io_rows_needed=lambda _ext, _kind: 4,
         _create_managed_plan=AsyncMock(return_value=created),
     )
 
     assert asyncio.run(coordinator._join_or_create_io_plan("A", {}, 2, PREFIX)) == placed
+
+
+def _cluster_coordinator(
+    plan_name: str, cluster_size: int, sizes: dict[str, int], *, renamed: bool = True, created: int = 48
+) -> ComexioCoordinator:
+    """A coordinator with one managed plan 47 (plan_name) for resolve_io_clusters."""
+    return _coordinator(
+        server_id="cx1",
+        data={},
+        api=SimpleNamespace(fub_data={"47": {"Name": plan_name}, "3": {"Name": "Lights"}}),
+        config_entry=SimpleNamespace(options={"logikplan_plan_map": {plan_name: 47, "Lights": 3}}),
+        _distrusted_fub_ids=set(),
+        _function_plan_prefix=lambda: PREFIX,
+        _function_plan_cluster_size=lambda: cluster_size,
+        _plan_rows_per_col=lambda _fid, _orientation=None: 10,
+        _io_plan_rows_per_col=lambda _orientation: 10,
+        _io_rows_needed=lambda member, _kind: sizes[member],
+        _rename_io_plan=AsyncMock(return_value=renamed),
+        _create_managed_plan=AsyncMock(return_value=created),
+        _persist_plan_map=AsyncMock(),
+    )
+
+
+def test_joins_in_one_run_keep_only_the_final_plan_name() -> None:
+    coordinator = _cluster_coordinator("HA - IO [A]", 150, dict.fromkeys("ABC", 4))
+
+    asyncio.run(coordinator.resolve_io_clusters(["A", "B", "C"]))
+
+    # B and C join plan 47 one after the other: neither the old name nor the intermediate
+    # "[A,B]" may stay in plan_map, or the watchdog warns about plans that do not exist.
+    coordinator._persist_plan_map.assert_awaited_once_with({"HA - IO [A,B,C]": 47}, removals={"HA - IO [A]"})
+
+
+def test_quickbus_devices_join_a_plan_while_its_column_holds_them() -> None:
+    # One column of 10 rows: device 1 (4 rows) is placed; device 2 (4) stacks below it after a
+    # blank row; device 3 (3) no longer fits and opens a fresh plan.
+    coordinator = _cluster_coordinator("HA - QB [1]", 50, {"1": 4, "2": 4, "3": 3})
+
+    placed, created, failed = asyncio.run(coordinator.resolve_io_clusters(["1", "2", "3"], IO_PLAN_KIND_QUICKBUS))
+
+    assert placed == {"1": (47, (0, 0)), "2": (47, (0, 5)), "3": (48, (0, 0))}
+    assert (created, failed) == ({48}, [])
+    coordinator._rename_io_plan.assert_awaited_once_with(47, "HA - QB [1,2]")
+    coordinator._persist_plan_map.assert_awaited_once_with(
+        {"HA - QB [1,2]": 47, "HA - QB [3]": 48}, removals={"HA - QB [1]"}
+    )
+
+
+def test_a_failed_join_rename_places_the_member_in_a_fresh_plan() -> None:
+    coordinator = _cluster_coordinator("HA - IO [A]", 150, dict.fromkeys("AB", 4), renamed=False, created=9)
+
+    placed, created, failed = asyncio.run(coordinator.resolve_io_clusters(["A", "B"]))
+
+    # Plan 47 keeps its name and member: plan_map must not claim it holds B.
+    assert placed == {"A": (47, (0, 0)), "B": (9, (0, 0))}
+    assert (created, failed) == ({9}, [])
+    coordinator._persist_plan_map.assert_awaited_once_with({"HA - IO [A]": 47, "HA - IO [B]": 9}, removals=set())
+
+
+@pytest.mark.parametrize(
+    ("plan_map", "superseded"),
+    [
+        ({"HA - QB [1]": 5, "HA - QB [1,2]": 5, "Lights": 3, "HA - IO [A]": 7, "bogus": "x"}, {"HA - QB [1]"}),
+        ("not a map", set()),
+    ],
+    ids=["other-plans-kept", "no-map"],
+)
+def test_superseded_plan_map_names(plan_map: object, superseded: set[str]) -> None:
+    coordinator = _coordinator(config_entry=SimpleNamespace(options={"logikplan_plan_map": plan_map}))
+
+    assert coordinator._superseded_plan_map_names({5: "HA - QB [1,2]"}) == superseded
 
 
 def test_source_link_names_the_first_plan_wiring_the_source() -> None:

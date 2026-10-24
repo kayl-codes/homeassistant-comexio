@@ -239,7 +239,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
                 web_io_json = api.generate_webio_json(
                     server_id,
                     class_name,
-                    coordinator.data,
+                    coordinator.webio_source_data(),
                     webio_class=cls,
                     ignored_marker_ids=coordinator.ignored_marker_ids,
                     ignored_knx_ids=coordinator.ignored_knx_ids,
@@ -256,7 +256,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
             web_io_json = api.generate_webio_json(
                 server_id,
                 class_name,
-                coordinator.data,
+                coordinator.webio_source_data(),
                 webio_class=cls,
                 ignored_marker_ids=coordinator.ignored_marker_ids,
                 ignored_knx_ids=coordinator.ignored_knx_ids,
