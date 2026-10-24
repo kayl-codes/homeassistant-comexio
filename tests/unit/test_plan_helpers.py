@@ -118,6 +118,35 @@ def test_knx_bridge_pairs_count_only_marker_to_knx() -> None:
     assert ComexioCoordinator._plan_knx_bridge_pairs(plan) == {("40", "7")}
 
 
+def _bridge_plan(*pairs: tuple[int, int]) -> dict:
+    """A plan wiring each (marker_id, k_id) pair Marker -> KNX."""
+    elements, connections = {}, {}
+    for n, (marker_id, k_id) in enumerate(pairs):
+        elements[f"m{n}"] = {"reference": {"type": 2, "ref_id": marker_id}}
+        elements[f"k{n}"] = {"reference": {"type": 11, "ref_id": k_id}}
+        connections[str(n)] = {"input": {"FubElementId": f"m{n}"}, "output": [{"FubElementId": f"k{n}"}]}
+    return {"elements": elements, "connections": connections}
+
+
+def _bridge_coordinator(relevant: set[int], loaded: bool = True) -> ComexioCoordinator:
+    coordinator = _coordinator(
+        function_plan_plans={7: _bridge_plan((40, 1)), 8: _bridge_plan((41, 2), (42, 1)), 9: _bridge_plan((99, 3))}
+    )
+    coordinator._function_plan_check_fub_ids = lambda: relevant
+    coordinator._relevant_plans_loaded = lambda fub_ids: loaded
+    return coordinator
+
+
+def test_knx_bridge_map_reads_only_the_relevant_plans() -> None:
+    # Plan 9 is not relevant; K1 is bridged by plans 7 and 8 — the later plan wins.
+    assert _bridge_coordinator({7, 8})._knx_bridge_marker_by_k_id() == {"1": "42", "2": "41"}
+
+
+@pytest.mark.parametrize(("relevant", "loaded"), [(set(), True), ({7}, False)], ids=["no plan", "not loaded"])
+def test_knx_bridge_map_is_unknown_without_loaded_relevant_plans(relevant: set[int], loaded: bool) -> None:
+    assert _bridge_coordinator(relevant, loaded)._knx_bridge_marker_by_k_id() is None
+
+
 @pytest.mark.parametrize("key", ["M5", "K3"])
 def test_range_cluster_plan_name_for_a_source_key(key: str) -> None:
     cat = next(

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import (
     ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
     ComexioConnectionError,
     ComexioCreatedWithoutIdError,
     ComexioDataError,
@@ -1091,6 +1092,19 @@ def test_knx_catalog_failure_keeps_last_known_good(comexio_api: ComexioAPI, clie
     assert comexio_api.get_knx_dpt_catalog_snapshot() == (catalog, "11.0.1")
 
 
+def test_knx_catalog_meeting_another_certificate_keeps_last_known_good(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    catalog = {"KnxPoints": {"1": {}}}
+    comexio_api.seed_knx_dpt_catalog(catalog, "11.0.1")
+    comexio_api.comexio_version = "11.0.2"
+    err = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
+    _fail(client, "get_knx_dpt_catalog", err)
+    assert asyncio.run(comexio_api.get_knx_dpt_catalog()) is catalog
+    assert comexio_api.get_knx_dpt_catalog_snapshot() == (catalog, "11.0.1")
+    assert comexio_api.certificate_mismatch is err  # reported, not swallowed as a plain fetch failure
+
+
 def test_knx_catalog_failure_without_cache_is_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
     _fail(client, "get_knx_dpt_catalog", _connection_error())
     assert asyncio.run(comexio_api.get_knx_dpt_catalog()) == {}
@@ -1263,6 +1277,17 @@ def test_system_info_logs_in_again_on_a_lapsed_session(comexio_api: ComexioAPI, 
     assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
     client.login.assert_awaited_once()
     assert client.get_system_info.await_count == 2
+
+
+def test_system_info_uptime_fetch_retries_after_the_polls_re_login(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), SYSTEM_INFO])
+    client.get_uptime = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), timedelta(days=3)])
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    # The uptime fetch reuses the poll's one re-login.
+    client.login.assert_awaited_once()
+    assert client.get_uptime.await_count == 2
 
 
 def test_system_info_failed_relogin_is_the_cause(comexio_api: ComexioAPI, client: MagicMock) -> None:

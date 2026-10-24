@@ -54,6 +54,8 @@ ISSUE_FUNCTION_PLAN_STOPPED_USER = "function_plan_stopped_user"
 ISSUE_FUNCTION_PLAN_AUTO_START_SUSPENDED = "function_plan_auto_start_suspended"
 # Repair of a watched user plan Comexio no longer has (deleted); one per plan, its own id scheme.
 ISSUE_FUNCTION_PLAN_VANISHED = "function_plan_vanished"
+# Translation key of the same repair while another plan holds the ID (renamed, or the ID reused); same id and flow.
+ISSUE_FUNCTION_PLAN_REPLACED = "function_plan_replaced"
 START_ACTION_PREFIX = "COMEXIO_START_PLAN_"
 RESTORE_ACTION_PREFIX = "COMEXIO_RESTORE_PLAN_"
 UNWATCH_ACTION_PREFIX = "COMEXIO_UNWATCH_PLAN_"
@@ -98,6 +100,11 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         ),
         "vanished_title": "Comexio: function plan deleted",
         "vanished": "The monitored function plan {name} (ID {fub_id}) no longer exists in Comexio.",
+        "replaced_title": "Comexio: function plan not found",
+        "replaced": (
+            "The monitored function plan {name} (ID {fub_id}) was not found: ID {fub_id} now holds {current}. "
+            "If it was renamed, take the rename over in the Home Assistant repair; the other choices are there too."
+        ),
         "restore": "Restore",
         "unwatch": "Stop watching",
         "no_backup_title": "Comexio: restore not possible",
@@ -138,6 +145,12 @@ PUSH_TEXTS: dict[str, dict[str, str]] = {
         ),
         "vanished_title": "Comexio: Logikplan gelöscht",
         "vanished": "Der überwachte Logikplan {name} (ID {fub_id}) existiert in Comexio nicht mehr.",
+        "replaced_title": "Comexio: Logikplan nicht gefunden",
+        "replaced": (
+            "Der überwachte Logikplan {name} (ID {fub_id}) wurde nicht gefunden: ID {fub_id} trägt jetzt {current}. "
+            "Wurde er umbenannt, übernimm die Umbenennung in der Reparatur von Home Assistant; dort stehen auch "
+            "die anderen Möglichkeiten."
+        ),
         "restore": "Wiederherstellen",
         "unwatch": "Nicht mehr überwachen",
         "no_backup_title": "Comexio: Wiederherstellen nicht möglich",
@@ -370,6 +383,8 @@ class ManagedPlanWatchdog:
         # (fub_id, name) of the watched user plans Comexio no longer has (deleted); None until the first check.
         # By ID and name: a reused ID can belong to two deleted watched plans.
         self.vanished: set[tuple[int, str]] | None = None
+        # fub_id → name of the plan holding a vanished plan's ID now (renamed, or the ID reused), as of the last check.
+        self.vanished_holders: dict[int, str] = {}
         # Tokens (vanished_plan_token) of vanished plans whose push was replaced by "restored": the plan
         # dropping out of vanished keeps it.
         self._restored_pushes: set[str] = set()
@@ -909,6 +924,7 @@ class ManagedPlanWatchdog:
         while_stopped: bool = False,
         vanished_guard: _VanishedGuard = _VanishedGuard.NONE,
         unless_ignored: bool = False,
+        current_name: str = "",
     ) -> frozenset[str]:
         """One push for a plan; with_action adds the "Start plan" button, actions further buttons.
 
@@ -961,7 +977,10 @@ class ManagedPlanWatchdog:
                 {
                     "title": texts[title_key],
                     "message": texts[message_key].format(
-                        name=one_line(name), fub_id=fub_id, attempts=FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS
+                        name=one_line(name),
+                        fub_id=fub_id,
+                        attempts=FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS,
+                        current=one_line(current_name),
                     ),
                     "data": data,
                 },
@@ -1016,17 +1035,23 @@ class ManagedPlanWatchdog:
             return "it vanished again meanwhile"
         return None
 
-    async def async_sync_vanished(self, vanished: Collection[tuple[int, str]]) -> None:
+    async def async_sync_vanished(
+        self, vanished: Collection[tuple[int, str]], holders: Mapping[int, str] | None = None
+    ) -> None:
         """Repair per watched user plan Comexio no longer has, by (fub_id, name); alarm push for a newly vanished one.
 
-        The first call after setup pushes every vanished plan, as the stopped-plan check does: a
-        plan deleted while HA was down is reported. A plan back again (restored under a new ID) or
-        unpicked loses its repair and push, except a "restored" confirmation, which stays on the phone.
+        holders: fub_id → name of the plan holding a vanished plan's ID now (renamed, or the ID reused); its
+        repair and push name that plan. The first call after setup pushes every vanished plan, as the
+        stopped-plan check does: a plan deleted while HA was down is reported. A plan back again (restored
+        under a new ID) or unpicked loses its repair and push, except a "restored" confirmation, which stays
+        on the phone.
         """
         if self._closed:
             return  # unloaded: the reloaded watchdog owns the shared repairs, this snapshot may predate them
         previous = self.vanished or set()
         self.vanished = set(vanished)
+        self._log_holder_changes(previous & self.vanished, dict(holders or {}))
+        self.vanished_holders = dict(holders or {})
         self._sync_vanished_issues(self.vanished)
         newly_vanished = self.vanished - previous
         retries = self._vanished_push_retries_due(self.vanished) | dict.fromkeys(newly_vanished, None)
@@ -1046,16 +1071,30 @@ class ManagedPlanWatchdog:
             self._restored_pushes -= {vanished_plan_token(fub_id, name) for fub_id, name in self._vanished_clearing}
             self._vanished_clearing = set()
 
+    def _log_holder_changes(self, still_vanished: Collection[tuple[int, str]], holders: Mapping[int, str]) -> None:
+        """Log a still-vanished plan whose ID got another holder; its repair follows, its push is not resent."""
+        for fub_id, name in sorted(still_vanished):
+            if (holder := holders.get(fub_id)) != self.vanished_holders.get(fub_id):
+                _LOGGER.info(
+                    "[%s] Monitored function plan '%s' (ID %s), still not found: the ID now holds %s",
+                    self._server_id,
+                    one_line(name),
+                    fub_id,
+                    "no plan" if holder is None else f"'{one_line(holder)}'",
+                )
+
     def _sync_vanished_issues(self, vanished: Collection[tuple[int, str]]) -> None:
         for fub_id, name in vanished:
             details = {"plan_name": name, "fub_id": str(fub_id)}
+            if (holder := self.vanished_holders.get(fub_id)) is not None:
+                details["current_name"] = holder
             ir.async_create_issue(
                 self._hass,
                 DOMAIN,
                 vanished_plan_issue_id(self._server_id, fub_id, name),
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
-                translation_key=ISSUE_FUNCTION_PLAN_VANISHED,
+                translation_key=ISSUE_FUNCTION_PLAN_VANISHED if holder is None else ISSUE_FUNCTION_PLAN_REPLACED,
                 translation_placeholders=one_line_values(details),
                 data={"entry_id": self._entry_id, **details},
             )
@@ -1069,12 +1108,22 @@ class ManagedPlanWatchdog:
 
         targets: a retry, to the notify targets that failed to take it; None sends it to every one.
         """
-        if targets is None:
+        holder = self.vanished_holders.get(fub_id)
+        if targets is None and holder is None:
             _LOGGER.warning(
                 "[%s] Monitored function plan '%s' (ID %s) no longer exists in Comexio",
                 self._server_id,
                 one_line(name),
                 fub_id,
+            )
+        elif targets is None:
+            _LOGGER.warning(
+                "[%s] Monitored function plan '%s' (ID %s) not found: the ID now holds '%s' (renamed, or the ID "
+                "reused for another plan); see its repair",
+                self._server_id,
+                one_line(name),
+                fub_id,
+                one_line(holder),
             )
         token = vanished_plan_token(fub_id, name)
         if token in self._restored_pushes:
@@ -1087,10 +1136,13 @@ class ManagedPlanWatchdog:
         failed = await self._async_push(
             fub_id,
             name,
-            "vanished_title",
-            "vanished",
+            "vanished_title" if holder is None else "replaced_title",
+            "vanished" if holder is None else "replaced",
+            current_name=holder or "",
             token=token,
-            actions=_vanished_actions(fub_id, name),
+            # With another plan on the ID the choice (restore, take a rename over, watch it) is the repair's:
+            # a one-tap Restore of a renamed plan would start a copy beside the original.
+            actions=_vanished_actions(fub_id, name) if holder is None else (ACTION_UNWATCH,),
             alarm=True,
             targets=targets,
             # Restored while an earlier plan's push was sent: the alarm would replace that confirmation, and the
@@ -1180,15 +1232,24 @@ class ManagedPlanWatchdog:
                 name=f"{DOMAIN}_{self._server_id}_restored_push_cancelled",
             )
 
-    async def async_push_restore_failed(self, fub_id: int, name: str) -> None:
-        """Tell the phone a Restore from its push failed or was refused, with both actions again."""
+    async def async_push_restore_failed(self, fub_id: int, name: str, *, offer_restore: bool = True) -> None:
+        """Tell the phone a Restore from its push failed or was refused, with both actions again.
+
+        With another plan on the ID only "Stop watching", as its alarm (see _async_push_vanished): a refused
+        Restore of a plan most likely renamed would be refused again on every tap. offer_restore=False: the
+        Restore was refused as such, before a check has listed that plan on the ID.
+        """
         await self._async_push(
             fub_id,
             name,
             "restore_failed_title",
             "restore_failed",
             token=vanished_plan_token(fub_id, name),
-            actions=_vanished_actions(fub_id, name),
+            actions=(
+                _vanished_actions(fub_id, name)
+                if offer_restore and fub_id not in self.vanished_holders
+                else (ACTION_UNWATCH,)
+            ),
             # Its buttons would replace the "restored" push sent meanwhile, or name a plan no longer vanished.
             vanished_guard=_VanishedGuard.WHILE_VANISHED,
         )
