@@ -21,9 +21,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 
 ## Project rules to check
 
-- **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776; `test_cognitive_complexity.py` checks it
-  locally — flag a new entry in its `BASELINE`); no duplicated string literals — extract constants (S1192). Tuning
-  values and thresholds belong in `const.py`, not inline.
+- **Complexity:** cognitive complexity ≤ 15 per function as SonarCloud measures it (S3776).
+  `test_cognitive_complexity.py` checks it locally with complexipy; its `BASELINE` is the only permitted exception
+  (functions SonarCloud accepts but complexipy rates above 15) — flag a new entry there. No duplicated string
+  literals — extract constants (S1192). Tuning values and thresholds belong in `const.py`, not inline.
 - **Stable IDs:** unique_ids and entity_ids carry only the technical address (`comexio_{server_id}_m{id}`,
   `..._k{id}`, `..._{ext_name}_{identifier}`, `..._fub{id}`); only the display name carries the Comexio
   description. Flag any change that would let a renamed description or naming schema alter a unique_id or entity_id.
