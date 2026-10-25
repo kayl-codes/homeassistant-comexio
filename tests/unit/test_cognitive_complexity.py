@@ -1,4 +1,4 @@
-"""No integration function exceeds cognitive complexity 15 (SonarCloud S3776), checked before the push.
+"""No new integration function exceeds cognitive complexity 15 (SonarCloud S3776), and no listed one grows.
 
 SonarCloud only sees a function once the PR is scanned, so a too-complex function cost a bot round each time (5 of
 them on #220). complexipy measures cognitive complexity locally, but not exactly like SonarCloud: it scores some
