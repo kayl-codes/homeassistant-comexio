@@ -29,7 +29,7 @@ from aiocomexio import (
     ComexioError,
 )
 from aiocomexio.function_plan import build_source_id_translation, plan_hash, render_plan_svg, snapshot_label_maps
-from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, quickbus_command_name
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS, quickbus_command_name
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
@@ -275,6 +275,8 @@ _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 # e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache). For the same
 # reason _function_plan_snapshot_complete() counts a seeded entry as a missing plan.
 _SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
+# Protocols a Web-IO command can carry; any other stored record is unknown (see async_load_webio_protocols).
+_WEBIO_PROTOCOLS = frozenset({WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS})
 # Audit buckets and mismatch keys derived from the function plans (see _carry_over_plan_audit).
 _PLAN_AUDIT_BUCKETS = (
     "function_plan_missing",
@@ -316,6 +318,11 @@ _SUN_ATTR_BY_FREQ = {
     "DAWN": "next_dawn",
     "DUSK": "next_dusk",
 }
+
+
+def _sound_protocol_record(protocol: Any) -> bool:
+    """A stored protocol record to trust: unknown (None) or a protocol the Web-IO commands support."""
+    return protocol is None or (type(protocol) is int and protocol in _WEBIO_PROTOCOLS)
 
 
 def _unknown_run_state(_fub_id: int) -> None:
@@ -9068,11 +9075,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.webio_synced_protocols = dict.fromkeys(WEBIO_CLASSES)
             return
         self.webio_synced_protocols = {
-            cls: protocol if protocol is None or type(protocol) is int else None for cls, protocol in classes.items()
+            cls: protocol if _sound_protocol_record(protocol) else None for cls, protocol in classes.items()
         }
-        if invalid := sorted(
-            cls for cls, protocol in classes.items() if protocol is not None and type(protocol) is not int
-        ):
+        if invalid := sorted(cls for cls, protocol in classes.items() if not _sound_protocol_record(protocol)):
             _LOGGER.warning(
                 "Web-IO protocol store: invalid record for %s; rewritten on the next sync", ", ".join(map(str, invalid))
             )

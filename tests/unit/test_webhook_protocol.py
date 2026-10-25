@@ -73,6 +73,17 @@ def _hass(internal_url: str | None = None, external_url: str | None = None, use_
         ("  http://192.0.2.10:8123  ", WebhookTarget("192.0.2.10:8123", False)),
         ("https://[fd00::10]:8123", WebhookTarget("[fd00::10]:8123", True)),
         ("HTTPS://HA.Example.com", WebhookTarget("ha.example.com:443", True)),
+        # LAN names may carry "_" although DNS host names do not.
+        ("http://my_ha.fritz.box:8123", WebhookTarget("my_ha.fritz.box:8123", False)),
+        # A fully qualified name ends in one dot; an internationalized name is checked in its IDNA form.
+        ("https://ha.example.com.", WebhookTarget("ha.example.com.:443", True)),
+        ("https://bücher.example", WebhookTarget("bücher.example:443", True)),
+        # The longest label (63) and the longest name (253 characters) DNS allows.
+        (f"https://{'a' * 63}.example.com", WebhookTarget(f"{'a' * 63}.example.com:443", True)),
+        (
+            "https://" + ".".join(["a" * 63] * 3 + ["a" * 61]),
+            WebhookTarget(".".join(["a" * 63] * 3 + ["a" * 61]) + ":443", True),
+        ),
     ],
 )
 def test_a_webhook_url_gives_its_address_and_protocol(url: str, target: WebhookTarget) -> None:
@@ -95,6 +106,15 @@ def test_a_webhook_url_gives_its_address_and_protocol(url: str, target: WebhookT
         "https://ha.example.com#top",
         "https://ha.example.com:99999",
         "https://ha.example.com:port",
+        # A host that is no host name: it would be saved as an address Comexio cannot reach.
+        "https://ha example.com",
+        "https://ha..example.com",
+        "https://-ha.example.com",
+        "https://ha-.example.com",
+        f"https://{'a' * 64}.example.com",
+        "https://ha.example.com..",
+        "https://" + ".".join(["a" * 63] * 4),  # 255 characters, beyond DNS's 253
+        f"https://{'ü' * 64}.example",  # a label beyond 63 characters fails the IDNA encoding
     ],
 )
 def test_an_unusable_webhook_url_is_invalid(url: str | None) -> None:
@@ -199,6 +219,32 @@ def test_an_unusable_fixed_url_falls_back_to_the_automatic_address_and_warns_onc
     assert resolver.fallback_reason == reason
 
 
+@pytest.mark.parametrize(
+    ("url", "logged"),
+    [
+        ("https://user:s3cret@ha.example.com", "'https://***@ha.example.com'"),
+        # A password with a character that ends the URL's host part early, and a URL without a scheme.
+        ("https://user:pa/s3cret@ha.example.com", "'https://***@ha.example.com'"),
+        ("https://user:pa?s3cret@ha.example.com", "'https://***@ha.example.com'"),
+        ("https://user:pa#s3cret@ha.example.com", "'https://***@ha.example.com'"),
+        ("user:s3cret@192.0.2.10:8123", "'***@192.0.2.10:8123'"),
+        ("user:pa//s3cret@192.0.2.10:8123", "'***@192.0.2.10:8123'"),
+        # An "@" in the password: only the last one ends the user info.
+        ("https://user:pa@s3cret@ha.example.com", "'https://***@ha.example.com'"),
+        ("HTTPS://user:s3cret@ha.example.com", "'HTTPS://***@ha.example.com'"),
+    ],
+)
+def test_a_refused_url_is_logged_without_its_password(caplog: pytest.LogCaptureFixture, url: str, logged: str) -> None:
+    resolver = HaAddressResolver(_hass(internal_url="http://192.0.2.10:8123"), WEBHOOK_ADDRESS_CUSTOM, url)
+    resolver._async_get = AsyncMock(return_value="192.0.2.10:8123")  # type: ignore[method-assign]
+
+    asyncio.run(resolver.async_target())
+
+    assert resolver.fallback_reason == "invalid_url"
+    assert logged in caplog.text
+    assert "s3cret" not in caplog.text
+
+
 def test_a_fixed_url_that_works_again_warns_again_when_it_breaks(caplog: pytest.LogCaptureFixture) -> None:
     hass = _hass(external_url=None)
     resolver = HaAddressResolver(hass, WEBHOOK_ADDRESS_EXTERNAL)
@@ -281,6 +327,8 @@ def test_a_class_without_a_record_counts_as_http() -> None:
         ({"host": _HOST, "classes": {MARKER: 1, IO: None}}, {MARKER: 1, IO: None}),
         # An invalid record is unknown (rewritten), not HTTP (which could hide an HTTPS class).
         ({"host": _HOST, "classes": {MARKER: "1", IO: True, "x": 0}}, {MARKER: None, IO: None, "x": 0}),
+        # A number that is neither HTTP nor HTTPS is no protocol a command could be written with.
+        ({"host": _HOST, "classes": {MARKER: 7, IO: -1, "x": 1}}, {MARKER: None, IO: None, "x": 1}),
         # An unreadable store: every class is unknown, not HTTP — only no store at all means HTTP.
         ({}, dict.fromkeys(WEBIO_CLASSES)),
         ({"host": _HOST, "classes": None}, dict.fromkeys(WEBIO_CLASSES)),
@@ -302,6 +350,7 @@ def test_the_protocol_store_is_restored_defensively(stored: Any, expected: dict)
         ({"host": _HOST, "classes": None}, "unreadable (NoneType)"),
         ("garbage", "unreadable (str)"),
         ({"host": _HOST, "classes": {MARKER: "1"}}, f"invalid record for {MARKER}"),
+        ({"host": _HOST, "classes": {MARKER: 7}}, f"invalid record for {MARKER}"),
     ],
 )
 def test_a_damaged_protocol_store_is_logged(stored: Any, logged: str, caplog: pytest.LogCaptureFixture) -> None:
@@ -554,16 +603,26 @@ def _ctx(action: str = "update_ip", failed_writes: list[str] | None = None) -> _
     )
 
 
-def _sync_button(failed: list[str] | None = None, cancel: bool = False) -> ComexioSyncButton:
+def _sync_button(
+    failed: list[str] | None = None,
+    cancel: bool = False,
+    synced: int | None = WEBIO_PROTOCOL_HTTP,
+    written: dict[str, int] | None = None,
+) -> ComexioSyncButton:
+    """synced: the class's recorded protocol; written: the delta's write counters (default: 2 commands updated)."""
     button = ComexioSyncButton.__new__(ComexioSyncButton)
     button.server_id = "cx1"
     button.coordinator = SimpleNamespace(  # type: ignore[assignment]
-        cancel_sync=cancel, async_set_webio_synced_protocol=AsyncMock(), active_webio_classes=list(WEBIO_CLASSES)
+        cancel_sync=cancel,
+        async_set_webio_synced_protocol=AsyncMock(),
+        active_webio_classes=list(WEBIO_CLASSES),
+        webio_synced_protocol=lambda _cls: synced,
     )
+    counters = {"added": 0, "updated": 2, "renamed": 0, **(written or {})}
 
     async def _execute(ctx: _SyncContext, *_args: Any) -> dict[str, Any]:
         ctx.failed_writes.extend(failed or [])
-        return {"added": 0, "removed": 0, "updated": 2, "renamed": 0, "created_names": [], "debris_removed": 0}
+        return {"removed": 0, "created_names": [], "debris_removed": 0, **counters}
 
     button._execute_delta_tasks = _execute  # type: ignore[method-assign]
     return button
@@ -595,13 +654,42 @@ def test_a_delta_sync_records_the_protocol_its_payloads_carry(action: str) -> No
         ("update_ip", [], True),
     ],
 )
-def test_a_delta_sync_keeps_the_old_record_when_not_every_command_was_rewritten(
+def test_a_delta_sync_that_rewrote_only_some_commands_marks_the_class_unknown(
     action: str, failed: list[str], cancel: bool
 ) -> None:
+    """The class now mixes the recorded protocol and the audit's: unknown, so the next audit rewrites all of it."""
     button = _sync_button(failed, cancel)
     button._decide_effective_action = AsyncMock(return_value=action)  # type: ignore[method-assign]
 
     _sync_class(button, _ctx(action))
+
+    button.coordinator.async_set_webio_synced_protocol.assert_awaited_once_with(MARKER, None)
+
+
+@pytest.mark.parametrize("counter", ["added", "renamed"])
+def test_a_create_or_rename_with_another_protocol_marks_the_class_unknown(counter: str) -> None:
+    button = _sync_button(written={"updated": 0, counter: 1})
+    button._decide_effective_action = AsyncMock(return_value="create_missing")  # type: ignore[method-assign]
+
+    _sync_class(button, _ctx("create_missing"))
+
+    button.coordinator.async_set_webio_synced_protocol.assert_awaited_once_with(MARKER, None)
+
+
+@pytest.mark.parametrize(
+    ("synced", "written"),
+    [
+        (WEBIO_PROTOCOL_HTTPS, None),  # the commands written carry the recorded protocol
+        (WEBIO_PROTOCOL_HTTP, {"updated": 0}),  # nothing written
+    ],
+)
+def test_a_partial_delta_sync_keeps_a_record_it_did_not_contradict(
+    synced: int | None, written: dict[str, int] | None
+) -> None:
+    button = _sync_button(synced=synced, written=written)
+    button._decide_effective_action = AsyncMock(return_value="update_types")  # type: ignore[method-assign]
+
+    _sync_class(button, _ctx("update_types"))
 
     button.coordinator.async_set_webio_synced_protocol.assert_not_awaited()
 

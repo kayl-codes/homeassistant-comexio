@@ -2037,9 +2037,28 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             pct_end,
         )
         result["recreated"] = False
-        if result.pop("protocol_written") and ctx.audit_protocol is not None:
-            await self.coordinator.async_set_webio_synced_protocol(cls, ctx.audit_protocol)
+        await self._record_delta_protocol(ctx, cls, result, result.pop("protocol_written"))
         return result
+
+    async def _record_delta_protocol(
+        self, ctx: _SyncContext, cls: str, result: dict[str, Any], protocol_written: bool
+    ) -> None:
+        """Record the protocol a delta sync left cls's commands with.
+
+        Every command rewritten: the audit's protocol. Only some of them written (a create, rename or type fix
+        carries the audit's protocol too, or a protocol rewrite failed or was cancelled) while the record names
+        another protocol: the class is mixed now, so it becomes unknown and the next audit rewrites all of it.
+        Otherwise a switch back to the recorded protocol would hide the commands written in between.
+        """
+        protocol = ctx.audit_protocol
+        if protocol is None or cls not in self.coordinator.active_webio_classes:
+            return
+        if protocol_written:
+            await self.coordinator.async_set_webio_synced_protocol(cls, protocol)
+        elif (result["added"] or result["updated"] or result["renamed"]) and (
+            self.coordinator.webio_synced_protocol(cls) != protocol
+        ):
+            await self.coordinator.async_set_webio_synced_protocol(cls, None)
 
     # --- MANAGED CLUSTER PLAN WIRING ---
 

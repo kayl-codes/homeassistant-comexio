@@ -47,6 +47,7 @@ from contextlib import suppress
 from enum import Enum
 import ipaddress
 import logging
+import re
 import socket
 import time
 from typing import Any, NamedTuple
@@ -68,6 +69,10 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_HA_PORT = 8123
 _SCHEME_PORTS = {"http": 80, "https": 443}
+# One label of a host name in its IDNA form; "_" is tolerated, as LAN names carry it although DNS does not.
+_HOST_LABEL = re.compile(r"(?!-)[a-z0-9_-]{1,63}(?<!-)")
+# The scheme a URL starts with, kept when the URL is logged with its user info masked.
+_URL_SCHEME = re.compile(r"[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
 HA_HOST_CANDIDATES: tuple[str, ...] = tuple(f"homeassistant.{domain}" for domain in KNOWN_DOMAINS)
 
@@ -225,6 +230,30 @@ def format_address(host: str, port: int) -> str:
     return f"{host}:{port}"
 
 
+def _is_host_name(host: str) -> bool:
+    """Whether host is an IP address or a well-formed host name (an internationalized one in its IDNA form)."""
+    if _ip(host) is not None:
+        return True
+    try:
+        name = host.removesuffix(".").encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    return 0 < len(name) <= 253 and all(_HOST_LABEL.fullmatch(label) for label in name.lower().split("."))
+
+
+def _without_user_info(url: str | None) -> str | None:
+    """url for the log: a password in it must not end up there.
+
+    Everything between the scheme and the last "@" is masked, as a refused URL need not be well formed: its
+    password may hold "/", "?", "#" or "//", or the scheme may be missing. An "@" in a path or query is masked
+    too, which costs nothing.
+    """
+    if not url or "@" not in url:
+        return url
+    scheme = match.group() if (match := _URL_SCHEME.match(url)) else ""
+    return f"{scheme}***@{url.rpartition('@')[2]}"
+
+
 def is_loopback_address(address: str) -> bool:
     """Whether a "host:port" address (see format_address) points to the loopback interface or is unspecified.
 
@@ -244,7 +273,9 @@ def webhook_url_target(url: str | None) -> WebhookTarget | None:
         port = parsed.port
     except ValueError:  # a port out of range or not numeric
         return None
-    if parsed.scheme not in _SCHEME_PORTS or not parsed.hostname or parsed.username is not None:
+    if parsed.scheme not in _SCHEME_PORTS or parsed.username is not None:
+        return None
+    if not parsed.hostname or not _is_host_name(parsed.hostname):
         return None
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.params:
         return None
@@ -330,7 +361,7 @@ class HaAddressResolver:
                 error,
                 logging.WARNING,
                 "HA address: the webhook address mode %r has no usable URL (%r: %s); using the automatic address",
-                url,
+                _without_user_info(url),
                 error,
             )
             return None
