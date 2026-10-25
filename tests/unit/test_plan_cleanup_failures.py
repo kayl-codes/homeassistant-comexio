@@ -14,6 +14,9 @@ from custom_components.comexio.button import ComexioSyncButton, _failed_writes_n
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    IO_PLAN_KIND_QUICKBUS,
+    PLAN_FAILURE_NOT_RESOLVED,
+    PLAN_FAILURE_OFF_CANVAS,
     SOURCE_CATEGORIES,
     WebioClass,
 )
@@ -246,6 +249,75 @@ def test_sort_without_result_is_a_failed_step() -> None:
     ctx = _ctx(SimpleNamespace(function_plan_run_fup=AsyncMock(return_value=False)))
     _sort(_button(), ctx, None, was_active=True)
     assert ctx.failed_writes == [f"function plan '{PLAN}': sort failed", f"function plan '{PLAN}': not activated"]
+
+
+@pytest.mark.parametrize("reason", ["QB3 no longer fit its 1 columns", "No elements in plan."])
+def test_skipped_sort_is_a_failed_step_with_its_reason(reason: str) -> None:
+    ctx = _ctx(SimpleNamespace(function_plan_run_fup=AsyncMock(return_value=True)))
+    sort_res = {"success": False, "skipped": reason, "activated": False}
+
+    note = _sort(_button(), ctx, sort_res, was_active=True)
+
+    assert "sort skipped" in note
+    assert ctx.failed_writes == [f"function plan '{PLAN}': sort skipped — {reason}"]
+    ctx.api.function_plan_run_fup.assert_awaited_once_with(5)  # the skip stopped nothing, but keeps it running
+
+
+def test_skipped_sort_of_an_inactive_plan_leaves_it_stopped() -> None:
+    ctx = _ctx(SimpleNamespace(function_plan_run_fup=AsyncMock(return_value=True)))
+    sort_res = {"success": False, "skipped": "No elements in plan.", "activated": False}
+
+    _sort(_button(), ctx, sort_res, was_active=False)
+
+    assert ctx.failed_writes == [f"function plan '{PLAN}': sort skipped — No elements in plan."]
+    ctx.api.function_plan_run_fup.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("sort_line", "skipped"), [("QB plan sort skipped", "QB plan sort skipped"), ("", None)])
+@pytest.mark.parametrize("notify", [True, False])
+def test_sort_that_places_nothing_returns_why_it_skipped(sort_line: str, skipped: str | None, notify: bool) -> None:
+    # None stays reserved for a plan that could not be loaded; _sort_checked reports the reason.
+    api = SimpleNamespace(fub_data={}, function_plan_load_elements=AsyncMock(return_value={"elements": [1]}))
+    with (
+        patch.object(plan_actions, "_sort_row_step", return_value=50),
+        patch.object(plan_actions, "_sort_canvas_bounds", return_value=("A3", 1230, 20, 3)),
+        patch.object(plan_actions, "_sort_compute_positions", return_value=([], 0, 0, sort_line, [], None)),
+        patch.object(plan_actions.persistent_notification, "async_create") as create,
+    ):
+        result = asyncio.run(plan_actions.async_sort_function_plan(MagicMock(), MagicMock(), api, 5, notify=notify))
+
+    expected = skipped or "No elements in plan."
+    assert result == {"success": False, "skipped": expected, "activated": False}
+    assert create.call_count == int(notify)
+
+
+@pytest.mark.parametrize("reason", [PLAN_FAILURE_OFF_CANVAS, PLAN_FAILURE_NOT_RESOLVED])
+def test_unwired_cluster_member_is_a_failed_step_with_its_reason(reason: str) -> None:
+    button = _button(resolve_io_clusters=AsyncMock(return_value=({}, set(), {"QB2": reason})))
+    ctx = _ctx()
+
+    summary, added, errors = asyncio.run(
+        button._wire_io_kind_clusters(ctx, IO_PLAN_KIND_QUICKBUS, {"QB2": ["G1"]}, {})  # type: ignore[arg-type]
+    )
+
+    label = IO_PLAN_KIND_QUICKBUS.label
+    assert ctx.failed_writes == [f"{label} cluster plan for 'QB2': {reason}"]
+    assert len(summary) == 1
+    assert reason in summary[0]
+    assert (added, errors) == (0, 1)
+
+
+def test_no_cluster_plan_at_all_is_one_failed_step() -> None:
+    button = _button(resolve_io_clusters=AsyncMock(return_value=({}, set(), {})))
+    ctx = _ctx()
+
+    summary, added, errors = asyncio.run(
+        button._wire_io_kind_clusters(ctx, IO_PLAN_KIND_QUICKBUS, {"QB2": ["G1"]}, {})  # type: ignore[arg-type]
+    )
+
+    assert ctx.failed_writes == [f"{IO_PLAN_KIND_QUICKBUS.label} cluster plan: none available"]
+    assert len(summary) == 1
+    assert (added, errors) == (0, 1)
 
 
 def test_repeated_failures_count_once() -> None:

@@ -52,6 +52,7 @@ from .const import (
     ISSUE_UNINSTALL_CLEANUP,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_REJECTED,
+    PLAN_FAILURE_NOT_RESOLVED,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -108,7 +109,7 @@ _SYNC_PROGRESS_NOTIFY_EVERY = 5  # notify every Nth pair; the plan's final pair 
 
 _NOTE_ACTIVATED = ", plan activated"
 _NOTE_NOT_ACTIVATED = f", {ICON_WARNING} plan NOT activated"
-_FAILURE_NOT_RESOLVED = "not resolved/created"
+_FAILURE_NOT_RESOLVED = PLAN_FAILURE_NOT_RESOLVED
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
 _STEP_CHECKING_PLAN = "Checking function plan wiring"
@@ -2807,12 +2808,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         ext_plans, created_plans, failed_exts = await self.coordinator.resolve_io_clusters(sorted(by_ext), kind)
         # Surface a resolve failure to the user, not just the log — see _wire_source_clusters.
         summary: list[str] = [
-            f"{ICON_WARNING} {kind.label} cluster plan for '{one_line(ext)}' could not be resolved/created — see log"
-            for ext in failed_exts
+            f"{ICON_WARNING} {kind.label} cluster plan for '{one_line(ext)}': {reason} — see log"
+            for ext, reason in failed_exts.items()
         ]
         errors = len(failed_exts)
         ctx.failed_writes.extend(
-            f"{kind.label} cluster plan for '{one_line(ext)}': {_FAILURE_NOT_RESOLVED}" for ext in failed_exts
+            f"{kind.label} cluster plan for '{one_line(ext)}': {reason}" for ext, reason in failed_exts.items()
         )
         if not ext_plans:
             if not failed_exts:
@@ -2968,8 +2969,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     async def _sort_checked(self, ctx: _SyncContext, fub_id: int, plan_name: str, was_active: bool) -> str:
         """Sort one plan; a failed sort and a plan left stopped go to ctx.failed_writes.
 
-        async_sort_function_plan also returns None for a plan without elements, but a managed
-        plan always keeps its pinned template comment — None means it could not be loaded.
+        None means the plan could not be loaded; a skipped sort (a column plan without its IO
+        data or past its canvas) is a failed step too, with the reason the sort gave.
         Returns the summary-line note.
         """
         sort_res = await async_sort_function_plan(
@@ -2977,6 +2978,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
         if sort_res and sort_res["success"]:
             note = f", sorted in {sort_res['duration']:.1f}s"
+        elif sort_res and sort_res.get("skipped"):
+            ctx.failed_writes.append(_plan_failure(plan_name, f"sort skipped — {sort_res['skipped']}"))
+            note = f", {ICON_WARNING} sort skipped"
         else:
             ctx.failed_writes.append(_plan_failure(plan_name, "sort failed"))
             note = f", {ICON_WARNING} sort failed"

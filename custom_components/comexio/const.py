@@ -1421,6 +1421,41 @@ def io_plan_columns(kind: IoPlanKind, members: list[str], rows_needed: Callable[
     return column - (-(row + rows_needed(members[-1])) // rows_per_col)
 
 
+def canvas_columns(x_max: float) -> int:
+    """Column groups a plan canvas x_max wide takes (FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH apart)."""
+    return max(1, round((x_max - FUNCTION_PLAN_LAYOUT_X_MARKER) / FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH))
+
+
+# Why a column plan member was not wired (resolve_io_clusters → the sync summary).
+PLAN_FAILURE_NOT_RESOLVED = "not resolved/created"
+PLAN_FAILURE_OFF_CANVAS = "no longer fits the plan canvas — delete the plan in Comexio to have it laid out afresh"
+
+
+def io_plan_overflow(
+    kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int], rows_per_col: int, max_columns: int
+) -> list[str]:
+    """Members of a Quickbus plan that end past its last canvas column, in membership order.
+
+    A device joins only while the plan's columns take it, but its IO count can grow later (or the
+    plan's paper change): the devices behind it then move right, past the canvas edge. From the
+    first member that ends there on, every later one is returned too, as each is placed after it.
+    The first member never overflows: no other layout of the plan would fit it either. Columns
+    beyond the configured capacity but still on the canvas are fine. An extension keeps its own
+    column (empty list).
+    """
+    if not kind.stacked:
+        return []
+    first = next(
+        (
+            i
+            for i in range(1, len(members))
+            if io_plan_columns(kind, members[: i + 1], rows_needed, rows_per_col) > max_columns
+        ),
+        len(members),
+    )
+    return members[first:]
+
+
 IO_PLAN_KIND_IO = IoPlanKind(
     label="IO",
     data_key="io",

@@ -22,6 +22,7 @@ from ..const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     PLAN_TRANSITION_STARTING,
     PLAN_TRANSITION_STOPPING,
+    IoPlanKind,
     one_line,
 )
 from ..coordinator import ComexioCoordinator
@@ -330,8 +331,9 @@ async def async_sort_function_plan(
     Managed IO / Quickbus cluster plans ('{prefix} - IO [...]' / '{prefix} - QB [...]') are not
     marker-sorted — their deterministic column grid (IoPlanKind.column_blocks) is restored instead.
 
-    Returns a result dict (success, pairs, orphans, act_note, activated, duration) or
-    None when the plan could not be loaded or is empty. With notify=False no persistent
+    Returns a result dict (success, pairs, orphans, act_note, activated, duration), one with
+    success False and skipped (the reason) when nothing was sorted — an empty plan, or a
+    column plan the sort leaves as it is — or None when the plan could not be loaded. With notify=False no persistent
     notifications are created — used by the sync button, which reports the result in its
     own summary notification.
 
@@ -357,11 +359,10 @@ async def async_sort_function_plan(
         coordinator, plan_data, fub_id, x_max, rows_per_col, max_cols, row_step
     )
     if not new_positions:
+        skipped = sort_line or "No elements in plan."
         if notify:
-            persistent_notification.async_create(
-                hass, sort_line or "No elements in plan.", title=f"Function Plan Sort Plan {fub_id}"
-            )
-        return None
+            persistent_notification.async_create(hass, skipped, title=f"Function Plan Sort Plan {fub_id}")
+        return {"success": False, "skipped": skipped, "activated": False}
 
     _LOGGER.info(
         "Function Plan Sort: Plan %s — %d pairs, %d single elements, %d positions (io_plan=%s, active=%s)",
@@ -405,6 +406,31 @@ def _sort_canvas_bounds(api, fub_id: int, canvas_format: str | None, row_step: f
     return canvas_label, x_max, rows_per_col, max_cols
 
 
+def _column_plan_sort_skip(
+    coordinator: ComexioCoordinator,
+    fub_id: int,
+    column_plan: tuple[IoPlanKind, list[str]],
+    rows_per_col: int,
+    max_cols: int,
+) -> str | None:
+    """Why the sort must leave a managed column plan as it is (the sort line), or None to sort it."""
+    kind, members = column_plan
+    if not (coordinator.data or {}).get(kind.data_key):
+        # No IO data (Quickbus import off, failed parse): the marker sort would scramble its column grid.
+        return (
+            f"Plan {fub_id} is a managed {kind.label} plan, but no {kind.label} IOs are loaded"
+            " — sort skipped to keep its column grid."
+        )
+    if overflow := coordinator.io_plan_overflow(members, kind, rows_per_col, max_cols):
+        # Its grid would move these members' pairs off the canvas.
+        names = ", ".join(one_line(kind.member_label(coordinator.data, member)) for member in overflow)
+        return (
+            f"Plan {fub_id} is a managed {kind.label} plan, but {names} no longer fit its {max_cols} columns"
+            " — sort skipped; delete the plan in Comexio to have the next sync lay it out afresh."
+        )
+    return None
+
+
 def _sort_compute_positions(
     coordinator: ComexioCoordinator,
     plan_data: dict,
@@ -422,15 +448,9 @@ def _sort_compute_positions(
     column_plan = coordinator.managed_column_plan(fub_id)
     io_members = column_plan[1] if column_plan else None
     header_slots: list[tuple[float, float, str]] = []
-    if column_plan and not (coordinator.data or {}).get(column_plan[0].data_key):
-        # A managed column plan without its IO data (Quickbus import off, failed parse): the
-        # marker sort would scramble its column grid, so leave the plan as it is.
-        sort_line = (
-            f"Plan {fub_id} is a managed {column_plan[0].label} plan, but no {column_plan[0].label} IOs are"
-            " loaded — sort skipped to keep its column grid."
-        )
-        _LOGGER.warning("Function Plan Sort: %s", sort_line)
-        return [], 0, 0, sort_line, header_slots, io_members
+    if column_plan and (skip_line := _column_plan_sort_skip(coordinator, fub_id, column_plan, rows_per_col, max_cols)):
+        _LOGGER.warning("Function Plan Sort: %s", skip_line)
+        return [], 0, 0, skip_line, header_slots, io_members
     if column_plan:
         # Managed IO / Quickbus cluster plan: the marker sort would scramble the column grid —
         # restore the deterministic column layout the wire path produced instead.

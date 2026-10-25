@@ -1,13 +1,20 @@
 """Small coordinator/API helpers around function plans and polled KNX values (coordinator.py, api.py)."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import IO_PLAN_KIND_QUICKBUS, WebioClass, function_plan_id, source_category
+from custom_components.comexio.const import (
+    IO_PLAN_KIND_QUICKBUS,
+    PLAN_FAILURE_OFF_CANVAS,
+    WebioClass,
+    function_plan_id,
+    source_category,
+)
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 PREFIX = "HA"
@@ -92,7 +99,13 @@ def test_a_fresh_io_plan_takes_the_extension(created: int | None, placed: int | 
 
 
 def _cluster_coordinator(
-    plan_name: str, cluster_size: int, sizes: dict[str, int], *, renamed: bool = True, created: int = 48
+    plan_name: str,
+    cluster_size: int,
+    sizes: dict[str, int],
+    *,
+    renamed: bool = True,
+    created: int = 48,
+    canvas_columns: int = 3,
 ) -> ComexioCoordinator:
     """A coordinator with one managed plan 47 (plan_name) for resolve_io_clusters."""
     return _coordinator(
@@ -104,6 +117,7 @@ def _cluster_coordinator(
         _function_plan_prefix=lambda: PREFIX,
         _function_plan_cluster_size=lambda: cluster_size,
         _plan_rows_per_col=lambda _fid, _orientation=None: 10,
+        _plan_canvas_columns=lambda _fid, _orientation=None: canvas_columns,
         _io_plan_rows_per_col=lambda _orientation: 10,
         _io_rows_needed=lambda member, _kind: sizes[member],
         _rename_io_plan=AsyncMock(return_value=renamed),
@@ -130,11 +144,84 @@ def test_quickbus_devices_join_a_plan_while_its_column_holds_them() -> None:
     placed, created, failed = asyncio.run(coordinator.resolve_io_clusters(["1", "2", "3"], IO_PLAN_KIND_QUICKBUS))
 
     assert placed == {"1": (47, (0, 0)), "2": (47, (0, 5)), "3": (48, (0, 0))}
-    assert (created, failed) == ({48}, [])
+    assert (created, failed) == ({48}, {})
     coordinator._rename_io_plan.assert_awaited_once_with(47, "HA - QB [1,2]")
     coordinator._persist_plan_map.assert_awaited_once_with(
         {"HA - QB [1,2]": 47, "HA - QB [3]": 48}, removals={"HA - QB [1]"}
     )
+
+
+@pytest.mark.parametrize(
+    ("canvas_columns", "placed", "failed"),
+    [
+        (2, {"1": (47, (0, 0)), "2": (47, (1, 0))}, {}),  # past the configured column, still on the canvas
+        (1, {"1": (47, (0, 0))}, {"2": PLAN_FAILURE_OFF_CANVAS}),  # past the canvas edge: not wired
+    ],
+    ids=["on-the-canvas", "off-the-canvas"],
+)
+def test_a_quickbus_device_pushed_past_the_canvas_by_a_grown_one_is_not_wired(
+    canvas_columns: int, placed: dict, failed: dict[str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    # Device 1 grew from 4 to 8 rows after device 2 joined below it: device 2 moves to column 1.
+    coordinator = _cluster_coordinator("HA - QB [1,2]", 50, {"1": 8, "2": 4}, canvas_columns=canvas_columns)
+
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(coordinator.resolve_io_clusters(["1", "2"], IO_PLAN_KIND_QUICKBUS))
+
+    assert result == (placed, set(), failed)
+    coordinator._rename_io_plan.assert_not_awaited()
+    # The log names the device and the way out; the sync summary only carries the short reason.
+    assert ("'QB2' no longer fits" in caplog.text) is bool(failed)
+    assert ("delete the plan in Comexio" in caplog.text) is bool(failed)
+
+
+def test_a_device_alone_too_tall_for_the_canvas_keeps_its_fresh_plan() -> None:
+    # No layout would fit it: failing it would leave the fresh plan empty on every sync.
+    coordinator = _cluster_coordinator("HA - IO [A]", 150, {"1": 12}, canvas_columns=1)
+
+    result = asyncio.run(coordinator.resolve_io_clusters(["1"], IO_PLAN_KIND_QUICKBUS))
+
+    assert result == ({"1": (48, (0, 0))}, {48}, {})
+
+
+def test_the_canvas_check_of_a_fresh_plan_uses_its_orientation() -> None:
+    coordinator = _cluster_coordinator("HA - IO [A]", 50, {"1": 8, "2": 4})
+    coordinator._plan_canvas_columns = lambda _fid, orientation=None: 1 if orientation == "portrait" else 2
+    failed: dict[str, str] = {}
+
+    slots = coordinator._io_member_slots(
+        {"1": 48, "2": 48}, {48: ["1", "2"]}, IO_PLAN_KIND_QUICKBUS, {48: "portrait"}, failed
+    )
+
+    assert slots == {"1": (48, (0, 0))}
+    assert failed == {"2": PLAN_FAILURE_OFF_CANVAS}
+
+
+@pytest.mark.parametrize(
+    ("fub_data", "orientation", "expected_call"),
+    [
+        ({"7": {}}, None, ((7,), {})),  # an existing plan: its own paper
+        ({"7": {}}, "portrait", ((-1,), {"paper_name": "A3", "orientation": "portrait"})),  # created in this run
+        ({}, None, ((-1,), {"paper_name": "A3", "orientation": "landscape"})),  # not in $Fubs yet
+    ],
+    ids=["existing", "fresh", "unknown"],
+)
+def test_plan_canvas_columns(fub_data: dict, orientation: str | None, expected_call: tuple) -> None:
+    api = SimpleNamespace(fub_data=fub_data, get_fub_canvas_bounds=MagicMock(return_value=(870.0, 600.0)))
+    coordinator = _coordinator(api=api)
+
+    assert coordinator._plan_canvas_columns(7, orientation) == 2  # 870 wide: two 450 columns
+    assert api.get_fub_canvas_bounds.call_args == expected_call
+
+
+def test_a_quickbus_device_joins_no_plan_whose_canvas_lacks_the_column() -> None:
+    # Capacity 150 offers 3 columns, the (portrait) canvas only 1: device 2 would need column 1.
+    coordinator = _cluster_coordinator("HA - QB [1]", 150, {"1": 8, "2": 4}, canvas_columns=1)
+
+    result = asyncio.run(coordinator.resolve_io_clusters(["1", "2"], IO_PLAN_KIND_QUICKBUS))
+
+    assert result == ({"1": (47, (0, 0)), "2": (48, (0, 0))}, {48}, {})
+    coordinator._rename_io_plan.assert_not_awaited()
 
 
 def test_a_failed_join_rename_places_the_member_in_a_fresh_plan() -> None:
@@ -144,7 +231,7 @@ def test_a_failed_join_rename_places_the_member_in_a_fresh_plan() -> None:
 
     # Plan 47 keeps its name and member: plan_map must not claim it holds B.
     assert placed == {"A": (47, (0, 0)), "B": (9, (0, 0))}
-    assert (created, failed) == ({9}, [])
+    assert (created, failed) == ({9}, {})
     coordinator._persist_plan_map.assert_awaited_once_with({"HA - IO [A]": 47, "HA - IO [B]": 9}, removals=set())
 
 

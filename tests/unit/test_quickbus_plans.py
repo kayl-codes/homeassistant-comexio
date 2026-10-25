@@ -19,6 +19,7 @@ from custom_components.comexio.const import (
     DOMAIN,
     FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH,
     FUNCTION_PLAN_LAYOUT_X_MARKER,
+    FUNCTION_PLAN_LAYOUT_X_WEBIO,
     FUNCTION_PLAN_LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP,
     IO_PLAN_KIND_IO,
@@ -26,12 +27,14 @@ from custom_components.comexio.const import (
     QUICKBUS_IO_DATA_KEY,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    canvas_columns,
     io_plan_columns,
     io_plan_gap_item,
     io_plan_item_member,
     io_plan_kind_of,
     io_plan_label,
     io_plan_member_origins,
+    io_plan_overflow,
     quickbus_column_blocks,
     selected_quickbus_devices,
     webio_quickbus_ios,
@@ -564,14 +567,35 @@ def test_sort_of_a_quickbus_plan_uses_its_column_grid(quickbus_result: dict[str,
     data = {**quickbus_result, "io": []}  # only the Quickbus data decides for a QB plan
     coordinator = _coordinator({}, data)
     coordinator.managed_column_plan = lambda _fid: (IO_PLAN_KIND_QUICKBUS, ["1"])  # type: ignore[method-assign]
+    # IO 202 of MT Flur (its second row below the header) and the Web-IO element it feeds, both moved away.
+    elements = {"1": {"reference": {"type": 1, "ref_id": 202}, "x": 900, "y": 900}, "2": {"x": 0, "y": 0}}
+    connections = {"c1": {"input": {"FubElementId": 1}, "output": [{"FubElementId": "2"}]}}
 
-    _positions, _n_pairs, _n_single, sort_line, headers, members = _sort_compute_positions(
-        coordinator, {"elements": {}, "connections": {}}, 5, 4000, 10, 10, FUNCTION_PLAN_LAYOUT_Y_STEP
+    positions, n_pairs, n_single, sort_line, headers, members = _sort_compute_positions(
+        coordinator, {"elements": elements, "connections": connections}, 5, 4000, 10, 10, FUNCTION_PLAN_LAYOUT_Y_STEP
     )
 
+    row = FUNCTION_PLAN_LAYOUT_Y_START + 2 * FUNCTION_PLAN_LAYOUT_Y_STEP
+    assert sorted(positions) == [(1, FUNCTION_PLAN_LAYOUT_X_MARKER, row), (2, FUNCTION_PLAN_LAYOUT_X_WEBIO, row)]
+    assert (n_pairs, n_single) == (1, 0)
     assert "QB pairs restored" in sort_line
     assert members == ["1"]
     assert len(headers) == 1
+
+
+def test_sort_of_a_quickbus_plan_past_its_canvas_is_skipped(quickbus_result: dict[str, Any]) -> None:
+    coordinator = _coordinator({}, {**quickbus_result, "io": []})
+    coordinator.managed_column_plan = lambda _fid: (IO_PLAN_KIND_QUICKBUS, ["1", "2", "3"])  # type: ignore[method-assign]
+    elements = {"1": {"reference": {"type": 1, "ref_id": 301}, "x": 0, "y": 0}}
+
+    # BM Diele (device 3) takes column 1 (see test_quickbus_grid_slots_stack_devices_in_a_column); the canvas has one.
+    positions, _n_pairs, _n_single, sort_line, _headers, _members = _sort_compute_positions(
+        coordinator, {"elements": elements, "connections": {}}, 5, 4000, 10, 1, FUNCTION_PLAN_LAYOUT_Y_STEP
+    )
+
+    assert positions == []
+    assert "BM Diele" in sort_line
+    assert "sort skipped" in sort_line
 
 
 def test_sort_of_a_column_plan_without_its_data_is_skipped(quickbus_result: dict[str, Any]) -> None:
@@ -701,6 +725,35 @@ def test_io_extensions_keep_one_column_each() -> None:
         "UD1": (1, 0),
     }
     assert io_plan_columns(IO_PLAN_KIND_IO, list(sizes), _rows(sizes), 10) == 2
+
+
+@pytest.mark.parametrize(
+    ("sizes", "max_columns", "overflow"),
+    [
+        ({"a": 4, "b": 4, "c": 3}, 2, []),  # c opens column 1, the last one on the canvas
+        ({"a": 4, "b": 4, "c": 3}, 1, ["c"]),
+        ({"a": 8, "b": 4, "c": 1}, 1, ["b", "c"]),  # a grew: b moves right, c behind it with it
+        ({"a": 12, "b": 1}, 1, ["b"]),  # a alone wraps past the edge: no layout fits it, b behind it
+        ({"a": 0, "b": 4}, 1, []),  # a gone: takes no column
+    ],
+    ids=["fits", "last-off", "grown", "wrap", "gone"],
+)
+def test_quickbus_devices_past_the_canvas_overflow(sizes: dict[str, int], max_columns: int, overflow: list) -> None:
+    assert io_plan_overflow(IO_PLAN_KIND_QUICKBUS, list(sizes), _rows(sizes), 10, max_columns) == overflow
+
+
+def test_io_extensions_never_overflow() -> None:
+    # One column per extension whatever the canvas — the wire path has always kept them.
+    sizes = {"BASE": 2, "UD1": 2, "UD2": 2}
+
+    assert io_plan_overflow(IO_PLAN_KIND_IO, list(sizes), _rows(sizes), 10, 1) == []
+
+
+@pytest.mark.parametrize(
+    ("x_max", "columns"), [(1230.0, 3), (870.0, 2), (100.0, 1)], ids=["a3-landscape", "a3-portrait", "tiny"]
+)
+def test_canvas_columns(x_max: float, columns: int) -> None:
+    assert canvas_columns(x_max) == columns
 
 
 @pytest.mark.parametrize(

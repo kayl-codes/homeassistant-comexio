@@ -141,6 +141,8 @@ from .const import (
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
     MARKER_READ_ONLY_SUFFIX,
+    PLAN_FAILURE_NOT_RESOLVED,
+    PLAN_FAILURE_OFF_CANVAS,
     PLAN_TRANSITION_STARTING,
     PREVIEW_CARD_ALIVE_SEC,
     QUICKBUS_IO_DATA_KEY,
@@ -175,6 +177,7 @@ from .const import (
     WebioClass,
     active_webio_classes,
     bus_load_signal,
+    canvas_columns,
     category_by_fub_module_type,
     classify_audit_key,
     entity_id_migration_target,
@@ -192,6 +195,7 @@ from .const import (
     io_plan_kind_of,
     io_plan_label,
     io_plan_member_origins,
+    io_plan_overflow,
     one_line,
     parse_ignored_ids,
     parse_keyword_list,
@@ -7301,6 +7305,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Columns the members take in a plan whose columns offer rows_per_col rows."""
         return io_plan_columns(kind, members, lambda member: self._io_rows_needed(member, kind), rows_per_col)
 
+    def io_plan_overflow(self, members: list[str], kind: IoPlanKind, rows_per_col: int, max_columns: int) -> list[str]:
+        """Members past the last of max_columns canvas columns — see const.io_plan_overflow.
+
+        Shared by the wire path and the sort, so neither puts a pair off the canvas.
+        """
+        return io_plan_overflow(
+            kind, members, lambda member: self._io_rows_needed(member, kind), rows_per_col, max_columns
+        )
+
+    def _plan_canvas_columns(self, fub_id: int, fresh_orientation: str | None = None) -> int:
+        """Column groups the canvas of a plan takes — see _plan_rows_per_col for fresh_orientation."""
+        if fresh_orientation is not None or str(fub_id) not in self.api.fub_data:
+            orientation = fresh_orientation or _ORIENT_LANDSCAPE
+            x_max, _ = self.api.get_fub_canvas_bounds(-1, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
+        else:
+            x_max, _ = self.api.get_fub_canvas_bounds(fub_id)
+        return canvas_columns(x_max)
+
     def _plan_rows_per_col(self, fub_id: int, fresh_orientation: str | None = None) -> int:
         """Row slots one column of a plan offers — the same formula as api.function_plan_add_io_pairs.
 
@@ -7313,11 +7335,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def resolve_io_clusters(
         self, ext_names: list[str], kind: IoPlanKind = IO_PLAN_KIND_IO
-    ) -> tuple[dict[str, tuple[int, tuple[int, int]]], set[int], list[str]]:
+    ) -> tuple[dict[str, tuple[int, tuple[int, int]]], set[int], dict[str, str]]:
         """Resolve/create the managed IO cluster plan of every extension (membership-true).
 
         Returns ({ext_name: (fub_id, (column, first row))}, {fub_ids of freshly created plans},
-        [ext_names whose plan could not be resolved/created]). The third element lets callers
+        {ext_name not wired: why — PLAN_FAILURE_NOT_RESOLVED / PLAN_FAILURE_OFF_CANVAS}). The third element lets callers
         surface a partial failure to the user — see resolve_marker_clusters' docstring for why
         an empty first dict is not a reliable "something went wrong" signal when several
         extensions are being resolved at once.
@@ -7336,7 +7358,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         placed_in: dict[str, int] = {}
         fresh_orientations: dict[int, str] = {}
         created_plans: set[int] = set()
-        failed_exts: list[str] = []
+        failed_exts: dict[str, str] = {}
 
         for ext in ext_names:
             fub_id = next((fid for fid, members in membership.items() if ext in members), None)
@@ -7349,19 +7371,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     kind.label,
                     one_line(kind.member_label(self.data, ext)),
                 )
-                failed_exts.append(ext)
+                failed_exts[ext] = PLAN_FAILURE_NOT_RESOLVED
                 continue
             placed_in[ext] = fub_id
             if fub_id not in membership:
                 created_plans.add(fub_id)
                 membership[fub_id] = [ext]
 
-        # Origins only once every member is placed: a later join appends to the plan, which never
-        # moves an earlier member (see io_plan_member_origins).
-        result: dict[str, tuple[int, tuple[int, int]]] = {}
-        for ext, fub_id in placed_in.items():
-            rows_per_col = self._plan_rows_per_col(fub_id, fresh_orientations.get(fub_id))
-            result[ext] = (fub_id, self.io_plan_origins(membership[fub_id], kind, rows_per_col)[ext])
+        result = self._io_member_slots(placed_in, membership, kind, fresh_orientations, failed_exts)
 
         # Final names only: several joins in one run rename a plan step by step, and the names it
         # carried before ([1], [1,2]) are no plan any more — left in plan_map, the watchdog warned
@@ -7372,6 +7389,45 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if plan_map_updates or removals:
             await self._persist_plan_map(plan_map_updates, removals=removals)
         return result, created_plans, failed_exts
+
+    def _io_member_slots(
+        self,
+        placed_in: dict[str, int],
+        membership: dict[int, list[str]],
+        kind: IoPlanKind,
+        fresh_orientations: dict[int, str],
+        failed_exts: dict[str, str],
+    ) -> dict[str, tuple[int, tuple[int, int]]]:
+        """{member: (fub_id, (column, first row))} of every placed member that fits its plan's canvas.
+
+        Origins only once every member is placed: a later join appends to the plan, which never
+        moves an earlier member (see io_plan_member_origins). A member past the canvas edge (see
+        io_plan_overflow) goes to failed_exts instead: wiring it would put its pairs off the plan.
+        """
+        slots: dict[str, tuple[int, tuple[int, int]]] = {}
+        overflow: dict[int, list[str]] = {}
+        for ext, fub_id in placed_in.items():
+            orientation = fresh_orientations.get(fub_id)
+            rows_per_col = self._plan_rows_per_col(fub_id, orientation)
+            members = membership[fub_id]
+            if fub_id not in overflow:
+                canvas = self._plan_canvas_columns(fub_id, orientation)
+                overflow[fub_id] = self.io_plan_overflow(members, kind, rows_per_col, canvas)
+            if ext in overflow[fub_id]:
+                _LOGGER.error(
+                    "[%s] '%s' no longer fits on the canvas of %s plan fub=%s (a %s before it grew, or the"
+                    " plan's paper changed) and is not wired — delete the plan in Comexio to have the next"
+                    " sync lay it out afresh",
+                    self.server_id,
+                    one_line(kind.member_label(self.data, ext)),
+                    kind.label,
+                    fub_id,
+                    kind.member_noun,
+                )
+                failed_exts[ext] = PLAN_FAILURE_OFF_CANVAS
+                continue
+            slots[ext] = (fub_id, self.io_plan_origins(members, kind, rows_per_col)[ext])
+        return slots
 
     def _superseded_plan_map_names(self, final_names: dict[int, str]) -> set[str]:
         """plan_map names pointing at one of these plans under a name other than its final one."""
@@ -7405,8 +7461,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         fresh_orientations = {} if fresh_orientations is None else fresh_orientations
         for fid, members in membership.items():
             new_members = [*members, ext]
-            rows_per_col = self._plan_rows_per_col(fid, fresh_orientations.get(fid))
-            if self._io_plan_columns(new_members, kind, rows_per_col) <= capacity:
+            if self._io_plan_takes(fid, new_members, kind, capacity, fresh_orientations.get(fid)):
                 if not await self._rename_io_plan(fid, self._io_plan_name(prefix, new_members, kind)):
                     _LOGGER.warning(
                         "[%s] Could not rename %s plan fub=%s to add '%s' — creating a fresh plan instead",
@@ -7425,6 +7480,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if fub_id is not None:
             fresh_orientations[fub_id] = orientation
         return fub_id
+
+    def _io_plan_takes(
+        self, fub_id: int, members: list[str], kind: IoPlanKind, capacity: int, fresh_orientation: str | None
+    ) -> bool:
+        """Whether a plan's columns take these members — its capacity and its canvas, as a portrait
+        plan offers fewer columns than a capacity of 3."""
+        rows_per_col = self._plan_rows_per_col(fub_id, fresh_orientation)
+        if self._io_plan_columns(members, kind, rows_per_col) > capacity:
+            return False
+        canvas = self._plan_canvas_columns(fub_id, fresh_orientation)
+        if not self.io_plan_overflow(members, kind, rows_per_col, canvas):
+            return True
+        _LOGGER.info(
+            "[%s] %s plan fub=%s has no room left on its %s canvas column(s) for '%s'",
+            self.server_id,
+            kind.label,
+            fub_id,
+            canvas,
+            one_line(kind.member_label(self.data, members[-1])),
+        )
+        return False
 
     def _io_plan_rows_per_col(self, orientation: str) -> int:
         """Row slots one column offers on a fresh A3 plan of the given orientation."""
