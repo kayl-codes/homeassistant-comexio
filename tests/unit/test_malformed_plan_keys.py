@@ -216,13 +216,24 @@ def test_a_created_plan_is_found_in_a_plan_list_sent_as_an_array(comexio_api: Co
         ({8: "plan"}, {}, [(8, "8")]),
         ({8: "plan"}, {"08": {"Name": "Pumps"}}, []),
         ({7: "plan"}, {"7": {"Name": "Pumps"}, "08": {"Name": "Lights"}}, [(7, "Pumps")]),
+        ({8: "plan"}, {"8": {"Id": 9, "Name": "Pumps"}}, []),
+        ({8: "plan"}, {"8": "garbage"}, []),
     ],
-    ids=["unlisted", "maybe-08", "readable-next-to-an-unreadable-entry"],
+    ids=[
+        "unlisted",
+        "maybe-08",
+        "readable-next-to-an-unreadable-entry",
+        "own-entry-carries-another-id",
+        "own-entry-not-a-dict",
+    ],
 )
 def test_the_auto_backup_skips_a_plan_the_list_may_hide_behind_an_unreadable_entry(
     monkeypatch: pytest.MonkeyPatch, plans: dict, fub_data: dict, identities: list
 ) -> None:
-    """Behind "08", plan 8 has an unknown name: backed up, it would land under the bogus identity (8, "8")."""
+    """Behind "08", plan 8 has an unknown name: backed up, it would land under the bogus identity (8, "8").
+
+    So does plan 8 whose own entry is unreadable: one carrying plan 9 would even lend it plan 9's name.
+    """
     saved: dict = {}
 
     class _Store:
