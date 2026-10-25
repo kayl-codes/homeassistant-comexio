@@ -9,7 +9,7 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 
 
 def _audit(**overrides: Any) -> dict[str, Any]:
-    audit: dict[str, Any] = {
+    return {
         "type": [],
         "missing": [],
         "rename": [],
@@ -24,9 +24,8 @@ def _audit(**overrides: Any) -> dict[str, Any]:
         "function_plan_trigger_orphan": {},
         "knx_bridge_missing": [],
         "knx_bridge_loopback_missing": [],
-    }
-    audit.update(overrides)
-    return audit
+        "protocol": [],
+    } | overrides
 
 
 def _coordinator(audit: dict[str, Any]) -> ComexioCoordinator:
@@ -98,3 +97,17 @@ def test_an_unchanged_audit_is_not_logged_again(caplog: pytest.LogCaptureFixture
         coordinator._log_audit_summary({"cleanup_entity_Marker_295"})
 
     assert caplog.text == ""
+
+
+def test_commands_to_rewrite_with_the_webhook_protocol_add_up_to_the_total(caplog: pytest.LogCaptureFixture) -> None:
+    """One mismatch key per command to rewrite (#165), so "issues detected" matches "Protocol:"."""
+    items = [{"name": "M1 Licht"}, {"name": "M2 Rollo"}]
+    coordinator = _coordinator(_audit(protocol=items))
+
+    with caplog.at_level(logging.INFO):
+        coordinator._log_audit_summary({"protocol_marker_11", "protocol_marker_12"})
+
+    assert "2 issues detected" in caplog.text
+    assert "Protocol:2" in caplog.text
+    assert "Webhook protocol to rewrite (2):" in caplog.text
+    assert "M2 Rollo" in caplog.text

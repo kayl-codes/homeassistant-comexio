@@ -71,6 +71,15 @@ DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind, markise, awning"
 # default on migration 1.3 -> 1.4 (see migrate_entry_options), a customised list is kept.
 LEGACY_DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
 
+# Where the Web-IO devices push to (#165): the resolved address (ha_address.py), the host and port of
+# HA's external_url, or a URL of the user's own; the protocol (HTTP/HTTPS) follows the URL's scheme.
+CONF_WEBHOOK_ADDRESS_MODE = "webhook_address_mode"
+CONF_WEBHOOK_URL = "webhook_url"
+WEBHOOK_ADDRESS_AUTO = "auto"
+WEBHOOK_ADDRESS_EXTERNAL = "external"
+WEBHOOK_ADDRESS_CUSTOM = "custom"
+WEBHOOK_ADDRESS_MODES = [WEBHOOK_ADDRESS_AUTO, WEBHOOK_ADDRESS_EXTERNAL, WEBHOOK_ADDRESS_CUSTOM]
+
 CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
 CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
 CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"

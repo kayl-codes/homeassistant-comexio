@@ -101,7 +101,7 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 > **Admin password changed in Comexio:** If Comexio rejects the stored admin credentials of an existing entry — when the integration starts or on a poll — Home Assistant shows a *Re-authenticate Comexio* prompt under *Settings → Devices & Services*. Enter the current username and password there. Until then, the configuration poll stops and the integration does not try the rejected credentials again — only a Home Assistant restart or a reload of the entry tries them once more, and asks for reauth again if Comexio still refuses them. While you are first adding the integration, rejected credentials show an error in the setup form instead.
 
 > [!NOTE]
-> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, notifications, and cover detection keywords.
+> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, webhook address, notifications, and cover detection keywords.
 
 📖 **[Full configuration guide with screenshots →](CONFIGURATION.md)**
 
@@ -245,7 +245,7 @@ actions:
 ## 🐛 Troubleshooting
 
 - **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a function plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
-- **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu.
+- **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu. To push over HTTPS (e.g. to a reverse proxy), pick *External HA URL* or *Custom address* under **Webhook address** in the settings, see [CONFIGURATION.md](CONFIGURATION.md#3-settings).
 - **Extension entities don't reappear after coming back online:** Reload the integration via *Settings → Devices & Services → Comexio → ⋮ → Reload*. The coordinator will re-detect the extension as online and restore all its entities.
 - **KNX analog values above ~1,000,000 get rounded/corrupted:** See the [KNX Objects guide](KNX.md#9-known-limitations) — this is a Comexio firmware bug, not an integration issue.
 - **"Entity IDs not following the Comexio scheme" after updating:** Entities created before v0.11.0 keep their old, name-based entity IDs. The Repair issue (or the **Fix Entity IDs** button) renames them to the stable scheme; history and statistics move along. Automations, scripts and dashboards are **not** rewritten — the Repair issue shows how many automations/scripts still use the old IDs, so update those afterwards. You can also ignore the issue and keep the old IDs.
@@ -361,7 +361,7 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 > **Admin-Passwort in Comexio geändert:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten einer bestehenden Integration ab — beim Start der Integration oder bei einer Abfrage —, zeigt Home Assistant unter *Einstellungen → Geräte & Dienste* die Aufforderung *Comexio erneut anmelden*. Dort den aktuellen Benutzernamen und das Passwort eingeben. Bis dahin ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut — nur ein Neustart von Home Assistant oder ein Neuladen der Integration versucht sie noch einmal und fordert erneut zur Anmeldung auf, wenn Comexio sie weiter ablehnt. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
 
 > [!NOTE]
-> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Benachrichtigungen und Rollladen-Schlüsselwörter.
+> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Webhook-Adresse, Benachrichtigungen und Rollladen-Schlüsselwörter.
 
 📖 **[Vollständige Konfigurationsanleitung mit Screenshots →](CONFIGURATION.md)**
 
@@ -508,7 +508,7 @@ actions:
 ## 🐛 Fehlerbehebung (Troubleshooting)
 
 - **"Web-IO Gerät ist blockiert (in use)":** Du versuchst, einen *Full Sync* zu machen, aber das Web-IO Gerät ist in Comexio bereits in einem Logikplan verbunden. Die Integration erkennt das und fällt automatisch und sicher auf den *Delta-Sync* zurück, um nur die Einzelbefehle zu patchen.
-- **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten.
+- **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten. Für einen Push über HTTPS (z. B. an einen Reverse-Proxy) wähle in den Einstellungen unter **Webhook-Adresse** *Externe HA-URL* oder *Eigene Adresse*, siehe [CONFIGURATION.md](CONFIGURATION.md#3-einstellungen).
 - **Extension-Entitäten erscheinen nach Wiederherstellung nicht:** Lade die Integration über *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu laden* neu. Der Coordinator erkennt das Modul als online und legt alle Entitäten neu an.
 - **KNX-Analogwerte oberhalb von ca. 1.000.000 werden gerundet/verfälscht:** Siehe die [Anleitung KNX-Objekte](KNX.md#9-bekannte-einschränkungen) — das ist ein Comexio-Firmware-Bug, kein Integrations-Problem.
 - **„Entity-IDs entsprechen nicht dem Comexio-Schema" nach dem Update:** Vor v0.11.0 angelegte Entitäten behalten ihre alten, namensbasierten Entity-IDs. Das Reparatur-Issue (oder der Button **Entity-IDs korrigieren**) benennt sie auf das stabile Schema um; Verlauf und Statistiken ziehen mit um. Automationen, Skripte und Dashboards werden **nicht** umgeschrieben — das Reparatur-Issue zeigt, wie viele Automationen/Skripte noch die alten IDs verwenden, diese danach anpassen. Das Issue kann auch ignoriert werden, dann bleiben die alten IDs.
