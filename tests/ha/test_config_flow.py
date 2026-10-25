@@ -254,6 +254,29 @@ async def test_reconfigure_login_errors_keep_the_stored_settings(
     mock_comexio_api[0].close.assert_called_once()
 
 
+async def test_unchanged_reauth_without_a_coordinator_falls_back_to_ha_reload(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """A loaded entry whose coordinator is missing still reloads: through HA's reload, there is no guard to use."""
+    await _setup(hass, mock_config_entry)
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    same = {key: mock_config_entry.data[key] for key in REAUTH_INPUT}
+
+    with (
+        patch.dict(hass.data[DOMAIN]),  # puts the coordinator back for the unload at teardown
+        patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload,
+    ):
+        del hass.data[DOMAIN][mock_config_entry.entry_id]
+        result = await _submit_reauth(hass, mock_config_entry, same)
+        await hass.async_block_till_done()
+
+    assert result["reason"] == "reauth_successful"
+    schedule_reload.assert_called_once_with(mock_config_entry.entry_id)
+    # Setup and the flow's login test only (HA's reload is patched out); the credentials were tested first.
+    assert len(mock_comexio_api) == 2
+    mock_comexio_api[1].login.assert_awaited_once()
+
+
 async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
