@@ -171,6 +171,7 @@ Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templat
 - **R1** (`coordinator.py`): Webhook updates arriving *during* a `get_raw_config` HTTP round-trip are preserved — coordinator clears dirty sets before the fetch, then prefers webhook values over stale API snapshot.
 - **R2** (`__init__.py`, `button.py`): `_skip_next_listener_reload` flag prevents a double-reload when the sync button writes to `audit_ignored` in options (the explicit reload after sync is the canonical one).
 - **R4** (`coordinator.py`): `_sync_lock` (asyncio.Lock) ensures only one sync run at a time.
+- **Guarded reload** (`coordinator.async_reload_entry`): every reload of the entry goes through it — it skips the reload while a sync runs (the sync's closing reload covers it) and otherwise waits for `_sync_lock`, running restores and plan edits. HA's own `config_entries.async_reload` / `async_schedule_reload` would tear the coordinator down mid-sync or mid-restore; a use is allowed only where the guard cannot apply, listed with its reason in `ALLOWED` of `tests/unit/test_guarded_reloads.py`, which fails on any unlisted use.
 
 ### GitHub Actions — HACS-spezifische Ausnahme
 
