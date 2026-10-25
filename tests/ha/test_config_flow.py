@@ -327,7 +327,7 @@ async def test_unchanged_flow_still_reloads_a_loaded_entry(
     submit: Any,
     reason: str,
 ) -> None:
-    """No change, no listener run: the flow reloads itself to restart the polls the refused login stopped."""
+    """No change, no update listener run: the flow reloads the loaded entry itself (here set up normally)."""
     await _setup_for_unchanged_flows(hass, mock_config_entry)
     data_before = dict(mock_config_entry.data)
 
