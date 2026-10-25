@@ -110,6 +110,9 @@ def api_returns() -> dict[str, Any]:
             SystemInfo(free_storage_percent=42.0, time_server=TimeServerSettings(True, "pool.ntp.org", 86400)),
             timedelta(days=3),
         ),
+        # Never None either: an unreadable form is (None, None). The nightly range check (04:20 test time) runs in
+        # any test whose loaded entry spans that minute, and a bare None crashes it into a logged exception.
+        "get_webio_command_range": (None, None),
     }
 
 

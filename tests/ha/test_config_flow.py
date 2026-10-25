@@ -353,10 +353,14 @@ async def test_unchanged_flow_during_a_sync_leaves_the_reload_to_the_sync(
 ) -> None:
     """A reload mid-sync would close the API session under it; the sync's closing reload covers the flow."""
     await _setup_for_unchanged_flows(hass, mock_config_entry)
-    hass.data[DOMAIN][mock_config_entry.entry_id].in_sync = True
     data_before = dict(mock_config_entry.data)
 
-    with patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
+    # The sync ends with the flow, even a failing one: else the teardown unload waits FUNCTION_PLAN_UNLOAD_WAIT_SEC
+    # for it, 120 s in which a scheduled check (e.g. the nightly range check) can fire against the mocked API.
+    with (
+        patch.object(hass.data[DOMAIN][mock_config_entry.entry_id], "in_sync", True),
+        patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload,
+    ):
         result = await submit(hass, mock_config_entry)
         await hass.async_block_till_done()
 
