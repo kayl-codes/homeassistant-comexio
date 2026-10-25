@@ -9,7 +9,7 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 
 
 def _audit(**overrides: Any) -> dict[str, Any]:
-    audit: dict[str, Any] = {
+    return {
         "type": [],
         "missing": [],
         "rename": [],
@@ -25,9 +25,7 @@ def _audit(**overrides: Any) -> dict[str, Any]:
         "knx_bridge_missing": [],
         "knx_bridge_loopback_missing": [],
         "protocol": [],
-    }
-    audit.update(overrides)
-    return audit
+    } | overrides
 
 
 def _coordinator(audit: dict[str, Any]) -> ComexioCoordinator:
