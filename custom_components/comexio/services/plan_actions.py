@@ -22,6 +22,7 @@ from ..const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     PLAN_TRANSITION_STARTING,
     PLAN_TRANSITION_STOPPING,
+    function_plan_info,
     one_line,
 )
 from ..coordinator import ComexioCoordinator
@@ -182,7 +183,7 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
     if not plan_data:
         persistent_notification.async_create(hass, f"Plan {fub_id} could not be loaded.", title=error_title)
         return None
-    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
     return (
         coordinator,
         api,
@@ -286,7 +287,7 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
         return
     coordinator, api, fub_id = ctx
     if not _is_managed_cluster_plan(coordinator, fub_id):
-        plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+        plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
         persistent_notification.async_create(
             hass,
             f"Plan '{one_line(plan_name)}' (ID {fub_id}) is not an HA-managed cluster plan. "
@@ -327,7 +328,7 @@ async def async_sort_function_plan(
     """
     t_start = time.monotonic()
     if was_active is None:
-        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
 
     if coordinator.is_trigger_plan(fub_id):
         row_step = FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
@@ -473,7 +474,7 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
         return
     coordinator, api, fub_id = ctx
 
-    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
     _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, one_line(plan_name))
     t_start = time.monotonic()
     with coordinator.plan_edit():
@@ -496,7 +497,7 @@ async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) 
         return
     coordinator, api, fub_id = ctx
 
-    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
     _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, one_line(plan_name))
     t_start = time.monotonic()
     with coordinator.plan_edit():

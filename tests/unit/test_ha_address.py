@@ -10,12 +10,14 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS
 import pytest
 
 from custom_components.comexio import ha_address
 from custom_components.comexio.ha_address import (
     HA_HOST_CANDIDATES,
     HaAddressResolver,
+    WebhookTarget,
     format_address,
     host_of,
     webio_device_hints,
@@ -723,10 +725,50 @@ def test_the_coordinator_passes_every_stored_address(data: dict | None, hints: t
 
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.data = data
-    coordinator.ha_address = SimpleNamespace(async_get=AsyncMock(return_value="x:8123"))
+    coordinator.api = SimpleNamespace(webhook_protocol=None)
+    coordinator.ha_address = SimpleNamespace(async_target=AsyncMock(return_value=WebhookTarget("x:8123", False)))
 
     assert asyncio.run(coordinator.async_ha_address()) == "x:8123"
-    coordinator.ha_address.async_get.assert_awaited_once_with(*hints)
+    coordinator.ha_address.async_target.assert_awaited_once_with(*hints)
+
+
+@pytest.mark.parametrize(
+    ("target", "protocol"),
+    [
+        (WebhookTarget("x:8123", False), WEBIO_PROTOCOL_HTTP),
+        (WebhookTarget("x:8443", True), WEBIO_PROTOCOL_HTTPS),
+        # Comexio speaks TLS to 443 by itself: switching there must not rewrite every command.
+        (WebhookTarget("x:443", True), WEBIO_PROTOCOL_HTTP),
+    ],
+)
+def test_the_webhook_target_hands_its_protocol_to_the_command_builders(target: WebhookTarget, protocol: int) -> None:
+    from unittest.mock import AsyncMock
+
+    from custom_components.comexio.coordinator import ComexioCoordinator
+
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.data = None
+    coordinator.api = SimpleNamespace(webhook_protocol=None)
+    coordinator.ha_address = SimpleNamespace(async_target=AsyncMock(return_value=target))
+
+    assert asyncio.run(coordinator.async_webhook_target()) == target
+    assert coordinator.api.webhook_protocol == protocol
+
+
+@pytest.mark.parametrize(
+    ("target", "protocol"),
+    [
+        (WebhookTarget("ha.example.com:443", True), WEBIO_PROTOCOL_HTTP),
+        (WebhookTarget("[fd00::10]:443", True), WEBIO_PROTOCOL_HTTP),
+        (WebhookTarget("ha.example.com:8443", True), WEBIO_PROTOCOL_HTTPS),
+        (WebhookTarget("[fd00::10]:8123", True), WEBIO_PROTOCOL_HTTPS),
+        (WebhookTarget("ha.example.com:4430", True), WEBIO_PROTOCOL_HTTPS),
+        (WebhookTarget("ha.example.com:443", False), WEBIO_PROTOCOL_HTTP),
+        (WebhookTarget("ha.example.com:8123", False), WEBIO_PROTOCOL_HTTP),
+    ],
+)
+def test_only_https_on_a_port_other_than_443_needs_the_https_protocol(target: WebhookTarget, protocol: int) -> None:
+    assert target.webio_protocol == protocol
 
 
 @pytest.mark.parametrize(

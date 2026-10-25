@@ -61,6 +61,7 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
             login=AsyncMock(return_value=True),
             get_webio_device_info=AsyncMock(return_value=dev_id),
             webio_device_delete_error=AsyncMock(return_value=None),
+            fub_data={"7": {"Name": "Pumps"}},
         ),
         async_ha_address=AsyncMock(return_value=ha_address),
         ha_address=HaAddressResolver(MagicMock()),
@@ -161,6 +162,52 @@ def test_actions_without_device_writes_still_run_with_a_loopback_address(action:
         assert getattr(button, name).await_count == (name == handler), name
 
 
+@pytest.mark.parametrize("action", ["function_plan_add_missing", "knx_bridge_add_missing"])
+def test_a_plan_wiring_action_refuses_while_the_plan_list_has_unreadable_entries(action: str) -> None:
+    button = _button(REACHABLE)
+    button.coordinator.api.fub_data = {"7": {"Name": "Pumps"}, "x": {"Name": "Pumps"}}
+    logger = _press(button, action)
+
+    logger.exception.assert_not_called()
+    assert logger.error.call_args.args[0] == "[%s] Sync not started: %s"
+    assert "unreadable entries (x)" in str(logger.error.call_args.args[2])
+    assert button.coordinator.sync_error is True
+    button._wire_created_pairs.assert_not_awaited()
+    button._wire_knx_full.assert_not_awaited()
+
+
+def test_a_full_sync_still_runs_while_the_plan_list_has_unreadable_entries() -> None:
+    button = _button(REACHABLE)
+    button.coordinator.api.fub_data = {"x": {"Name": "Pumps"}}
+    _press(button)
+
+    assert button.coordinator.sync_error is False
+    button._sync_class.assert_awaited()
+
+
+_PLAN_FINDINGS = {
+    "function_plan_missing": [{"marker_id": 1}],
+    "function_plan_dangling": [{"ref_id": "5", "webio_class": WebioClass.MARKER}],
+}
+
+
+@pytest.mark.parametrize(("fub_data", "acted_on"), [({"7": {"Name": "Pumps"}}, True), ({"x": {}}, False)])
+def test_a_full_sync_acts_on_carried_plan_findings_only_while_the_plan_list_is_readable(
+    fub_data: dict, acted_on: bool
+) -> None:
+    """Carried over while the list is unreadable, they may be stale: no wiring, no element deletes from them."""
+    button = _button(REACHABLE)
+    button.coordinator.api.fub_data = fub_data
+    button.coordinator.last_audit_results = dict(_PLAN_FINDINGS)
+    _press(button)
+
+    gap_items = button._wire_created_pairs.await_args.args[2]
+    dangling = [call.args[7] for call in button._sync_class.await_args_list if call.args[1] == WebioClass.MARKER]
+    assert gap_items == (_PLAN_FINDINGS["function_plan_missing"] if acted_on else [])
+    assert dangling == [_PLAN_FINDINGS["function_plan_dangling"] if acted_on else []]
+    assert ("plan list has unreadable entries (x)" in button.coordinator.sync_progress_text) is not acted_on
+
+
 def test_a_failed_login_is_still_reported_without_a_traceback() -> None:
     button = _button(REACHABLE)
     button.coordinator.api.login = AsyncMock(return_value=False)
@@ -190,7 +237,7 @@ def test_no_fast_track_with_a_loopback_address() -> None:
     ctx = _ctx(button, LOOPBACK)
     with patch.object(button_module, "_LOGGER") as logger:
         action = asyncio.run(
-            button._decide_effective_action(ctx, WEBIO_CLASSES[0], "7", _FAST_TRACK_MISSING, [], [], [], False)
+            button._decide_effective_action(ctx, WEBIO_CLASSES[0], "7", _FAST_TRACK_MISSING, [], [], [], [], False)
         )
 
     assert action == "full_sync"
@@ -203,7 +250,7 @@ def test_fast_track_with_a_reachable_address() -> None:
     ctx = _ctx(button, REACHABLE)
     with patch.object(button_module, "webio_still_present", AsyncMock(return_value=None)):
         action = asyncio.run(
-            button._decide_effective_action(ctx, WEBIO_CLASSES[0], "7", _FAST_TRACK_MISSING, [], [], [], False)
+            button._decide_effective_action(ctx, WEBIO_CLASSES[0], "7", _FAST_TRACK_MISSING, [], [], [], [], False)
         )
 
     assert action == "recreate"

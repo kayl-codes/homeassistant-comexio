@@ -867,3 +867,35 @@ def test_a_restore_renaming_the_plan_keeps_its_live_format_when_the_backup_store
         asyncio.run(backup_service._restore_apply_snapshot(api, 7, snapshot, "Renamed", "Lights", False))
 
     api.function_plan_update_paper.assert_awaited_once_with(7, *A5, name="Lights")
+
+
+def test_auto_backup_skips_a_plan_whose_list_entry_is_unreadable(stores: dict[str, Any], plan: dict[str, Any]) -> None:
+    """One malformed $Fubs entry must neither abort every plan's backup nor store a plan as (id, "id")."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+    fub_data = {"1": {"Name": "Lights"}, "2": "garbage", "3": {"Id": 4, "Name": "Pumps"}}
+
+    rotated = asyncio.run(manager.async_auto_backup({1: plan, 2: plan, 3: plan}, fub_data))
+
+    assert len(rotated) == 1
+    assert set(manager._auto_data) == {"1"}
+
+
+@pytest.mark.parametrize(
+    ("live_entries", "filled"),
+    [({"1": {"Id": 2, "Name": "Lights"}}, 0), ({"01": {"Name": "Lights"}}, 0), ({}, 1)],
+    ids=["id-differs-from-key", "key-not-canonical", "deleted"],
+)
+def test_the_backfill_waits_while_a_plan_may_hide_behind_an_unreadable_entry(
+    stores: dict[str, Any], plan: dict[str, Any], live_entries: dict, filled: int
+) -> None:
+    """Read as deleted, the live plan's legacy snapshots would get a guessed format a restore rebuilds."""
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
+
+    async def run() -> int:
+        await manager.async_auto_backup({1: plan}, {"1": {"Name": "Lights"}}, plan_format={"1": A4})
+        for key in ("paper", "dpi", "orientation"):
+            del manager._auto_data["1"]["Lights"][0][key]
+        return await manager.async_backfill_paper_metadata(live_entries, {})
+
+    assert asyncio.run(run()) == filled
+    assert ("paper" in manager._auto_data["1"]["Lights"][0]) is bool(filled)

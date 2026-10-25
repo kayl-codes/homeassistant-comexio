@@ -132,6 +132,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # instance has nothing cached yet, so if its very first live catalog fetch fails, this
     # restores last known-good data instead of leaving DPT3.x composite pairs untagged.
     await coordinator.async_load_knx_dpt_catalog()
+    # The protocol each Web-IO class was last written with, before the first audit compares against it.
+    await coordinator.async_load_webio_protocols()
 
     if entry.entry_id in _setup_unreachable_entries(hass):
         # The last attempt could not reach Comexio, which may still be booting: the first refresh starts the grace.
@@ -755,7 +757,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
         if not unload_ok and running is not None and hasattr(running, "api"):
             running.unloading = False  # the entry stays loaded: restores and plan edits may start again
     if unload_ok:
-        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        # A default like the get() above: the config flow's fallback reload also reaches an entry whose coordinator
+        # is missing, and a KeyError here would leave that entry failed to unload.
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
         if coordinator and hasattr(coordinator, "api"):
             # Only now, not before the wait: the work it waited for still sends its pushes, and a failed unload
             # keeps them. The reloaded entry's watchdog takes the plans' pushes over (its first check alarms every

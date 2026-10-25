@@ -32,6 +32,7 @@ from ..const import (
     ICON_SUCCESS,
     ICON_WARNING,
     TIMESTAMP_DISPLAY_FORMAT,
+    function_plan_info,
     one_line,
 )
 from ..coordinator import ComexioCoordinator
@@ -407,7 +408,7 @@ async def _resolve_restore_target(
     if not raw:
         fub_id = coordinator.get_active_function_plan_fub_id()
         if fub_id is not None:
-            return fub_id, api.fub_data.get(str(fub_id), {}).get("Name"), None
+            return fub_id, function_plan_info(api.fub_data, fub_id).get("Name"), None
         return (
             None,
             None,
@@ -421,7 +422,7 @@ async def _resolve_restore_target(
 
     fub_id = _resolve_fub_id(raw, api.fub_data, hass)
     if fub_id is not None:
-        return fub_id, api.fub_data.get(str(fub_id), {}).get("Name"), None
+        return fub_id, function_plan_info(api.fub_data, fub_id).get("Name"), None
 
     raw_lower = raw.strip().lower()
     backups = await coordinator.function_plan_backup.async_list_backups()
@@ -511,9 +512,9 @@ async def _restore_plan_in_place(
     so both are aligned first (function_plan_update_paper) so the plan comes back exactly as it
     was, not just its wiring.
     """
-    live_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    live_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
     plan_name = snapshot.get("plan_name", live_name)
-    was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+    was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
     t_start = time.monotonic()
 
     # Same notification_id for the start and final message — the "in progress" notice is

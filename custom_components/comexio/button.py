@@ -51,6 +51,7 @@ from .const import (
     ISSUE_UNINSTALL_CLEANUP,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_REJECTED,
+    PLAN_WIRING_ACTIONS,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -70,10 +71,12 @@ from .const import (
     SourceCategory,
     WebioClass,
     category_by_fub_module_type,
+    function_plan_info,
     one_line,
     source_category,
     trigger_pair_categories,
     uninstall_cleanup_pending_notification_id,
+    unreadable_plan_keys,
     webio_class_label,
     webio_class_name,
     webio_range_check_entity_id,
@@ -110,7 +113,15 @@ _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
 _STEP_CHECKING_PLAN = "Checking function plan wiring"
 _RETRY_CLEANUP = "run the cleanup again from Repairs"
-_DELTA_RESULT_KEYS = {"rename": "renamed", "delete": "removed", "type": "updated", "create": "added"}
+_DELTA_RESULT_KEYS = {
+    "rename": "renamed",
+    "delete": "removed",
+    "type": "updated",
+    "protocol": "updated",
+    "create": "added",
+}
+# Actions that rewrite the commands of a class whose webhook protocol changed (part of the server address).
+_PROTOCOL_ACTIONS = frozenset({"full_sync", "update_ip"})
 _FAILED_WRITES_SHOWN = 10  # failed Web-IO writes named in the result message; the rest are counted
 
 
@@ -196,6 +207,47 @@ def _mark_cancelled(ctx: "_SyncContext", msg: str) -> str:
     """
     ctx.failed_writes.append("cancelled by user")
     return f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
+
+
+def _protocol_only_items(cls_protocol: list[dict], type_fixes: list[dict]) -> list[dict]:
+    """The protocol rewrites a type-fix of the same command does not already cover."""
+    type_fix_ids = {item.get("id") for item in type_fixes}
+    return [item for item in cls_protocol if item.get("id") not in type_fix_ids]
+
+
+def _class_action_eta(
+    action: str,
+    cls_missing: list[dict],
+    cls_renamed: list[dict],
+    cls_types: list[dict],
+    cls_orphans: list[dict],
+    cls_protocol: list[dict],
+    dev_ip_mismatch: bool,
+) -> int:
+    """Seconds the delta tasks of action take for one class (the Fast-Track decision weighs it)."""
+    eta = 0
+    task_count = 0
+    if action in {"full_sync", "update_renames"}:
+        eta += len(cls_renamed) * SYNC_DURATION_WRITE
+        task_count += len(cls_renamed)
+    if action in {"full_sync", "delete_orphans"}:
+        eta += len(cls_orphans) * SYNC_DURATION_DELETE
+        task_count += len(cls_orphans)
+    if action in {"full_sync", "create_missing"}:
+        eta += len(cls_missing) * SYNC_DURATION_WRITE
+        task_count += len(cls_missing)
+    if action in {"full_sync", "update_types"}:
+        eta += len(cls_types) * SYNC_DURATION_WRITE
+        task_count += len(cls_types)
+    if action in _PROTOCOL_ACTIONS:
+        protocol_only = _protocol_only_items(cls_protocol, cls_types if action == "full_sync" else [])
+        eta += len(protocol_only) * SYNC_DURATION_WRITE
+        task_count += len(protocol_only)
+        if dev_ip_mismatch:
+            eta += SYNC_DURATION_WRITE
+    if task_count > 1:
+        eta += int(1.5 * (task_count - 1))
+    return eta
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -371,6 +423,33 @@ class _SyncNotStartedError(HomeAssistantError):
     """The sync stopped before its first write — reported without a traceback."""
 
 
+def _plan_audit_for_action(action: str, bad_keys: list[str], audit_data: dict[str, Any]) -> dict[str, Any]:
+    """audit_data for a sync action, without its function plan findings while the plan list has unreadable entries.
+
+    They are carried over from the last readable audit then and may be stale (see
+    coordinator._carry_over_plan_audit): the plan-only actions are refused, a full sync neither
+    wires nor deletes plan elements from them (see _unknown_plan_findings_lines).
+    """
+    if not bad_keys:
+        return audit_data
+    if action in PLAN_WIRING_ACTIONS:
+        raise _SyncNotStartedError(
+            f"The plan list has unreadable entries ({one_line(', '.join(bad_keys))}), so the function "
+            "plan findings are unknown. Fix them in Comexio, then retry."
+        )
+    return {**audit_data, "function_plan_missing": [], "function_plan_dangling": []}
+
+
+def _unknown_plan_findings_lines(bad_keys: list[str]) -> list[str]:
+    """Function Plan block line for a full sync that left the plan findings alone (see _plan_audit_for_action)."""
+    if not bad_keys:
+        return []
+    return [
+        f"{ICON_WARNING} Missing wiring and leftover elements: skipped, the plan list has unreadable entries"
+        f" ({one_line(', '.join(bad_keys))}) — fix them in Comexio, then sync again"
+    ]
+
+
 class _SyncLoginError(_SyncNotStartedError):
     """The sync could not log in to Comexio."""
 
@@ -440,6 +519,9 @@ class _SyncContext:
     # adapter logged why), function plan wiring errors, cleanup deletions and a user cancel.
     # Named in the result message and turn the status sensor to "partial".
     failed_writes: list[str] = field(default_factory=list)
+    # The audit's commands to rewrite with the webhook protocol, and the protocol their payloads carry.
+    protocol_items: list[dict[str, Any]] = field(default_factory=list)
+    audit_protocol: int | None = None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -657,8 +739,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 start_time=start_time,
                 class_names=class_names,
                 update_status=update_status,
+                protocol_items=audit_data.get("protocol", []),
+                audit_protocol=audit_data.get("webhook_protocol"),
             )
 
+            # Read once: the KNX step's fresh config may change the list before the result is written.
+            bad_plan_keys = unreadable_plan_keys(api.fub_data)
+            audit_data = _plan_audit_for_action(action, bad_plan_keys, audit_data)
             gap_items = audit_data.get("function_plan_missing", [])
             cleanup_entity_ids: list[tuple[str, int]] = audit_data.get("cleanup_entities", [])
 
@@ -741,6 +828,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     step_info=_STEP_CHECKING_PLAN,
                 )
                 plan_summary += await self._wire_trigger_pairs(ctx, refresh_audit=True)
+                plan_summary += _unknown_plan_findings_lines(bad_plan_keys)
 
                 duration = datetime.datetime.now() - start_time
                 duration_str = f"{_mmss(duration.total_seconds())} min"
@@ -1435,34 +1523,20 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_renamed: list[dict],
         cls_types: list[dict],
         cls_orphans: list[dict],
+        cls_protocol: list[dict],
         dev_ip_mismatch: bool,
     ) -> str:
         """Pick recreate vs. delta-sync for one class, based on ETA vs. the Fast-Track threshold."""
         label = webio_class_label(cls)
         action = ctx.action
-        cls_action_eta = 0
-        cls_task_count = 0
-        if action in {"full_sync", "update_renames"}:
-            cls_action_eta += len(cls_renamed) * SYNC_DURATION_WRITE
-            cls_task_count += len(cls_renamed)
-        if action in {"full_sync", "delete_orphans"}:
-            cls_action_eta += len(cls_orphans) * SYNC_DURATION_DELETE
-            cls_task_count += len(cls_orphans)
-        if action in {"full_sync", "create_missing"}:
-            cls_action_eta += len(cls_missing) * SYNC_DURATION_WRITE
-            cls_task_count += len(cls_missing)
-        if action in {"full_sync", "update_types"}:
-            cls_action_eta += len(cls_types) * SYNC_DURATION_WRITE
-            cls_task_count += len(cls_types)
-        if action in {"full_sync", "update_ip"} and dev_ip_mismatch:
-            cls_action_eta += SYNC_DURATION_WRITE
-        if cls_task_count > 1:
-            cls_action_eta += int(1.5 * (cls_task_count - 1))
+        cls_action_eta = _class_action_eta(
+            action, cls_missing, cls_renamed, cls_types, cls_orphans, cls_protocol, dev_ip_mismatch
+        )
 
         if not class_dev_id:
             _LOGGER.info("[%s] %s: no device instance found. Forcing recreate.", self.server_id, label)
             return "recreate"
-        if action == "update_ip":
+        if action == "update_ip" and not cls_protocol:
             _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
             return "update_ip"
         if cls_action_eta > SYNC_DURATION_RECREATE:
@@ -1616,6 +1690,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             cls_audit["orphans"],
             cls_audit["missing"],
             cls_audit["types"],
+            cls_audit["protocol"],
         )
         skipped_creates = 0
         if not base_id:
@@ -1643,8 +1718,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_dangling_to_delete = (
             cls_audit["dangling"] if cls_effective_action in {"full_sync", "delete_orphans"} else []
         )
+        failed_before = len(ctx.failed_writes)
         result = await self._execute_delta_tasks(
             ctx, cls, class_dev_id, base_id, tasks_to_do, cls_dangling_to_delete, on_progress, label, pct_start
+        )
+        # Every command of the class now carries the audit's protocol — unless a rewrite failed or was cancelled.
+        # Only an active class was audited for its protocol; a deselected one only keeps its device IP.
+        result["protocol_written"] = (
+            cls_effective_action in _PROTOCOL_ACTIONS
+            and cls in self.coordinator.active_webio_classes
+            and not getattr(self.coordinator, "cancel_sync", False)
+            and not any(f.startswith(("type ", "protocol ")) for f in ctx.failed_writes[failed_before:])
         )
         result["updated_ip"] = False
         result["skipped_creates"] = skipped_creates
@@ -1690,6 +1774,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             "delete": f"{ICON_DELETE} Remove",
             "create": f"{ICON_ADD} Add",
             "type": f"{ICON_FIX} Type-Fix",
+            "protocol": f"{ICON_NETWORK} Protocol",
         }
         t_label = labels.get(task_type, task_type)
         prog_msg = (
@@ -1713,8 +1798,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_orphans: list[dict],
         cls_missing: list[dict],
         cls_types: list[dict],
+        cls_protocol: list[dict],
     ) -> list[dict]:
-        """Collect the individual create/rename/delete/type-fix tasks for one delta-sync run."""
+        """Collect the individual create/rename/delete/type-fix/protocol tasks for one delta-sync run.
+
+        A type-fix writes the whole command, protocol included, so a command with both gets one write.
+        """
         tasks_to_do = []
         if cls_effective_action in {"full_sync", "update_renames"}:
             tasks_to_do.extend([{"item": i, "type": "rename"} for i in cls_renamed])
@@ -1722,8 +1811,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             tasks_to_do.extend([{"item": i, "type": "delete"} for i in cls_orphans])
         if cls_effective_action in {"full_sync", "create_missing"}:
             tasks_to_do.extend([{"item": i, "type": "create"} for i in cls_missing])
-        if cls_effective_action in {"full_sync", "update_types"}:
-            tasks_to_do.extend([{"item": i, "type": "type"} for i in cls_types])
+        type_fixes = cls_types if cls_effective_action in {"full_sync", "update_types"} else []
+        tasks_to_do.extend([{"item": i, "type": "type"} for i in type_fixes])
+        if cls_effective_action in _PROTOCOL_ACTIONS:
+            tasks_to_do.extend(
+                [{"item": i, "type": "protocol"} for i in _protocol_only_items(cls_protocol, type_fixes)]
+            )
         return tasks_to_do
 
     async def _cleanup_delta_debris(
@@ -1888,12 +1981,15 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         class_name = ctx.class_names[cls]
         label = webio_class_label(cls)
 
+        cls_protocol = _items_of_class(ctx.protocol_items, cls)
         cls_effective_action = await self._decide_effective_action(
-            ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch
+            ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, cls_protocol, dev_ip_mismatch
         )
 
         if cls_effective_action == "recreate":
             await self._recreate_class(ctx, cls, class_name, label, class_dev_id, pct_start, pct_end)
+            # The uploaded template was built with the protocol of this sync's address.
+            await self.coordinator.async_set_webio_synced_protocol(cls, ctx.api.webhook_protocol)
             # Everything in this class is brand new, so every command of it needs the
             # function plan pairing pass too: its old webIoId (if any) went away with the
             # deleted class, and the pre-sync audit never flagged a wiring gap for it (it
@@ -1926,6 +2022,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             "types": cls_types,
             "orphans": cls_orphans,
             "dangling": cls_dangling,
+            "protocol": cls_protocol,
         }
         result = await self._delta_sync_class(
             ctx,
@@ -1940,7 +2037,28 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             pct_end,
         )
         result["recreated"] = False
+        await self._record_delta_protocol(ctx, cls, result, result.pop("protocol_written"))
         return result
+
+    async def _record_delta_protocol(
+        self, ctx: _SyncContext, cls: str, result: dict[str, Any], protocol_written: bool
+    ) -> None:
+        """Record the protocol a delta sync left cls's commands with.
+
+        Every command rewritten: the audit's protocol. Only some of them written (a create, rename or type fix
+        carries the audit's protocol too, or a protocol rewrite failed or was cancelled) while the record names
+        another protocol: the class is mixed now, so it becomes unknown and the next audit rewrites all of it.
+        Otherwise a switch back to the recorded protocol would hide the commands written in between.
+        """
+        protocol = ctx.audit_protocol
+        if protocol is None or cls not in self.coordinator.active_webio_classes:
+            return
+        if protocol_written:
+            await self.coordinator.async_set_webio_synced_protocol(cls, protocol)
+        elif (result["added"] or result["updated"] or result["renamed"]) and (
+            self.coordinator.webio_synced_protocol(cls) != protocol
+        ):
+            await self.coordinator.async_set_webio_synced_protocol(cls, None)
 
     # --- MANAGED CLUSTER PLAN WIRING ---
 
@@ -2170,7 +2288,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             wire_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
 
         plan_name = self._plan_name(fub_id)
-        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
         t0 = time.monotonic()
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"add_trigger_pairs {[f'{prefix}{m}' for m in missing_ids]}"
@@ -2220,7 +2338,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             return f"{ICON_WARNING} {len(orphan_ids)} orphaned trigger construct(s) found, but no trigger plan exists."
 
         fub_id = int(raw_fub_id)
-        if self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
+        if function_plan_info(self.coordinator.api.fub_data, fub_id).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
             ctx.failed_writes.append(
                 _plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "mapping stale, orphans not removed")
             )
@@ -2690,7 +2808,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # brand-new cluster plan would end up permanently stopped: is_fresh=False further down
         # only controls whether the sort pass runs, was_active alone controls reactivation — same
         # invariant _add_trigger_pairs already documents and relies on.
-        was_active = is_fresh or bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = is_fresh or bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
         t0 = time.monotonic()
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"wire_knx_full {[f'K{m}' for m in cluster_ids]}"
@@ -2804,7 +2922,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     def _plan_name(self, fub_id: int) -> str:
         """Live name of a plan, falling back to its fub_id when it isn't in the cache."""
-        return self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") or str(fub_id)
+        return function_plan_info(self.coordinator.api.fub_data, fub_id).get("Name") or str(fub_id)
 
     async def _add_pairs_to_plan(
         self,
@@ -2831,7 +2949,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # Capture the activation state BEFORE stop_fup: function_plan_add_source_pairs
         # reloads the config (refreshing fub_data) after the stop, so any later lookup
         # would see the plan as inactive and skip reactivation.
-        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
         t0 = time.monotonic()
         ctx.update_status(
             f"Adding {len(cluster_ids)} pair(s) to Function Plan '{one_line(plan_name)}'...",
@@ -2977,7 +3095,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
             )
 
-        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
         n_total = sum(len(by_ext[ext]) for ext, _ in ext_cols)
         t0 = time.monotonic()
         ctx.update_status(

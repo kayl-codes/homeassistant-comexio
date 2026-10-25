@@ -250,7 +250,7 @@ def test_ignore_entries_saved_during_the_audit_survive_the_pruning() -> None:
     # the poll's conf snapshot: the newly ignored 44 would be dropped and its source reactivated.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
 
-    async def _options_saved_meanwhile() -> dict[int, Any]:
+    async def _options_saved_meanwhile(**_kwargs: Any) -> dict[int, Any]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,44,999"}  # type: ignore[misc]
         return {}
 
@@ -285,7 +285,7 @@ def test_stale_id_removed_by_the_user_during_the_audit_is_not_reported() -> None
     # "automatically removed" notification for an id that is no longer in the list.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
 
-    async def _options_saved_meanwhile() -> dict[int, Any]:
+    async def _options_saved_meanwhile(**_kwargs: Any) -> dict[int, Any]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
         return {}
 
@@ -375,7 +375,7 @@ def test_knx_ranges_survive_and_only_stale_k_singles_are_pruned() -> None:
 def test_a_stale_single_turned_into_a_range_during_the_audit_is_kept() -> None:
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
 
-    async def _options_saved_meanwhile() -> dict[int, Any]:
+    async def _options_saved_meanwhile(**_kwargs: Any) -> dict[int, Any]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,990-1000"}  # type: ignore[misc]
         return {}
 
@@ -392,7 +392,7 @@ def test_a_save_during_the_audit_defers_the_stale_pruning_to_the_next_poll() -> 
     # creating marker 999 in Comexio): the audit judged the old list, so it must not prune the new.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
 
-    async def _options_saved_meanwhile() -> dict[int, Any]:
+    async def _options_saved_meanwhile(**_kwargs: Any) -> dict[int, Any]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,400-410,999"}  # type: ignore[misc]
         return {}
 
@@ -409,7 +409,7 @@ def test_a_save_that_restores_the_audited_list_still_defers_the_stale_pruning() 
     # creating it in Comexio), so the old verdict must not remove it although the string matches.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"})
 
-    async def _saved_twice_meanwhile() -> dict[int, Any]:
+    async def _saved_twice_meanwhile(**_kwargs: Any) -> dict[int, Any]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33,999"}  # type: ignore[misc]
         return {}
@@ -439,7 +439,7 @@ def test_a_save_during_the_audit_still_drops_a_bridge_marker() -> None:
     # Bridge markers are known from the scrape, not from the audited list: they go regardless.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,999"}, {BRIDGE_MARKER_ID})
 
-    async def _options_saved_meanwhile() -> dict[int, Any]:
+    async def _options_saved_meanwhile(**_kwargs: Any) -> dict[int, Any]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: f"33,400-410,999,{BRIDGE_MARKER_ID}"}  # type: ignore[misc]
         return {}
 
@@ -526,7 +526,7 @@ def test_a_source_unignored_during_the_audit_is_not_flagged_for_cleanup() -> Non
     # so the cleanup must not offer to delete it — the next poll re-judges the saved list.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "33,335"})
 
-    async def _unignored_meanwhile() -> dict[int, Any]:
+    async def _unignored_meanwhile(**_kwargs: Any) -> dict[int, Any]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
         return {}
 
@@ -579,3 +579,11 @@ def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
         conf, _final_data, options_at_poll = audit.await_args.args
         assert options_at_poll is polled
         assert conf[CONF_IGNORED_MARKERS] == "33,999"
+
+
+def test_the_audit_loads_the_plans_whose_list_entry_is_unreadable_too() -> None:
+    # Managed or not is unknown for them: a leftover wired there stays a finding (the cleanup reports them skipped).
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    _check_ignored(coordinator, {"markers": [*MARKERS, {"id": 335, "name": "Rollo"}]})
+
+    coordinator._load_managed_plan_check_data.assert_awaited_once_with(include_unknown=True)

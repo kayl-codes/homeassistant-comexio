@@ -294,6 +294,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_run_state_stale_count=0,
         _plan_run_state_missed={},
         _plan_list_unread_polls=0,
+        _reported_unreadable_plan_keys=[],
         _plan_run_state_last_fetch=0.0,
         _plan_run_state_fetching=False,
         _plan_run_state_relogin_refused=False,
@@ -943,7 +944,7 @@ def test_the_watchdog_waits_for_the_first_full_plan_list(
 
     coordinator.plan_watchdog.async_check.assert_not_called()
     assert dispatched == []
-    assert caplog.text.count("waits for the first poll that reads the plan list") == 1
+    assert caplog.text.count("waits for a poll that reads the whole plan list") == 1
     assert "no longer watches" not in caplog.text
 
     # The first poll that reads the plan list ends the wait: the pick is judged with the managed plan.
@@ -2272,6 +2273,87 @@ def test_a_plan_restored_while_the_check_awaits_is_not_synced_as_vanished(api: C
     coordinator.plan_watchdog.async_sync_vanished.assert_awaited_once_with(set(), {})
 
 
+@pytest.mark.parametrize(
+    ("fubs", "polled"),
+    [({"19": {"Name": "Pumps"}}, {19}), ({"19": {"Name": "Pumps"}, "x": {"Name": "Lights"}}, None), (None, None)],
+    ids=["readable", "unreadable-entry", "not-read"],
+)
+def test_a_poll_publishes_only_a_readable_plan_list(
+    api: ComexioAPI, fubs: dict | None, polled: set[int] | None
+) -> None:
+    """A plan list with an entry that is no plan may hide a plan: the poll leaves it unread (unknown, not deleted)."""
+    coordinator = _coordinator(api, marker_states={}, knx_states={})
+    raw_config = {"FubModules": {"2": {}}} | ({} if fubs is None else {"Fubs": fubs})
+    api.get_raw_config = AsyncMock(return_value=raw_config)
+    api.get_live_states = AsyncMock(side_effect=_StopAfterFetch)
+    fetch = ComexioCoordinator._async_fetch_parsed_config(coordinator, {})
+    with pytest.raises(_StopAfterFetch):
+        asyncio.run(fetch)
+    assert coordinator._polled_plan_ids == polled
+
+
+def test_an_unread_plan_list_with_unreadable_entries_names_them_and_the_paused_watchdog(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    api._fub_data = {"19": {"Name": "Pumps"}, "x": {"Name": "Lights"}}
+    coordinator = _coordinator(api, _polled_plan_ids=None, _last_poll_scraped=True)
+
+    with caplog.at_level(logging.WARNING):
+        coordinator._track_plan_list_read()
+
+    assert "['x']" in caplog.text
+    assert "watchdog pauses" in caplog.text
+
+
+def test_the_watchdog_logs_its_wait_again_once_a_read_plan_list_turns_unreadable(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _coordinator(api, config_entry=SimpleNamespace(options={}), scraped_plan_ids=None)
+    wait_log = "waits for a poll that reads the whole plan list"
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(coordinator.async_watch_managed_plans())
+        coordinator.scraped_plan_ids = {19, 43}
+        asyncio.run(coordinator.async_watch_managed_plans())
+        assert coordinator._plan_watch_deferred is False
+        api._fub_data["x"] = {"Name": "Lights"}
+        asyncio.run(coordinator.async_watch_managed_plans())
+
+    assert caplog.text.count(wait_log) == 2
+
+
+def test_the_unreadable_entries_are_warned_again_only_when_they_change(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Also after a poll whose plan list did not decode at all: the bad keys are the cause by now."""
+    coordinator = _coordinator(api, _polled_plan_ids=None, _last_poll_scraped=True)
+    names_the_keys = "that are no readable plan"
+
+    with caplog.at_level(logging.WARNING):
+        coordinator._track_plan_list_read()  # not decoded: the generic warning
+        api._fub_data["x"] = {"Name": "Lights"}
+        coordinator._track_plan_list_read()
+        coordinator._track_plan_list_read()  # unchanged: no repeat
+        api._fub_data["43"] = "garbage"
+        coordinator._track_plan_list_read()
+
+    assert caplog.text.count("brought no readable plan list") == 1
+    assert caplog.text.count(names_the_keys) == 2
+    assert "['43', 'x']" in caplog.text
+
+
+def test_stop_watching_reads_an_unreadable_entry_for_the_id_as_no_reuse(api: ComexioAPI) -> None:
+    """function_plan_name would call the entry plan "47" and keep the bare pick for a reuse nobody knows of."""
+    api._fub_data["47"] = "garbage"
+    options = {CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: ["47:Test4", "47", "19:Test1"]}
+    coordinator = _coordinator(
+        api, config_entry=SimpleNamespace(options=options), request_options_update_without_reload=MagicMock()
+    )
+    assert asyncio.run(coordinator.async_unwatch_user_plan(47, "Test4")) is True
+    (new_options,) = coordinator.request_options_update_without_reload.call_args.args
+    assert new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] == ["19:Test1"]
+
+
 # (cu) A named pick whose ID another plan holds now (renamed, or the ID reused) is no longer dropped silently.
 
 
@@ -3076,6 +3158,7 @@ def test_the_backup_cycle_stops_after_a_restore_starts_between_plans(api: Comexi
 
 
 def test_a_broken_plan_list_entry_leaves_the_other_plans(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """An unreadable entry names no plan: skipped without a traceback (the poll warns about it)."""
     hashes = {(43, "Alt"): plan_hash(RENAMED_PLAN)}
     coordinator, _ = _rename_coordinator(api, hashes)
     asyncio.run(
@@ -3083,7 +3166,7 @@ def test_a_broken_plan_list_entry_leaves_the_other_plans(api: ComexioAPI, caplog
             {19: OTHER_PLAN, 43: RENAMED_PLAN}, {"19": "broken", "43": {"Name": "Licht"}}, lambda: False
         )
     )
-    assert "rename check of ID 19 failed" in caplog.text
+    assert "rename check of ID 19 failed" not in caplog.text
     coordinator.function_plan_backup.async_rename_identity.assert_awaited_once_with(43, "Alt", "Licht")
 
 
@@ -3429,6 +3512,22 @@ def test_a_deleted_plan_drops_its_noted_move(api: ComexioAPI, caplog: pytest.Log
         "[iosrv1] The backups of function plan 'Alt' (ID 43) no longer follow its rename to 'Licht' (the plan is "
         "gone from Comexio); they stay listed as orphaned backups"
     ]
+
+
+def test_an_unreadable_plan_list_entry_keeps_a_noted_move(api: ComexioAPI) -> None:
+    """ "043" may be plan 43: the plan is unknown then, not gone."""
+    coordinator, _ = _failed_move(api)
+    asyncio.run(coordinator._async_follow_plan_renames({}, {"043": {"Name": "Licht"}}, lambda: False))
+    assert coordinator._rename_move_pending == {(43, "Alt"): "Licht"}
+
+
+def test_a_plan_list_entry_carrying_another_id_is_not_followed_as_a_rename(api: ComexioAPI) -> None:
+    """Entry "43" carrying Id 99 names no plan 43: its name is no rename of plan 43."""
+    coordinator, _ = _failed_move(api)
+    fub_data = {"43": {"Id": 99, "Name": "Licht", "Active": 1}}
+    asyncio.run(coordinator._async_follow_plan_renames({43: RENAMED_PLAN}, fub_data, lambda: False))
+    assert coordinator.function_plan_backup.async_rename_identity.await_count == 1  # only _failed_move's attempt
+    assert coordinator._rename_move_pending == {(43, "Alt"): "Licht"}
 
 
 def test_rename_check_errors_log_one_traceback_then_debug(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
