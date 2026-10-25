@@ -7157,7 +7157,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
     @staticmethod
     def _io_plan_members(plan_name: str, prefix: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> list[str] | None:
         """Member names encoded in a managed column plan name '{prefix} - IO [A,B]' / '... - QB [A,B]', else None."""
-        if m := re.fullmatch(re.escape(prefix) + rf" - {re.escape(kind.label)} \[(.+)\]", plan_name):
+        if m := re.fullmatch(rf"{re.escape(prefix)} - {re.escape(kind.label)} \[(.+)\]", plan_name):
             return [p.strip() for p in m[1].split(",") if p.strip()]
         return None
 

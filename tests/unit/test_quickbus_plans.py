@@ -45,17 +45,8 @@ from custom_components.comexio.repairs import _function_plan_gap_lines, _functio
 from custom_components.comexio.services import misc as services_misc
 from custom_components.comexio.services._grid import _io_header_slots, _io_ref_slots
 from custom_components.comexio.services.plan_actions import _sort_compute_positions
-from tests.common import load_json_fixture
-from tests.unit.test_quickbus import _QUICKBUS_IO_INPUT_TYPES, _QUICKBUS_IO_TYPES
 
 PREFIX = "HA"
-
-
-@pytest.fixture
-def quickbus_result(parsing_api: ComexioAPI) -> dict[str, Any]:
-    parsing_api.io_types = _QUICKBUS_IO_TYPES
-    parsing_api.io_input_types = _QUICKBUS_IO_INPUT_TYPES
-    return parsing_api.parse_config(load_json_fixture("config_quickbus.json"))
 
 
 def _qb_io(result: dict[str, Any], io_id: str) -> dict[str, Any]:

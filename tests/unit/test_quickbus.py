@@ -30,26 +30,8 @@ from custom_components.comexio.coordinator import (
     _split_disabled_commands,
 )
 from custom_components.comexio.repairs import _CLEANUP_SCOPE_LABELS
-from tests.common import load_json_fixture
 
-# IO type tables for config_quickbus.json, as Comexio sends them: 134 = Multitouch gesture, 126 = motion (PIR),
-# 12 = temperature, 111 = LED colour channel.
-_QUICKBUS_IO_TYPES = {
-    "1": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
-    "12": {"binary": False, "min": 0, "max": 100, "unit": "°C"},
-    "111": {"binary": False, "min": 0, "max": 100, "unit": "%"},
-    "126": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
-    "134": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
-}
-_QUICKBUS_IO_INPUT_TYPES = {"1": {"input": True}, "12": {"input": True}, "111": {"input": True}}
 _QUICKBUS_CATEGORY = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
-
-
-@pytest.fixture
-def quickbus_result(parsing_api: ComexioAPI) -> dict[str, Any]:
-    parsing_api.io_types = _QUICKBUS_IO_TYPES
-    parsing_api.io_input_types = _QUICKBUS_IO_INPUT_TYPES
-    return parsing_api.parse_config(load_json_fixture("config_quickbus.json"))
 
 
 def _by_id(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

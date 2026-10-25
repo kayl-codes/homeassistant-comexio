@@ -3010,10 +3010,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """
         api = ctx.api
         plan_name = self._plan_name(fub_id)
-        stale_exts = [
+        if stale_exts := [
             one_line(ext) for ext, _ in ext_cols if not self.coordinator.io_cluster_plan_contains(plan_name, ext, kind)
-        ]
-        if stale_exts:
+        ]:
             _LOGGER.error(
                 "[%s] Aborting %s pair write to fub=%s: plan is now named '%s', no longer a managed %s "
                 "cluster plan for %s — it was renamed/repurposed since resolve_io_clusters() ran",
