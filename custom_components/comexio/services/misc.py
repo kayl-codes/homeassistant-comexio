@@ -19,7 +19,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from ..const import DOMAIN, MarkerKind, one_line, webio_class_name
+from ..const import DOMAIN, MarkerKind, function_plans, one_line, unreadable_plan_keys, webio_class_name
 from ..coordinator import ComexioCoordinator
 from ..plan_preview import PreviewStoppedError, async_render_opened_preview, preview_selection_available
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator, service_flag
@@ -449,7 +449,7 @@ async def _handle_function_plan_preview_stop(hass: HomeAssistant, call: ServiceC
 async def _search_plan_labels(
     coordinator: ComexioCoordinator,
     api: Any,
-    fid: str,
+    fid: int,
     fub: dict,
     catalog: dict,
     markers_by_id: dict,
@@ -468,11 +468,11 @@ async def _search_plan_labels(
     # takes ~11s against the embedded Comexio server, which processes requests
     # serially regardless of client-side concurrency. Only plans missing from the
     # snapshot (e.g. right after startup) are fetched live.
-    plan_data = coordinator.function_plan_plans.get(int(fid))
+    plan_data = coordinator.function_plan_plans.get(fid)
     if plan_data is None:
         if login_state["ok"] is None:
             login_state["ok"] = await api.login()
-        plan_data = await api.function_plan_load_elements(int(fid)) if login_state["ok"] else None
+        plan_data = await api.function_plan_load_elements(fid) if login_state["ok"] else None
     if not plan_data:
         return None, f"{one_line(fub.get('Name', '?'))} (fub {fid})"
     hits: set[str] = set()
@@ -541,9 +541,10 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
     knx_by_id = coordinator.function_plan_knx_label_map()
     catalog = await coordinator.function_plan_catalog.async_get_catalog()
 
-    plans = sorted(api.fub_data.items(), key=lambda kv: int(kv[0]))
+    plans = sorted(function_plans(api.fub_data), key=lambda kv: kv[0])
     results: list[dict] = []
-    failed: list[str] = []
+    # A plan list entry the search cannot read is not searched: report it, never a complete search.
+    failed: list[str] = [f"unreadable plan list entry '{one_line(key)}'" for key in unreadable_plan_keys(api.fub_data)]
     total_hits = 0
     login_state: dict[str, bool | None] = {"ok": None}  # lazy, at most one login attempt
     for fid, fub in plans:
@@ -565,7 +566,7 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
             continue
         if hits:
             total_hits += len(hits)
-            results.append({"fub_id": int(fid), "plan_name": fub.get("Name", "?"), "matches": hits})
+            results.append({"fub_id": fid, "plan_name": fub.get("Name", "?"), "matches": hits})
 
     duration = time.monotonic() - t_start
     # An unambiguous hit selects the plan right away (user wish): the next call

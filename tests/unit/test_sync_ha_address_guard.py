@@ -68,6 +68,7 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
             get_webio_device_info=AsyncMock(return_value=dev_id),
             webio_device_delete_error=AsyncMock(return_value=None),
             generate_webio_json=MagicMock(return_value='{"commands": [{"name": "HA M1"}]}'),
+            fub_data={"7": {"Name": "Pumps"}},
         ),
         webio_source_data=MagicMock(return_value={}),
         ignored_marker_ids=set(),
@@ -169,6 +170,52 @@ def test_actions_without_device_writes_still_run_with_a_loopback_address(action:
     button._sync_class.assert_not_awaited()
     for name in ("_handle_cleanup_entities", "_wire_created_pairs", "_wire_knx_full"):
         assert getattr(button, name).await_count == (name == handler), name
+
+
+@pytest.mark.parametrize("action", ["function_plan_add_missing", "knx_bridge_add_missing"])
+def test_a_plan_wiring_action_refuses_while_the_plan_list_has_unreadable_entries(action: str) -> None:
+    button = _button(REACHABLE)
+    button.coordinator.api.fub_data = {"7": {"Name": "Pumps"}, "x": {"Name": "Pumps"}}
+    logger = _press(button, action)
+
+    logger.exception.assert_not_called()
+    assert logger.error.call_args.args[0] == "[%s] Sync not started: %s"
+    assert "unreadable entries (x)" in str(logger.error.call_args.args[2])
+    assert button.coordinator.sync_error is True
+    button._wire_created_pairs.assert_not_awaited()
+    button._wire_knx_full.assert_not_awaited()
+
+
+def test_a_full_sync_still_runs_while_the_plan_list_has_unreadable_entries() -> None:
+    button = _button(REACHABLE)
+    button.coordinator.api.fub_data = {"x": {"Name": "Pumps"}}
+    _press(button)
+
+    assert button.coordinator.sync_error is False
+    button._sync_class.assert_awaited()
+
+
+_PLAN_FINDINGS = {
+    "function_plan_missing": [{"marker_id": 1}],
+    "function_plan_dangling": [{"ref_id": "5", "webio_class": WebioClass.MARKER}],
+}
+
+
+@pytest.mark.parametrize(("fub_data", "acted_on"), [({"7": {"Name": "Pumps"}}, True), ({"x": {}}, False)])
+def test_a_full_sync_acts_on_carried_plan_findings_only_while_the_plan_list_is_readable(
+    fub_data: dict, acted_on: bool
+) -> None:
+    """Carried over while the list is unreadable, they may be stale: no wiring, no element deletes from them."""
+    button = _button(REACHABLE)
+    button.coordinator.api.fub_data = fub_data
+    button.coordinator.last_audit_results = dict(_PLAN_FINDINGS)
+    _press(button)
+
+    gap_items = button._wire_created_pairs.await_args.args[2]
+    dangling = [call.args[7] for call in button._sync_class.await_args_list if call.args[1] == WebioClass.MARKER]
+    assert gap_items == (_PLAN_FINDINGS["function_plan_missing"] if acted_on else [])
+    assert dangling == [_PLAN_FINDINGS["function_plan_dangling"] if acted_on else []]
+    assert ("plan list has unreadable entries (x)" in button.coordinator.sync_progress_text) is not acted_on
 
 
 def test_a_failed_login_is_still_reported_without_a_traceback() -> None:

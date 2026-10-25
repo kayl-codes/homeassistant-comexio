@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT, one_line_values
+from .const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT, function_plan_info, one_line_values
 from .function_plan_backup import FunctionPlanBackupManager
 
 ISSUE_ORPHANED_PLAN_BACKUPS = "orphaned_plan_backups"
@@ -105,7 +105,7 @@ async def async_audit_orphaned_backups(
             "months": str(retention_months),
             # A plan renamed in Comexio looks exactly like a deleted one whose ID was reused;
             # naming the plan that holds the ID now lets the user tell the two apart.
-            "current_plan": str(fub_data.get(str(fub_id), {}).get("Name") or NO_CURRENT_PLAN),
+            "current_plan": str(function_plan_info(fub_data, fub_id).get("Name") or NO_CURRENT_PLAN),
         }
         ir.async_create_issue(
             hass,

@@ -13,7 +13,7 @@ from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN, one_line
+from .const import DOMAIN, function_plan_info, one_line
 from .function_plan_backup import format_backup_label, snapshot_paper_format
 from .function_plan_block_settings import snapshot_block_settings
 
@@ -77,7 +77,7 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
     fub_id = coordinator.get_active_function_plan_fub_id()
     if fub_id is None:
         raise HomeAssistantError("No plan is selected for the preview.")
-    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
 
     backup_choice = _active_backup_choice(coordinator, fub_id, plan_name)
     if backup_choice is not None:

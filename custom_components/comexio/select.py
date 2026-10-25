@@ -15,7 +15,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_FUNCTION_PLAN_FUB_ID, DOMAIN, FUNCTION_PLAN_ORPHANED_VIEW_OPTION, one_line
+from .const import (
+    CONF_FUNCTION_PLAN_FUB_ID,
+    DOMAIN,
+    FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
+    function_plan_info,
+    function_plans,
+    one_line,
+)
 from .coordinator import ComexioCoordinator
 from .entity import ComexioFunctionPlanEntityMixin
 from .function_plan_backup import format_backup_label
@@ -106,7 +113,7 @@ class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         # options unambiguous and lets _resolve_fub_id() parse it back out directly.
         # The orphaned-plans view comes last and only while there is something to show.
         fub_data = self.coordinator.api.fub_data
-        options = sorted((_plan_option_label(fid, fub) for fid, fub in fub_data.items()), key=str.lower)
+        options = sorted((_plan_option_label(fid, fub) for fid, fub in function_plans(fub_data)), key=str.lower)
         if self.coordinator.function_plan_backup.orphaned_plans_sync(self.coordinator.live_plan_list()):
             options.append(FUNCTION_PLAN_ORPHANED_VIEW_OPTION)
         return options
@@ -166,10 +173,8 @@ class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         fub_id = self.coordinator.persisted_function_plan_fub_id()
         if fub_id is None:
             return None
-        fub = self.coordinator.api.fub_data.get(str(fub_id))
-        if fub is None:
-            return None
-        return _plan_option_label(fub_id, fub)
+        fub = function_plan_info(self.coordinator.api.fub_data, fub_id)
+        return _plan_option_label(fub_id, fub) if fub else None
 
 
 def _follow_in_preview(coordinator: ComexioCoordinator) -> None:
@@ -315,7 +320,7 @@ class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorE
             return [label for label, _choice in self.coordinator.orphaned_backup_options()]
         fub_id = self.coordinator.get_active_function_plan_fub_id()
         fub_data = self.coordinator.api.fub_data
-        plan_name = fub_data.get(str(fub_id), {}).get("Name") if fub_id is not None else None
+        plan_name = function_plan_info(fub_data, fub_id).get("Name") if fub_id is not None else None
         if plan_name is None:
             return []
         entries = self.coordinator.function_plan_backup.plan_backups_for_identity_sync(fub_id, plan_name)
@@ -343,7 +348,9 @@ class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorE
         if orphan is not None:
             return backups.block_check_sync(orphan["kind"], orphan["fub_id"], orphan["plan_name"], orphan["slot"])
         fub_id = self.coordinator.get_active_function_plan_fub_id()
-        plan_name = self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") if fub_id is not None else None
+        plan_name = (
+            function_plan_info(self.coordinator.api.fub_data, fub_id).get("Name") if fub_id is not None else None
+        )
         label = self.current_option
         if plan_name is None or label is None or self.coordinator.orphaned_plans_view_active():
             return None

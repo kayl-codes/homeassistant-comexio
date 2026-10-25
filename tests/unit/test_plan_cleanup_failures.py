@@ -65,7 +65,7 @@ def _plan_name(fub_id: int) -> str:
 
 
 def _api(**kwargs: Any) -> SimpleNamespace:
-    return SimpleNamespace(function_plan_name=_plan_name, **kwargs)
+    return SimpleNamespace(function_plan_name=_plan_name, **{"fub_data": {}, **kwargs})
 
 
 def test_unwire_reports_a_plan_that_could_not_be_loaded() -> None:
@@ -402,6 +402,7 @@ def test_cleanup_scans_a_plan_behind_a_stale_trigger_mapping() -> None:
     coordinator = _coordinator(
         SimpleNamespace(
             function_plan_name=lambda fub_id: "HA - Marker [200-300]",
+            fub_data={},
             _find_source_element_id=ComexioAPI._find_source_element_id,
         )
     )
