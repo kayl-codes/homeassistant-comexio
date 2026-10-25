@@ -293,7 +293,7 @@ async def test_changes_on_a_loaded_entry_reload_it_once(
     assert "should use it for scheduling a reload" not in caplog.text
 
 
-@pytest.mark.parametrize(
+UNCHANGED_FLOW_CASES = pytest.mark.parametrize(
     ("submit", "reason"),
     [
         (
@@ -309,6 +309,17 @@ async def test_changes_on_a_loaded_entry_reload_it_once(
     ],
     ids=["reconfigure", "reauth"],
 )
+
+
+async def _setup_for_unchanged_flows(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    """Store the data as a reconfigure stores it, so submitting UNCHANGED_FLOW_CASES' values changes nothing."""
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_API_USERNAME: "api", CONF_API_PASSWORD: ""})
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+@UNCHANGED_FLOW_CASES
 async def test_unchanged_flow_still_reloads_a_loaded_entry(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -317,13 +328,7 @@ async def test_unchanged_flow_still_reloads_a_loaded_entry(
     reason: str,
 ) -> None:
     """No change, no listener run: the flow reloads itself to restart the polls the refused login stopped."""
-    mock_config_entry.add_to_hass(hass)
-    # Stored as a reconfigure stores them, so submitting the same values changes nothing.
-    hass.config_entries.async_update_entry(
-        mock_config_entry, data={**mock_config_entry.data, CONF_API_USERNAME: "api", CONF_API_PASSWORD: ""}
-    )
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await _setup_for_unchanged_flows(hass, mock_config_entry)
     data_before = dict(mock_config_entry.data)
 
     with patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
@@ -338,20 +343,27 @@ async def test_unchanged_flow_still_reloads_a_loaded_entry(
     assert len(mock_comexio_api) == 3
 
 
-async def test_unchanged_reauth_during_a_sync_leaves_the_reload_to_the_sync(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+@UNCHANGED_FLOW_CASES
+async def test_unchanged_flow_during_a_sync_leaves_the_reload_to_the_sync(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    submit: Any,
+    reason: str,
 ) -> None:
-    """A reload mid-sync would close the API session under it; the sync's closing reload covers the reauth."""
-    await _setup(hass, mock_config_entry)
+    """A reload mid-sync would close the API session under it; the sync's closing reload covers the flow."""
+    await _setup_for_unchanged_flows(hass, mock_config_entry)
     hass.data[DOMAIN][mock_config_entry.entry_id].in_sync = True
-    same = {key: mock_config_entry.data[key] for key in REAUTH_INPUT}
+    data_before = dict(mock_config_entry.data)
 
     with patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
-        result = await _submit_reauth(hass, mock_config_entry, same)
+        result = await submit(hass, mock_config_entry)
         await hass.async_block_till_done()
 
-    assert result["reason"] == "reauth_successful"
+    assert result["reason"] == reason
+    assert dict(mock_config_entry.data) == data_before
     schedule_reload.assert_not_called()
     assert mock_config_entry.state is ConfigEntryState.LOADED
     # Setup and the flow's login test only: no reload while the sync runs.
     assert len(mock_comexio_api) == 2
+    mock_comexio_api[1].login.assert_awaited_once()
