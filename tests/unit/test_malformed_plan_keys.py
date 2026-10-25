@@ -17,7 +17,11 @@ from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     DOMAIN,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    IO_PLAN_KIND_IO,
+    IO_PLAN_KIND_QUICKBUS,
+    PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_UNREADABLE_PLAN_LIST,
+    IoPlanKind,
     function_plan_info,
     function_plans,
     unreadable_plan_keys,
@@ -369,25 +373,41 @@ def test_function_plan_info_reads_a_listing_keyed_by_int() -> None:
     assert function_plan_info({7: {"Name": "Pumps"}}, 7) == {"Name": "Pumps"}
 
 
-def test_no_new_extension_joins_an_io_plan_while_the_list_may_hide_its_plan() -> None:
-    """Its IO plan may be the unreadable entry: joining another plan would wire its IOs twice."""
-    coordinator = _coordinator({"7": {"Name": "HA - IO EXT1"}, "8": "garbage"})
+def _column_plan_coordinator(fub_data: dict, membership: dict[int, list[str]]) -> ComexioCoordinator:
+    """A coordinator for resolve_io_clusters with these managed column plans (origins faked)."""
+    coordinator = _coordinator(fub_data)
     coordinator.data = None
     coordinator.config_entry = SimpleNamespace(options={})
     coordinator._function_plan_prefix = lambda: "HA"
     coordinator._function_plan_cluster_size = lambda: 100
     coordinator._stale_plan_map_entries = lambda _fub_data: {}
-    coordinator._io_plan_membership = lambda _prefix, _kind: {7: ["EXT1"]}
-    coordinator._io_plan_name = lambda _prefix, members, _kind: f"HA - IO [{','.join(members)}]"
+    coordinator._io_plan_membership = lambda _prefix, _kind: membership
+    coordinator._io_plan_name = lambda _prefix, members, kind: f"HA - {kind.label} [{','.join(members)}]"
     coordinator._io_member_slots = lambda placed_in, *_args: {ext: (fid, (0, 1)) for ext, fid in placed_in.items()}
-    coordinator._join_or_create_io_plan = AsyncMock()
+    coordinator._join_or_create_io_plan = AsyncMock(return_value=None)
     coordinator._persist_plan_map = AsyncMock()
+    return coordinator
 
-    result, created, failed = asyncio.run(coordinator.resolve_io_clusters(["EXT1", "EXT2"]))
 
-    assert result == {"EXT1": (7, (0, 1))}
-    assert (created, failed) == (set(), {"EXT2": PLAN_FAILURE_UNREADABLE_PLAN_LIST})
+@pytest.mark.parametrize("kind", [IO_PLAN_KIND_IO, IO_PLAN_KIND_QUICKBUS])
+def test_no_new_member_joins_a_column_plan_while_the_list_may_hide_its_plan(kind: IoPlanKind) -> None:
+    """Its column plan may be the unreadable entry: joining another plan would wire its IOs twice."""
+    coordinator = _column_plan_coordinator({"7": {"Name": f"HA - {kind.label} [A]"}, "8": "garbage"}, {7: ["A"]})
+
+    result, created, failed = asyncio.run(coordinator.resolve_io_clusters(["A", "B"], kind))
+
+    assert result == {"A": (7, (0, 1))}
+    assert (created, failed) == (set(), {"B": PLAN_FAILURE_UNREADABLE_PLAN_LIST})
     coordinator._join_or_create_io_plan.assert_not_awaited()
+    coordinator._persist_plan_map.assert_awaited_once_with({f"HA - {kind.label} [A]": 7}, removals=set())
+
+
+def test_a_member_no_plan_could_be_resolved_for_fails_with_its_reason() -> None:
+    coordinator = _column_plan_coordinator({"7": {"Name": "Pumps"}}, {})
+
+    assert asyncio.run(coordinator.resolve_io_clusters(["A"])) == ({}, set(), {"A": PLAN_FAILURE_NOT_RESOLVED})
+    coordinator._join_or_create_io_plan.assert_awaited_once()
+    coordinator._persist_plan_map.assert_not_awaited()
 
 
 @pytest.mark.parametrize("fub_id", ["9", "Pumps"])
