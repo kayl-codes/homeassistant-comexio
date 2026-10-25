@@ -9,7 +9,10 @@ HA's reload, which could cut into a running sync).
 
 Each use counts, so a second reload added to a listed function fails too. A reference counts like a call (passing
 the reload on via `partial(...)` or a callback), and so does the bare name as a string (`getattr(..., "async_reload")`).
-Not followed: a reload reached through a helper outside the integration.
+A `getattr` on config_entries whose name the scan cannot read counts as well, since it may be a reload. Any other
+attribute or string named like a reload counts too: a false alarm goes into ALLOWED, a missed reload would not.
+Not followed: a reload reached through a helper outside the integration, and whether a listed reload still sits on
+the path its reason describes - that is for the review of the diff that moves it.
 """
 
 import ast
@@ -39,9 +42,22 @@ ALLOWED = {
 }
 
 
+def _computed_config_entries_getattr(node: ast.Call) -> bool:
+    """getattr(<...>config_entries, name) with a name that is not a literal (a literal counts as a string)."""
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and not isinstance(node.args[1], ast.Constant)
+        and ast.unparse(node.args[0]).endswith("config_entries")
+    )
+
+
 def _uses_reload(node: ast.AST) -> bool:
     if isinstance(node, ast.Attribute):
         return node.attr in HA_RELOADS
+    if isinstance(node, ast.Call):
+        return _computed_config_entries_getattr(node)
     return isinstance(node, ast.Constant) and node.value in HA_RELOADS
 
 
@@ -68,6 +84,8 @@ def test_detector_finds_calls_and_references() -> None:
     nested = "async def outer(hass):\n    async def inner():\n        await hass.config_entries.async_reload(x)\n"
     reference = "def later(hass):\n    hass.async_create_task(partial(hass.config_entries.async_reload, x)())\n"
     by_name = "async def dynamic(hass):\n    await getattr(hass.config_entries, 'async_reload')(x)\n"
+    computed = "async def pick(hass, name):\n    await getattr(hass.config_entries, name)(x)\n"
+    other_getattr = "def flag(self, name):\n    return getattr(self.watchdog, name)\n"
     twice = (
         "def two(hass):\n    hass.config_entries.async_schedule_reload(x)\n    hass.config_entries.async_reload(x)\n"
     )
@@ -79,9 +97,16 @@ def test_detector_finds_calls_and_references() -> None:
     assert _reload_users(nested) == {"outer.inner": 1}
     assert _reload_users(reference) == {"later": 1}
     assert _reload_users(by_name) == {"dynamic": 1}
+    assert _reload_users(computed) == {"pick": 1}
     assert _reload_users(twice) == {"two": 2}
     assert _reload_users(module_level) == {"": 1}
     assert not _reload_users(guarded)
+    assert not _reload_users(other_getattr)
+
+
+def test_every_allowed_reload_says_why() -> None:
+    unexplained = sorted(key for key, (count, reason) in ALLOWED.items() if count < 1 or not reason.strip())
+    assert not unexplained, f"ALLOWED entries need a use count of at least 1 and a reason: {unexplained}"
 
 
 def test_every_ha_reload_is_guarded_or_listed() -> None:
