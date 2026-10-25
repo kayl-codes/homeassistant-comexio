@@ -132,7 +132,7 @@ def _add_knx_dpt_suffix_ignored_ids(existing_raw: str, new_ids: set[int]) -> str
 _ADDRESS_FALLBACK_REASONS = {
     "invalid_url": ("keine gültige http(s)-Adresse", "not a valid http(s) address"),
     "loopback_url": ("eine Loopback-Adresse", "a loopback address"),
-    "insecure_url": ("http:// außerhalb des lokalen Netzes", "http:// outside the local network"),
+    "insecure_url": ("unverschlüsseltes HTTP außerhalb des lokalen Netzes", "plain HTTP outside the local network"),
 }
 
 

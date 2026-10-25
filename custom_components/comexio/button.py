@@ -212,6 +212,41 @@ def _protocol_only_items(cls_protocol: list[dict], type_fixes: list[dict]) -> li
     return [item for item in cls_protocol if item.get("id") not in type_fix_ids]
 
 
+def _class_action_eta(
+    action: str,
+    cls_missing: list[dict],
+    cls_renamed: list[dict],
+    cls_types: list[dict],
+    cls_orphans: list[dict],
+    cls_protocol: list[dict],
+    dev_ip_mismatch: bool,
+) -> int:
+    """Seconds the delta tasks of action take for one class (the Fast-Track decision weighs it)."""
+    eta = 0
+    task_count = 0
+    if action in {"full_sync", "update_renames"}:
+        eta += len(cls_renamed) * SYNC_DURATION_WRITE
+        task_count += len(cls_renamed)
+    if action in {"full_sync", "delete_orphans"}:
+        eta += len(cls_orphans) * SYNC_DURATION_DELETE
+        task_count += len(cls_orphans)
+    if action in {"full_sync", "create_missing"}:
+        eta += len(cls_missing) * SYNC_DURATION_WRITE
+        task_count += len(cls_missing)
+    if action in {"full_sync", "update_types"}:
+        eta += len(cls_types) * SYNC_DURATION_WRITE
+        task_count += len(cls_types)
+    if action in _PROTOCOL_ACTIONS:
+        protocol_only = _protocol_only_items(cls_protocol, cls_types if action == "full_sync" else [])
+        eta += len(protocol_only) * SYNC_DURATION_WRITE
+        task_count += len(protocol_only)
+        if dev_ip_mismatch:
+            eta += SYNC_DURATION_WRITE
+    if task_count > 1:
+        eta += int(1.5 * (task_count - 1))
+    return eta
+
+
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
     """Filter an audit-result list (missing/renamed/type/orphan) down to one Web-IO class."""
     return [i for i in seq if i.get("webio_class") == cls]
@@ -1460,28 +1495,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Pick recreate vs. delta-sync for one class, based on ETA vs. the Fast-Track threshold."""
         label = webio_class_label(cls)
         action = ctx.action
-        cls_action_eta = 0
-        cls_task_count = 0
-        if action in {"full_sync", "update_renames"}:
-            cls_action_eta += len(cls_renamed) * SYNC_DURATION_WRITE
-            cls_task_count += len(cls_renamed)
-        if action in {"full_sync", "delete_orphans"}:
-            cls_action_eta += len(cls_orphans) * SYNC_DURATION_DELETE
-            cls_task_count += len(cls_orphans)
-        if action in {"full_sync", "create_missing"}:
-            cls_action_eta += len(cls_missing) * SYNC_DURATION_WRITE
-            cls_task_count += len(cls_missing)
-        if action in {"full_sync", "update_types"}:
-            cls_action_eta += len(cls_types) * SYNC_DURATION_WRITE
-            cls_task_count += len(cls_types)
-        if action in _PROTOCOL_ACTIONS:
-            protocol_only = _protocol_only_items(cls_protocol, cls_types if action == "full_sync" else [])
-            cls_action_eta += len(protocol_only) * SYNC_DURATION_WRITE
-            cls_task_count += len(protocol_only)
-        if action in _PROTOCOL_ACTIONS and dev_ip_mismatch:
-            cls_action_eta += SYNC_DURATION_WRITE
-        if cls_task_count > 1:
-            cls_action_eta += int(1.5 * (cls_task_count - 1))
+        cls_action_eta = _class_action_eta(
+            action, cls_missing, cls_renamed, cls_types, cls_orphans, cls_protocol, dev_ip_mismatch
+        )
 
         if not class_dev_id:
             _LOGGER.info("[%s] %s: no device instance found. Forcing recreate.", self.server_id, label)

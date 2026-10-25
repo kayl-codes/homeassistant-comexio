@@ -8,6 +8,7 @@ records the protocol, and the nightly range check reads it back from each analog
 
 import asyncio
 import inspect
+import json
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -18,7 +19,12 @@ from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS
 import pytest
 
 from custom_components.comexio import coordinator as coordinator_module, repairs as repairs_module
-from custom_components.comexio.button import ComexioSyncButton, _protocol_only_items, _SyncContext
+from custom_components.comexio.button import (
+    ComexioSyncButton,
+    _class_action_eta,
+    _protocol_only_items,
+    _SyncContext,
+)
 from custom_components.comexio.const import (
     CONF_WEBHOOK_ADDRESS_MODE,
     CONF_WEBHOOK_URL,
@@ -28,6 +34,7 @@ from custom_components.comexio.const import (
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_FAILED,
     RANGE_CHECK_FIXED,
+    SYNC_DURATION_DELETE,
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
     WEBHOOK_ADDRESS_AUTO,
@@ -42,7 +49,7 @@ from custom_components.comexio.ha_address import (
     webhook_url_error,
     webhook_url_target,
 )
-from custom_components.comexio.options_flow import ComexioOptionsFlow
+from custom_components.comexio.options_flow import WEBHOOK_URL_EXAMPLE, ComexioOptionsFlow
 from custom_components.comexio.repairs import _ADDRESS_FALLBACK_REASONS, ComexioRepairFlow
 
 MARKER, IO = WEBIO_CLASSES[0], WEBIO_CLASSES[1]
@@ -249,9 +256,12 @@ def test_protocol_items_cover_every_built_command_of_a_stale_class() -> None:
     ]
 
 
+_HOST = "192.0.2.20"
+
+
 def _coordinator(webhook_protocol: int = WEBIO_PROTOCOL_HTTP, stored: Any = None) -> ComexioCoordinator:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
-    coordinator.api = SimpleNamespace(webhook_protocol=webhook_protocol)
+    coordinator.api = SimpleNamespace(webhook_protocol=webhook_protocol, host=_HOST)
     coordinator.webio_synced_protocols = {}
     coordinator._webio_protocol_store = SimpleNamespace(
         async_load=AsyncMock(return_value=stored), async_save=AsyncMock()
@@ -268,11 +278,12 @@ def test_a_class_without_a_record_counts_as_http() -> None:
     ("stored", "expected"),
     [
         (None, {}),
-        ({"classes": {MARKER: 1, IO: None}}, {MARKER: 1, IO: None}),
+        ({"host": _HOST, "classes": {MARKER: 1, IO: None}}, {MARKER: 1, IO: None}),
         # An invalid record is unknown (rewritten), not HTTP (which could hide an HTTPS class).
-        ({"classes": {MARKER: "1", IO: True, "x": 0}}, {MARKER: None, IO: None, "x": 0}),
-        ({}, {}),
-        # An unreadable store: every class is unknown, not HTTP.
+        ({"host": _HOST, "classes": {MARKER: "1", IO: True, "x": 0}}, {MARKER: None, IO: None, "x": 0}),
+        # An unreadable store: every class is unknown, not HTTP — only no store at all means HTTP.
+        ({}, dict.fromkeys(WEBIO_CLASSES)),
+        ({"host": _HOST, "classes": None}, dict.fromkeys(WEBIO_CLASSES)),
         ({"classes": [1]}, dict.fromkeys(WEBIO_CLASSES)),
         ([1], dict.fromkeys(WEBIO_CLASSES)),
         ("garbage", dict.fromkeys(WEBIO_CLASSES)),
@@ -288,8 +299,9 @@ def test_the_protocol_store_is_restored_defensively(stored: Any, expected: dict)
     ("stored", "logged"),
     [
         ({"classes": [1]}, "unreadable (list)"),
+        ({"host": _HOST, "classes": None}, "unreadable (NoneType)"),
         ("garbage", "unreadable (str)"),
-        ({"classes": {MARKER: "1"}}, f"invalid record for {MARKER}"),
+        ({"host": _HOST, "classes": {MARKER: "1"}}, f"invalid record for {MARKER}"),
     ],
 )
 def test_a_damaged_protocol_store_is_logged(stored: Any, logged: str, caplog: pytest.LogCaptureFixture) -> None:
@@ -297,10 +309,30 @@ def test_a_damaged_protocol_store_is_logged(stored: Any, logged: str, caplog: py
     assert logged in caplog.text
 
 
-@pytest.mark.parametrize("stored", [None, {}, {"classes": {}}, {"classes": {MARKER: 1, IO: None}}])
+@pytest.mark.parametrize(
+    "stored", [None, {"host": _HOST, "classes": {}}, {"host": _HOST, "classes": {MARKER: 1, IO: None}}]
+)
 def test_a_sound_protocol_store_logs_nothing(stored: Any, caplog: pytest.LogCaptureFixture) -> None:
     asyncio.run(_coordinator(stored=stored).async_load_webio_protocols())
     assert not caplog.records
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"host": "192.0.2.99", "classes": {MARKER: WEBIO_PROTOCOL_HTTPS}},  # reconfigured to another Comexio
+        {"classes": {MARKER: WEBIO_PROTOCOL_HTTPS}},  # a record without its host
+    ],
+)
+def test_a_record_of_another_comexio_host_is_unknown(stored: dict, caplog: pytest.LogCaptureFixture) -> None:
+    """A server ID reused for another Comexio, or a changed host, must not inherit the old commands' protocol."""
+    coordinator = _coordinator(stored=stored)
+    asyncio.run(coordinator.async_load_webio_protocols())
+
+    assert coordinator.webio_synced_protocols == dict.fromkeys(WEBIO_CLASSES)
+    # A warning: the reset raises a protocol repair the user should be able to trace back.
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert f"not '{_HOST}'; every class gets rewritten" in caplog.text
 
 
 def test_a_recorded_protocol_is_saved_only_when_it_changes() -> None:
@@ -310,11 +342,25 @@ def test_a_recorded_protocol_is_saved_only_when_it_changes() -> None:
     asyncio.run(coordinator.async_set_webio_synced_protocol(MARKER, WEBIO_PROTOCOL_HTTPS))
     asyncio.run(coordinator.async_set_webio_synced_protocol(MARKER, WEBIO_PROTOCOL_HTTPS))
     assert save.await_count == 1
-    save.assert_awaited_with({"classes": {MARKER: WEBIO_PROTOCOL_HTTPS}})
+    save.assert_awaited_with({"host": _HOST, "classes": {MARKER: WEBIO_PROTOCOL_HTTPS}})
 
     asyncio.run(coordinator.async_set_webio_synced_protocol(MARKER, None))
     assert coordinator.webio_synced_protocol(MARKER) is None
     assert save.await_count == 2
+
+
+def test_a_saved_protocol_record_loads_back_unchanged(caplog: pytest.LogCaptureFixture) -> None:
+    """The record the sync writes is the one the next start reads: same host, so no class is rewritten."""
+    writer = _coordinator()
+    asyncio.run(writer.async_set_webio_synced_protocol(MARKER, WEBIO_PROTOCOL_HTTPS))
+    asyncio.run(writer.async_set_webio_synced_protocol(IO, WEBIO_PROTOCOL_HTTP))
+    saved = writer._webio_protocol_store.async_save.await_args.args[0]
+
+    reader = _coordinator(stored=json.loads(json.dumps(saved)))
+    asyncio.run(reader.async_load_webio_protocols())
+
+    assert reader.webio_synced_protocols == {MARKER: WEBIO_PROTOCOL_HTTPS, IO: WEBIO_PROTOCOL_HTTP}
+    assert not caplog.records
 
 
 @pytest.mark.parametrize(
@@ -378,6 +424,7 @@ def _range_coordinator(form: WebioCommandForm | None, saved: bool = True) -> Com
     coordinator.webio_synced_protocols = {MARKER: WEBIO_PROTOCOL_HTTPS}
     coordinator.api = SimpleNamespace(
         webhook_protocol=WEBIO_PROTOCOL_HTTPS,
+        host=_HOST,
         get_webio_command_form=AsyncMock(return_value=form),
         save_single_command=AsyncMock(return_value=saved),
     )
@@ -436,6 +483,30 @@ def test_a_type_fix_already_covers_the_protocol_of_its_command() -> None:
     assert _protocol_only_items([_item("1"), _item("2")], [_item("2")]) == [_item("1")]
 
 
+_W, _D = SYNC_DURATION_WRITE, SYNC_DURATION_DELETE
+
+
+@pytest.mark.parametrize(
+    ("action", "protocol", "ip_mismatch", "expected"),
+    [
+        ("update_ip", [], True, _W),  # the address write alone, no task overhead
+        ("update_ip", [_item("1"), _item("2")], False, 2 * _W + 1),
+        ("update_ip", [_item("1")], True, 2 * _W),
+        # one each of rename, orphan, missing, type fix (covers command 2) + protocol of 1, plus the address
+        ("full_sync", [_item("1"), _item("2")], True, 5 * _W + _D + 6),
+        ("delete_orphans", [_item("1")], True, 2 * _D + 1),  # neither protocol nor address counts here
+        ("update_types", [_item("1")], True, _W),
+        ("ignore", [_item("1")], True, 0),
+    ],
+)
+def test_the_class_eta_counts_only_the_tasks_of_its_action(
+    action: str, protocol: list[dict], ip_mismatch: bool, expected: int
+) -> None:
+    orphans = [_item("o1"), _item("o2")] if action == "delete_orphans" else [_item("o1")]
+    eta = _class_action_eta(action, [_item("m")], [_item("r")], [_item("2")], orphans, protocol, ip_mismatch)
+    assert eta == expected
+
+
 @pytest.mark.parametrize(
     ("action", "expected"),
     [
@@ -449,6 +520,23 @@ def test_protocol_tasks_run_with_the_server_address_actions(action: str, expecte
     button = ComexioSyncButton.__new__(ComexioSyncButton)
     tasks = button._build_delta_tasks(action, [], [], [], [_item("2")], [_item("1"), _item("2")])
     assert [(t["type"], t["item"]["id"]) for t in tasks] == expected
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_the_delta_executor_writes_each_protocol_task(ok: bool) -> None:
+    """A protocol task saves the item's payload over its command; only a write that worked is counted."""
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button.coordinator = SimpleNamespace(cancel_sync=False)  # type: ignore[assignment]
+    button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
+    ctx = _ctx()
+    ctx.api = SimpleNamespace(save_single_command=AsyncMock(return_value=ok))
+    tasks = button._build_delta_tasks("update_ip", [], [], [], [], [_item("1")])
+
+    result = asyncio.run(button._execute_delta_tasks(ctx, MARKER, "7", "3", tasks, [], MagicMock(), "M", 10))
+
+    ctx.api.save_single_command.assert_awaited_once_with("3", "7", _item("1")["payload"], existing_cmd_id="1")
+    assert result["updated"] == (1 if ok else 0)
+    assert ctx.failed_writes == ([] if ok else ["protocol M1"])
 
 
 def _ctx(action: str = "update_ip", failed_writes: list[str] | None = None) -> _SyncContext:
@@ -822,6 +910,45 @@ def test_the_audit_takes_the_fallback_reason_with_the_address_it_explains() -> N
     assert '"address_fallback": address_fallback,' in source
 
 
+_PARSED = {
+    "markers": [{"id": "5", "name": "M5 Licht", "type": "digital"}, {"id": "6", "name": "M6 Soll", "type": "analog"}],
+    "io": [{"ext_name": "BASE", "identifier": "Q1", "is_binary": True, "min": 0, "max": 1}],
+    "knx": [],
+}
+
+
+def _protocols(value: Any) -> list[Any]:
+    """Every "Protocol" field anywhere in a parsed Web-IO JSON upload."""
+    if isinstance(value, dict):
+        return [v for k, v in value.items() if k == "Protocol"] + [p for v in value.values() for p in _protocols(v)]
+    if isinstance(value, list):
+        return [p for v in value for p in _protocols(v)]
+    return []
+
+
+@pytest.mark.parametrize(
+    ("target", "protocol"),
+    [(WebhookTarget("x:8123", False), WEBIO_PROTOCOL_HTTP), (WebhookTarget("x:8443", True), WEBIO_PROTOCOL_HTTPS)],
+)
+def test_the_resolved_protocol_reaches_every_payload_the_api_builds(
+    comexio_api: Any, target: WebhookTarget, protocol: int
+) -> None:
+    """Delta sync and audit (build_webio_commands) and the recreate upload (generate_webio_json) alike."""
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.data = None
+    coordinator.api = comexio_api
+    coordinator.ha_address = SimpleNamespace(async_target=AsyncMock(return_value=target))
+
+    asyncio.run(coordinator.async_webhook_target())
+
+    commands = comexio_api.build_webio_commands("srv", _PARSED)
+    assert len(commands) == 3
+    assert [command["Protocol"] for command in commands] == [protocol] * 3
+    uploaded = _protocols(json.loads(comexio_api.generate_webio_json("srv", "HomeAssistant", _PARSED)))
+    assert len(uploaded) == 3
+    assert set(uploaded) == {protocol}
+
+
 # --- repair issue ---
 
 
@@ -941,8 +1068,21 @@ def test_the_custom_mode_asks_for_the_url_in_a_second_step() -> None:
     result = _init(flow, WEBHOOK_ADDRESS_CUSTOM)
 
     assert result["step_id"] == "webhook_url"
+    assert result["description_placeholders"] == {"example_url": WEBHOOK_URL_EXAMPLE}
     assert flow._pending_input[CONF_WEBHOOK_ADDRESS_MODE] == WEBHOOK_ADDRESS_CUSTOM
     flow.async_create_entry.assert_not_called()
+
+
+def test_the_custom_url_step_keeps_the_settings_of_the_first_step() -> None:
+    flow = _flow(options={"audit_ignored": False})
+    _init(flow, WEBHOOK_ADDRESS_CUSTOM, audit_ignored=True)
+
+    result = asyncio.run(flow.async_step_webhook_url({CONF_WEBHOOK_URL: "https://ha.example.com:8443"}))
+
+    assert result["type"] == "create_entry"
+    assert result["data"]["audit_ignored"] is True
+    assert result["data"][CONF_WEBHOOK_ADDRESS_MODE] == WEBHOOK_ADDRESS_CUSTOM
+    assert result["data"][CONF_WEBHOOK_URL] == "https://ha.example.com:8443"
 
 
 def test_the_external_mode_without_an_external_url_stays_on_the_first_step() -> None:
@@ -971,12 +1111,12 @@ def test_an_error_on_the_first_step_keeps_the_custom_mode_from_moving_on() -> No
     [
         (
             "en",
-            "unusable (http:// outside the local network). Fixing the server address sets the automatic address "
+            "unusable (plain HTTP outside the local network). Fixing the server address sets the automatic address "
             "**192.0.2.10:8123**",
         ),
         (
             "de",
-            "nicht nutzbar (http:// außerhalb des lokalen Netzes). Die Korrektur der Server-Adresse "
+            "nicht nutzbar (unverschlüsseltes HTTP außerhalb des lokalen Netzes). Die Korrektur der Server-Adresse "
             "setzt stattdessen die automatische "
             "Adresse **192.0.2.10:8123**",
         ),

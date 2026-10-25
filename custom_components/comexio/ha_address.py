@@ -192,8 +192,9 @@ async def _async_own_ips() -> frozenset[IPAddress] | None:
     return frozenset(ip for address in configured if (ip := _ip(address)) is not None and not ip.is_loopback)
 
 
-# Shared address space (RFC 6598): carrier-grade NAT and VPN overlays such as Tailscale — not public.
-_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+# Shared address space (RFC 6598): carrier-grade NAT and VPN overlays such as Tailscale — not public. A fixed
+# network the LAN check compares against, not an address anything connects to (S1313 false positive).
+_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")  # NOSONAR
 
 
 def _is_lan_host(host: str) -> bool:

@@ -8851,16 +8851,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def async_load_webio_protocols(self) -> None:
         """Restore the protocol each Web-IO class was last written with (called once at setup)."""
         stored = await self._webio_protocol_store.async_load()
-        classes = stored.get("classes") if isinstance(stored, dict) else stored
-        # An invalid record is unknown, not HTTP: unknown never matches, so the next audit rewrites the class
-        # instead of hiding a protocol the commands may still carry. Only no record at all (a store from before
-        # the protocol was configurable, or none yet) means HTTP.
-        if classes is None:
+        # Only no record at all (a store from before the protocol was configurable, or none yet) means HTTP. Any
+        # other record that is not sound is unknown, not HTTP: unknown never matches, so the next audit rewrites the
+        # class instead of hiding a protocol the commands may still carry.
+        if stored is None:
             self.webio_synced_protocols = {}
             return
+        classes = stored.get("classes") if isinstance(stored, dict) else stored
         if not isinstance(classes, dict):
             _LOGGER.warning(
                 "Web-IO protocol store is unreadable (%s); every class gets rewritten", type(classes).__name__
+            )
+            self.webio_synced_protocols = dict.fromkeys(WEBIO_CLASSES)
+            return
+        # The record belongs to the Comexio it was written to: a reconfigured host, or a server ID that a new entry
+        # for another Comexio reuses, must not inherit it.
+        if (host := stored.get("host")) != self.api.host:
+            _LOGGER.warning(
+                "Web-IO protocol store was written for Comexio %r, not %r; every class gets rewritten",
+                host,
+                self.api.host,
             )
             self.webio_synced_protocols = dict.fromkeys(WEBIO_CLASSES)
             return
@@ -8890,7 +8900,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if cls in self.webio_synced_protocols and self.webio_synced_protocols[cls] == protocol:
             return
         self.webio_synced_protocols[cls] = protocol
-        await self._webio_protocol_store.async_save({"classes": self.webio_synced_protocols})
+        await self._webio_protocol_store.async_save({"host": self.api.host, "classes": self.webio_synced_protocols})
 
     async def async_fresh_trigger_audit(
         self, snapshot: dict[str, Any] | None = None

@@ -201,7 +201,7 @@
           "webhook_url": "URL del webhook"
         },
         "data_description": {
-          "webhook_url": "URL base de Home Assistant tal como Comexio debe alcanzarla, p. ej. https://ha.example.com:8443 — sin ruta. Si esta dirección es pública, el push pasa por Internet."
+          "webhook_url": "URL base de Home Assistant tal como Comexio debe alcanzarla, p. ej. {example_url} — sin ruta. Si esta dirección es pública, el push pasa por Internet."
         }
       }
     },
