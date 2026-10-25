@@ -16,9 +16,11 @@ TRANSLATIONS = Path(__file__).parents[2] / "custom_components" / "comexio" / "tr
 # Every file, so a language added later is checked too.
 TRANSLATION_FILES = sorted(path.name for path in TRANSLATIONS.glob("*.json"))
 
-# Copied from Home Assistant's script/hassfest/translations.py (RE_URL, as of HA 2026.8); compare it again when
-# the minimum HA version is raised. hassfest allows URLs only in the description of a preview feature, which
-# this integration has none of.
+# Copied from Home Assistant's script/hassfest/translations.py (RE_URL, dev branch as of 2026-10-25). CI runs
+# home-assistant/actions/hassfest@master, i.e. HA's current dev code rather than the minimum HA version, so this
+# copy can fall behind; hassfest in CI stays authoritative. When it rejects a URL this test let through, copy the
+# current pattern from the dev branch again. hassfest allows URLs only in the description of a preview feature,
+# which this integration has none of.
 RE_URL = re.compile(
     r"(((ftp|ftps|scp|http|https|mqtt|mqtts|socket|socks5):\/\/|www\.)"
     r"[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,5}(:[0-9]{1,5})?(\/.*)?)",
