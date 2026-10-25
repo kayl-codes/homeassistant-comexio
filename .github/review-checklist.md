@@ -153,6 +153,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   replace non-printable characters and collapse whitespace to one line (`const.one_line`), so a name cannot
   split a log entry or break the notification layout. Flag new code that writes a Comexio name to a log line,
   notification or response unfiltered; entity display names are out of scope (#186).
+- **Stored values are checked against the allowed set:** a value read back from a `Store` or from the config entry
+  (a protocol, a mode, an enum-like string) is compared with the values the code knows before it drives a decision.
+  An unknown value — a typo, a newer version's value after a downgrade, a hand-edited file — counts as "unknown",
+  never as one of the known values by default. Flag code that branches on a stored value with an `else` that
+  silently treats every other value as a known one (#222).
+- **User-entered URLs are masked before logging:** a URL the user types (an HA address, a push target) can carry
+  credentials as `user:password@`. Before it goes into a log line, a notification or a repair text, mask the user
+  info (`ha_address._without_user_info`). Flag new code that logs or shows such a URL unmasked (#222).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
