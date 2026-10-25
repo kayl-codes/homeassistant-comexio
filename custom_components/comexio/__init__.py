@@ -757,7 +757,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
         if not unload_ok and running is not None and hasattr(running, "api"):
             running.unloading = False  # the entry stays loaded: restores and plan edits may start again
     if unload_ok:
-        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        # A default like the get() above: the config flow's fallback reload also reaches an entry whose coordinator
+        # is missing, and a KeyError here would leave that entry failed to unload.
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
         if coordinator and hasattr(coordinator, "api"):
             # Only now, not before the wait: the work it waited for still sends its pushes, and a failed unload
             # keeps them. The reloaded entry's watchdog takes the plans' pushes over (its first check alarms every

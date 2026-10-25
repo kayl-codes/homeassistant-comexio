@@ -986,6 +986,46 @@ def function_plan_ids(fub_data: Mapping[str, Any]) -> set[int]:
     return {fub_id for fid in fub_data if (fub_id := function_plan_id(fid)) is not None}
 
 
+def _readable_plan_entry_id(fid: Any, info: Any) -> int | None:
+    """Plan id of a readable $Fubs entry: a canonical key, dict info, and an Id it carries matching the key."""
+    if (fub_id := function_plan_id(fid)) is None or not isinstance(info, dict):
+        return None
+    if "Id" in info and str(info["Id"]) != str(fid):
+        return None
+    return fub_id
+
+
+def function_plans(fub_data: Mapping[str, Any]) -> Iterator[tuple[int, dict[str, Any]]]:
+    """(fub_id, plan info) per readable plan in a $Fubs listing (see unreadable_plan_keys for what is skipped)."""
+    for fid, info in fub_data.items():
+        if (fub_id := _readable_plan_entry_id(fid, info)) is not None:
+            yield fub_id, info
+
+
+def function_plan_info(fub_data: Mapping[str, Any], fub_id: int | str) -> dict[str, Any]:
+    """The $Fubs info of plan fub_id, {} when it is not listed or its entry is unreadable."""
+    key = str(fub_id)
+    info = fub_data.get(key)
+    if info is None and (plan_id := function_plan_id(key)) is not None:
+        info = fub_data.get(plan_id)  # a listing keyed by int, which function_plan_id accepts as well
+    return info if _readable_plan_entry_id(key, info) is not None else {}
+
+
+def unreadable_plan_keys(fub_data: Mapping[str, Any]) -> list[str]:
+    """Keys of a $Fubs listing function_plans skips.
+
+    A key that is no plan id as str(fub_id) spells it, an entry that is no plan info, or an Id the entry
+    carries that differs from its key. A listing with any such key is unknown, never "these plans are
+    gone": the skipped entry may be a plan.
+    """
+    return [str(fid) for fid, info in fub_data.items() if _readable_plan_entry_id(fid, info) is None]
+
+
+# Sync actions acting on the audit's function plan findings only: refused while the plan list has
+# unreadable entries (the findings are unknown then), so the repair dialog does not offer them either.
+PLAN_WIRING_ACTIONS = frozenset({"function_plan_add_missing", "knx_bridge_add_missing"})
+
+
 def watchdog_user_plan_pick(fub_id: int, name: str) -> str:
     """Saved form of a user plan picked for the watchdog: its ID and its name.
 

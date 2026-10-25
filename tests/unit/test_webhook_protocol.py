@@ -1012,7 +1012,8 @@ def test_the_issue_carries_the_address_to_write_and_why_it_is_the_automatic_one(
 def _repair_form(counts: dict[str, int], language: str = "en", **issue_data: Any) -> dict[str, Any]:
     flow = ComexioRepairFlow("sync_mismatch_cx1", {"entry_id": "e1", "counts": counts, **issue_data})
     flow.hass = SimpleNamespace(  # type: ignore[assignment]
-        config=SimpleNamespace(language=language), data={DOMAIN: {"e1": SimpleNamespace(in_sync=False)}}
+        config=SimpleNamespace(language=language),
+        data={DOMAIN: {"e1": SimpleNamespace(in_sync=False, api=SimpleNamespace(fub_data={}))}},
     )
     flow.async_show_form = MagicMock(side_effect=lambda **kw: kw)  # type: ignore[method-assign]
     issue = SimpleNamespace(

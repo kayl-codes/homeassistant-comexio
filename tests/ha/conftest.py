@@ -110,6 +110,9 @@ def api_returns() -> dict[str, Any]:
             SystemInfo(free_storage_percent=42.0, time_server=TimeServerSettings(True, "pool.ntp.org", 86400)),
             timedelta(days=3),
         ),
+        # An unreadable form, as the real method returns it. The nightly range check (04:20 test time) runs in any
+        # test whose loaded entry spans that minute; it counts the command as not checked.
+        "get_webio_command_form": None,
     }
 
 

@@ -51,6 +51,7 @@ from .const import (
     ISSUE_UNINSTALL_CLEANUP,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_REJECTED,
+    PLAN_WIRING_ACTIONS,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -70,10 +71,12 @@ from .const import (
     SourceCategory,
     WebioClass,
     category_by_fub_module_type,
+    function_plan_info,
     one_line,
     source_category,
     trigger_pair_categories,
     uninstall_cleanup_pending_notification_id,
+    unreadable_plan_keys,
     webio_class_label,
     webio_class_name,
     webio_range_check_entity_id,
@@ -420,6 +423,33 @@ class _SyncNotStartedError(HomeAssistantError):
     """The sync stopped before its first write — reported without a traceback."""
 
 
+def _plan_audit_for_action(action: str, bad_keys: list[str], audit_data: dict[str, Any]) -> dict[str, Any]:
+    """audit_data for a sync action, without its function plan findings while the plan list has unreadable entries.
+
+    They are carried over from the last readable audit then and may be stale (see
+    coordinator._carry_over_plan_audit): the plan-only actions are refused, a full sync neither
+    wires nor deletes plan elements from them (see _unknown_plan_findings_lines).
+    """
+    if not bad_keys:
+        return audit_data
+    if action in PLAN_WIRING_ACTIONS:
+        raise _SyncNotStartedError(
+            f"The plan list has unreadable entries ({one_line(', '.join(bad_keys))}), so the function "
+            "plan findings are unknown. Fix them in Comexio, then retry."
+        )
+    return {**audit_data, "function_plan_missing": [], "function_plan_dangling": []}
+
+
+def _unknown_plan_findings_lines(bad_keys: list[str]) -> list[str]:
+    """Function Plan block line for a full sync that left the plan findings alone (see _plan_audit_for_action)."""
+    if not bad_keys:
+        return []
+    return [
+        f"{ICON_WARNING} Missing wiring and leftover elements: skipped, the plan list has unreadable entries"
+        f" ({one_line(', '.join(bad_keys))}) — fix them in Comexio, then sync again"
+    ]
+
+
 class _SyncLoginError(_SyncNotStartedError):
     """The sync could not log in to Comexio."""
 
@@ -713,6 +743,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 audit_protocol=audit_data.get("webhook_protocol"),
             )
 
+            # Read once: the KNX step's fresh config may change the list before the result is written.
+            bad_plan_keys = unreadable_plan_keys(api.fub_data)
+            audit_data = _plan_audit_for_action(action, bad_plan_keys, audit_data)
             gap_items = audit_data.get("function_plan_missing", [])
             cleanup_entity_ids: list[tuple[str, int]] = audit_data.get("cleanup_entities", [])
 
@@ -795,6 +828,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     step_info=_STEP_CHECKING_PLAN,
                 )
                 plan_summary += await self._wire_trigger_pairs(ctx, refresh_audit=True)
+                plan_summary += _unknown_plan_findings_lines(bad_plan_keys)
 
                 duration = datetime.datetime.now() - start_time
                 duration_str = f"{_mmss(duration.total_seconds())} min"
@@ -2235,7 +2269,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             wire_ref_type = int(SOURCE_CATEGORIES[WebioClass.MARKER].fub_module_type)
 
         plan_name = self._plan_name(fub_id)
-        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
         t0 = time.monotonic()
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"add_trigger_pairs {[f'{prefix}{m}' for m in missing_ids]}"
@@ -2285,7 +2319,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             return f"{ICON_WARNING} {len(orphan_ids)} orphaned trigger construct(s) found, but no trigger plan exists."
 
         fub_id = int(raw_fub_id)
-        if self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
+        if function_plan_info(self.coordinator.api.fub_data, fub_id).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
             ctx.failed_writes.append(
                 _plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, "mapping stale, orphans not removed")
             )
@@ -2755,7 +2789,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # brand-new cluster plan would end up permanently stopped: is_fresh=False further down
         # only controls whether the sort pass runs, was_active alone controls reactivation — same
         # invariant _add_trigger_pairs already documents and relies on.
-        was_active = is_fresh or bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = is_fresh or bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
         t0 = time.monotonic()
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"wire_knx_full {[f'K{m}' for m in cluster_ids]}"
@@ -2869,7 +2903,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
     def _plan_name(self, fub_id: int) -> str:
         """Live name of a plan, falling back to its fub_id when it isn't in the cache."""
-        return self.coordinator.api.fub_data.get(str(fub_id), {}).get("Name") or str(fub_id)
+        return function_plan_info(self.coordinator.api.fub_data, fub_id).get("Name") or str(fub_id)
 
     async def _add_pairs_to_plan(
         self,
@@ -2896,7 +2930,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # Capture the activation state BEFORE stop_fup: function_plan_add_source_pairs
         # reloads the config (refreshing fub_data) after the stop, so any later lookup
         # would see the plan as inactive and skip reactivation.
-        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
         t0 = time.monotonic()
         ctx.update_status(
             f"Adding {len(cluster_ids)} pair(s) to Function Plan '{one_line(plan_name)}'...",
@@ -3042,7 +3076,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
             )
 
-        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
         n_total = sum(len(by_ext[ext]) for ext, _ in ext_cols)
         t0 = time.monotonic()
         ctx.update_status(

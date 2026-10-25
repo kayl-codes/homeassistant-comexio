@@ -291,12 +291,36 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self._show_reconfigure_form(merged, errors)
         self._notify_https_change(entry, merged, https_change)
         clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
-        return self.async_update_reload_and_abort(
+        return self._async_update_and_reload_once(
             entry,
             title=f"Comexio {entry.data[CONF_SERVER_ID]} ({merged[CONF_HOST]})",
             data=merged,
             options=clean_options,
         )
+
+    def _async_update_and_reload_once(self, entry, **changes):
+        """Store the changes, abort the flow and reload the entry exactly once.
+
+        A loaded entry's update listener reloads it when the changes land; HA's own reload on top would load it
+        twice (and is refused from HA 2026.12 for entries with an update listener). Without a listener run — the
+        entry is not loaded (a setup refused on the credentials), or nothing changed — the flow starts the
+        reload: a reauth must restart the polls the refused login stopped, even with unchanged credentials. On a
+        loaded entry it goes through the coordinator like the listener's, so it never cuts into a running sync.
+        """
+        loaded = entry.state is config_entries.ConfigEntryState.LOADED
+        before = (entry.title, dict(entry.data), dict(entry.options))
+        result = self.async_update_and_abort(entry, **changes)
+        if loaded and (entry.title, dict(entry.data), dict(entry.options)) != before:
+            return result
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id) if loaded else None
+        if coordinator is None:
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        else:
+            self.hass.async_create_task(
+                coordinator.async_reload_entry(f"{self.source} without changes"),
+                f"comexio reload after {self.source} {entry.entry_id}",
+            )
+        return result
 
     @staticmethod
     async def _async_pin_for_host(entry, merged) -> str | None:
@@ -362,7 +386,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not errors:
                 # Like reconfigure: credentials left in options from older versions would shadow the new ones.
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
-                return self.async_update_reload_and_abort(entry, data_updates=data_updates, options=clean_options)
+                return self._async_update_and_reload_once(entry, data_updates=data_updates, options=clean_options)
 
         return self.async_show_form(
             step_id="reauth_confirm",
