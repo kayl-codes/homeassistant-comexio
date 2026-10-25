@@ -232,6 +232,8 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   test's `ENTRY_STEP_BY_ISSUE` (the step `async_step_init` routes it to; the test reads the issue_id from the
   raise site). A computed `translation_key` must come from a `self.` helper returning constants or from a
   parameter whose callers pass constants; `is_fixable` stays a literal `True`/`False`.
+- No translation string contains a URL (hassfest rejects it); an example address goes into a description
+  placeholder the code fills (`tests/unit/test_translation_urls.py` enforces it).
 - A test for an action that must leave Comexio and the entities untouched (ignore, cancel, abort) asserts what the
   action does change — e.g. the saved ignore option, the dismissed issue — and that no deleting or writing method of
   the API, the entity/device registry or the recorder ran: `assert_not_awaited()` for coroutines,
@@ -248,6 +250,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   of a race or timeout switches the state during the await it targets (e.g. inside the mocked call) and proves the
   timeout fired; a quick check is to break the target path (raise the timeout, drop the guard) and see it fail
   (#168).
+- A test of a value handed along a chain (a flow step to the next step, a resolved setting to the command builder
+  and its payload, a task to the executor and the API write) asserts at the end of the chain: the payload actually
+  built, the arguments the API mock received, what the last step saves of the first step's input. Checking an
+  intermediate attribute, the order of lines in the source, or a fake that replaces the stage under test also
+  passes when that stage drops the value. A multi-step flow test runs the steps one after the other with every
+  other field filled in, instead of seeding the later step's state by hand (#222).
 - A test of a step that validates before it acts (a config, reauth or reconfigure step that tests the login, a
   check before a write) asserts whether the validation ran, not only the result (entry created, data unchanged, error
   shown): the success case and every failure the validation reports assert it ran — e.g.
