@@ -21,6 +21,7 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
     IgnoredIds,
+    function_plan_info,
     one_line,
     parse_ignored_ids,
 )
@@ -383,7 +384,7 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
 
     # No await since the check: a restore starting from here on refuses until the writes end.
     with coordinator.plan_edit():
-        plan_info = api.fub_data.get(str(fub_id), {})
+        plan_info = function_plan_info(api.fub_data, fub_id)
         was_active = bool(plan_info.get("Active", True))
         await coordinator.async_function_plan_change_backup(fub_id, f"connect_poc {[f'M{m}' for m in marker_ids]}")
         if was_active:

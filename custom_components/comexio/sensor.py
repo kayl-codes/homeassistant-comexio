@@ -55,6 +55,7 @@ from .const import (
     MarkerKind,
     bus_load_signal,
     function_plan_ids,
+    function_plan_info,
     function_plan_run_state_unique_id,
     is_temperature_marker_name,
     system_info_signal,
@@ -962,8 +963,7 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
 
     @property
     def _fub(self) -> dict[str, Any] | None:
-        fub = self.coordinator.api.fub_data.get(str(self._fub_id))
-        return fub if isinstance(fub, dict) else None
+        return function_plan_info(self.coordinator.api.fub_data, self._fub_id) or None
 
     @property
     def name(self) -> str:
