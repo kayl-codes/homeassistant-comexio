@@ -101,3 +101,23 @@ export function fmtTs(d) {
     `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
   );
 }
+
+// How the preview image on screen relates to a row of the orphaned-plans view.
+// shown: {fub_id, plan_name, source} of the image (the preview image entity's attributes at
+// the time it was fetched), null when no image is shown or the entity did not report them;
+// orphan: the backup selector's `orphan` attribute (fub_id, plan_name, kind, slot).
+// "match": that very snapshot · "other_snapshot": the same deleted plan, another source ·
+// "other_plan": another plan · "unknown": no identity to compare.
+export function orphanPreviewMatch(shown, orphan) {
+  if (shown?.fub_id == null || shown.plan_name == null || shown.source == null) {
+    return "unknown";
+  }
+  // Compared as strings: an id that arrives as "12" still matches 12.
+  if (String(shown.fub_id) !== String(orphan.fub_id) || shown.plan_name !== orphan.plan_name) {
+    return "other_plan";
+  }
+  // The orphaned-plans view renders as "orphan:<kind>:<slot>"; function_plan_visualize names the
+  // same stored snapshot "snapshot:<kind>:<slot>".
+  const slot = `${orphan.kind}:${orphan.slot}`;
+  return [`orphan:${slot}`, `snapshot:${slot}`].includes(shown.source) ? "match" : "other_snapshot";
+}
