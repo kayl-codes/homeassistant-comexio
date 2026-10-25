@@ -1,5 +1,5 @@
 from bisect import bisect_right
-from collections.abc import Callable, Iterable, Iterator, Mapping, Set as AbstractSet
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
 import logging
 import re
@@ -1366,7 +1366,7 @@ def io_group_headers(identifiers: list[str]) -> dict[int, str]:
     return _io_row_blocks(identifiers)[1]
 
 
-def _io_ident_blocks(_member: str, ios: list[Mapping[str, Any]]) -> tuple[dict[str, int], dict[int, str]]:
+def _io_ident_blocks(_member: str, ios: Sequence[Mapping[str, Any]]) -> tuple[dict[str, int], dict[int, str]]:
     """Rows + type-group headers of an extension column (see _io_row_blocks)."""
     return _io_row_blocks([io["identifier"] for io in ios])
 
@@ -1377,7 +1377,7 @@ def _quickbus_io_order(io: Mapping[str, Any]) -> tuple[int, str]:
     return (int(io_id), io_id) if io_id.isascii() and io_id.isdecimal() else (2**31, io_id)
 
 
-def quickbus_column_blocks(member: str, ios: list[Mapping[str, Any]]) -> tuple[dict[str, int], dict[int, str]]:
+def quickbus_column_blocks(member: str, ios: Sequence[Mapping[str, Any]]) -> tuple[dict[str, int], dict[int, str]]:
     """Rows + header of a Quickbus device block: its name as the one header, then its IOs in Comexio's order.
 
     The type-group rows of an extension column do not fit: G1, TL1, R or HUM name no IO type.
@@ -1406,7 +1406,7 @@ class IoPlanKind:
     member_of: Callable[[Mapping[str, Any]], str]  # member an IO belongs to (extension name / device id)
     member_display: Callable[[Mapping[str, Any]], str]  # its member as shown to the user
     command_name: Callable[[Mapping[str, Any]], str]  # its Web-IO command name
-    column_blocks: Callable[[str, list[Mapping[str, Any]]], tuple[dict[str, int], dict[int, str]]]
+    column_blocks: Callable[[str, Sequence[Mapping[str, Any]]], tuple[dict[str, int], dict[int, str]]]
     stacked: bool  # members share a column while they fit (else one column per member)
     member_fallback: Callable[[str], str]  # a member with no IO in the data, as shown to the user
 

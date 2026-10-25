@@ -303,7 +303,7 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
         )
 
 
-def _sort_row_step(coordinator: ComexioCoordinator, fub_id: int) -> int:
+def _sort_row_step(coordinator: ComexioCoordinator, fub_id: int) -> float:
     """Vertical distance between two rows of the sorted plan."""
     if coordinator.is_trigger_plan(fub_id):
         return FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
