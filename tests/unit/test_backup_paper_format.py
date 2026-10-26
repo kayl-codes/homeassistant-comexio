@@ -1,6 +1,7 @@
 """A plan's paper format/DPI/orientation: backed up on its own, shown in the diff and in a backup's preview."""
 
 import asyncio
+from collections.abc import Callable
 import copy
 from functools import partial
 import inspect
@@ -910,6 +911,100 @@ def test_loading_an_orphaned_plan_reads_the_backup_choice_once_it_holds_the_lock
     assert loaded is False
     coordinator.async_generate_orphaned_plan_preview.assert_not_awaited()
     assert coordinator.preview_follow_generation == 3  # nothing rendered: the queued follow is not superseded
+
+
+@pytest.mark.parametrize(
+    "select_another",
+    [
+        pytest.param(
+            lambda coordinator: setattr(coordinator.hass.states.get, "return_value", SimpleNamespace(state="Garage")),
+            id="another backup picked",
+        ),
+        pytest.param(
+            lambda coordinator: setattr(coordinator.orphaned_plans_view_active, "return_value", False),
+            id="orphaned-plans view left",
+        ),
+    ],
+)
+def test_loading_an_orphaned_plan_leaves_a_newer_selection_to_its_own_follow(
+    select_another: Callable[[Any], None],
+) -> None:
+    """(Review #233) Another pick while the load waited for the lock: neither rendered nor superseded."""
+    coordinator = _orphan_load_coordinator([("Lights", _ORPHAN_ROW)])
+    coordinator.async_generate_orphaned_plan_preview = AsyncMock()  # type: ignore[method-assign]
+    registry = SimpleNamespace(async_get_entity_id=lambda _domain, _platform, unique_id: f"select.{unique_id}")
+
+    async def load_while_a_follow_renders() -> bool:
+        async with coordinator.preview_follow_lock:
+            task = asyncio.create_task(coordinator.async_load_orphaned_plan_into_preview(7, "Lights"))
+            await asyncio.sleep(0)  # the load passes the selector checks and waits for the lock
+            assert not task.done()
+            select_another(coordinator)
+        return await task
+
+    with patch.object(coordinator_module.er, "async_get", return_value=registry):
+        loaded = asyncio.run(load_while_a_follow_renders())
+
+    assert loaded is False
+    coordinator.async_generate_orphaned_plan_preview.assert_not_awaited()
+    assert coordinator.preview_follow_generation == 3
+
+
+@pytest.mark.parametrize(
+    ("svg", "source", "captured_at", "stamped"),
+    [
+        (
+            '<svg xmlns="http://www.w3.org/2000/svg"><svg x="1"/></svg>',
+            "orphan:auto:0",
+            "2026-01-02T03:04:05+00:00",
+            '<svg data-comexio-source="orphan:auto:0" data-comexio-captured-at="2026-01-02T03:04:05+00:00"'
+            ' xmlns="http://www.w3.org/2000/svg"><svg x="1"/></svg>',
+        ),
+        ("<svg/>", "orphan:auto:0", None, '<svg data-comexio-source="orphan:auto:0"/>'),
+        # Empty like None: the card compares `captured_at || null` with the missing attribute.
+        ("<svg/>", "live", "", '<svg data-comexio-source="live"/>'),
+        (
+            '<?xml version="1.0"?>\n<svg>',
+            "snapshot:auto:1",
+            None,
+            '<?xml version="1.0"?>\n<svg data-comexio-source="snapshot:auto:1">',
+        ),
+        (
+            "<svg>",
+            "orphan:auto:0",
+            '"x"',
+            '<svg data-comexio-source="orphan:auto:0" data-comexio-captured-at="&quot;x&quot;">',
+        ),
+        # Only the root tag: an <svg inside a leading comment is not stamped in its place.
+        ("<!-- <svg --><svg>", "live", None, "<!-- <svg --><svg>"),
+        ("<!DOCTYPE svg><svg>", "live", None, "<!DOCTYPE svg><svg>"),
+    ],
+)
+def test_a_published_preview_names_its_render_on_the_svg_root(
+    svg: str, source: str, captured_at: str | None, stamped: str
+) -> None:
+    """(Review #233) The card trusts the entity's identity only for an image naming that render."""
+    assert coordinator_module.stamp_preview_identity(svg, source, captured_at) == stamped
+
+
+@pytest.mark.parametrize(("svg", "warned"), [("<svg/>", False), ("<!-- x --><svg/>", True)])
+def test_a_preview_without_a_root_tag_to_stamp_is_published_with_a_warning(
+    svg: str, warned: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Review #233) Unstamped, the plan card keeps warning before a delete: the log says why."""
+    coordinator = _preview_coordinator()
+    coordinator.server_id = SERVER_ID
+    coordinator.hass = MagicMock()
+    coordinator.hass.config.path = lambda *parts: "/".join(("/config", *parts))
+    coordinator.hass.async_add_executor_job = AsyncMock()
+
+    with caplog.at_level("WARNING", logger=coordinator_module.__name__):
+        asyncio.run(coordinator._async_publish_plan_preview(7, "Lights", "live", svg))
+
+    written = coordinator.hass.async_add_executor_job.await_args.args[2]
+    assert ("no <svg> root tag" in caplog.text) is warned
+    assert (written == svg) is warned  # unstamped, but published unchanged all the same
+    assert coordinator.last_plan_preview_svg == written
 
 
 def test_a_backup_preview_without_a_known_format_names_none() -> None:

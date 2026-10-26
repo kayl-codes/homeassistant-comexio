@@ -35,12 +35,12 @@ import {
   isTextQuery,
   fmtTs,
   orphanPreviewMatch,
-} from "./comexio-plan-card-utils.js?v=0.9.52";
+} from "./comexio-plan-card-utils.js?v=0.9.53";
 
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.52";
+const CARD_VERSION = "0.9.53";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -61,6 +61,17 @@ const _SHOWN_PREVIEW_EVENT = "comexio-plan-card-shown-preview";
 
 function _isPreviewImage(entityId) {
   return typeof entityId === "string" && entityId.startsWith("image.");
+}
+
+// True when the fetched SVG is the render `identity` names: the integration stamps source and
+// capture time on its root (coordinator.stamp_preview_identity). The image URL always serves the
+// newest render, which can land before the entity state announcing it.
+function _svgShowsRender(svg, identity) {
+  return (
+    svg.getAttribute("data-comexio-source") === identity.source &&
+    // || like the integration's `if captured_at:`, which writes no attribute for an empty value
+    svg.getAttribute("data-comexio-captured-at") === (identity.captured_at || null)
+  );
 }
 
 // What every full card of one Comexio instance shows — null (warn) as soon as one shows none
@@ -1275,6 +1286,7 @@ class ComexioPlanCard extends HTMLElement {
       this._fetchFailed("preview response contains no <svg>");
       return;
     }
+    const shownRender = identity && _svgShowsRender(newSvg, identity) ? identity : null; // read before the swap
     try {
       this._swapInSvg(tpl, newSvg);
     } catch (err) {
@@ -1286,9 +1298,10 @@ class ComexioPlanCard extends HTMLElement {
       return;
     }
     // The image serves the newest render, not necessarily the stamp it was fetched by: with a
-    // newer stamp waiting, the identity is unknown until _loadIfNewer's fetch lands. The same
-    // holds when the card editor switched `entity` while this fetch was under way.
-    this._setShownPreview(stamp === this._stamp && entity === this._config.entity ? identity : null);
+    // newer stamp waiting, or an SVG naming another render than the state it was fetched by, the
+    // identity is unknown until _loadIfNewer's fetch lands. The same holds when the card editor
+    // switched `entity` while this fetch was under way.
+    this._setShownPreview(stamp === this._stamp && entity === this._config.entity ? shownRender : null);
     if (this._failures > 0) {
       console.info(`comexio-plan-card: preview loaded again after ${this._failures} failed attempt(s)`);
       this._failures = 0;

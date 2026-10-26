@@ -102,6 +102,10 @@ async def test_an_orphan_render_names_its_snapshot_by_capture_time(
         "source": "orphan:auto:0",
         "captured_at": "2026-01-02T03:04:05+00:00",
     }
+    # The served SVG names the same render, so the card can tell it from a newer one (stamp_preview_identity).
+    assert coordinator.last_plan_preview_svg == (
+        '<svg data-comexio-source="orphan:auto:0" data-comexio-captured-at="2026-01-02T03:04:05+00:00"/>'
+    )
 
 
 async def test_the_backup_selector_shares_its_device_with_the_only_preview_image(

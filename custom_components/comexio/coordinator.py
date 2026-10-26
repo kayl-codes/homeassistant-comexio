@@ -14,6 +14,7 @@ from collections.abc import (
 import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import html
 import logging
 import pathlib
 import re
@@ -350,6 +351,24 @@ def _build_sun_times(hass: HomeAssistant) -> dict[str, str]:
 
 # Title suffix of a preview rendered from a deleted plan's backup (German, like "[aktiv]").
 _ORPHANED_PREVIEW_TITLE_SUFFIX = "[verwaist]"
+
+
+# The root tag only: at the start, after an optional XML declaration (a comment or DOCTYPE before it
+# is not expected from render_plan_svg and leaves the SVG unstamped instead of stamping a wrong tag).
+_SVG_ROOT_TAG_RE = re.compile(r"\A\s*(?:<\?xml[^>]*\?>\s*)?<svg(?=[\s/>])")
+
+
+def stamp_preview_identity(svg_content: str, source: str, captured_at: str | None) -> str:
+    """The SVG with its render's source (and snapshot capture time) on the root element.
+
+    comexio-plan-card.js trusts the identity the image entity reports only for an image naming the
+    same render: the image URL always serves the newest render, which can land before the entity
+    state announcing it. Returned unchanged when the root tag is not found.
+    """
+    attributes = f' data-comexio-source="{html.escape(source)}"'
+    if captured_at:
+        attributes += f' data-comexio-captured-at="{html.escape(captured_at)}"'
+    return _SVG_ROOT_TAG_RE.sub(lambda match: match.group(0) + attributes, svg_content, count=1)
 
 
 def _write_preview_svg(path: pathlib.Path, svg_content: str) -> None:
@@ -3671,6 +3690,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         filename = f"comexio_{self.server_id}_plan_preview.svg"
         file_path = pathlib.Path(self.hass.config.path("www", filename))
+        stamped = stamp_preview_identity(svg_content, source, captured_at)
+        if stamped == svg_content:
+            # Shown anyway; the plan card then never trusts its identity and keeps warning before a delete.
+            _LOGGER.warning(
+                "[%s] Plan preview of '%s' (%s) has no <svg> root tag to name its render on",
+                self.server_id,
+                one_line(plan_name),
+                source,
+            )
+        svg_content = stamped
         await self.hass.async_add_executor_job(_write_preview_svg, file_path, svg_content)
 
         self.last_plan_preview_svg = svg_content
@@ -3743,8 +3772,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("[%s] Orphaned plan preview: could not switch the plan selectors: %s", self.server_id, err)
             return False
         # A disabled or unavailable select is skipped by the service call without an error.
-        backup_state = self.hass.states.get(backup_eid)
-        if not self.orphaned_plans_view_active() or backup_state is None or backup_state.state != label:
+        if not self._orphan_label_selected(backup_eid, label):
             _LOGGER.warning(
                 "[%s] Orphaned plan preview: the plan selectors did not switch (disabled or unavailable?)",
                 self.server_id,
@@ -3752,9 +3780,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         # In turn with the selection follows (plan_preview) and the other loads, so a slower render of an
         # earlier pick cannot publish after a newer one; as the newest request it supersedes the follow
-        # its own selector switch queued. The choice is read under the lock: a delete while it waited
-        # shifts the slots.
+        # its own selector switch queued. Selection and choice are read again under the lock: another
+        # pick while it waited is left to its own follow, and a delete shifts the slots.
         async with self.preview_follow_lock:
+            if not self._orphan_label_selected(backup_eid, label):
+                _LOGGER.info(
+                    "[%s] Orphaned plan preview of '%s' skipped: another selection was made meanwhile",
+                    self.server_id,
+                    one_line(plan_name),
+                )
+                return False
             choice = self.orphaned_backup_choice(label)
             if choice is None:
                 _LOGGER.warning(
@@ -3764,6 +3799,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.preview_follow_generation += 1
             url = await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
         return url is not None
+
+    def _orphan_label_selected(self, backup_eid: str, label: str) -> bool:
+        """True while the 'Plan' selector shows the orphaned-plans view and the backup selector this label."""
+        backup_state = self.hass.states.get(backup_eid)
+        return self.orphaned_plans_view_active() and backup_state is not None and backup_state.state == label
 
     async def async_generate_orphaned_plan_preview(
         self, fub_id: int, plan_name: str, kind: str, slot: int
