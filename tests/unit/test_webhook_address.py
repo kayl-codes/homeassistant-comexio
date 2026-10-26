@@ -471,7 +471,7 @@ def test_an_address_change_writes_only_the_device() -> None:
 
 
 @pytest.mark.parametrize("type_fixes", [0, 1])
-def test_a_full_sync_writes_the_address_to_the_device_and_no_command(type_fixes: int) -> None:
+def test_a_full_sync_adds_only_the_device_write_for_the_address(type_fixes: int) -> None:
     """The address adds the device write only: the commands written are exactly the type fixes."""
     button = _sync_button()
     ctx = _ctx("full_sync")
