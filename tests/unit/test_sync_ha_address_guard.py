@@ -237,7 +237,7 @@ def test_no_fast_track_with_a_loopback_address() -> None:
     ctx = _ctx(button, LOOPBACK)
     with patch.object(button_module, "_LOGGER") as logger:
         action = asyncio.run(
-            button._decide_effective_action(ctx, WEBIO_CLASSES[0], "7", _FAST_TRACK_MISSING, [], [], [], [], False)
+            button._decide_effective_action(ctx, WEBIO_CLASSES[0], "7", _FAST_TRACK_MISSING, [], [], [], False)
         )
 
     assert action == "full_sync"
@@ -250,7 +250,7 @@ def test_fast_track_with_a_reachable_address() -> None:
     ctx = _ctx(button, REACHABLE)
     with patch.object(button_module, "webio_still_present", AsyncMock(return_value=None)):
         action = asyncio.run(
-            button._decide_effective_action(ctx, WEBIO_CLASSES[0], "7", _FAST_TRACK_MISSING, [], [], [], [], False)
+            button._decide_effective_action(ctx, WEBIO_CLASSES[0], "7", _FAST_TRACK_MISSING, [], [], [], False)
         )
 
     assert action == "recreate"
