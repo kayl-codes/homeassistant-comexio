@@ -814,7 +814,14 @@ def test_a_backup_of_a_deleted_plan_shows_its_own_format() -> None:
 
 @pytest.mark.parametrize(
     ("stored", "title", "canvas"),
-    [({"paper": "A5", "dpi": 120}, "[verwaist] [A5 | 120dpi]", (1.0, 2.0)), ({}, "[verwaist]", None)],
+    [
+        (
+            {"paper": "A5", "dpi": 120, "captured_at": "2026-01-02T03:04:05+00:00"},
+            "[verwaist] [A5 | 120dpi]",
+            (1.0, 2.0),
+        ),
+        ({}, "[verwaist]", None),  # also an old snapshot without captured_at
+    ],
 )
 def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
     stored: dict[str, Any], title: str, canvas: tuple | None
@@ -841,8 +848,10 @@ def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
 
     assert render.call_args.args[7] == title
     assert render.call_args.kwargs["canvas"] == canvas
-    # comexio-plan-card.js (orphanPreviewMatch) matches the shown image against this source.
-    coordinator._async_publish_plan_preview.assert_awaited_once_with(7, "Lights", "orphan:auto:0", "<svg/>")
+    # comexio-plan-card.js (orphanPreviewMatch) matches the shown image by source and capture time.
+    coordinator._async_publish_plan_preview.assert_awaited_once_with(
+        7, "Lights", "orphan:auto:0", "<svg/>", captured_at=stored.get("captured_at")
+    )
 
 
 def test_a_backup_preview_without_a_known_format_names_none() -> None:

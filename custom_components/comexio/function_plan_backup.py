@@ -488,7 +488,9 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
 
     One plan row per orphaned identity (see FunctionPlanBackupManager.orphaned_plans_sync),
     followed by its indented snapshot rows. choice carries the identity plus the kind/slot to
-    show; a plan row shows the plan's newest snapshot. Shared by select.py (options) and
+    show and that snapshot's captured_at — slots are list positions that shift after a delete,
+    the capture time names the snapshot itself (comexio-plan-card.js compares it with the preview
+    image's). A plan row shows the plan's newest snapshot. Shared by select.py (options) and
     button.py (resolving the chosen label back), like format_backup_label. Labels must be
     unique select options, but two plans changed in the same minute share a snapshot row
     label — a repeat gets its plan appended. Names that differ only in line breaks or spacing
@@ -500,15 +502,18 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
         identity = {"fub_id": orphan["fub_id"], "plan_name": orphan["plan_name"], "kept": orphan["kept"]}
         backups = orphan["backups"]
         newest = max(backups, key=lambda entry: entry.get("captured_at") or "")
-        plan_choice = {**identity, "kind": newest["kind"], "slot": newest["slot"], "plan_row": True}
-        rows.append((_orphan_plan_label(orphan), plan_choice))
+        rows.append((_orphan_plan_label(orphan), {**identity, **_orphan_snapshot_ref(newest), "plan_row": True}))
         for entry in backups:
             label = f"{_ORPHAN_SNAPSHOT_INDENT}{format_backup_label(entry)}"
             if label in seen:
                 label += f" · {distinct_one_line(orphan['plan_name'])} (ID {orphan['fub_id']})"
             seen.add(label)
-            rows.append((label, {**identity, "kind": entry["kind"], "slot": entry["slot"], "plan_row": False}))
+            rows.append((label, {**identity, **_orphan_snapshot_ref(entry), "plan_row": False}))
     return rows
+
+
+def _orphan_snapshot_ref(entry: dict[str, Any]) -> dict[str, Any]:
+    return {"kind": entry["kind"], "slot": entry["slot"], "captured_at": entry.get("captured_at")}
 
 
 def summarize_orphaned_backups(orphans: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]]:

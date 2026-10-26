@@ -3661,8 +3661,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         kind, slot = _parse_snapshot_source(source)
         return self.function_plan_backup.block_settings_sync(kind, fub_id, plan_name, slot)
 
-    async def _async_publish_plan_preview(self, fub_id: int, plan_name: str, source: str, svg_content: str) -> str:
-        """Write a rendered preview to config/www and record it as the last preview; returns its /local/ URL."""
+    async def _async_publish_plan_preview(
+        self, fub_id: int, plan_name: str, source: str, svg_content: str, captured_at: str | None = None
+    ) -> str:
+        """Write a rendered preview to config/www and record it as the last preview; returns its /local/ URL.
+
+        captured_at: the rendered snapshot's capture time (orphaned-plans view only; see
+        image.ComexioPlanPreviewImage.extra_state_attributes).
+        """
         filename = f"comexio_{self.server_id}_plan_preview.svg"
         file_path = pathlib.Path(self.hass.config.path("www", filename))
         await self.hass.async_add_executor_job(_write_preview_svg, file_path, svg_content)
@@ -3672,6 +3678,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "fub_id": fub_id,
             "plan_name": plan_name,
             "source": source,
+            "captured_at": captured_at,
             "generated_at": dt_util.utcnow().isoformat(),
         }
         return f"/local/{filename}"
@@ -3802,7 +3809,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # A newer render (another plan picked meanwhile) owns the preview now.
             _LOGGER.debug("[%s] Orphaned plan preview skipped: a newer preview was armed meanwhile", self.server_id)
             return None
-        url = await self._async_publish_plan_preview(fub_id, plan_name, f"orphan:{kind}:{slot}", svg_content)
+        # captured_at from the snapshot read above, before any await: it names what was rendered,
+        # even when a delete shifted the slots meanwhile.
+        url = await self._async_publish_plan_preview(
+            fub_id, plan_name, f"orphan:{kind}:{slot}", svg_content, captured_at=snapshot.get("captured_at")
+        )
         self.async_update_listeners()
         return url
 

@@ -35,18 +35,55 @@ import {
   isTextQuery,
   fmtTs,
   orphanPreviewMatch,
-} from "./comexio-plan-card-utils.js?v=0.9.50";
+} from "./comexio-plan-card-utils.js?v=0.9.51";
 
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.50";
+const CARD_VERSION = "0.9.51";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
 // function_plan_backup.py) so the card can parse kind+slot back out of the select's state
 // without ever having to know the backup manager's internal storage format itself.
 const _BACKUP_LABEL_RE = /^(\w+)\[(\d+)\]/;
+
+// translation_key of the integration's plan preview image entity (image.py), how a trigger-only
+// card tells it apart from any other image on the function plan device.
+const PREVIEW_TRANSLATION_KEY = "plan_preview";
+
+// Connected full cards on the page by the preview image entity they show (a Set each), so a
+// trigger-only card next to them compares against the images actually on screen instead of the
+// server's newest render. The event tells trigger-only cards to re-check their buttons after a
+// full card swapped its image.
+const _shownPreviewCards = new Map();
+const _SHOWN_PREVIEW_EVENT = "comexio-plan-card-shown-preview";
+
+function _isPreviewImage(entityId) {
+  return typeof entityId === "string" && entityId.startsWith("image.");
+}
+
+// What every full card showing one image entity shows — null (warn) as soon as one shows none
+// or two show different renders: each image on screen must be the selected backup.
+function _agreedPreview(cards) {
+  const identities = [...cards].map((card) => card._shownIdentity());
+  const keys = identities.map((identity) => (identity ? JSON.stringify(identity) : null));
+  return keys.every((key) => key !== null && key === keys[0]) ? identities[0] : null;
+}
+
+function _addShownPreviewCard(image, card) {
+  if (!_shownPreviewCards.has(image)) {
+    _shownPreviewCards.set(image, new Set());
+  }
+  _shownPreviewCards.get(image).add(card);
+}
+
+function _removeShownPreviewCard(image, card) {
+  const cards = _shownPreviewCards.get(image);
+  if (cards?.delete(card) && cards.size === 0) {
+    _shownPreviewCards.delete(image);
+  }
+}
 
 // Grace period before disconnectedCallback actually stops the live preview poll — bridges
 // Lovelace's detach+reattach on a view switch/edit-mode toggle without freezing a preview
@@ -388,7 +425,15 @@ class ComexioPlanCard extends HTMLElement {
     this._keepaliveDeferred = false; // a keepalive answered during a start: re-sent once the starts settle
     this._startRetryAfter = 0; // Date.now() before which an unarmed start is not retried on that instance
     this._keepaliveWarned = false; // a failing keepalive warns once until one is answered again
-    this._shownPreview = null; // {fub_id, plan_name, source} of the image on screen (null: none / not reported)
+    this._shownPreview = null; // {fub_id, plan_name, source, captured_at} of the image on screen (null: none / not reported)
+    this._previewEntity = null; // trigger-only card: cached lookup of its instance's preview image entity
+    this._identityEntity = null; // the `entity` _shownPreview was recorded for
+    this._registeredImage = null; // full card: its key in _shownPreviewCards while connected
+    this._onShownPreview = () => {
+      if (this._hass) {
+        this._updateBackupRow(); // before the first `set hass` there are no buttons to re-check
+      }
+    };
   }
 
   setConfig(config) {
@@ -402,6 +447,7 @@ class ComexioPlanCard extends HTMLElement {
     if (!this.shadowRoot) {
       this._buildDom();
     }
+    this._syncPreviewRegistration(); // the card editor reconfigures a connected card in place
     this.classList.toggle("minimal-mode", this._minimal);
     if (this._minimal) {
       return;
@@ -1189,8 +1235,7 @@ class ComexioPlanCard extends HTMLElement {
       msg.textContent = `Keine Vorschau verfügbar (${this._config.entity}: ${st ? st.state : "nicht gefunden"}).`;
       this._planEl.replaceChildren(msg);
       if (this._shownPreview) {
-        this._shownPreview = null;
-        this._updateBackupRow();
+        this._setShownPreview(null);
       }
       return;
     }
@@ -1212,6 +1257,7 @@ class ComexioPlanCard extends HTMLElement {
     }
     const seq = ++this._fetchSeq;
     const identity = this._previewIdentity(stamp);
+    const entity = this._config.entity;
     this._cancelRetry(); // this fetch supersedes a pending retry
     this._refetchOnConnect = false;
     this._inFlight = true;
@@ -1247,14 +1293,15 @@ class ComexioPlanCard extends HTMLElement {
     } catch (err) {
       // Deterministic for this response — a retry would render the same content again.
       console.warn("comexio-plan-card: preview render failed", err);
+      this._setShownPreview(null); // the swap may have left a partial image on screen
       this._failures = 0; // no retry follows — don't keep new stamps gated
       this._loadIfNewer(stamp);
       return;
     }
     // The image serves the newest render, not necessarily the stamp it was fetched by: with a
-    // newer stamp waiting, the identity is unknown until _loadIfNewer's fetch lands.
-    this._shownPreview = stamp === this._stamp ? identity : null;
-    this._updateBackupRow();
+    // newer stamp waiting, the identity is unknown until _loadIfNewer's fetch lands. The same
+    // holds when the card editor switched `entity` while this fetch was under way.
+    this._setShownPreview(stamp === this._stamp && entity === this._config.entity ? identity : null);
     if (this._failures > 0) {
       console.info(`comexio-plan-card: preview loaded again after ${this._failures} failed attempt(s)`);
       this._failures = 0;
@@ -1357,8 +1404,93 @@ class ComexioPlanCard extends HTMLElement {
     if (st?.state !== stamp) {
       return null;
     }
-    const { fub_id: fubId, plan_name: planName, source } = st.attributes;
-    return { fub_id: fubId, plan_name: planName, source };
+    // Only the image entity names its render. A card fed by the Plan Preview sensor has none to
+    // go by (its state is the plan name, not the render stamp) — null, so its buttons warn.
+    return _isPreviewImage(this._config.entity) ? this._identityOf(st) : null;
+  }
+
+  // Full card: record which plan the image on screen shows and let trigger-only cards re-check.
+  _setShownPreview(identity) {
+    this._shownPreview = identity;
+    this._identityEntity = this._config.entity;
+    this._updateBackupRow();
+    if (this._registeredImage) {
+      window.dispatchEvent(new Event(_SHOWN_PREVIEW_EVENT));
+    }
+  }
+
+  // The identity of the image on screen — null once `entity` changed since it was recorded (also
+  // while the card was detached), as it then names the other entity's image.
+  _shownIdentity() {
+    return this._config.entity === this._identityEntity ? this._shownPreview : null;
+  }
+
+  // Keeps the registration in step with config and attachment: a connected full card on an image
+  // entity is listed in _shownPreviewCards, a connected trigger-only card listens for their
+  // swaps. Called on setConfig, connect and disconnect.
+  _syncPreviewRegistration() {
+    const image = this.isConnected && _isPreviewImage(this._config?.entity) ? this._config.entity : null;
+    const previous = this._registeredImage;
+    if (previous !== image) {
+      _removeShownPreviewCard(previous, this);
+      if (image) {
+        _addShownPreviewCard(image, this);
+      }
+      this._registeredImage = image;
+      window.dispatchEvent(new Event(_SHOWN_PREVIEW_EVENT));
+    }
+    if (this.isConnected && this._minimal === true) {
+      window.addEventListener(_SHOWN_PREVIEW_EVENT, this._onShownPreview);
+    } else {
+      window.removeEventListener(_SHOWN_PREVIEW_EVENT, this._onShownPreview);
+    }
+  }
+
+  _identityOf(st) {
+    const { fub_id: fubId, plan_name: planName, source, captured_at: capturedAt } = st.attributes;
+    return { fub_id: fubId, plan_name: planName, source, captured_at: capturedAt };
+  }
+
+  // Which plan the preview shows, for the orphaned-plans warnings. A card with its own image:
+  // the image on screen. A trigger-only card (no `entity`; the image sits in another card of
+  // the dashboard): what the full cards on the page show for that image entity; without one
+  // (e.g. a picture-entity card, which swaps in each render as it lands) the newest render the
+  // server reports. Null (the card warns) while the image entity cannot be found.
+  _currentPreview() {
+    if (!this._minimal) {
+      return this._shownIdentity();
+    }
+    const st = this._previewEntityState();
+    if (!st) {
+      return null;
+    }
+    const cards = _shownPreviewCards.get(st.entity_id);
+    return cards ? _agreedPreview(cards) : this._identityOf(st);
+  }
+
+  // The plan preview image of the backup selector's Comexio instance: both sit on the same
+  // function plan device (the frontend's entity registry carries device_id and platform, not
+  // always the config entry). The lookup (also a miss) is cached until HA hands over a new
+  // entity registry — `set hass` runs on every state change, a scan each time would be wasted.
+  _previewEntityState() {
+    const entities = this._hass?.entities;
+    const deviceId = entities?.[this._config.backup_entity]?.device_id;
+    if (!deviceId) {
+      return null;
+    }
+    const cached = this._previewEntity;
+    if (cached?.entities !== entities || cached.deviceId !== deviceId) {
+      const found = Object.values(entities).find(
+        (ent) =>
+          ent.platform === "comexio" &&
+          ent.device_id === deviceId &&
+          ent.entity_id.startsWith("image.") &&
+          ent.translation_key === PREVIEW_TRANSLATION_KEY,
+      );
+      this._previewEntity = { entities, deviceId, entityId: found?.entity_id ?? null };
+    }
+    const { entityId } = this._previewEntity;
+    return entityId ? this._hass.states[entityId] : null;
   }
 
   _cancelRetry() {
@@ -1454,19 +1586,15 @@ ${warning}`;
   // lag behind the choice: the render of the neighbour picked after "delete all" failed, a
   // fetch failed, or the image still shows a plan from before. Delete (one backup) needs the
   // very snapshot; delete all / keep act on the whole plan, so any of its backups will do.
-  // A trigger-only card shows no image, so there is nothing to mismatch.
   _orphanPreviewWarning(action, orphan) {
-    if (this._minimal) {
-      return null;
-    }
-    const match = orphanPreviewMatch(this._shownPreview, orphan);
+    const shown = this._currentPreview();
+    const match = orphanPreviewMatch(shown, orphan);
     if (match === "match" || (match === "other_snapshot" && action !== "delete")) {
       return null;
     }
     if (match === "unknown") {
       return "Achtung: Die Vorschau hat diese Auswahl (noch) nicht geladen — das Bild kann einen anderen Plan zeigen.";
     }
-    const shown = this._shownPreview;
     const what =
       match === "other_snapshot"
         ? `ein anderes Backup von „${shown.plan_name}“`
@@ -1554,15 +1682,10 @@ ${warning}`;
     }
     this._orphanBusy = true;
     this._updateBackupRow();
-    const shownBefore = this._shownPreview;
     try {
+      // No reset of the shown identity after a delete: it names the snapshot by its capture
+      // time, which no remaining row carries (see orphanPreviewMatch).
       await this._hass.callService("comexio", service, data);
-      if (action !== "keep" && this._shownPreview === shownBefore) {
-        // Slots are list positions: after a delete the next backup moves into the shown
-        // image's slot, so its identity would match a row it does not show. The next render
-        // sets it again (one that landed during the call already did — kept).
-        this._shownPreview = null;
-      }
     } catch (err) {
       console.warn(`comexio-plan-card: ${service} failed`, err);
     } finally {
@@ -1931,6 +2054,7 @@ ${warning}`;
   }
 
   connectedCallback() {
+    this._syncPreviewRegistration();
     // Lovelace detaches+reattaches cards on every view switch and edit-mode toggle — not just on
     // real removal. Cancel a pending stop from disconnectedCallback's grace window so a reattach
     // within that window doesn't need a fresh open to resume live values (#75).
@@ -2079,6 +2203,7 @@ ${warning}`;
   }
 
   disconnectedCallback() {
+    this._syncPreviewRegistration();
     this._startPreviewPending = false;
     if (this._keepaliveTimer) {
       clearInterval(this._keepaliveTimer);
