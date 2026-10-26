@@ -35,12 +35,12 @@ import {
   isTextQuery,
   fmtTs,
   orphanPreviewMatch,
-} from "./comexio-plan-card-utils.js?v=0.9.53";
+} from "./comexio-plan-card-utils.js?v=0.9.54";
 
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.53";
+const CARD_VERSION = "0.9.54";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -65,12 +65,15 @@ function _isPreviewImage(entityId) {
 
 // True when the fetched SVG is the render `identity` names: the integration stamps source and
 // capture time on its root (coordinator.stamp_preview_identity). The image URL always serves the
-// newest render, which can land before the entity state announcing it.
+// newest render, which can land before the entity state announcing it. An unstamped SVG
+// never matches, not even an identity without a source.
 function _svgShowsRender(svg, identity) {
+  const stamp = svg.dataset;
   return (
-    svg.getAttribute("data-comexio-source") === identity.source &&
+    stamp.comexioSource !== undefined &&
+    stamp.comexioSource === identity.source &&
     // || like the integration's `if captured_at:`, which writes no attribute for an empty value
-    svg.getAttribute("data-comexio-captured-at") === (identity.captured_at || null)
+    (stamp.comexioCapturedAt ?? null) === (identity.captured_at || null)
   );
 }
 
