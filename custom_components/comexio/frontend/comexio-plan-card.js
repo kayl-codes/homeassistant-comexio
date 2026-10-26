@@ -35,12 +35,12 @@ import {
   isTextQuery,
   fmtTs,
   orphanPreviewMatch,
-} from "./comexio-plan-card-utils.js?v=0.9.51";
+} from "./comexio-plan-card-utils.js?v=0.9.52";
 
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.51";
+const CARD_VERSION = "0.9.52";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -52,37 +52,24 @@ const _BACKUP_LABEL_RE = /^(\w+)\[(\d+)\]/;
 // card tells it apart from any other image on the function plan device.
 const PREVIEW_TRANSLATION_KEY = "plan_preview";
 
-// Connected full cards on the page by the preview image entity they show (a Set each), so a
+// Connected full cards on the page, fed by the preview image or by the Plan Preview sensor, so a
 // trigger-only card next to them compares against the images actually on screen instead of the
 // server's newest render. The event tells trigger-only cards to re-check their buttons after a
 // full card swapped its image.
-const _shownPreviewCards = new Map();
+const _shownPreviewCards = new Set();
 const _SHOWN_PREVIEW_EVENT = "comexio-plan-card-shown-preview";
 
 function _isPreviewImage(entityId) {
   return typeof entityId === "string" && entityId.startsWith("image.");
 }
 
-// What every full card showing one image entity shows — null (warn) as soon as one shows none
-// or two show different renders: each image on screen must be the selected backup.
+// What every full card of one Comexio instance shows — null (warn) as soon as one shows none
+// (a sensor-fed card never knows) or two show different renders: each image on screen must be
+// the selected backup.
 function _agreedPreview(cards) {
-  const identities = [...cards].map((card) => card._shownIdentity());
+  const identities = cards.map((card) => card._shownIdentity());
   const keys = identities.map((identity) => (identity ? JSON.stringify(identity) : null));
   return keys.every((key) => key !== null && key === keys[0]) ? identities[0] : null;
-}
-
-function _addShownPreviewCard(image, card) {
-  if (!_shownPreviewCards.has(image)) {
-    _shownPreviewCards.set(image, new Set());
-  }
-  _shownPreviewCards.get(image).add(card);
-}
-
-function _removeShownPreviewCard(image, card) {
-  const cards = _shownPreviewCards.get(image);
-  if (cards?.delete(card) && cards.size === 0) {
-    _shownPreviewCards.delete(image);
-  }
 }
 
 // Grace period before disconnectedCallback actually stops the live preview poll — bridges
@@ -428,7 +415,7 @@ class ComexioPlanCard extends HTMLElement {
     this._shownPreview = null; // {fub_id, plan_name, source, captured_at} of the image on screen (null: none / not reported)
     this._previewEntity = null; // trigger-only card: cached lookup of its instance's preview image entity
     this._identityEntity = null; // the `entity` _shownPreview was recorded for
-    this._registeredImage = null; // full card: its key in _shownPreviewCards while connected
+    this._registeredEntity = null; // full card: its `entity` while listed in _shownPreviewCards
     this._onShownPreview = () => {
       if (this._hass) {
         this._updateBackupRow(); // before the first `set hass` there are no buttons to re-check
@@ -1414,7 +1401,7 @@ class ComexioPlanCard extends HTMLElement {
     this._shownPreview = identity;
     this._identityEntity = this._config.entity;
     this._updateBackupRow();
-    if (this._registeredImage) {
+    if (this._registeredEntity) {
       window.dispatchEvent(new Event(_SHOWN_PREVIEW_EVENT));
     }
   }
@@ -1425,19 +1412,19 @@ class ComexioPlanCard extends HTMLElement {
     return this._config.entity === this._identityEntity ? this._shownPreview : null;
   }
 
-  // Keeps the registration in step with config and attachment: a connected full card on an image
-  // entity is listed in _shownPreviewCards, a connected trigger-only card listens for their
+  // Keeps the registration in step with config and attachment: a connected full card (image- or
+  // sensor-fed) is listed in _shownPreviewCards, a connected trigger-only card listens for their
   // swaps. Called on setConfig, connect and disconnect.
   _syncPreviewRegistration() {
-    const image = this.isConnected && _isPreviewImage(this._config?.entity) ? this._config.entity : null;
-    const previous = this._registeredImage;
-    if (previous !== image) {
-      _removeShownPreviewCard(previous, this);
-      if (image) {
-        _addShownPreviewCard(image, this);
+    const entity = this.isConnected ? (this._config?.entity ?? null) : null;
+    if (this._registeredEntity !== entity) {
+      if (entity) {
+        _shownPreviewCards.add(this);
+      } else {
+        _shownPreviewCards.delete(this);
       }
-      this._registeredImage = image;
-      window.dispatchEvent(new Event(_SHOWN_PREVIEW_EVENT));
+      this._registeredEntity = entity;
+      window.dispatchEvent(new Event(_SHOWN_PREVIEW_EVENT)); // also on a changed `entity`: its identity is void
     }
     if (this.isConnected && this._minimal === true) {
       window.addEventListener(_SHOWN_PREVIEW_EVENT, this._onShownPreview);
@@ -1453,9 +1440,10 @@ class ComexioPlanCard extends HTMLElement {
 
   // Which plan the preview shows, for the orphaned-plans warnings. A card with its own image:
   // the image on screen. A trigger-only card (no `entity`; the image sits in another card of
-  // the dashboard): what the full cards on the page show for that image entity; without one
-  // (e.g. a picture-entity card, which swaps in each render as it lands) the newest render the
-  // server reports. Null (the card warns) while the image entity cannot be found.
+  // the dashboard): what the full cards on the page show for that Comexio instance (their
+  // `entity` on the same function plan device as the image, or on none known); without one (e.g. a picture-entity
+  // card, which swaps in each render as it lands) the newest render the server reports. Null (the
+  // card warns) while the image entity cannot be found.
   _currentPreview() {
     if (!this._minimal) {
       return this._shownIdentity();
@@ -1464,8 +1452,14 @@ class ComexioPlanCard extends HTMLElement {
     if (!st) {
       return null;
     }
-    const cards = _shownPreviewCards.get(st.entity_id);
-    return cards ? _agreedPreview(cards) : this._identityOf(st);
+    const entities = this._hass.entities;
+    const deviceId = entities[st.entity_id]?.device_id;
+    // A full card whose entity has no device on record counts too: fail-safe, it may show this image.
+    const cards = [..._shownPreviewCards].filter((card) => {
+      const cardDevice = entities[card._config.entity]?.device_id;
+      return cardDevice === undefined || cardDevice === deviceId;
+    });
+    return cards.length > 0 ? _agreedPreview(cards) : this._identityOf(st);
   }
 
   // The plan preview image of the backup selector's Comexio instance: both sit on the same

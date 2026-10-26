@@ -3750,13 +3750,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
             )
             return False
-        choice = self.orphaned_backup_choice(label)
-        if choice is None:
-            _LOGGER.warning(
-                "[%s] Orphaned plan preview: '%s' was deleted meanwhile", self.server_id, one_line(plan_name)
-            )
-            return False
-        url = await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
+        # In turn with the selection follows (plan_preview) and the other loads, so a slower render of an
+        # earlier pick cannot publish after a newer one; as the newest request it supersedes the follow
+        # its own selector switch queued. The choice is read under the lock: a delete while it waited
+        # shifts the slots.
+        async with self.preview_follow_lock:
+            choice = self.orphaned_backup_choice(label)
+            if choice is None:
+                _LOGGER.warning(
+                    "[%s] Orphaned plan preview: '%s' was deleted meanwhile", self.server_id, one_line(plan_name)
+                )
+                return False
+            self.preview_follow_generation += 1
+            url = await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
         return url is not None
 
     async def async_generate_orphaned_plan_preview(

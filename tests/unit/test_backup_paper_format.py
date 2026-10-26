@@ -854,6 +854,64 @@ def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
     )
 
 
+def _orphan_load_coordinator(options: list[tuple[str, dict[str, Any]]]) -> ComexioCoordinator:
+    """A coordinator whose orphaned_plan_backups repair switches both selectors to the first option's label."""
+    coordinator = _preview_coordinator()
+    coordinator.server_id = SERVER_ID
+    coordinator.preview_follow_lock = asyncio.Lock()
+    coordinator.preview_follow_generation = 3
+    coordinator.orphaned_backup_options = MagicMock(return_value=options)  # type: ignore[method-assign]
+    coordinator.orphaned_plans_view_active = MagicMock(return_value=True)  # type: ignore[method-assign]
+    coordinator.hass = MagicMock()
+    coordinator.hass.services.async_call = AsyncMock()
+    coordinator.hass.states.get = MagicMock(return_value=SimpleNamespace(state=options[0][0]))
+    return coordinator
+
+
+_ORPHAN_ROW = {"plan_row": True, "fub_id": 7, "plan_name": "Lights", "kind": "auto", "slot": 0}
+
+
+def test_loading_an_orphaned_plan_renders_in_turn_with_the_selection_follows() -> None:
+    """(Review #233) Under the follows' lock and superseding queued follows: no older pick publishes last."""
+    coordinator = _orphan_load_coordinator([("Lights", _ORPHAN_ROW)])
+    seen: dict[str, Any] = {}
+
+    async def render(*args: Any) -> str:
+        seen.update(locked=coordinator.preview_follow_lock.locked(), generation=coordinator.preview_follow_generation)
+        seen["args"] = args
+        return "/local/x.svg"
+
+    coordinator.async_generate_orphaned_plan_preview = render  # type: ignore[method-assign]
+    registry = SimpleNamespace(async_get_entity_id=lambda _domain, _platform, unique_id: f"select.{unique_id}")
+    with patch.object(coordinator_module.er, "async_get", return_value=registry):
+        loaded = asyncio.run(coordinator.async_load_orphaned_plan_into_preview(7, "Lights"))
+
+    assert loaded is True
+    assert seen == {"locked": True, "generation": 4, "args": (7, "Lights", "auto", 0)}
+
+
+def test_loading_an_orphaned_plan_reads_the_backup_choice_once_it_holds_the_lock() -> None:
+    """(Review #233) A delete while the load waited for the lock: no render of a shifted slot."""
+    coordinator = _orphan_load_coordinator([("Lights", _ORPHAN_ROW)])
+    coordinator.async_generate_orphaned_plan_preview = AsyncMock()  # type: ignore[method-assign]
+    registry = SimpleNamespace(async_get_entity_id=lambda _domain, _platform, unique_id: f"select.{unique_id}")
+
+    async def load_while_a_follow_renders() -> bool:
+        async with coordinator.preview_follow_lock:
+            task = asyncio.create_task(coordinator.async_load_orphaned_plan_into_preview(7, "Lights"))
+            await asyncio.sleep(0)  # the load passes the selector checks and waits for the lock
+            assert not task.done()  # else it never read the choice under the lock
+            coordinator.orphaned_backup_options.return_value = []  # the backup is deleted meanwhile
+        return await task
+
+    with patch.object(coordinator_module.er, "async_get", return_value=registry):
+        loaded = asyncio.run(load_while_a_follow_renders())
+
+    assert loaded is False
+    coordinator.async_generate_orphaned_plan_preview.assert_not_awaited()
+    assert coordinator.preview_follow_generation == 3  # nothing rendered: the queued follow is not superseded
+
+
 def test_a_backup_preview_without_a_known_format_names_none() -> None:
     """(Review) sized like the live plan, but the live "[A4 | 100dpi]" is no statement about the backup."""
     coordinator = _preview_coordinator()
