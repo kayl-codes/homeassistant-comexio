@@ -603,7 +603,9 @@ def _flow(external_url: str | None = None, options: dict | None = None) -> Comex
     flow = ComexioOptionsFlow(SimpleNamespace(entry_id="e1", data={}, options=options or {}))
     flow.hass = _hass(external_url=external_url)  # type: ignore[assignment]
     flow.async_show_form = MagicMock(side_effect=lambda **kw: {"type": "form", **kw})  # type: ignore[method-assign]
-    flow.async_create_entry = MagicMock(side_effect=lambda **kw: {"type": "create_entry", **kw})  # type: ignore[method-assign]
+    flow.async_create_entry = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda **kw: {"type": "create_entry", **kw}
+    )
     return flow
 
 
