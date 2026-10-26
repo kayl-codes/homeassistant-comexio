@@ -921,7 +921,7 @@ class ComexioRepairFlow(RepairsFlow):
                     label = f"{ICON_NETWORK} HA Server-Adresse (IP:Port) aktualisieren"
                 else:
                     label = f"{ICON_NETWORK} Update HA Server Address (IP:Port)"
-                specific_options["update_ip"] = f"{label} (~{SYNC_DURATION_WRITE}s)"
+                specific_options["update_ip"] = f"{label} ({format_time(SYNC_DURATION_WRITE).strip()})"
 
             specific_options = _without_refused_plan_options(
                 self.hass, self.issue_data.get("entry_id"), specific_options

@@ -304,7 +304,7 @@ def test_the_audit_takes_the_fallback_reason_with_the_address_it_explains() -> N
 _PARSED = {
     "markers": [{"id": "5", "name": "M5 Licht", "type": "digital"}, {"id": "6", "name": "M6 Soll", "type": "analog"}],
     "io": [{"ext_name": "BASE", "identifier": "Q1", "is_binary": True, "min": 0, "max": 1}],
-    "knx": [],
+    "knx": [{"id": "8", "name": "K8 Temp", "type": "analog", "dpt_min": -273, "dpt_max": 670760}],
 }
 
 
@@ -332,10 +332,10 @@ def test_every_payload_the_api_builds_keeps_http_whatever_the_webhook_target(
     assert asyncio.run(coordinator.async_webhook_target()) == target
 
     commands = comexio_api.build_webio_commands("srv", _PARSED)
-    assert len(commands) == 3
-    assert [command["Protocol"] for command in commands] == [WEBIO_PROTOCOL_HTTP] * 3
+    assert len(commands) == 4
+    assert [command["Protocol"] for command in commands] == [WEBIO_PROTOCOL_HTTP] * 4
     uploaded = _protocols(json.loads(comexio_api.generate_webio_json("srv", "HomeAssistant", _PARSED)))
-    assert len(uploaded) == 3
+    assert len(uploaded) == 4
     assert set(uploaded) == {WEBIO_PROTOCOL_HTTP}
 
 
@@ -371,12 +371,15 @@ def test_the_range_check_leaves_the_protocol_of_a_command_alone(protocol: int | 
     coordinator.api.save_single_command.assert_not_awaited()
 
 
-def test_a_min_max_drift_is_corrected(caplog: pytest.LogCaptureFixture) -> None:
-    coordinator = _range_coordinator(WebioCommandForm(0, 100, WEBIO_PROTOCOL_HTTP))
+@pytest.mark.parametrize("protocol", [WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS])
+def test_a_min_max_drift_is_corrected(caplog: pytest.LogCaptureFixture, protocol: int) -> None:
+    """The correction writes the built command as it is: one write, and the log names only Min/Max."""
+    coordinator = _range_coordinator(WebioCommandForm(0, 100, protocol))
 
     assert _check(coordinator)[RANGE_CHECK_FIXED] == 1
     coordinator.api.save_single_command.assert_awaited_once_with("3", "7", _TARGET, existing_cmd_id="11")
     assert "Min/Max drifted (0/100 -> -32768/32767)" in caplog.text
+    assert "protocol" not in caplog.text.lower()
 
 
 def test_a_failed_min_max_correction_is_counted() -> None:
@@ -439,13 +442,19 @@ def _ctx(action: str) -> _SyncContext:
     )
 
 
-def test_an_address_change_writes_only_the_device() -> None:
-    """A new address is one device write per class: the commands stay as they are, the device is never deleted."""
+def _sync_button() -> ComexioSyncButton:
     button = ComexioSyncButton.__new__(ComexioSyncButton)
     button.server_id = "cx1"
+    # Nothing but the cancel flag: a sync that still recorded a protocol on the coordinator would fail here.
     button.coordinator = SimpleNamespace(cancel_sync=False)  # type: ignore[assignment]
     button._async_fast_track = AsyncMock(return_value=True)  # type: ignore[method-assign]
     button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
+    return button
+
+
+def test_an_address_change_writes_only_the_device() -> None:
+    """A new address is one device write per class: the commands stay as they are, the device is never deleted."""
+    button = _sync_button()
     ctx = _ctx("update_ip")
     many = [_item(str(i)) for i in range(SYNC_DURATION_RECREATE // SYNC_DURATION_WRITE + 1)]
 
@@ -460,11 +469,28 @@ def test_an_address_change_writes_only_the_device() -> None:
     assert not ctx.failed_writes
 
 
-def test_the_sync_records_no_protocol() -> None:
-    """No store, no record: nothing left that could mark a class unknown and rewrite all its commands."""
-    assert not hasattr(ComexioCoordinator, "async_set_webio_synced_protocol")
-    assert not hasattr(ComexioCoordinator, "async_load_webio_protocols")
-    assert "protocol" not in inspect.getsource(ComexioSyncButton._sync_class)
+def test_a_full_sync_writes_the_address_to_the_device_and_no_command() -> None:
+    button = _sync_button()
+    ctx = _ctx("full_sync")
+
+    result = asyncio.run(button._sync_class(ctx, MARKER, "7", [], [], [], [], [], True, 10, 50))
+
+    ctx.api.update_webio_device_ip.assert_awaited_once_with("7", "192.0.2.10:8443", f"HomeAssistant {MARKER}")
+    ctx.api.save_single_command.assert_not_awaited()
+    ctx.api.delete_single_command.assert_not_awaited()
+    assert result["updated_ip"] is True
+
+
+def test_an_address_update_without_a_wrong_address_writes_nothing() -> None:
+    button = _sync_button()
+    ctx = _ctx("update_ip")
+
+    result = asyncio.run(button._sync_class(ctx, MARKER, "7", [_item("1")], [], [_item("2")], [], [], False, 10, 50))
+
+    ctx.api.update_webio_device_ip.assert_not_awaited()
+    ctx.api.save_single_command.assert_not_awaited()
+    ctx.api.delete_single_command.assert_not_awaited()
+    assert not result["updated_ip"]
 
 
 # --- repair issue ---
