@@ -72,7 +72,8 @@ DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind, markise, awning"
 LEGACY_DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
 
 # Where the Web-IO devices push to (#165): the resolved address (ha_address.py), the host and port of
-# HA's external_url, or a URL of the user's own; the protocol (HTTP/HTTPS) follows the URL's scheme.
+# HA's external_url, or a URL of the user's own. Only host and port are written to the Web-IO devices;
+# their commands keep HTTP whatever the scheme (Comexio picks HTTP or HTTPS itself).
 CONF_WEBHOOK_ADDRESS_MODE = "webhook_address_mode"
 CONF_WEBHOOK_URL = "webhook_url"
 WEBHOOK_ADDRESS_AUTO = "auto"

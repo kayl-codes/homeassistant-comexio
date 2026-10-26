@@ -36,8 +36,10 @@ foreign; set internal_url to that address there.
 
 All of the above is the automatic webhook address (#165). The other modes take host and port of a URL
 as they are, with no check against the own addresses: HA's external_url, or a URL of the user's own.
-The protocol follows the URL's scheme; automatically, the scheme of internal_url (HA's own TLS setting
-without one). A mode whose URL is unusable (external_url removed since) falls back to the automatic
+Only host and port reach the Web-IO devices: their commands keep HTTP whatever the scheme, Comexio picks
+HTTP or HTTPS itself. The scheme only decides whether an http:// URL is allowed (webhook_url_error); for
+the automatic address it is the one of internal_url (HA's own TLS setting without one). A mode whose URL
+is unusable (external_url removed since) falls back to the automatic
 address, warned once.
 """
 
@@ -53,7 +55,6 @@ import time
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
-from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS
 from homeassistant.components.network.util import async_load_adapters
 from homeassistant.core import HomeAssistant
 
@@ -104,18 +105,6 @@ class WebhookTarget(NamedTuple):
 
     address: str
     https: bool
-
-    @property
-    def webio_protocol(self) -> int:
-        """The protocol the Web-IO commands carry (aiocomexio WEBIO_PROTOCOL_*) to reach this target.
-
-        Comexio speaks TLS to port 443 by itself, even with the commands on HTTP (live verified with
-        FW 11.1.4): only HTTPS on another port needs the HTTPS protocol, and switching to it rewrites
-        every command of a class, while a new device address alone is one write.
-        """
-        if self.https and self.address.rsplit(":", 1)[-1] != str(_SCHEME_PORTS["https"]):
-            return WEBIO_PROTOCOL_HTTPS
-        return WEBIO_PROTOCOL_HTTP
 
 
 # Resolver errors that mean "this name does not exist"; anything else (EAI_AGAIN while DNS is not
@@ -334,7 +323,7 @@ class HaAddressResolver:
         return (await self.async_target(*hints)).address
 
     async def async_target(self, *hints: str | None) -> WebhookTarget:
-        """The address and protocol for Comexio webhooks.
+        """The address for Comexio webhooks, and whether HA serves it over HTTPS.
 
         hints: the addresses the Web-IO devices already store (see webio_device_hints), checked in
         order before the homeassistant.<domain> name found last time — only for the automatic address.

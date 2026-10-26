@@ -132,8 +132,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # instance has nothing cached yet, so if its very first live catalog fetch fails, this
     # restores last known-good data instead of leaving DPT3.x composite pairs untagged.
     await coordinator.async_load_knx_dpt_catalog()
-    # The protocol each Web-IO class was last written with, before the first audit compares against it.
-    await coordinator.async_load_webio_protocols()
 
     if entry.entry_id in _setup_unreachable_entries(hass):
         # The last attempt could not reach Comexio, which may still be booting: the first refresh starts the grace.

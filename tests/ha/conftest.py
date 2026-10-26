@@ -177,7 +177,7 @@ def mock_comexio_api(
         patch("custom_components.comexio.certificate.ComexioAPI", side_effect=_factory),
         patch("custom_components.comexio.config_flow.ComexioAPI", side_effect=_factory),
         # DNS and sockets are disabled in tests; the resolver's own logic has unit tests (test_ha_address.py).
-        # Patched below async_target, so the address mode and protocol around the search still run for real.
+        # Patched below async_target, so the address mode around the search still runs for real.
         patch("custom_components.comexio.ha_address.HaAddressResolver._async_get", return_value=HA_ADDRESS),
     ):
         yield created
