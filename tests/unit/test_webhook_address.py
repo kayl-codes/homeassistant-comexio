@@ -7,6 +7,7 @@ write per class and never rewrites a command.
 """
 
 import asyncio
+import datetime
 import inspect
 import json
 import logging
@@ -436,7 +437,7 @@ def _ctx(action: str) -> _SyncContext:
         action=action,
         ha_address="192.0.2.10:8443",
         webio_devices_audit={MARKER: {"base_id": "3"}},
-        start_time=MagicMock(),
+        start_time=datetime.datetime.now(),
         class_names={cls: f"HomeAssistant {cls}" for cls in WEBIO_CLASSES},
         update_status=MagicMock(),
     )
@@ -445,7 +446,7 @@ def _ctx(action: str) -> _SyncContext:
 def _sync_button() -> ComexioSyncButton:
     button = ComexioSyncButton.__new__(ComexioSyncButton)
     button.server_id = "cx1"
-    # Nothing but the cancel flag: a sync that still recorded a protocol on the coordinator would fail here.
+    # Nothing but the cancel flag: a sync that still called a protocol record method on the coordinator fails here.
     button.coordinator = SimpleNamespace(cancel_sync=False)  # type: ignore[assignment]
     button._async_fast_track = AsyncMock(return_value=True)  # type: ignore[method-assign]
     button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
@@ -469,14 +470,17 @@ def test_an_address_change_writes_only_the_device() -> None:
     assert not ctx.failed_writes
 
 
-def test_a_full_sync_writes_the_address_to_the_device_and_no_command() -> None:
+@pytest.mark.parametrize("type_fixes", [0, 1])
+def test_a_full_sync_writes_the_address_to_the_device_and_no_command(type_fixes: int) -> None:
+    """The address adds the device write only: the commands written are exactly the type fixes."""
     button = _sync_button()
     ctx = _ctx("full_sync")
+    types = [_item("2")] * type_fixes
 
-    result = asyncio.run(button._sync_class(ctx, MARKER, "7", [], [], [], [], [], True, 10, 50))
+    result = asyncio.run(button._sync_class(ctx, MARKER, "7", [], [], types, [], [], True, 10, 50))
 
     ctx.api.update_webio_device_ip.assert_awaited_once_with("7", "192.0.2.10:8443", f"HomeAssistant {MARKER}")
-    ctx.api.save_single_command.assert_not_awaited()
+    assert ctx.api.save_single_command.await_count == type_fixes
     ctx.api.delete_single_command.assert_not_awaited()
     assert result["updated_ip"] is True
 
