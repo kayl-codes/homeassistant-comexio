@@ -688,6 +688,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if not await self._async_acquire_sync_lock(notify_enabled):
             return
         self.coordinator.in_sync = True
+        # A cancel belongs to the run it was pressed in, never to the next one.
+        self.coordinator.cancel_sync = False
         self.coordinator.sync_error = False
         self.coordinator.sync_failed_writes = []
 
@@ -959,7 +961,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             for idx, cls in enumerate(active_classes)
         }
 
-        for cls in active_classes:
+        for idx, cls in enumerate(active_classes):
+            # A cancel stops before the next class: its Fast-Track would delete the device, its delta tasks write.
+            if getattr(self.coordinator, "cancel_sync", False):
+                skipped = [webio_class_label(c) for c in active_classes[idx:]]
+                _LOGGER.info("[%s] Sync cancelled: skipping class(es) %s", self.server_id, ", ".join(skipped))
+                ctx.failed_writes.extend(f"{label}: skipped (cancelled)" for label in skipped)
+                break
             pct_start, pct_end = class_pct_ranges[cls]
             cls_result = await self._sync_class(
                 ctx,

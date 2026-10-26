@@ -16,7 +16,13 @@ import pytest
 
 from custom_components.comexio import button as button_module
 from custom_components.comexio.button import ComexioSyncButton, _SyncContext
-from custom_components.comexio.const import SYNC_DURATION_RECREATE, SYNC_DURATION_WRITE, WEBIO_CLASSES, WebioClass
+from custom_components.comexio.const import (
+    SYNC_DURATION_RECREATE,
+    SYNC_DURATION_WRITE,
+    WEBIO_CLASSES,
+    WebioClass,
+    webio_class_label,
+)
 from custom_components.comexio.coordinator import _device_ip_mismatch
 from custom_components.comexio.ha_address import HaAddressResolver, is_loopback_address
 
@@ -125,6 +131,36 @@ def test_a_sync_runs_when_no_device_gets_a_loopback_address(ha_address: str, dev
     dev_ids = dict.fromkeys(WEBIO_CLASSES, dev_id)
 
     asyncio.run(button._sync_all_classes(ctx, {}, dev_ids))
+
+    assert button._sync_class.await_count == len(WEBIO_CLASSES)
+
+
+@pytest.mark.parametrize(("cancelled_before", "synced"), [(False, [WEBIO_CLASSES[0]]), (True, [])])
+def test_a_cancel_stops_the_sync_before_the_next_class(cancelled_before: bool, synced: list[str]) -> None:
+    """A cancel during one class used to leave the later classes running — Fast-Track (device delete) included."""
+    button = _button(REACHABLE)
+    button.coordinator.cancel_sync = cancelled_before
+    ctx = _ctx(button, REACHABLE)
+
+    async def cancel_during_the_class(*_args: Any) -> dict[str, Any]:
+        button.coordinator.cancel_sync = True
+        return {**_CLASS_RESULT, "added": 2}
+
+    button._sync_class = AsyncMock(side_effect=cancel_during_the_class)  # type: ignore[method-assign]
+
+    result = asyncio.run(button._sync_all_classes(ctx, {}, dict.fromkeys(WEBIO_CLASSES, "7")))
+
+    assert [call.args[1] for call in button._sync_class.await_args_list] == synced
+    assert result[0] == 2 * len(synced)  # the class that ran still counts in the result
+    # The skipped classes are named in the result, not only in the log.
+    skipped = WEBIO_CLASSES[len(synced) :]
+    assert ctx.failed_writes == [f"{webio_class_label(cls)}: skipped (cancelled)" for cls in skipped]
+
+
+def test_a_new_sync_does_not_inherit_a_stale_cancel() -> None:
+    button = _button(REACHABLE)
+    button.coordinator.cancel_sync = True
+    _press(button)
 
     assert button._sync_class.await_count == len(WEBIO_CLASSES)
 
