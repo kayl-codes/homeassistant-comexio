@@ -150,6 +150,21 @@ def test_a_rule_only_one_side_has_differs() -> None:
     assert rules_not_matching({"rules": []}, {"rules": {"1": _RULE}}, ()) == ["user_event_1"]
 
 
+@pytest.mark.parametrize(("live_value", "expected"), [("50;0;0", []), ("70;0;0", ["#2"])], ids=["same", "value"])
+def test_rules_without_an_event_are_matched_by_their_position(live_value: str, expected: list) -> None:
+    # A rebuilt module numbers its rows anew: rows 9/12 of the backup are rows 40/41 now.
+    blank = _RULE | {"ByDay": ""}
+    wanted = {"rules": {"9": blank, "12": blank | {"ByDay": None, "Value": "50;0;0"}}}
+    live = {"rules": {"40": blank | {"Id": 40}, "41": blank | {"Id": 41, "ByDay": None, "Value": live_value}}}
+    assert rules_not_matching(wanted, live, ()) == expected
+
+
+def test_a_rule_without_an_event_is_counted_among_those_only() -> None:
+    # Row order differs around a rule with an event: it does not shift the position of the one without.
+    blank = _RULE | {"ByDay": ""}
+    assert rules_not_matching({"rules": {"5": blank, "9": _RULE}}, {"rules": {"40": _RULE, "41": blank}}, ()) == []
+
+
 # ---------------------------------------------------------------------------
 # Rebuilding a plan: place, then configure
 # ---------------------------------------------------------------------------
@@ -486,15 +501,15 @@ def test_in_place_names_rules_that_differ(configs: dict[str, Any], tables: dict[
     assert restore.rules == {"134": ["window"]}
 
 
-def test_in_place_without_stored_configs_writes_nothing() -> None:
-    api = _in_place_api(None)
+def test_in_place_without_stored_configs_writes_nothing(tables: dict[str, Any]) -> None:
+    api = _in_place_api(tables)
 
     # A backup from before configs were captured: its blocks keep whatever Comexio has.
     missing = _in_place(api, None)
     assert (missing.configs_missing, missing.ok()) == (True, False)
     api.get_raw_config.assert_not_awaited()
 
-    # Captured, but no block was ever saved: nothing to write.
+    # Captured, but no block was ever saved, nor is the live one (#131 has no scene row): nothing to write.
     assert _in_place(api, {}).ok()
     api.function_plan_save_scene.assert_not_awaited()
     api.function_plan_save_quantum_settings.assert_not_awaited()
@@ -512,6 +527,26 @@ def test_in_place_names_a_scene_saved_since_the_backup(tables: dict[str, Any]) -
         "element #131: scene not reset to Comexio's default (the backup's, never saved) — reset it in Comexio Studio"
     ]
     api.function_plan_save_scene.assert_not_awaited()
+
+
+@pytest.mark.parametrize("readable", [None, {"20": {}}], ids=["page-not-reloaded", "scene-table-unreadable"])
+def test_in_place_names_a_never_saved_scene_it_cannot_check(readable: dict[str, Any] | None) -> None:
+    api = _in_place_api(readable)
+
+    restore = _in_place(api, {})
+
+    assert restore.problems == [
+        "element #131: scene not checked for Comexio's default (the backup's, never saved) — Comexio's scene "
+        "table could not be read"
+    ]
+    assert not restore.ok()
+
+
+def test_in_place_checks_a_never_saved_scene_against_an_empty_scene_table() -> None:
+    # Readable, just no scene saved anywhere: checked, nothing to report.
+    restore = _in_place(_in_place_api({"13": {}}), {})
+
+    assert (restore.problems, restore.ok()) == ([], True)
 
 
 # ---------------------------------------------------------------------------

@@ -269,8 +269,9 @@ async def restore_in_place(
 
     element_map / live_plan: the snapshot's elements matched to the reloaded plan's, and that plan;
     None when it could not be reloaded. The config page is reloaded first: a Quantum module's
-    type can only be checked against it. A transport failure stops the writes and is reported, so
-    the plan the restore already applied stays reported as well.
+    type can only be checked against it; when that reload fails, the scene configs (which need no
+    table) are still written. A transport failure while writing stops the writes and is reported,
+    so the plan the restore already applied stays reported as well.
     """
     restore = ModuleConfigRestore.for_snapshot(snapshot)
     configs = restore.configs
@@ -281,8 +282,26 @@ async def restore_in_place(
         restore.problems.append("not restored — the plan could not be reloaded to match its blocks")
         return restore
     tables = await _reload_tables(api)
-    live_elements = live_plan.get("elements") or {}
-    for old_id, entry in (configs or {}).items():
+    await _write_all_in_place(api, configs or {}, element_map, live_plan.get("elements") or {}, tables, restore)
+    _note_unsaved_scenes(restore, unsaved_scenes, element_map, tables)
+    # Rules are compared on the page read before the writes: saving settings changes no rule
+    # field the comparison looks at. A reload after writing refreshes the cached configs.
+    _compare_rules(restore, tables)
+    if restore.restored:
+        await _reload_tables(api)
+    return restore
+
+
+async def _write_all_in_place(
+    api,
+    configs: ModuleConfigs,
+    element_map: Mapping[str, Any],
+    live_elements: Mapping[str, Any],
+    tables: Mapping[str, Mapping[str, Any]] | None,
+    restore: ModuleConfigRestore,
+) -> None:
+    """Write each stored config onto the live block it was matched to; a transport failure stops the writes."""
+    for old_id, entry in configs.items():
         if (live_id := _positive(element_map.get(old_id))) is None:
             restore.problems.append(f"no restored element for backup element #{old_id}")
             continue
@@ -297,13 +316,6 @@ async def restore_in_place(
                 f"element #{live_id}: writing its config failed (connection) — the remaining configs were not written"
             )
             break
-    _note_unsaved_scenes(restore, unsaved_scenes, element_map, tables)
-    # Rules are compared on the page read before the writes: saving settings changes no rule
-    # field the comparison looks at. A reload after writing refreshes the cached configs.
-    _compare_rules(restore, tables)
-    if restore.restored:
-        await _reload_tables(api)
-    return restore
 
 
 def _note_unsaved_scenes(
@@ -314,13 +326,19 @@ def _note_unsaved_scenes(
 ) -> None:
     """Name the scene blocks saved in Comexio since a backup that stores them unsaved (Comexio's default scene).
 
-    Comexio cannot reset a scene to its default, and save_scene refuses an empty config.
+    Comexio cannot reset a scene to its default, and save_scene refuses an empty config. Without a
+    readable scene table each of them is named unchecked.
     """
-    if not unsaved_scenes or tables is None:
-        return
-    scenes = tables.get(SCENE_TYPE) or {}
+    scenes = None if tables is None else tables.get(SCENE_TYPE)
     for old_id in unsaved_scenes:
-        if (live_id := _positive(element_map.get(old_id))) is not None and str(live_id) in scenes:
+        if (live_id := _positive(element_map.get(old_id))) is None:
+            continue
+        if scenes is None:
+            restore.problems.append(
+                f"element #{live_id}: scene not checked for Comexio's default (the backup's, never saved) — "
+                "Comexio's scene table could not be read"
+            )
+        elif str(live_id) in scenes:
             restore.problems.append(
                 f"element #{live_id}: scene not reset to Comexio's default (the backup's, never saved) — "
                 "reset it in Comexio Studio"

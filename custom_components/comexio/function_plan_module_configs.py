@@ -425,8 +425,9 @@ def rules_not_matching(wanted: Mapping[str, Any], live: Mapping[str, Any], setti
     """The events (ByDay) of the rules that differ between a stored Quantum config and the live one.
 
     Rules are matched by the event they react to: a module created by a restore numbers its rule
-    rows anew. A rule only one side has counts. The name of a rule whose event is one of the
-    settings (user_event_N) is left out: it follows that setting, which the restore writes.
+    rows anew, so a rule without an event is matched by its position among those. A rule only one
+    side has counts. The name of a rule whose event is one of the settings (user_event_N) is left
+    out: it follows that setting, which the restore writes.
     """
     named = frozenset(settings)
     want, have = _rules_by_event(wanted), _rules_by_event(live)
@@ -441,7 +442,16 @@ def rules_not_matching(wanted: Mapping[str, Any], live: Mapping[str, Any], setti
 
 
 def _rules_by_event(config: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    return {str(rule.get("ByDay") or f"#{row_id}"): rule for row_id, rule in _items(config.get("rules"))}
+    """{event: rule}; a rule without an event is keyed "#n" by its position among those, not by its row id."""
+    rules: dict[str, Mapping[str, Any]] = {}
+    without_event = 0
+    for _row_id, rule in _items(config.get("rules")):
+        if event := rule.get("ByDay"):
+            rules[str(event)] = rule
+        else:
+            without_event += 1
+            rules[f"#{without_event}"] = rule
+    return rules
 
 
 def _rule(rule: Mapping[str, Any] | None, name_follows_setting: bool) -> dict[str, str] | None:
