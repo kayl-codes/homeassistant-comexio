@@ -742,7 +742,6 @@ def _issue_writer(fub_data: dict) -> ComexioCoordinator:
         **dict.fromkeys(coordinator_module._PLAN_AUDIT_BUCKETS, {}),
         "missing": {"m1": {}},
         "ip_mismatch": False,
-        "protocol": [],
     }
     coordinator._cleanup_entity_ids = []
     coordinator._cleanup_function_plan_count = 0
