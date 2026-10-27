@@ -7806,7 +7806,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for fid, members in membership.items():
             new_members = [*members, ext]
             if self._io_plan_takes(fid, new_members, kind, capacity, fresh_orientations.get(fid)):
-                if not await self._rename_io_plan(fid, self._io_plan_name(prefix, new_members, kind)):
+                renamed = await self._rename_io_plan_confirmed(fid, self._io_plan_name(prefix, new_members, kind))
+                if renamed is None:
+                    # Not known whether Comexio applied it: a fresh plan could hold the member twice.
+                    _LOGGER.error(
+                        "[%s] '%s' not placed: the rename of %s plan fub=%s may have been applied, and the plan"
+                        " list could not be read in full to tell — the next sync places it",
+                        self.server_id,
+                        one_line(kind.member_label(self.data, ext)),
+                        kind.label,
+                        fid,
+                    )
+                    return None
+                if not renamed:
                     _LOGGER.warning(
                         "[%s] Could not rename %s plan fub=%s to add '%s' — creating a fresh plan instead",
                         self.server_id,
@@ -7860,6 +7872,35 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Row slots one column offers on a fresh A3 plan of the given orientation."""
         _, y_max = self.api.get_fub_canvas_bounds(-1, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
         return max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+
+    async def _rename_io_plan_confirmed(self, fub_id: int, new_name: str) -> bool | None:
+        """_rename_io_plan, confirmed against a fresh plan list when it reports a failure.
+
+        A request whose answer got lost (timeout) may still have renamed the plan. None: the plan
+        list could not be read again, so whether the rename took effect is unknown.
+        """
+        if await self._rename_io_plan(fub_id, new_name):
+            return True
+        try:
+            raw_config = await self.api.get_raw_config()
+        except UNREACHABLE_ERRORS as err:
+            _LOGGER.warning("[%s] Plan list not read again after the rename of fub=%s: %r", self.server_id, fub_id, err)
+            return None
+        if not raw_config:
+            return None
+        # parse_config takes the fresh plan list into the cache that function_plan_name reads.
+        self.api.parse_config(raw_config)
+        if unreadable_plan_keys(self.api.fub_data):
+            return None
+        if self.api.function_plan_name(fub_id) == new_name:
+            _LOGGER.info(
+                "[%s] The rename of plan fub=%s to '%s' took effect after all",
+                self.server_id,
+                fub_id,
+                one_line(new_name),
+            )
+            return True
+        return False
 
     async def _rename_io_plan(self, fub_id: int, new_name: str) -> bool:
         """Rename a managed IO plan (membership join), keeping paper/DPI/orientation as-is."""

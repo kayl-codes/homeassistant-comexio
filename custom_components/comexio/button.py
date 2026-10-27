@@ -1,6 +1,6 @@
 # Version: 0.7.6
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 import contextlib
 from dataclasses import dataclass, field
 import datetime
@@ -2296,22 +2296,23 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"add_trigger_pairs {[f'{prefix}{m}' for m in missing_ids]}"
         )
-        await api.function_plan_stop_fup(fub_id)
-        added, errors = await api.function_plan_add_trigger_pairs(
-            fub_id, wire_ids, fresh_plan=is_fresh, ref_type=wire_ref_type
-        )
-        errors = bridge_errors + errors
-        if errors:
-            _LOGGER.warning("[%s] function_plan_add_trigger_pairs errors: %s", self.server_id, errors)
-            ctx.failed_writes.append(_plan_failure(plan_name, f"{len(errors)} error(s)"))
-        note = ""
-        if added and not is_fresh:
-            # was_active=False: the plan stays stopped here, the activation below follows.
-            note = await self._sort_checked(ctx, fub_id, plan_name, was_active=False)
-        if is_fresh or was_active:
-            # create_fup always creates plans inactive (fub_active="0") — a fresh plan must be
-            # activated unconditionally, was_active=False would otherwise leave it stopped forever.
-            note += _activation_note(ctx, plan_name, await api.function_plan_run_fup(fub_id))
+        async with self._plan_restarted_on_error(api, fub_id, is_fresh):
+            await api.function_plan_stop_fup(fub_id)
+            added, errors = await api.function_plan_add_trigger_pairs(
+                fub_id, wire_ids, fresh_plan=is_fresh, ref_type=wire_ref_type
+            )
+            errors = bridge_errors + errors
+            if errors:
+                _LOGGER.warning("[%s] function_plan_add_trigger_pairs errors: %s", self.server_id, errors)
+                ctx.failed_writes.append(_plan_failure(plan_name, f"{len(errors)} error(s)"))
+            note = ""
+            if added and not is_fresh:
+                # was_active=False: the plan stays stopped here, the activation below follows.
+                note = await self._sort_checked(ctx, fub_id, plan_name, was_active=False)
+            if is_fresh or was_active:
+                # create_fup always creates plans inactive (fub_active="0") — a fresh plan must be
+                # activated unconditionally, was_active=False would otherwise leave it stopped forever.
+                note += _activation_note(ctx, plan_name, await api.function_plan_run_fup(fub_id))
         return _plan_summary_line(plan_name, is_fresh, len(added), len(missing_ids), "trigger pairs", t0, note, errors)
 
     async def _remove_trigger_pairs(self, ctx: _SyncContext, orphan_ids: list[int], ref_type: int = 2) -> str:
@@ -2412,9 +2413,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         for fub_id, cluster_ids in plan_to_ids.items():
             if getattr(self.coordinator, "cancel_sync", False):
                 break
-            line, lp_added, lp_errors = await self._add_pairs_to_plan(
-                ctx, fub_id, sorted(cluster_ids), fub_id in created_plans, progress_state, ref_type
-            )
+            async with self._plan_restarted_on_error(ctx.api, fub_id, fub_id in created_plans):
+                line, lp_added, lp_errors = await self._add_pairs_to_plan(
+                    ctx, fub_id, sorted(cluster_ids), fub_id in created_plans, progress_state, ref_type
+                )
             if lp_errors:
                 ctx.failed_writes.append(_plan_failure(self._plan_name(fub_id), f"{len(lp_errors)} error(s)"))
             summary.append(line)
@@ -2545,17 +2547,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             # finalize cycle instead of one leg's own.
             if getattr(self.coordinator, "cancel_sync", False):
                 break
-            line = await self._wire_knx_cluster(
-                ctx,
-                fub_id,
-                sorted(cluster_ids),
-                fub_id in created_plans,
-                read_path_ids,
-                bridge_by_id,
-                loopback_by_id,
-                progress_state,
-                prestage,
-            )
+            async with self._plan_restarted_on_error(ctx.api, fub_id, fub_id in created_plans):
+                line = await self._wire_knx_cluster(
+                    ctx,
+                    fub_id,
+                    sorted(cluster_ids),
+                    fub_id in created_plans,
+                    read_path_ids,
+                    bridge_by_id,
+                    loopback_by_id,
+                    progress_state,
+                    prestage,
+                )
             if line:
                 summary.append(line)
         return summary
@@ -2822,48 +2825,34 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         all_errors: list[str] = []
         parts: list[str] = []
 
-        try:
-            if read_ids:
-                added, errors, part = await self._wire_knx_leg_read_path(
-                    ctx, fub_id, plan_name, read_ids, progress_state
-                )
-                all_added.extend(added)
-                all_errors.extend(errors)
-                parts.append(part)
+        # Anything escaping the three legs (most legs isolate their own known failure modes, see
+        # _wire_knx_leg_bridge's re-audit try/except) or the finalization below: the caller's
+        # _plan_restarted_on_error starts the plan again before the error propagates.
+        if read_ids:
+            added, errors, part = await self._wire_knx_leg_read_path(ctx, fub_id, plan_name, read_ids, progress_state)
+            all_added.extend(added)
+            all_errors.extend(errors)
+            parts.append(part)
 
-            if bridge_items:
-                added, errors, part, new_loopback_items = await self._wire_knx_leg_bridge(
-                    ctx, fub_id, plan_name, bridge_items, loopback_by_id, progress_state, prestage.allocated
-                )
-                all_added.extend(added)
-                all_errors.extend(errors)
-                parts.append(part)
-                # _wire_knx_full's upfront total already reserved a leg-3 slot for every open
-                # bridge — release the slots of bridges that did not come out of leg 2.
-                progress_state["total"] -= len(bridge_items) - len(new_loopback_items)
-                loopback_items = loopback_items + new_loopback_items
+        if bridge_items:
+            added, errors, part, new_loopback_items = await self._wire_knx_leg_bridge(
+                ctx, fub_id, plan_name, bridge_items, loopback_by_id, progress_state, prestage.allocated
+            )
+            all_added.extend(added)
+            all_errors.extend(errors)
+            parts.append(part)
+            # _wire_knx_full's upfront total already reserved a leg-3 slot for every open
+            # bridge — release the slots of bridges that did not come out of leg 2.
+            progress_state["total"] -= len(bridge_items) - len(new_loopback_items)
+            loopback_items += new_loopback_items
 
-            if loopback_items:
-                added, errors, part = await self._wire_knx_leg_loopback(
-                    ctx, fub_id, plan_name, loopback_items, progress_state, prestage.preembedded
-                )
-                all_added.extend(added)
-                all_errors.extend(errors)
-                parts.append(part)
-        except (Exception, asyncio.CancelledError):
-            # Anything unexpected escaping the three legs above (most legs already isolate their
-            # own known failure modes, see _wire_knx_leg_bridge's re-audit try/except) must not
-            # leave the plan stopped on the real Comexio server with no indication to the user —
-            # async_handle_press' own except Exception only reports "Error: ..." and never
-            # restarts a plan itself. Best-effort restart before letting the exception propagate,
-            # same failure class _remove_trigger_pairs already guards for its own single write.
-            # asyncio.CancelledError is listed explicitly — it subclasses BaseException, not
-            # Exception, since Python 3.8, so a cancelled sync (HA shutdown, config-entry
-            # reload, a cancelled service call) would otherwise skip this restart entirely and
-            # leave the managed plan permanently stopped (Sourcery finding, review 2026-09-23).
-            if was_active:
-                await api.function_plan_run_fup(fub_id)
-            raise
+        if loopback_items:
+            added, errors, part = await self._wire_knx_leg_loopback(
+                ctx, fub_id, plan_name, loopback_items, progress_state, prestage.preembedded
+            )
+            all_added.extend(added)
+            all_errors.extend(errors)
+            parts.append(part)
 
         if all_errors:
             _LOGGER.warning("[%s] _wire_knx_cluster errors on fub=%s: %s", self.server_id, fub_id, all_errors)
@@ -2938,21 +2927,63 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         for fub_id, ext_cols in plan_exts.items():
             if getattr(self.coordinator, "cancel_sync", False):
                 break
-            line, lp_added, lp_errors = await self._add_io_pairs_to_plan(
-                ctx,
-                fub_id,
-                sorted(ext_cols, key=lambda t: t[1]),
-                by_ext,
-                fub_id in created_plans,
-                progress_state,
-                kind,
-            )
+            async with self._plan_restarted_on_error(ctx.api, fub_id, fub_id in created_plans):
+                line, lp_added, lp_errors = await self._add_io_pairs_to_plan(
+                    ctx,
+                    fub_id,
+                    sorted(ext_cols, key=lambda t: t[1]),
+                    by_ext,
+                    fub_id in created_plans,
+                    progress_state,
+                    kind,
+                )
             if lp_errors:
                 ctx.failed_writes.append(_plan_failure(self._plan_name(fub_id), f"{len(lp_errors)} error(s)"))
             summary.append(line)
             added += len(lp_added)
             errors += len(lp_errors)
         return summary, added, errors
+
+    @contextlib.asynccontextmanager
+    async def _plan_restarted_on_error(self, api: Any, fub_id: int, is_fresh: bool) -> AsyncIterator[None]:
+        """Start a plan again that a pair write stopped and then left by raising before its finalization.
+
+        Otherwise a plan that ran stays stopped, and the next sync reads it as one that was off and
+        leaves it so. Started as the finalization would have: a fresh plan, or one that ran before
+        the write (a plan the cache does not know counts as running, as for the writers). The
+        write's error propagates; a failed start only logs (the plan watchdog then reports the
+        stopped plan). asyncio.CancelledError too: a cancelled sync (HA shutdown, entry reload, a
+        cancelled service call) would leave the plan stopped as well (Sourcery, review 2026-09-23).
+        """
+        start = is_fresh or api.get_fub_active(fub_id) is not False
+        try:
+            yield
+        except (Exception, asyncio.CancelledError) as err:
+            if start and api.get_fub_active(fub_id) is not True:
+                await self._start_plan_after_failed_write(api, fub_id, err)
+            raise
+
+    async def _start_plan_after_failed_write(self, api: Any, fub_id: int, err: BaseException) -> None:
+        """_plan_restarted_on_error's start, which must not replace the write's own error."""
+        try:
+            started = await api.function_plan_run_fup(fub_id)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] fub=%s stays stopped: its start after a failed pair write (%r) raised",
+                self.server_id,
+                fub_id,
+                err,
+            )
+            return
+        if started:
+            _LOGGER.warning("[%s] fub=%s started again after its pair write failed (%r)", self.server_id, fub_id, err)
+        else:
+            _LOGGER.error(
+                "[%s] fub=%s stays stopped: Comexio did not confirm its start after a failed pair write (%r)",
+                self.server_id,
+                fub_id,
+                err,
+            )
 
     def _plan_name(self, fub_id: int) -> str:
         """Live name of a plan, falling back to its fub_id when it isn't in the cache."""

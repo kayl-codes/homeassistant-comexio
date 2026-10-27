@@ -3,8 +3,11 @@
 import asyncio
 import logging
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from aiocomexio import ComexioConnectionError
+import aiohttp
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
@@ -12,6 +15,7 @@ from custom_components.comexio.const import (
     IO_PLAN_KIND_IO,
     IO_PLAN_KIND_QUICKBUS,
     PLAN_FAILURE_AFTER_GONE_MEMBER,
+    PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_OFF_CANVAS,
     IoPlanKind,
     WebioClass,
@@ -363,8 +367,22 @@ def test_a_quickbus_device_joins_no_plan_whose_canvas_lacks_the_column() -> None
     coordinator._rename_io_plan.assert_not_awaited()
 
 
+def _plan_list(name: str) -> dict[str, Any]:
+    """A config page whose plan list holds plan 47 under name."""
+    return {"Fubs": {"47": {"Name": name}, "3": {"Name": "Lights"}}}
+
+
+def _reread_plan_list(coordinator: ComexioCoordinator, fetched: dict[str, Any] | Exception) -> None:
+    """Let a config fetch return fetched (raise it, if an error)."""
+    api = coordinator.api
+    api.get_raw_config = AsyncMock(side_effect=[fetched])
+    api.parse_config = lambda conf: api.fub_data.update(conf["Fubs"])
+    api.function_plan_name = lambda fub_id: api.fub_data[str(fub_id)]["Name"]
+
+
 def test_a_failed_join_rename_places_the_member_in_a_fresh_plan() -> None:
     coordinator = _cluster_coordinator("HA - IO [A]", 150, dict.fromkeys("AB", 4), renamed=False, created=9)
+    _reread_plan_list(coordinator, _plan_list("HA - IO [A]"))
 
     placed, created, failed = asyncio.run(coordinator.resolve_io_clusters(["A", "B"]))
 
@@ -372,6 +390,42 @@ def test_a_failed_join_rename_places_the_member_in_a_fresh_plan() -> None:
     assert placed == {"A": (47, (0, 0)), "B": (9, (0, 0))}
     assert (created, failed) == ({9}, {})
     coordinator._persist_plan_map.assert_awaited_once_with({"HA - IO [A]": 47, "HA - IO [B]": 9}, removals=set())
+
+
+def test_a_join_rename_whose_answer_got_lost_still_joins_the_plan() -> None:
+    # Comexio applied the rename, but its answer got lost: a fresh plan would hold B a second time.
+    coordinator = _cluster_coordinator("HA - IO [A]", 150, dict.fromkeys("AB", 4), renamed=False, created=9)
+    _reread_plan_list(coordinator, _plan_list("HA - IO [A,B]"))
+
+    placed, created, failed = asyncio.run(coordinator.resolve_io_clusters(["A", "B"]))
+
+    assert placed == {"A": (47, (0, 0)), "B": (47, (1, 0))}
+    assert (created, failed) == (set(), {})
+    coordinator._create_managed_plan.assert_not_awaited()
+    coordinator._persist_plan_map.assert_awaited_once_with({"HA - IO [A,B]": 47}, removals={"HA - IO [A]"})
+
+
+@pytest.mark.parametrize(
+    "fetched",
+    [
+        {},
+        aiohttp.ClientError("connection lost"),
+        TimeoutError(),
+        ComexioConnectionError("no route"),
+        {"Fubs": {"x": None}},
+    ],
+    ids=["fetch-failed", "transport-error", "timeout", "connection-error", "unreadable-entry"],
+)
+def test_a_failed_join_rename_creates_no_plan_while_the_plan_list_is_unreadable(fetched: object) -> None:
+    coordinator = _cluster_coordinator("HA - IO [A]", 150, dict.fromkeys("AB", 4), renamed=False, created=9)
+    _reread_plan_list(coordinator, fetched)  # type: ignore[arg-type]
+
+    placed, created, failed = asyncio.run(coordinator.resolve_io_clusters(["A", "B"]))
+
+    # Whether plan 47 holds B is unknown: B waits for the next sync instead of landing in a second plan.
+    assert placed == {"A": (47, (0, 0))}
+    assert (created, failed) == (set(), {"B": PLAN_FAILURE_NOT_RESOLVED})
+    coordinator._create_managed_plan.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -547,3 +601,17 @@ def test_a_malformed_plan_list_falls_back_to_the_plan_id(comexio_api: ComexioAPI
 def test_only_a_canonical_plan_key_is_a_plan_id(fid: object, fub_id: int | None) -> None:
     """Every lookup goes by fub_data.get(str(fub_id)): a key in any other spelling is no plan id."""
     assert function_plan_id(fid) == fub_id
+
+
+@pytest.mark.parametrize(("live_name", "confirmed"), [("HA - IO [A,B]", True), ("HA - IO [A]", False)])
+def test_a_rename_confirmation_reads_the_plan_list_parse_config_takes_in(
+    comexio_api: ComexioAPI, live_name: str, confirmed: bool
+) -> None:
+    # The real parse_config must refresh the cache function_plan_name reads, or nothing is confirmed.
+    comexio_api.parse_config({"Fubs": {"47": {"Id": 47, "Name": "HA - IO [A]", "Active": 1}}})
+    comexio_api.get_raw_config = AsyncMock(  # type: ignore[method-assign]
+        return_value={"Fubs": {"47": {"Id": 47, "Name": live_name, "Active": 1}}}
+    )
+    coordinator = _coordinator(server_id="cx1", api=comexio_api, _rename_io_plan=AsyncMock(return_value=False))
+
+    assert asyncio.run(coordinator._rename_io_plan_confirmed(47, "HA - IO [A,B]")) is confirmed
