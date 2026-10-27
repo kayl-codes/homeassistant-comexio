@@ -28,6 +28,7 @@ from custom_components.comexio.const import (
 )
 from custom_components.comexio.coordinator import ComexioCoordinator, _readable_plan_ids
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
+from custom_components.comexio.ha_address import WebhookTarget
 from custom_components.comexio.services import _context, _yaml_sync, misc
 from custom_components.comexio.services._context import _available_plans_str, _resolve_fub_id
 from tests.common import load_json_fixture
@@ -599,7 +600,9 @@ def _audit_coordinator(fub_data: dict) -> ComexioCoordinator:
     """A coordinator whose audit steps are stubbed: no finding unless a test makes one."""
     coordinator = _coordinator(fub_data)
     coordinator.api.build_webio_commands = MagicMock(return_value=[])
-    coordinator.ha_address = SimpleNamespace(async_get=AsyncMock(return_value="10.0.0.2"))
+    coordinator.ha_address = SimpleNamespace(
+        async_target=AsyncMock(return_value=WebhookTarget("10.0.0.2", False)), fallback_reason=None
+    )
     coordinator.last_audit_results = {}
     coordinator._plan_audit_buckets = None
     coordinator._plan_audit_mismatches = set()

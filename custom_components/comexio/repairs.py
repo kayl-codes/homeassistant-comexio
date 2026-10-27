@@ -54,6 +54,7 @@ from .const import (
     ICON_RENAME,
     ICON_ROCKET,
     ICON_SYNC,
+    ICON_WARNING,
     ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
     ISSUE_UNINSTALL_CLEANUP,
@@ -127,6 +128,33 @@ def _add_knx_dpt_suffix_ignored_ids(existing_raw: str, new_ids: set[int]) -> str
         _LOGGER.warning("Dropping invalid entries %s from the KNX DPT suffix ignore list", invalid)
     singles, ranges = split_ignored_ids(existing_raw, prefix_chars)
     return format_ignored_ids(singles | new_ids, ranges, knx_prefix)
+
+
+# Why the webhook URL from the options is unusable (ha_address.webhook_url_error keys): (German, English).
+_ADDRESS_FALLBACK_REASONS = {
+    "invalid_url": ("keine gültige http(s)-Adresse", "not a valid http(s) address"),
+    "loopback_url": ("eine Loopback-Adresse", "a loopback address"),
+    "insecure_url": ("unverschlüsseltes HTTP außerhalb des lokalen Netzes", "plain HTTP outside the local network"),
+}
+
+
+def _address_fallback_note(issue_data: dict, is_de: bool) -> str | None:
+    """The note that the server address fix sets the automatic address instead of the options' URL; None if not."""
+    reason = issue_data.get("address_fallback")
+    if not reason:
+        return None
+    de_reason, en_reason = _ADDRESS_FALLBACK_REASONS.get(reason, (reason, reason))
+    address = issue_data.get("ha_address") or "?"
+    if is_de:
+        return (
+            f"{ICON_WARNING} Die Webhook-URL aus den Optionen ist nicht nutzbar ({de_reason}). Die Korrektur "
+            f"der Server-Adresse setzt stattdessen die automatische Adresse **{address}**. Für die eigene Adresse "
+            "zuerst die URL korrigieren."
+        )
+    return (
+        f"{ICON_WARNING} The webhook URL from the options is unusable ({en_reason}). Fixing the server "
+        f"address sets the automatic address **{address}** instead. Correct the URL first to use your own address."
+    )
 
 
 def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
@@ -772,6 +800,8 @@ class ComexioRepairFlow(RepairsFlow):
                         "Web-IO device does not match the current Home Assistant address. "
                         "This prevents receiving status updates via webhooks."
                     )
+                if fallback := _address_fallback_note(self.issue_data, is_de):
+                    summary += f"\n\n{fallback}"
             else:
                 # CASE 2: Configuration issues (with optional IP mismatch)
                 if is_de:
@@ -816,6 +846,8 @@ class ComexioRepairFlow(RepairsFlow):
                         f"* {ICON_NETWORK} **{'Server-Adresse' if is_de else 'Server Address'}:** "
                         f"{'Falsch' if is_de else 'Incorrect'}"
                     )
+                    if fallback := _address_fallback_note(self.issue_data, is_de):
+                        lines.append(f"  * {fallback}")
 
                 if is_de:
                     footer = f"\n\nWeb-IO-Befehle: {ha_count} (HA) zu {com_count} (Comexio)"
@@ -915,7 +947,7 @@ class ComexioRepairFlow(RepairsFlow):
                     label = f"{ICON_NETWORK} HA Server-Adresse (IP:Port) aktualisieren"
                 else:
                     label = f"{ICON_NETWORK} Update HA Server Address (IP:Port)"
-                specific_options["update_ip"] = f"{label} (~{SYNC_DURATION_WRITE}s)"
+                specific_options["update_ip"] = f"{label} ({format_time(SYNC_DURATION_WRITE).strip()})"
 
             specific_options = _without_refused_plan_options(
                 self.hass, self.issue_data.get("entry_id"), specific_options

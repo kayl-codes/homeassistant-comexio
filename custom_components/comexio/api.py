@@ -23,6 +23,7 @@ from aiocomexio import (
     CreatedFunctionPlan,
     RawConfig,
     SystemInfo,
+    WebioCommandForm,
     config as comexio_config,
     fetch_certificate_fingerprint,
     webio as comexio_webio,
@@ -1853,23 +1854,21 @@ class ComexioAPI:
             return False
         return True
 
-    async def get_webio_command_range(
-        self, cmd_id: str | int, device_id: str | int
-    ) -> tuple[float | None, float | None]:
+    async def get_webio_command_form(self, cmd_id: str | int, device_id: str | int) -> WebioCommandForm | None:
         """Reads a single Web-IO command's live Min/Max from its edit form.
 
         The bulk config scrape ($FubModules["10"], see aiocomexio.config._add_webhook_command) never returns
-        Min/Max for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
+        these fields for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
         edit form is the only reliable source. Used by the nightly range check (see
-        WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against
-        WEBIO_MARKER_ANALOG_MIN/MAX. Returns (None, None) on a fetch failure or a form without
-        min/max fields; a single missing or non-numeric field comes back as None.
+        WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against WEBIO_MARKER_ANALOG_MIN/MAX.
+        Returns None on a fetch failure or a form without min/max fields; a single missing or
+        unreadable field comes back as None.
         """
         try:
-            return await self.client.get_webio_command_range(cmd_id, device_id)
+            return await self.client.get_webio_command_form(cmd_id, device_id)
         except ComexioError as err:
-            _LOGGER.warning("Reading the range of Web-IO command %s failed: %s", cmd_id, err)
-            return None, None
+            _LOGGER.warning("Reading the form of Web-IO command %s failed: %s", cmd_id, err)
+            return None
 
     def build_webio_commands(
         self,
@@ -1887,9 +1886,15 @@ class ComexioAPI:
         ignored_marker_ids / ignored_knx_ids exclude items the user configured as ignored —
         they have no HA entity, so they need no Web-IO command pushing values back via webhook.
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
+        Every command keeps the builder's default protocol (HTTP) whatever the webhook address: Comexio
+        picks HTTP or HTTPS from the device address itself, so an address change never rewrites commands.
         """
         return comexio_webio.build_webio_commands(
-            _webhook_path(server_id), _with_quickbus_ios(parsed_data), webio_class, ignored_marker_ids, ignored_knx_ids
+            _webhook_path(server_id),
+            _with_quickbus_ios(parsed_data),
+            webio_class,
+            ignored_marker_ids,
+            ignored_knx_ids,
         )
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
@@ -1920,7 +1925,8 @@ class ComexioAPI:
         webio_name here is already the class-specific name (see const.webio_class_name) —
         callers append the ' [M]'/' [IO]'/' [KNX]'/' [QB]' suffix before calling this.
         ignored_marker_ids / ignored_knx_ids are forwarded to build_webio_commands() to
-        exclude ignored items.
+        exclude ignored items. Every command keeps the builder's default protocol (HTTP), see
+        build_webio_commands.
         """
         return comexio_webio.generate_webio_json(
             _webhook_path(server_id),

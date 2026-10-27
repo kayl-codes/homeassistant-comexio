@@ -143,6 +143,13 @@
         "take_over_rename": "✏️ Umbenennung übernehmen (Backups ziehen mit)",
         "watch_holder": "👁️ Stattdessen den Plan überwachen, der diese ID jetzt trägt"
       }
+    },
+    "webhook_address_mode": {
+      "options": {
+        "auto": "Automatisch (lokale Adresse)",
+        "external": "Externe HA-URL",
+        "custom": "Eigene Adresse"
+      }
     }
   },
   "options": {
@@ -168,7 +175,8 @@
           "bus_watchdog_enabled": "Bus-Auslastungs-Watchdog aktivieren",
           "bus_watchdog_auto_reboot": "Automatischen Comexio-Neustart bei Notfall-Busauslastung erlauben",
           "function_plan_watchdog_notify": "Logikplan-Watchdog: Push an",
-          "function_plan_watchdog_user_plans": "Logikplan-Watchdog: zusätzlich überwachte Pläne"
+          "function_plan_watchdog_user_plans": "Logikplan-Watchdog: zusätzlich überwachte Pläne",
+          "webhook_address_mode": "Webhook-Adresse (Comexio → HA Push)"
         },
         "data_description": {
           "schema_marker": "Verfügbare Variablen: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -185,13 +193,28 @@
           "bus_watchdog_enabled": "Bei anhaltendem Anstieg der Busauslastung werden die von HA verwalteten Cluster-Logikpläne automatisch (von hinten nach vorne) neu gestartet, um die Auslastung zu entlasten. Greift nicht destruktiv in die Comexio-Anlage selbst ein.",
           "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust.",
           "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Wird ein überwachter eigener Plan in Comexio gelöscht, kommt ebenfalls ein Push, mit den Knöpfen „Wiederherstellen“ (aus seinem neuesten Backup, als neuer Plan) und „Nicht mehr überwachen“; trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), nur „Nicht mehr überwachen“ — Wiederherstellen oder Umbenennung übernehmen dann in der Reparaturmeldung. Zeigt Comexio ein anderes TLS-Zertifikat als das gepinnte, bekommen sie außerdem einen dringenden Push. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
-          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Ein gewählter Plan, der in Comexio gelöscht wurde, wird nicht gestartet: Reparaturmeldung und Push bieten an, ihn aus seinem neuesten Backup wiederherzustellen oder ihn nicht mehr zu überwachen. Ein in Comexio umbenannter Plan mit unverändertem Inhalt wird von selbst übernommen (Auswahl und Backups folgen dem neuen Namen). Trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), bietet die Reparaturmeldung zusätzlich an, stattdessen diesen Plan zu überwachen oder – wenn sein Inhalt dem letzten Backup entspricht – die Umbenennung zu übernehmen (die Backups ziehen mit). Absichtlich gestoppte Pläne (Tests) hier nicht auswählen."
+          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Ein gewählter Plan, der in Comexio gelöscht wurde, wird nicht gestartet: Reparaturmeldung und Push bieten an, ihn aus seinem neuesten Backup wiederherzustellen oder ihn nicht mehr zu überwachen. Ein in Comexio umbenannter Plan mit unverändertem Inhalt wird von selbst übernommen (Auswahl und Backups folgen dem neuen Namen). Trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), bietet die Reparaturmeldung zusätzlich an, stattdessen diesen Plan zu überwachen oder – wenn sein Inhalt dem letzten Backup entspricht – die Umbenennung zu übernehmen (die Backups ziehen mit). Absichtlich gestoppte Pläne (Tests) hier nicht auswählen.",
+          "webhook_address_mode": "Wohin Comexio die Live-Werte sendet. Automatisch: die lokale Adresse von HA. Externe HA-URL: Host und Port der externen URL aus den HA-Netzwerkeinstellungen (https ohne Port bedeutet 443). Eigene Adresse: eine URL, die du im nächsten Schritt eingibst. Mit externer oder eigener Adresse verlässt der Push dein Netzwerk und läuft über das Internet. Danach einen Web-IO-Sync ausführen."
+        }
+      },
+      "webhook_url": {
+        "title": "Eigene Webhook-Adresse",
+        "data": {
+          "webhook_url": "Webhook-URL"
+        },
+        "data_description": {
+          "webhook_url": "Basis-URL von Home Assistant, wie Comexio sie erreichen soll, z. B. {example_url} — ohne Pfad. Ist diese Adresse öffentlich, läuft der Push über das Internet."
         }
       }
     },
     "error": {
       "invalid_number": "Bitte eine gültige Ganzzahl eingeben.",
-      "invalid_schema": "Ungültiges Namensschema. Nur die aufgeführten Variablennamen in geschweiften Klammern verwenden und jede Klammer schließen."
+      "invalid_schema": "Ungültiges Namensschema. Nur die aufgeführten Variablennamen in geschweiften Klammern verwenden und jede Klammer schließen.",
+      "invalid_url": "Gib eine http://- oder https://-URL mit Host ein, ohne Pfad, Query oder Zugangsdaten.",
+      "loopback_url": "Eine Loopback-Adresse (localhost, 127.x, 0.0.0.0) ist von Comexio aus nicht erreichbar.",
+      "insecure_url": "Eine http://-Adresse ist nur im lokalen Netz erlaubt: sonst gingen die Werte unverschlüsselt übers Internet. Verwende https://.",
+      "insecure_external_url": "Die externe URL von Home Assistant ist eine http://-Adresse außerhalb des lokalen Netzes: die Werte gingen unverschlüsselt übers Internet. Lege zuerst eine https://-URL fest.",
+      "no_external_url": "Home Assistant hat keine nutzbare externe URL. Lege sie zuerst unter Einstellungen → System → Netzwerk fest."
     }
   },
   "entity": {

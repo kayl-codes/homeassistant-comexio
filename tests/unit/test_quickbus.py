@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTP
 import pytest
 
 from custom_components.comexio import _quickbus_entity_uids
@@ -59,7 +60,10 @@ def test_quickbus_ios_get_web_io_commands_of_their_own_class(
     parsing_api: ComexioAPI, quickbus_result: dict[str, Any]
 ) -> None:
     assert WebioClass.QUICKBUS in quickbus_result["webio_devices"]
-    names = [cmd["Name"] for cmd in parsing_api.build_webio_commands("test", quickbus_result)]
+    commands = parsing_api.build_webio_commands("test", quickbus_result)
+    # Like every class, the commands are sent over HTTP; Comexio picks HTTPS itself where the device port needs it.
+    assert {cmd["Protocol"] for cmd in commands} == {WEBIO_PROTOCOL_HTTP}
+    names = [cmd["Name"] for cmd in commands]
     assert names == [
         "HA IO BASE I1",
         "HA QB1 MT Flur G1",

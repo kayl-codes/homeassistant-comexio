@@ -26,6 +26,8 @@ from .const import (
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
+    CONF_WEBHOOK_ADDRESS_MODE,
+    CONF_WEBHOOK_URL,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
     DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
@@ -38,6 +40,10 @@ from .const import (
     QUICKBUS_IO_DATA_KEY,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
+    WEBHOOK_ADDRESS_AUTO,
+    WEBHOOK_ADDRESS_CUSTOM,
+    WEBHOOK_ADDRESS_EXTERNAL,
+    WEBHOOK_ADDRESS_MODES,
     SourceCategory,
     WebioClass,
     format_ignored_ids,
@@ -52,6 +58,7 @@ from .const import (
     selected_quickbus_devices,
     watchdog_user_plan_pick,
 )
+from .ha_address import webhook_url_error
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -132,12 +139,31 @@ def _watchdog_user_plan_field(coordinator: Any, conf: dict[str, Any]) -> tuple[l
     return saved, SelectSelector(SelectSelectorConfig(options=options, multiple=True, mode=SelectSelectorMode.DROPDOWN))
 
 
+# Example the custom webhook URL field shows (a description placeholder, see async_step_webhook_url).
+WEBHOOK_URL_EXAMPLE = "https://ha.example.com:8443"
+
+
+def _hidden_categories(
+    source_cats: list[SourceCategory], available_counts: dict, conf: dict[str, Any]
+) -> set[WebioClass]:
+    """The source categories the init step hides: no objects on the server, and not opted in."""
+    return {
+        cat.key
+        for cat in source_cats
+        if available_counts
+        and not available_counts.get(cat.key)
+        and not conf.get(cat.import_conf_key, cat.import_default)
+    }
+
+
 class ComexioOptionsFlow(config_entries.OptionsFlow):
     """Handle options for the component."""
 
     def __init__(self, config_entry):
         """Initialize options flow."""
         self._config_entry = config_entry
+        # The init step's input, held while the custom webhook URL step asks for the URL.
+        self._pending_input: dict[str, Any] = {}
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -153,12 +179,10 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # below (keep already-saved selections choosable even once no longer "current").
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
         available_counts = getattr(coordinator, "available_source_counts", None) or {}
-        hidden_cats = _hidden_source_categories(source_cats, available_counts, conf)
+        hidden_cats = _hidden_categories(source_cats, available_counts, conf)
 
-        if user_input is not None:
-            self._normalize_user_input(user_input, conf, errors, hidden_cats)
-            if not errors:
-                return self._create_options_entry(user_input)
+        if user_input is not None and (result := await self._async_submit_init(user_input, conf, errors, hidden_cats)):
+            return result
 
         # Extension names for the IO cluster multi-select: live coordinator data first,
         # excluding offline extensions (no hardware present — wiring them is pointless),
@@ -198,6 +222,15 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 options=SCAN_INTERVAL_OPTIONS,
                 mode=SelectSelectorMode.DROPDOWN,
                 translation_key="scan_interval",
+            )
+        )
+        schema_dict[
+            vol.Required(CONF_WEBHOOK_ADDRESS_MODE, default=conf.get(CONF_WEBHOOK_ADDRESS_MODE, WEBHOOK_ADDRESS_AUTO))
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=WEBHOOK_ADDRESS_MODES,
+                mode=SelectSelectorMode.DROPDOWN,
+                translation_key="webhook_address_mode",
             )
         )
         schema_dict[
@@ -316,6 +349,45 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_dict), errors=errors)
 
+    async def async_step_webhook_url(self, user_input=None):
+        """Ask for the custom webhook address (only reached with the "custom" webhook address mode)."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            url = user_input.get(CONF_WEBHOOK_URL, "").strip()
+            if error := webhook_url_error(url):
+                errors[CONF_WEBHOOK_URL] = error
+            else:
+                return self._create_options_entry({**self._pending_input, CONF_WEBHOOK_URL: url})
+        conf = {**self._config_entry.data, **self._config_entry.options}
+        schema = vol.Schema({vol.Required(CONF_WEBHOOK_URL, default=conf.get(CONF_WEBHOOK_URL, "")): str})
+        return self.async_show_form(
+            step_id="webhook_url",
+            data_schema=schema,
+            errors=errors,
+            # hassfest allows no URL in a translation string.
+            description_placeholders={"example_url": WEBHOOK_URL_EXAMPLE},
+        )
+
+    async def _async_submit_init(self, user_input: dict, conf: dict, errors: dict, hidden_cats: set[WebioClass]):
+        """Save the init step's input, or open the custom webhook URL step; None: the form again with the errors."""
+        self._normalize_user_input(user_input, conf, errors, hidden_cats)
+        self._validate_webhook_address_mode(user_input, errors)
+        if errors:
+            return None
+        if user_input.get(CONF_WEBHOOK_ADDRESS_MODE) == WEBHOOK_ADDRESS_CUSTOM:
+            self._pending_input = user_input
+            return await self.async_step_webhook_url()
+        return self._create_options_entry(user_input)
+
+    def _validate_webhook_address_mode(self, user_input: dict, errors: dict) -> None:
+        """The "external" mode needs a usable external URL in HA's network settings."""
+        if user_input.get(CONF_WEBHOOK_ADDRESS_MODE) != WEBHOOK_ADDRESS_EXTERNAL:
+            return
+        if (error := webhook_url_error(self.hass.config.external_url)) is not None:
+            errors[CONF_WEBHOOK_ADDRESS_MODE] = (
+                "insecure_external_url" if error == "insecure_url" else "no_external_url"
+            )
+
     @staticmethod
     def _restore_missing_ignored_fields(
         user_input: dict, conf: dict, source_cats: list[SourceCategory], hidden_cats: set[WebioClass]
@@ -385,17 +457,6 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             if not merged_options.get(cat.ignored_conf_key, "").strip():
                 merged_options.pop(cat.ignored_conf_key, None)
         return self.async_create_entry(title="", data=merged_options)
-
-
-def _hidden_source_categories(source_cats, available_counts: Mapping[str, int], conf: Mapping[str, Any]) -> set[str]:
-    """Categories without objects on the server and not opted in; none while the counts are unknown."""
-    return {
-        cat.key
-        for cat in source_cats
-        if available_counts
-        and not available_counts.get(cat.key)
-        and not conf.get(cat.import_conf_key, cat.import_default)
-    }
 
 
 def _io_extension_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[str]:

@@ -10,7 +10,7 @@ import asyncio
 import inspect
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -22,6 +22,7 @@ from custom_components.comexio.const import (
     SYNC_DURATION_WRITE,
     WEBIO_CLASSES,
     WebioClass,
+    webio_class_label,
 )
 from custom_components.comexio.coordinator import _device_ip_mismatch
 from custom_components.comexio.ha_address import HaAddressResolver, is_loopback_address
@@ -137,6 +138,207 @@ def test_a_sync_runs_when_no_device_gets_a_loopback_address(ha_address: str, dev
     asyncio.run(button._sync_all_classes(ctx, {}, dev_ids))
 
     assert button._sync_class.await_count == len(WEBIO_CLASSES)
+
+
+@pytest.mark.parametrize(("cancelled_before", "synced"), [(False, [WEBIO_CLASSES[0]]), (True, [])])
+def test_a_cancel_stops_the_sync_before_the_next_class(cancelled_before: bool, synced: list[str]) -> None:
+    """A cancel during one class used to leave the later classes running — Fast-Track (device delete) included."""
+    button = _button(REACHABLE)
+    button.coordinator.cancel_sync = cancelled_before
+    ctx = _ctx(button, REACHABLE)
+
+    async def cancel_during_the_class(*_args: Any) -> dict[str, Any]:
+        button.coordinator.cancel_sync = True
+        return {**_CLASS_RESULT, "added": 2}
+
+    button._sync_class = AsyncMock(side_effect=cancel_during_the_class)  # type: ignore[method-assign]
+
+    result = asyncio.run(button._sync_all_classes(ctx, {}, dict.fromkeys(WEBIO_CLASSES, "7")))
+
+    assert [call.args[1] for call in button._sync_class.await_args_list] == synced
+    assert result[0] == 2 * len(synced)  # the class that ran still counts in the result
+    # The skipped classes are kept for the cancel banner; a class the user stopped is no failed step.
+    assert ctx.skipped_classes == list(WEBIO_CLASSES[len(synced) :])
+    assert ctx.failed_writes == []
+
+
+def test_a_cancel_during_the_address_comparison_stops_before_the_class() -> None:
+    """The comparison awaits the address resolver; a cancel pressed meanwhile must not start that class."""
+    button = _button(REACHABLE)
+    ctx = _ctx(button, REACHABLE)
+
+    async def cancel_while_comparing(*_args: Any) -> bool:
+        button.coordinator.cancel_sync = True
+        return False
+
+    with patch.object(button_module, "_device_ip_mismatch", AsyncMock(side_effect=cancel_while_comparing)):
+        asyncio.run(button._sync_all_classes(ctx, {}, dict.fromkeys(WEBIO_CLASSES, "7")))
+
+    button._sync_class.assert_not_awaited()
+    assert ctx.skipped_classes == list(WEBIO_CLASSES)
+
+
+def test_a_sync_cancelled_during_the_analysis_is_no_address_error() -> None:
+    """A loopback address only blocks writes; a run cancelled before its first class writes nothing."""
+    button = _button(LOOPBACK, dev_id=None)
+    button.coordinator.cancel_sync = True
+    ctx = _ctx(button, LOOPBACK)
+
+    asyncio.run(button._sync_all_classes(ctx, {}, dict.fromkeys(WEBIO_CLASSES)))
+
+    button._sync_class.assert_not_awaited()
+    assert ctx.skipped_classes == list(WEBIO_CLASSES)
+
+
+def _cancel_in(button: ComexioSyncButton, step: str) -> None:
+    """Let the mocked sync step `step` press the cancel button while it runs."""
+
+    async def cancel(*_args: Any, **_kwargs: Any) -> Any:
+        button.coordinator.cancel_sync = True
+        return _CLASS_RESULT if step == "_sync_class" else []
+
+    setattr(button, step, AsyncMock(side_effect=cancel))
+
+
+_STAGES = ["_wire_created_pairs", "_wire_knx_full", "_wire_trigger_pairs"]
+_STAGE_LABELS = ["function plan wiring", "KNX write path wiring", "trigger pair wiring"]
+
+
+@pytest.mark.parametrize("cancel_in", ["_sync_class", *_STAGES])
+def test_a_cancel_starts_no_further_function_plan_stage(cancel_in: str) -> None:
+    """The KNX stage allocates bridge Markers and prestages the Loopback class before its own cancel check."""
+    button = _button(REACHABLE)
+    _cancel_in(button, cancel_in)
+    ran = _STAGES[: _STAGES.index(cancel_in) + 1] if cancel_in in _STAGES else []
+
+    _press(button)
+
+    assert [name for name in _STAGES if getattr(button, name).await_count] == ran
+    # The stages a cancel kept from starting are named in the banner; none left, no line.
+    not_started = _STAGE_LABELS[len(ran) :]
+    assert (f"Not started: {', '.join(not_started)}\n" in button.coordinator.sync_progress_text) is bool(not_started)
+    assert ("Not started:" in button.coordinator.sync_progress_text) is bool(not_started)
+
+
+def _cancel_on_login(button: ComexioSyncButton) -> None:
+    """Press the cancel button during the analysis, before any wiring stage."""
+
+    async def login(*_args: Any) -> bool:
+        button.coordinator.cancel_sync = True
+        return True
+
+    button.coordinator.api.login = AsyncMock(side_effect=login)
+
+
+@pytest.mark.parametrize(
+    ("action", "cancel", "ran", "not_started"),
+    [
+        ("function_plan_add_missing", None, ["_wire_created_pairs", "_wire_trigger_pairs"], []),
+        ("function_plan_add_missing", "_wire_created_pairs", ["_wire_created_pairs"], ["trigger pair wiring"]),
+        ("function_plan_add_missing", "login", [], ["function plan wiring", "trigger pair wiring"]),
+        ("knx_bridge_add_missing", None, ["_wire_knx_full"], []),
+        ("knx_bridge_add_missing", "login", [], ["KNX write path wiring"]),
+    ],
+)
+def test_a_cancel_stops_the_standalone_wiring_actions_before_and_between_stages(
+    action: str, cancel: str | None, ran: list[str], not_started: list[str]
+) -> None:
+    """The standalone wiring actions start no stage after a cancel and name the ones left out."""
+    button = _button(REACHABLE)
+    if cancel == "login":
+        _cancel_on_login(button)
+    elif cancel:
+        _cancel_in(button, cancel)
+    order = MagicMock()
+    for name in _STAGES:
+        order.attach_mock(getattr(button, name), name)
+
+    _press(button, action)
+
+    assert [c[0] for c in order.mock_calls] == ran
+    assert ("Not started:" in button.coordinator.sync_progress_text) is bool(not_started)
+    if not_started:
+        assert f"Not started: {', '.join(not_started)}\n" in button.coordinator.sync_progress_text
+
+
+_GAPS = [{"marker_id": 1}, {"knx_id": 5}]
+
+
+@pytest.mark.parametrize(
+    ("action", "stage", "expected"),
+    [
+        (
+            "function_plan_add_missing",
+            "_wire_created_pairs",
+            [call._wire_created_pairs(ANY, [], _GAPS), call._wire_trigger_pairs(ANY)],
+        ),
+        ("knx_bridge_add_missing", "_wire_knx_full", [call._wire_knx_full(ANY, [], _GAPS, refresh_audit=True)]),
+    ],
+)
+def test_the_standalone_wiring_actions_keep_their_arguments_and_report_the_stage_lines(
+    action: str, stage: str, expected: list[Any]
+) -> None:
+    """No KNX carve-out and no trigger re-audit in the standalone actions; each stage's lines reach the result."""
+    button = _button(REACHABLE)
+    button.coordinator.last_audit_results = {"function_plan_missing": _GAPS}
+    getattr(button, stage).return_value = ["Pair A linked"]
+    order = MagicMock()
+    for name in _STAGES:
+        order.attach_mock(getattr(button, name), name)
+
+    _press(button, action)
+
+    assert order.mock_calls == expected
+    assert "Pair A linked" in button.coordinator.sync_progress_text
+
+
+def test_the_function_plan_stages_run_in_order_with_the_knx_slice_carved_out() -> None:
+    """Without a cancel all three stages run; only the KNX stage gets the KNX names and gap items."""
+    button = _button(REACHABLE)
+    order = MagicMock()
+    for name in _STAGES:
+        order.attach_mock(getattr(button, name), name)
+    ctx = _ctx(button, REACHABLE)
+    names = ["HA M1 Pump", "HA K5 Door"]
+    gaps = [{"marker_id": 1}, {"knx_id": 5}]
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    assert order.mock_calls == [
+        call._wire_created_pairs(ctx, ["HA M1 Pump"], [{"marker_id": 1}]),
+        call._wire_knx_full(ctx, names, gaps, refresh_audit=True),
+        call._wire_trigger_pairs(ctx, refresh_audit=True),
+    ]
+    assert [c.args[0] for c in ctx.update_status.call_args_list] == [
+        "Checking function plan wiring of the Web-IO commands...",
+        "Checking KNX write path and wiring...",
+        "Checking trigger pairs...",
+    ]
+    assert ctx.skipped_stages == []
+
+
+def test_a_cancelled_sync_names_the_skipped_classes_but_reports_no_error() -> None:
+    button = _button(REACHABLE)
+    _cancel_in(button, "_sync_class")
+
+    _press(button)
+
+    text = button.coordinator.sync_progress_text
+    assert text.startswith(f"{button_module.ICON_WARNING} **Sync cancelled by user")
+    labels = ", ".join(webio_class_label(cls) for cls in WEBIO_CLASSES[1:])
+    assert f"Not synced: {labels}\n" in text
+    assert "Finished with errors" not in text
+    assert "sync step(s) failed" not in text
+    assert button.coordinator.sync_failed_writes == ["cancelled by user"]  # the run still counts as partial
+
+
+def test_a_new_sync_does_not_inherit_a_stale_cancel() -> None:
+    button = _button(REACHABLE)
+    button.coordinator.cancel_sync = True
+    _press(button)
+
+    assert button._sync_class.await_count == len(WEBIO_CLASSES)
+    assert [getattr(button, name).await_count for name in _STAGES] == [1, 1, 1]
 
 
 @pytest.mark.parametrize(("quickbus_dev_id", "synced"), [(None, False), ("9", True)])

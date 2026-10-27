@@ -87,6 +87,8 @@ from .const import (
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
     CONF_USERNAME,
+    CONF_WEBHOOK_ADDRESS_MODE,
+    CONF_WEBHOOK_URL,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
     DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
@@ -160,6 +162,7 @@ from .const import (
     SYSTEM_INFO_POLL_INTERVAL_SEC,
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
     WATCHDOG_HISTORY_MAX_ENTRIES,
+    WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
@@ -231,6 +234,7 @@ from .function_plan_block_settings import expand_autohide_blocks, snapshot_block
 from .function_plan_catalog import FunctionPlanCatalogManager
 from .ha_address import (
     HaAddressResolver,
+    WebhookTarget,
     host_of,
     is_loopback_address,
     webio_device_hints,
@@ -737,7 +741,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
-        self.ha_address = HaAddressResolver(hass)
+        conf = {**entry.data, **entry.options}
+        self.ha_address = HaAddressResolver(
+            hass, conf.get(CONF_WEBHOOK_ADDRESS_MODE, WEBHOOK_ADDRESS_AUTO), conf.get(CONF_WEBHOOK_URL)
+        )
         self._function_plan_backup_lock: asyncio.Lock = asyncio.Lock()
         self.last_changed_plans: list[dict[str, Any]] = []
         # Backup cycles in a row whose bulk load failed (see _track_bulk_load_result).
@@ -1419,6 +1426,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Reset internal failure flag when the audit is successful
         self.last_audit_failed = False
 
+        # The address a device already stores is kept while it still points to this host (#177),
+        # so a fresh resolver after a restart needs at most one lookup instead of a search.
+        ha_address = (await self.async_webhook_target(webio_devices)).address
+        # Taken with the address: a later resolution (button, sync) rewrites the resolver's reason.
+        address_fallback = self.ha_address.fallback_reason
+
         # Prepare payload map for future delta updates via button/repairs
         payload_map = {
             cmd["Name"]: cmd
@@ -1427,9 +1440,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         }
 
-        # The address a device already stores is kept while it still points to this host (#177),
-        # so a fresh resolver after a restart needs at most one lookup instead of a search.
-        ha_address = await self.ha_address.async_get(*webio_device_hints(webio_devices))
         webio_device_audit = await self._async_audit_webio_devices(webio_devices, ha_address)
         ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
 
@@ -1487,6 +1497,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "orphan": found["orphan"],
             "ip_mismatch": ip_mismatch,
             "ha_address": ha_address,
+            "address_fallback": address_fallback,
             "webio_devices": webio_device_audit,
             "cleanup_entities": self._cleanup_entity_ids,
             "cleanup_function_plan_count": self._cleanup_function_plan_count,
@@ -1761,7 +1772,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
     ) -> dict[str, dict[str, Any]]:
         """IP/Port Audit, checked independently per Web-IO class.
 
-        Marker and IO devices can in theory drift out of sync with each other.
+        Marker and IO devices can in theory drift out of sync with each other. Only the device
+        address is audited: the commands keep HTTP whatever the address (see api.build_webio_commands).
         """
         webio_device_audit: dict[str, dict[str, Any]] = {}
         for cls in WEBIO_CLASSES:
@@ -2137,6 +2149,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "entry_id": self.config_entry.entry_id,
                 "counts": issue_data_counts,
                 "function_plan_missing_detail": missing_detail,
+                # The address "update_ip" writes, and why it is the automatic one although the options name an
+                # external/custom URL (a webhook_url_error key; None when the mode's own URL is used).
+                "ha_address": audit.get("ha_address"),
+                "address_fallback": audit.get("address_fallback"),
             },
         )
 
@@ -4626,7 +4642,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Fires once a day at WEBIO_RANGE_CHECK_HOUR:WEBIO_RANGE_CHECK_MINUTE. The bulk config
         scrape ($FubModules["10"]) never returns Min/Max for HA's own Web-IO commands (see
-        api.get_webio_command_range), so drift can only be detected by reading each analog
+        api.get_webio_command_form), so drift can only be detected by reading each analog
         command's edit form individually — one HTTP GET per command. That cost is why this
         runs on its own nightly schedule instead of piggybacking on the regular poll audit
         or the manual sync button.
@@ -4651,12 +4667,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         kept separate so a run where every fix fails can't misreport as a clean success.
         """
         device_id = device.get("device_id")
-        live_min, live_max = await self.api.get_webio_command_range(cmd_id, device_id)
-        if live_min is None or live_max is None:
+        form = await self.api.get_webio_command_form(cmd_id, device_id)
+        if form is None or form.min is None or form.max is None:
             result[RANGE_CHECK_FAILED] += 1
             return
         result[RANGE_CHECK_CHECKED] += 1
-        if live_min == target["Min"] and live_max == target["Max"]:
+        if form.min == target["Min"] and form.max == target["Max"]:
             return
 
         if await self.api.save_single_command(device.get("base_id"), device_id, target, existing_cmd_id=cmd_id):
@@ -4664,8 +4680,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.warning(
                 "Web-IO command '%s' Min/Max drifted (%s/%s -> %s/%s); corrected.",
                 one_line(name),
-                live_min,
-                live_max,
+                form.min,
+                form.max,
                 target["Min"],
                 target["Max"],
             )
@@ -4677,7 +4693,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Check and correct analog Web-IO command Min/Max drift against the target range.
 
         For every analog Web-IO command, compares its live Min/Max (read via
-        api.get_webio_command_range) against the target build_webio_commands would create
+        api.get_webio_command_form) against the target build_webio_commands would create
         today — WEBIO_MARKER_ANALOG_MIN/MAX for markers, the authentic IO type range for
         physical IOs — and rewrites it via api.save_single_command on a mismatch. Returns a
         {"checked": n, "fixed": n, "failed": n, "correction_failed": n, "excluded": n,
@@ -9221,7 +9237,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def async_ha_address(self) -> str:
         """HA webhook address, hinted by the address the Web-IO devices of the last poll store."""
-        return await self.ha_address.async_get(*webio_device_hints((self.data or {}).get("webio_devices")))
+        return (await self.async_webhook_target()).address
+
+    async def async_webhook_target(self, webio_devices: dict[str, Any] | None = None) -> WebhookTarget:
+        """HA webhook address (IP:Port) the Web-IO devices are to store.
+
+        webio_devices: the parsed Web-IO devices whose stored addresses hint the resolver; default:
+        those of the last poll.
+        """
+        if webio_devices is None:
+            webio_devices = (self.data or {}).get("webio_devices")
+        return await self.ha_address.async_target(*webio_device_hints(webio_devices))
 
     async def async_fresh_trigger_audit(
         self, snapshot: dict[str, Any] | None = None
