@@ -7,30 +7,72 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+---
+
+## [0.30.0] — 2026-10-27
+
+Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and v0.20.0-rc1 … rc3.
+
 ### ✨ New Features
 - **Stable, address-based entity_ids:** new IO, Marker and KNX entities get their entity_id from the technical address (`binary_sensor.iosrv1_iox1_ai7`, `switch.iosrv1_m12`, `sensor.iosrv1_k5`) instead of the display name, so renaming something in Comexio only changes the name, never the id. Existing entities keep their entity_id (#97).
 - **Opt-in entity_id migration for existing installations:** the "Entity IDs not following the Comexio scheme" repair issue and the new **Fix Entity IDs** diagnostic button move existing entities to the stable ids. History and statistics move along; automations, scripts and dashboards are not rewritten — the repair shows how many automations/scripts still reference the old ids (#98).
 - **IO naming default without `{ExtName}`:** the default IO schema is now `{IoId} {IoTitle}`, since the extension already appears in the device name. Installations that never saved a schema keep the old `{ExtName} {IoId} {IoTitle}` (config entry migration), so existing names do not change (#97).
+- **Quickbus devices:** every IO of a Quickbus device (multitouch panels, motion detectors, …) becomes a read-only `binary_sensor` or `sensor` on its own device `<server> QB - <device>`, linked to its host extension (option *Create entities for Quickbus devices*, on by default). The devices picked under *Quickbus devices managed as QB cluster plans* (all by default) are wired into managed plans `HA - QB [<device ids>]` through the new `<name> [QB]` Web-IO class, so Comexio pushes their values. Requested by **@fabbrab** (#86, #202, #208, #220).
+- **Function plan watchdog with Plan Auto-Start:** HA watches the plans it manages and any user plans picked in the options. A stopped plan raises a repair (start / ignore / stop watching), turns the *Managed Plans Problem* sensor on and sends a push with a **Start plan** button; Plan Auto-Start restarts it on its own (on for HA plans, opt-in for user plans) and gives up after 2 failed attempts with a *Check function plan* repair. A deleted watched plan offers **Restore** from its newest backup; a plan whose ID another plan now holds is named, and a rename with unchanged content is followed on its own, backups included. The watchdog waits 10 minutes after a Comexio outage before judging plans (#132, #139, #167, #168, #181, #185, #187, #188, #189, #216).
+- **Run-state sensor per plan:** `sensor.<server>_fub<id>` shows running / stopped / starting / stopping; plans started or stopped in Comexio Studio are noticed within 60 s (#126).
+- **Function plan entities on their own sub-device** `<server> # Function plans`; unique_ids and entity_ids stay unchanged (#129, #131).
+- **Re-authentication:** when Comexio refuses the stored admin credentials at startup or on a poll, HA shows *Re-authenticate Comexio*. Until then no poll sends the refused credentials again; a restart or reload tries them once more (#207, #213).
+- **HTTPS to Comexio with a pinned certificate:** when Comexio serves HTTPS, the integration connects encrypted and pins the certificate's SHA-256 fingerprint on first use (existing entries at their next start). Another certificate is never accepted on its own: the integration stops talking to Comexio and raises a repair showing both fingerprints, plus an urgent push to the watchdog's notify services. A new `Connection` diagnostic sensor shows `https` / `http` / `certificate_changed` (#214).
+- **Webhook address mode:** *Automatic*, *External HA URL* or *Custom address* decide where Comexio pushes live values, e.g. through a reverse proxy over HTTPS. A plain `http://` address is only accepted inside the local network. A changed address rewrites only the Web-IO devices; the commands stay on HTTP and Comexio picks HTTP or HTTPS by itself (#222, #235).
+- **Server diagnostics:** *Free storage*, *Last boot* and a *Time server setting* problem sensor on the hub device, read every 5 minutes (#204).
+- **Backups keep more of a plan:** block settings (values from a block's settings dialog, #146, #147, #154), the paper format (#176) and the configs of scene blocks and Quantum modules (#199, #221) are stored and written back on every restore. Backups freeze each block's stable key, so they stay correct after Comexio renumbers its logic blocks (#144, #145).
+- **Backups of deleted plans:** never purged silently — a repair per deleted plan asks **Keep** / **Delete** once the retention has passed, and the plan card's **Orphaned plans** view previews, restores, deletes or keeps them (#120, #121, #123). Its buttons warn when the preview on screen shows another backup than the selected row, also in trigger-only cards (#232, #233).
+- **Repair for switched-off imports:** with `import_markers`, `import_ios` or `import_knx` off, its Web-IO commands no longer count as orphans; a repair offers **Clean up**, **Ignore** or **Switch import on** (#160).
 
 ### 🛠️ Core & Stability Improvements
-- **Faster, more robust HA address resolution:** the `homeassistant.<domain>` candidates are looked up in parallel with a 5 s cap, the search stops at the already known name, and definite misses are cached. A DNS timeout never replaces a known name with the IP fallback, which rules out false IP-mismatch repairs during a DNS hiccup (#104).
-- **Quicker sync wiring checks:** the KNX and trigger re-checks at the end of a sync share one config and plan fetch when nothing was written in between (one live sync went from ~30 s to 15 s). The status now shows each wiring step, and the result says "no changes needed" instead of `+0 … -0` (#104).
-- **KNX Web-IO bulk prestage:** all KNX bridge Markers are allocated and the API-Loopback Web-IO class is created with all its commands before the first KNX plan is wired, instead of saving loopback commands one by one (~35–40 s each on the Comexio side) (#103).
-- **Skipped sync checks are reported:** a trigger or KNX bridge/loopback re-check that could not read Comexio's current state now adds a warning line to the sync result instead of looking like "nothing to wire" (#105).
-- **Plan preview retries failed loads:** a failed preview fetch is retried with backoff (2 s up to 60 s) with at most one fetch in flight, and each phase logs its own message (#102).
+- **All Comexio communication through aiocomexio:** parsing, scraping, Web-IO building, login, reads and writes run through the [aiocomexio](https://github.com/kayl-codes/aiocomexio) library. A valid session is reused, concurrent logins collapse into one, and a lapsed session is no longer read as "Web-IO class absent" (#107, #108, #110, #111, #112, #114, #143, #200, #236).
+- **Periodic poll runs again while webhooks are active:** every push restarted the poll timer, so with frequent pushes the poll — and all audits — never ran. Reported by **@fabbrab** (#122, #148).
+- **Incomplete syncs are visible:** the sync status sensor has a state **Incomplete** (`partial`) with a `failed_writes` attribute for failed Web-IO writes, plan wiring, cleanup, sort steps and a user cancel; it survives the closing reload and a restart (#113, #117, #118, #119). A cancel now stops before the next Web-IO class instead of letting it run its Fast-Track delete (#234).
+- **Trigger pairs on every server:** the Flanke block id is resolved per server through a reference catalog instead of a fixed id; a server where it cannot be resolved gets a repair instead of a wrong block (#128, #130, #143, #173).
+- **Restores are protected:** reloads and options changes wait for a running restore, an in-place restore with an unreadable plan list aborts instead of building a second plan, and no auto backup is taken meanwhile (#158, #166, #168, #176).
+- **Plan list read strictly:** an unreadable `$Fubs` entry is skipped and makes the plan list *unknown* — never "deleted", never "in sync" (#217); a partial plan cache no longer counts as the full snapshot (#170); the audit summary counts every category (#153, #157).
+- **No double reload:** reconfigure and reauth reload the entry once instead of twice (#219); an older config fetch no longer overwrites newer block settings, and an internal options write leaves no stale reload skip (#163, #172).
+- **Faster, more robust HA address resolution:** the `homeassistant.<domain>` candidates are looked up in parallel with a 5 s cap, the search stops at the already known name, and definite misses are cached. A DNS timeout never replaces a known name with the IP fallback (#104). The address a Web-IO device already stores now comes first, then `internal_url`, the local IP and the guessed names; a loopback address is never written. Reported by **@mexpert71** (#177, #192).
+- **Quicker sync wiring checks:** the KNX and trigger re-checks at the end of a sync share one config and plan fetch when nothing was written in between. The status shows each wiring step, and the result says "no changes needed" instead of `+0 … -0` (#104).
+- **KNX Web-IO bulk prestage:** all KNX bridge Markers are allocated and the API-Loopback Web-IO class is created with all its commands before the first KNX plan is wired (#103).
+- **Skipped sync checks are reported:** a trigger or KNX bridge/loopback re-check that could not read Comexio's current state adds a warning line to the sync result (#105).
+- **Plan preview retries failed loads** with backoff (2 s up to 60 s), one fetch in flight at a time (#102).
+- **Tests and review guards:** Home Assistant integration tests in their own CI job, a stable-entity_id check for every entity class, a local cognitive-complexity guard, and a review checklist that catches more bug classes before review (#134, #135, #223, #225–#231 and the checklist PRs).
 
 ### 🐛 Bug Fixes & Refactoring
+- **`marker_delete` never deletes a placed marker**, not even with `force`; if a plan cannot be read, nothing is deleted (#186).
+- **Ignore lists:** the ignored-source cleanup searches every managed plan (#141); an ignored `[TRIG]` source loses its trigger pair and KNX bridge markers can no longer be ignored (#152, #164); ranges like `300-399` are kept as written and also cover IDs created later (#198).
+- **Temperature markers** accept −273 to 10,000 °C on the 0.1 grid, a bare "Soll" no longer counts as a temperature, and `markise` / `awning` join the cover keywords. Reported by **@mexpert71** (#179, #191, #218).
+- **Sync failing with `bad operand type for abs(): 'str'`** on an IO type with an unusable min/max (fixed in aiocomexio 0.7.0). Reported by **@Segelbootsfan** (#196).
+- **"Add missing pairs" for unnamed wired markers** no longer fails with `not found in fresh config`. Reported by **@fabbrab** (#161, #197).
+- **False write warning on firmware 11.1.5:** a stored write answered with `0` no longer logs "Comexio answered … instead of …" (aiocomexio 0.8.1, #236).
+- **Plan card resumes live values** within 30 s of a config entry reload (#171).
+- **`function_plan_visualize`:** `format: text` returns the diagram instead of failing with HTTP 500, and an unknown plan id is rejected (#118, #119).
+- **Naming schemas are validated** on save (#108); every repair abort reason is translated (#159, #162); the options dialog labels the import switches instead of showing their raw keys.
+- **Device names grouped by kind:** `<server> BASE`, `<server> EXT - <ext>`, `<server> QB - <device>` (#208).
 - **Doubled IO names:** an IO without a description rendered as e.g. `IOX1 I6 I6`; its title is now `#nn`, like unnamed Markers (#96).
-- **Sync failing with `Session is closed`:** a config entry reload during a running sync closed the API session. A reload requested during a sync is now left to the sync's own closing reload, and repair flows refuse to start while a sync is running (#103).
+- **Sync failing with `Session is closed`:** a reload requested during a sync is left to the sync's own closing reload, and repair flows refuse to start while a sync is running (#103).
 - **KNX trigger pairs** resolve their bridge Markers from a fresh config instead of the snapshot frozen during a sync (#103).
-- **Trigger re-check on stale plan data:** when the forced plan refetch fails, the trigger re-check is skipped instead of auditing a plan cached before this sync's writes (#104).
-- **Statistics helpers inactive on current installations:** the unit-label fix and the orphaned-statistics detection only matched the `sensor.comexio_<server>_` prefix, which neither the stable nor the device-name-based entity_ids carry (#99).
-- **Flow diagram changed on every restart:** the function plan flow diagram and the self-reset analysis depended on `PYTHONHASHSEED` (#100).
+- **Trigger re-check on stale plan data:** when the forced plan refetch fails, the trigger re-check is skipped instead of auditing a stale plan (#104).
+- **Statistics helpers inactive on current installations:** the unit-label fix and the orphaned-statistics detection only matched the `sensor.comexio_<server>_` prefix (#99).
+- **Flow diagram changed on every restart:** the flow diagram and the self-reset analysis depended on `PYTHONHASHSEED` (#100).
 - **Plan preview jumped back to the start** on every live refresh when scrolled (#101).
 
 ### ⚠️ Requirements & Notes
 - **Restart required** after updating.
+- **Dependency:** `aiocomexio==0.8.1` (installed automatically by Home Assistant).
 - **The entity_id migration is opt-in.** Before confirming it, check the number of automations/scripts the repair lists — they, and dashboards, must be updated to the new ids manually.
+- **Run a Web-IO sync after updating** if you have Quickbus devices: until the `[QB]` class exists, a "Web-IO class missing" repair is shown.
+- **Device names change:** the friendly names of IO entities follow the new device names; entity IDs and unique IDs stay the same.
+- **HTTPS switch:** an existing entry switches to HTTPS at its next start when Comexio serves it; a notification names the pinned fingerprint.
+- **Home Assistant address:** a configured `internal_url` now outranks a guessed `homeassistant.<domain>` name. Behind NAT or a Docker bridge, set `internal_url` to the address Comexio reaches Home Assistant under.
+- **Markers named only "Soll …"** lose their °C unit; Home Assistant raises its own "units changed" repair for their statistics.
+- **Plan card:** the bundled card was updated; if its help dialog still shows an old version, clear the browser cache.
 
 ---
 
