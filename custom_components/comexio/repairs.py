@@ -696,10 +696,6 @@ class ComexioRepairFlow(RepairsFlow):
             r_c = counts.get("rename", 0)
             o_c = counts.get("orphan", 0)
             i_c = counts.get("ip_mismatch", 0)
-            # Commands to rewrite with the webhook protocol: fixed by the server-address action (i_c > 0 then).
-            p_c = counts.get("protocol", 0)
-            # The device address itself (IP:Port); issues created before the protocol count only have i_c.
-            ip_address_c = counts.get("ip_address", i_c)
             ce_c = counts.get("cleanup_entities", 0)
             lp_c = counts.get("cleanup_function_plan_count", 0)
             # Trigger-marker gaps/orphans are folded into the same counts: both are fixed by
@@ -748,7 +744,7 @@ class ComexioRepairFlow(RepairsFlow):
                 return format_time(c * (SYNC_DURATION_DELETE if is_delete else SYNC_DURATION_WRITE))
 
             # 1. Calculate Full Sync ETA first to decide on the hint visibility
-            total_write = t_c + r_c + m_c + p_c
+            total_write = t_c + r_c + m_c
             total_del = o_c + ce_c + lp_dangling_c
             total_sec = (total_write * SYNC_DURATION_WRITE) + (total_del * SYNC_DURATION_DELETE)
             # Always add IP duration if a mismatch exists, as it's a separate call in Delta-Sync
@@ -768,16 +764,15 @@ class ComexioRepairFlow(RepairsFlow):
                 # CASE 1: Only IP mismatch
                 if is_de:
                     summary = (
-                        "Die Analyse hat festgestellt, dass die Server-Adresse (IP:Port) oder das "
-                        "Webhook-Protokoll (HTTP/HTTPS) im Comexio Web-IO Gerät nicht mit der aktuellen "
-                        "Adresse von Home Assistant übereinstimmt. Dies verhindert den Empfang von "
-                        "Status-Updates (Webhooks)."
+                        "Die Analyse hat festgestellt, dass die Server-Adresse (IP:Port) im "
+                        "Comexio Web-IO Gerät nicht mit der aktuellen Adresse von Home Assistant "
+                        "übereinstimmt. Dies verhindert den Empfang von Status-Updates (Webhooks)."
                     )
                 else:
                     summary = (
-                        "The analysis found that the server address (IP:Port) or the webhook "
-                        "protocol (HTTP/HTTPS) in the Comexio Web-IO device does not match the "
-                        "current Home Assistant address. This prevents receiving status updates via webhooks."
+                        "The analysis found that the server address (IP:Port) in the Comexio "
+                        "Web-IO device does not match the current Home Assistant address. "
+                        "This prevents receiving status updates via webhooks."
                     )
                 if fallback := _address_fallback_note(self.issue_data, is_de):
                     summary += f"\n\n{fallback}"
@@ -820,16 +815,13 @@ class ComexioRepairFlow(RepairsFlow):
                         f"**{'KNX-Brücken ohne Rückkopplung' if is_de else 'KNX bridges without feedback loop'}:** "
                         f"{kb_lb_c}"
                     )
-                if ip_address_c > 0:
+                if i_c > 0:
                     lines.append(
                         f"* {ICON_NETWORK} **{'Server-Adresse' if is_de else 'Server Address'}:** "
                         f"{'Falsch' if is_de else 'Incorrect'}"
                     )
-                if p_c > 0:
-                    lines.append(f"* {ICON_NETWORK} **{'Webhook-Protokoll' if is_de else 'Webhook protocol'}:** {p_c}")
-                # The fix writes the automatic address and its protocol, whichever of the two is wrong.
-                if i_c > 0 and (fallback := _address_fallback_note(self.issue_data, is_de)):
-                    lines.append(f"  * {fallback}")
+                    if fallback := _address_fallback_note(self.issue_data, is_de):
+                        lines.append(f"  * {fallback}")
 
                 if is_de:
                     footer = f"\n\nWeb-IO-Befehle: {ha_count} (HA) zu {com_count} (Comexio)"
@@ -926,17 +918,17 @@ class ComexioRepairFlow(RepairsFlow):
 
             if counts.get("ip_mismatch", 0) > 0:
                 if is_de:
-                    label = f"{ICON_NETWORK} HA Server-Adresse (IP:Port, Protokoll) aktualisieren"
+                    label = f"{ICON_NETWORK} HA Server-Adresse (IP:Port) aktualisieren"
                 else:
-                    label = f"{ICON_NETWORK} Update HA Server Address (IP:Port, protocol)"
-                specific_options["update_ip"] = f"{label} ({format_time((1 + p_c) * SYNC_DURATION_WRITE).strip()})"
+                    label = f"{ICON_NETWORK} Update HA Server Address (IP:Port)"
+                specific_options["update_ip"] = f"{label} ({format_time(SYNC_DURATION_WRITE).strip()})"
 
             specific_options = _without_refused_plan_options(
                 self.hass, self.issue_data.get("entry_id"), specific_options
             )
 
             # Calculate Full Sync ETA
-            total_write = counts.get("type", 0) + counts.get("rename", 0) + counts.get("missing", 0) + p_c
+            total_write = counts.get("type", 0) + counts.get("rename", 0) + counts.get("missing", 0)
             total_del = counts.get("orphan", 0) + ce_c
             total_sec = (total_write * SYNC_DURATION_WRITE) + (total_del * SYNC_DURATION_DELETE)
 
