@@ -20,11 +20,10 @@ import voluptuous as vol
 from ..const import (
     CERTIFICATE_CHANGED_MSG,
     DOMAIN,
-    FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH as _LAYOUT_COLUMN_WIDTH,
-    FUNCTION_PLAN_LAYOUT_X_MARKER as _LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
     LOGIN_ERROR_CERTIFICATE,
+    canvas_columns,
     function_plan_info,
     function_plans,
     one_line,
@@ -414,5 +413,5 @@ def _get_canvas_grid_dims(
         x_max, y_max = api.get_fub_canvas_bounds(fub_id)
 
     rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / row_step))
-    max_cols = max(1, round((x_max - _LAYOUT_X_MARKER) / _LAYOUT_COLUMN_WIDTH))
+    max_cols = canvas_columns(x_max)
     return canvas_label, x_max, y_max, rows_per_col, max_cols

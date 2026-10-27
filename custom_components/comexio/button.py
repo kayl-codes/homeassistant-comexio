@@ -1,6 +1,6 @@
 # Version: 0.7.6
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 import contextlib
 from dataclasses import dataclass, field
 import datetime
@@ -25,7 +25,6 @@ import voluptuous as vol
 from .const import (
     CERTIFICATE_CHANGED_MSG,
     CONF_ENABLE_NOTIFICATIONS,
-    CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_PLAN_MAP,
     DEFAULT_ENABLE_NOTIFICATIONS,
     DOMAIN,
@@ -48,9 +47,12 @@ from .const import (
     ICON_TOOLS,
     ICON_UPLOAD,
     ICON_WARNING,
+    IO_PLAN_KIND_IO,
+    IO_PLAN_KINDS,
     ISSUE_UNINSTALL_CLEANUP,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_REJECTED,
+    PLAN_FAILURE_NOT_RESOLVED,
     PLAN_WIRING_ACTIONS,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
@@ -67,11 +69,13 @@ from .const import (
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
+    IoPlanKind,
     MarkerKind,
     SourceCategory,
     WebioClass,
     category_by_fub_module_type,
     function_plan_info,
+    io_plan_item_member,
     one_line,
     source_category,
     trigger_pair_categories,
@@ -113,13 +117,14 @@ _SYNC_PROGRESS_NOTIFY_EVERY = 5  # notify every Nth pair; the plan's final pair 
 
 _NOTE_ACTIVATED = ", plan activated"
 _NOTE_NOT_ACTIVATED = f", {ICON_WARNING} plan NOT activated"
-_FAILURE_NOT_RESOLVED = "not resolved/created"
+_FAILURE_NOT_RESOLVED = PLAN_FAILURE_NOT_RESOLVED
 _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
 _STEP_CHECKING_PLAN = "Checking function plan wiring"
 _RETRY_CLEANUP = "run the cleanup again from Repairs"
 _DELTA_RESULT_KEYS = {"rename": "renamed", "delete": "removed", "type": "updated", "create": "added"}
 _FAILED_WRITES_SHOWN = 10  # failed Web-IO writes named in the result message; the rest are counted
+_ACTION_SKIP_CLASS = "skip_class"  # _decide_effective_action: a class with neither device nor wanted command
 
 
 def _format_counts(added: int, updated: int, renamed: int, removed: int) -> str:
@@ -246,6 +251,10 @@ def _class_action_eta(
     if task_count > 1:
         eta += int(1.5 * (task_count - 1))
     return eta
+
+
+# (column-plan kind label, member, identifier) of one IO / Quickbus pair to wire.
+_IoRef = tuple[str, str, str]
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -962,8 +971,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # server (a class deselected after a prior sync — only its device IP is kept current;
         # its commands are no orphans and are left to the import_disabled repair). An opted-out class
         # with no server device is skipped entirely — _decide_effective_action force-"recreate"s
-        # any class with no device, so including it would create it on the live server. The same
-        # holds for the Quickbus class while the server has no Quickbus IO (required_webio_classes).
+        # any class with no device and a wanted command, so including it would create it on the live server. The same
+        # holds for the Quickbus class while the server has no Quickbus IO, and for a class without a
+        # wanted command, as Comexio creates no device for an empty class (required_webio_classes).
         opted_in = set(self.coordinator.required_webio_classes)
         active_classes = tuple(c for c in WEBIO_CLASSES if c in opted_in or dev_ids.get(c))
         if not active_classes:
@@ -1562,12 +1572,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_action_eta = _class_action_eta(action, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch)
 
         if not class_dev_id:
+            if self._class_template_empty(ctx, cls):
+                # The sync picked its classes before the earlier classes' writes; an options save since
+                # (Quickbus devices deselected, every KNX object ignored) can leave this one empty, and
+                # Comexio creates no device for an empty class, so its recreate would only fail.
+                _LOGGER.info("[%s] %s: no device instance and no wanted command. Skipping.", self.server_id, label)
+                return _ACTION_SKIP_CLASS
             _LOGGER.info("[%s] %s: no device instance found. Forcing recreate.", self.server_id, label)
             return "recreate"
         if action == "update_ip":
             _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
             return "update_ip"
         if cls_action_eta > SYNC_DURATION_RECREATE:
+            if self._class_template_empty(ctx, cls):
+                # Synced only to clear it out (e.g. Quickbus with no device selected any more, every KNX
+                # object ignored): a recreate would upload an empty class, for which Comexio creates no
+                # device instance, so the sync failed after deleting the old one.
+                _LOGGER.info("[%s] %s: no command of this class is wanted. Skipping Fast-Track.", self.server_id, label)
+                return action
             return "recreate" if await self._async_fast_track(ctx, cls, class_dev_id, cls_action_eta) else action
         _LOGGER.info(
             "[%s] %s ETA (%ds) is faster than Fast-Track. Proceeding exactly as requested.",
@@ -1610,6 +1632,21 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         _LOGGER.info("[%s] %s device not deleted (%s). Falling back to Delta-Sync.", self.server_id, label, error)
         return False
 
+    def _class_template_empty(self, ctx: _SyncContext, cls: str) -> bool:
+        """Whether the class template a recreate would upload has no command."""
+        return not json.loads(self._class_webio_json(cls, ctx.class_names[cls]))["commands"]
+
+    def _class_webio_json(self, cls: str, class_name: str) -> str:
+        """The class template a recreate uploads: every wanted command of the class (pure, no network)."""
+        return self.coordinator.api.generate_webio_json(
+            self.server_id,
+            class_name,
+            self.coordinator.webio_source_data(),
+            webio_class=cls,
+            ignored_marker_ids=self.coordinator.ignored_marker_ids,
+            ignored_knx_ids=self.coordinator.ignored_knx_ids,
+        )
+
     async def _recreate_class(
         self,
         ctx: _SyncContext,
@@ -1624,14 +1661,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         api = ctx.api
         # Built up front (pure, no network) so the status can name the command count — the
         # upload itself gives no progress signal of its own.
-        web_io_json = api.generate_webio_json(
-            self.server_id,
-            class_name,
-            self.coordinator.data,
-            webio_class=cls,
-            ignored_marker_ids=self.coordinator.ignored_marker_ids,
-            ignored_knx_ids=self.coordinator.ignored_knx_ids,
-        )
+        web_io_json = self._class_webio_json(cls, class_name)
         n_commands = len(json.loads(web_io_json)["commands"])
         status_msg = (
             f"{ICON_TOOLS} **Initial Setup ({label})**\nCreating Web-IO class with {n_commands} command(s)..."
@@ -1994,6 +2024,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch
         )
 
+        if cls_effective_action == _ACTION_SKIP_CLASS:
+            return dict.fromkeys(("added", "removed", "updated", "renamed", "skipped_creates", "debris_removed"), 0) | {
+                "updated_ip": False,
+                "recreated": False,
+                "created_names": [],
+            }
         if cls_effective_action == "recreate":
             await self._recreate_class(ctx, cls, class_name, label, class_dev_id, pct_start, pct_end)
             # Everything in this class is brand new, so every command of it needs the
@@ -2014,7 +2050,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     cmd["Name"]
                     for cmd in ctx.api.build_webio_commands(
                         self.server_id,
-                        self.coordinator.data,
+                        self.coordinator.webio_source_data(),
                         webio_class=cls,
                         ignored_marker_ids=self.coordinator.ignored_marker_ids,
                         ignored_knx_ids=self.coordinator.ignored_knx_ids,
@@ -2050,11 +2086,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     def _classify_created_names(
         created_names: list[str],
         clustered_cats: list[SourceCategory],
-        known_io_names: dict[str, tuple[str, str]],
-    ) -> tuple[dict[WebioClass, list[int]], list[tuple[str, str]]]:
+        known_io_names: dict[str, _IoRef],
+    ) -> tuple[dict[WebioClass, list[int]], list[_IoRef]]:
         """Split freshly-created Web-IO command names into per-category source ids and IO refs."""
         source_ids_by_cat: dict[WebioClass, list[int]] = {}
-        created_io_refs: list[tuple[str, str]] = []
+        created_io_refs: list[_IoRef] = []
         for name in created_names:
             for cat in clustered_cats:
                 if (sid := _parse_source_id_from_webio_name(name, cat.audit_key_prefix)) is not None:
@@ -2083,10 +2119,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Wire every Web-IO command created in this run into its managed cluster plan.
 
         Marker commands are distributed across marker cluster plans (one per ID range),
-        IO commands across the IO cluster plan of their extension — but only for the
-        extensions the user opted into (CONF_FUNCTION_PLAN_IO_EXTENSIONS), and never for
-        an extension that is currently offline (its hardware isn't there, so wiring it is
-        pointless; the next sync picks it up once it's back).
+        IO commands across the IO cluster plan of their extension and Quickbus commands across
+        the QB cluster plan of their device — but only for the extensions / devices the user
+        opted into, and never for one that is currently offline (its hardware isn't there, so
+        wiring it is pointless; the next sync picks it up once it's back) — see
+        coordinator.managed_io_groups.
 
         For a full sync (or the standalone wiring-only action), pairs the audit found
         already existing but not yet wired (gap_items) are merged in too — a Fast-Track
@@ -2094,12 +2131,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         still be closed here, not just pairs freshly created in this run.
         Returns per-plan summary lines for the final sync notification.
         """
-        managed_exts = set(self.coordinator.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
-        managed_exts -= self.coordinator.offline_extensions or set()
-
+        managed_groups = self.coordinator.managed_io_groups()
         known_io_names = {
-            f"HA IO {io['ext_name']} {io['identifier']}": (io["ext_name"], io["identifier"])
-            for io in self.coordinator.data.get("io", [])
+            kind.command_name(io): (kind.label, kind.member_of(io), io["identifier"])
+            for kind in IO_PLAN_KINDS
+            for io in self.coordinator.data.get(kind.data_key, [])
         }
         # Range-clustered categories (Marker + KNX): one pipeline, only the id prefix / plan
         # label differ. IO stays a separate branch (per-extension plans, composite key).
@@ -2114,7 +2150,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             gap_io_items = []
 
         source_ids_by_cat = {k: list(dict.fromkeys(v)) for k, v in source_ids_by_cat.items() if v}
-        io_items = _merge_io_items(created_io_refs, gap_io_items, managed_exts)
+        io_items = _merge_io_items(created_io_refs, gap_io_items, managed_groups)
         if not source_ids_by_cat and not io_items:
             return []
 
@@ -2277,22 +2313,23 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         await self.coordinator.async_function_plan_change_backup(
             fub_id, f"add_trigger_pairs {[f'{prefix}{m}' for m in missing_ids]}"
         )
-        await api.function_plan_stop_fup(fub_id)
-        added, errors = await api.function_plan_add_trigger_pairs(
-            fub_id, wire_ids, fresh_plan=is_fresh, ref_type=wire_ref_type
-        )
-        errors = bridge_errors + errors
-        if errors:
-            _LOGGER.warning("[%s] function_plan_add_trigger_pairs errors: %s", self.server_id, errors)
-            ctx.failed_writes.append(_plan_failure(plan_name, f"{len(errors)} error(s)"))
-        note = ""
-        if added and not is_fresh:
-            # was_active=False: the plan stays stopped here, the activation below follows.
-            note = await self._sort_checked(ctx, fub_id, plan_name, was_active=False)
-        if is_fresh or was_active:
-            # create_fup always creates plans inactive (fub_active="0") — a fresh plan must be
-            # activated unconditionally, was_active=False would otherwise leave it stopped forever.
-            note += _activation_note(ctx, plan_name, await api.function_plan_run_fup(fub_id))
+        async with self._plan_restarted_on_error(api, fub_id, is_fresh):
+            await api.function_plan_stop_fup(fub_id)
+            added, errors = await api.function_plan_add_trigger_pairs(
+                fub_id, wire_ids, fresh_plan=is_fresh, ref_type=wire_ref_type
+            )
+            errors = bridge_errors + errors
+            if errors:
+                _LOGGER.warning("[%s] function_plan_add_trigger_pairs errors: %s", self.server_id, errors)
+                ctx.failed_writes.append(_plan_failure(plan_name, f"{len(errors)} error(s)"))
+            note = ""
+            if added and not is_fresh:
+                # was_active=False: the plan stays stopped here, the activation below follows.
+                note = await self._sort_checked(ctx, fub_id, plan_name, was_active=False)
+            if is_fresh or was_active:
+                # create_fup always creates plans inactive (fub_active="0") — a fresh plan must be
+                # activated unconditionally, was_active=False would otherwise leave it stopped forever.
+                note += _activation_note(ctx, plan_name, await api.function_plan_run_fup(fub_id))
         return _plan_summary_line(plan_name, is_fresh, len(added), len(missing_ids), "trigger pairs", t0, note, errors)
 
     async def _remove_trigger_pairs(self, ctx: _SyncContext, orphan_ids: list[int], ref_type: int = 2) -> str:
@@ -2393,9 +2430,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         for fub_id, cluster_ids in plan_to_ids.items():
             if getattr(self.coordinator, "cancel_sync", False):
                 break
-            line, lp_added, lp_errors = await self._add_pairs_to_plan(
-                ctx, fub_id, sorted(cluster_ids), fub_id in created_plans, progress_state, ref_type
-            )
+            async with self._plan_restarted_on_error(ctx.api, fub_id, fub_id in created_plans):
+                line, lp_added, lp_errors = await self._add_pairs_to_plan(
+                    ctx, fub_id, sorted(cluster_ids), fub_id in created_plans, progress_state, ref_type
+                )
             if lp_errors:
                 ctx.failed_writes.append(_plan_failure(self._plan_name(fub_id), f"{len(lp_errors)} error(s)"))
             summary.append(line)
@@ -2526,17 +2564,18 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             # finalize cycle instead of one leg's own.
             if getattr(self.coordinator, "cancel_sync", False):
                 break
-            line = await self._wire_knx_cluster(
-                ctx,
-                fub_id,
-                sorted(cluster_ids),
-                fub_id in created_plans,
-                read_path_ids,
-                bridge_by_id,
-                loopback_by_id,
-                progress_state,
-                prestage,
-            )
+            async with self._plan_restarted_on_error(ctx.api, fub_id, fub_id in created_plans):
+                line = await self._wire_knx_cluster(
+                    ctx,
+                    fub_id,
+                    sorted(cluster_ids),
+                    fub_id in created_plans,
+                    read_path_ids,
+                    bridge_by_id,
+                    loopback_by_id,
+                    progress_state,
+                    prestage,
+                )
             if line:
                 summary.append(line)
         return summary
@@ -2803,48 +2842,34 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         all_errors: list[str] = []
         parts: list[str] = []
 
-        try:
-            if read_ids:
-                added, errors, part = await self._wire_knx_leg_read_path(
-                    ctx, fub_id, plan_name, read_ids, progress_state
-                )
-                all_added.extend(added)
-                all_errors.extend(errors)
-                parts.append(part)
+        # Anything escaping the three legs (most legs isolate their own known failure modes, see
+        # _wire_knx_leg_bridge's re-audit try/except) or the finalization below: the caller's
+        # _plan_restarted_on_error starts the plan again before the error propagates.
+        if read_ids:
+            added, errors, part = await self._wire_knx_leg_read_path(ctx, fub_id, plan_name, read_ids, progress_state)
+            all_added.extend(added)
+            all_errors.extend(errors)
+            parts.append(part)
 
-            if bridge_items:
-                added, errors, part, new_loopback_items = await self._wire_knx_leg_bridge(
-                    ctx, fub_id, plan_name, bridge_items, loopback_by_id, progress_state, prestage.allocated
-                )
-                all_added.extend(added)
-                all_errors.extend(errors)
-                parts.append(part)
-                # _wire_knx_full's upfront total already reserved a leg-3 slot for every open
-                # bridge — release the slots of bridges that did not come out of leg 2.
-                progress_state["total"] -= len(bridge_items) - len(new_loopback_items)
-                loopback_items = loopback_items + new_loopback_items
+        if bridge_items:
+            added, errors, part, new_loopback_items = await self._wire_knx_leg_bridge(
+                ctx, fub_id, plan_name, bridge_items, loopback_by_id, progress_state, prestage.allocated
+            )
+            all_added.extend(added)
+            all_errors.extend(errors)
+            parts.append(part)
+            # _wire_knx_full's upfront total already reserved a leg-3 slot for every open
+            # bridge — release the slots of bridges that did not come out of leg 2.
+            progress_state["total"] -= len(bridge_items) - len(new_loopback_items)
+            loopback_items += new_loopback_items
 
-            if loopback_items:
-                added, errors, part = await self._wire_knx_leg_loopback(
-                    ctx, fub_id, plan_name, loopback_items, progress_state, prestage.preembedded
-                )
-                all_added.extend(added)
-                all_errors.extend(errors)
-                parts.append(part)
-        except (Exception, asyncio.CancelledError):
-            # Anything unexpected escaping the three legs above (most legs already isolate their
-            # own known failure modes, see _wire_knx_leg_bridge's re-audit try/except) must not
-            # leave the plan stopped on the real Comexio server with no indication to the user —
-            # async_handle_press' own except Exception only reports "Error: ..." and never
-            # restarts a plan itself. Best-effort restart before letting the exception propagate,
-            # same failure class _remove_trigger_pairs already guards for its own single write.
-            # asyncio.CancelledError is listed explicitly — it subclasses BaseException, not
-            # Exception, since Python 3.8, so a cancelled sync (HA shutdown, config-entry
-            # reload, a cancelled service call) would otherwise skip this restart entirely and
-            # leave the managed plan permanently stopped (Sourcery finding, review 2026-09-23).
-            if was_active:
-                await api.function_plan_run_fup(fub_id)
-            raise
+        if loopback_items:
+            added, errors, part = await self._wire_knx_leg_loopback(
+                ctx, fub_id, plan_name, loopback_items, progress_state, prestage.preembedded
+            )
+            all_added.extend(added)
+            all_errors.extend(errors)
+            parts.append(part)
 
         if all_errors:
             _LOGGER.warning("[%s] _wire_knx_cluster errors on fub=%s: %s", self.server_id, fub_id, all_errors)
@@ -2864,45 +2889,118 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
 
     async def _wire_io_clusters(
-        self, ctx: _SyncContext, io_items: list[dict[str, str]], progress_state: dict
+        self, ctx: _SyncContext, io_items: list[_IoRef], progress_state: dict
     ) -> tuple[list[str], int, int]:
-        """Resolve the IO cluster plans and add the pairs. Returns (lines, added, errors)."""
-        by_ext: dict[str, list[str]] = {}
-        for item in io_items:
-            by_ext.setdefault(item["ext_name"], []).append(item["identifier"])
+        """Add the IO / Quickbus pairs to their column plans, one kind after the other.
 
-        ext_plans, created_plans, failed_exts = await self.coordinator.resolve_io_clusters(sorted(by_ext))
+        Returns (lines, added, errors) over both kinds.
+        """
+        summary: list[str] = []
+        added = errors = 0
+        for kind in IO_PLAN_KINDS:
+            by_member: dict[str, list[str]] = {}
+            for label, member, ident in io_items:
+                if label == kind.label:
+                    by_member.setdefault(member, []).append(ident)
+            if not by_member:
+                continue
+            lines, kind_added, kind_errors = await self._wire_io_kind_clusters(ctx, kind, by_member, progress_state)
+            summary.extend(lines)
+            added += kind_added
+            errors += kind_errors
+        return summary, added, errors
+
+    async def _wire_io_kind_clusters(
+        self, ctx: _SyncContext, kind: IoPlanKind, by_ext: dict[str, list[str]], progress_state: dict
+    ) -> tuple[list[str], int, int]:
+        """Resolve the column plans of one kind and add the pairs. Returns (lines, added, errors)."""
+        ext_plans, created_plans, failed_exts = await self.coordinator.resolve_io_clusters(sorted(by_ext), kind)
         # Surface a resolve failure to the user, not just the log — see _wire_source_clusters.
+        # Each member as the user knows it: the extension name / "QB3 MT1", not a bare device id.
+        failed = {
+            one_line(kind.member_label(self.coordinator.data, ext)): reason for ext, reason in failed_exts.items()
+        }
         summary: list[str] = [
-            f"{ICON_WARNING} IO cluster plan for '{ext}' could not be resolved/created — see log" for ext in failed_exts
+            f"{ICON_WARNING} {kind.label} cluster plan for '{label}': {reason} — see log"
+            for label, reason in failed.items()
         ]
         errors = len(failed_exts)
-        ctx.failed_writes.extend(f"IO cluster plan for '{ext}': {_FAILURE_NOT_RESOLVED}" for ext in failed_exts)
+        ctx.failed_writes.extend(
+            f"{kind.label} cluster plan for '{label}': {reason}" for label, reason in failed.items()
+        )
         if not ext_plans:
             if not failed_exts:
-                _LOGGER.warning("[%s] Cluster plan wiring: no IO cluster plan available", self.server_id)
-                summary.append(f"{ICON_WARNING} No IO cluster plan available — see log.")
-                ctx.failed_writes.append("IO cluster plan: none available")
+                _LOGGER.warning("[%s] Cluster plan wiring: no %s cluster plan available", self.server_id, kind.label)
+                summary.append(f"{ICON_WARNING} No {kind.label} cluster plan available — see log.")
+                ctx.failed_writes.append(f"{kind.label} cluster plan: none available")
                 errors = 1
             return summary, 0, errors
 
-        plan_exts: dict[int, list[tuple[str, int]]] = {}
-        for ext, (fub_id, column) in ext_plans.items():
-            plan_exts.setdefault(fub_id, []).append((ext, column))
+        plan_exts: dict[int, list[tuple[str, tuple[int, int]]]] = {}
+        for ext, (fub_id, origin) in ext_plans.items():
+            plan_exts.setdefault(fub_id, []).append((ext, origin))
 
         added = 0
         for fub_id, ext_cols in plan_exts.items():
             if getattr(self.coordinator, "cancel_sync", False):
                 break
-            line, lp_added, lp_errors = await self._add_io_pairs_to_plan(
-                ctx, fub_id, sorted(ext_cols, key=lambda t: t[1]), by_ext, fub_id in created_plans, progress_state
-            )
+            async with self._plan_restarted_on_error(ctx.api, fub_id, fub_id in created_plans):
+                line, lp_added, lp_errors = await self._add_io_pairs_to_plan(
+                    ctx,
+                    fub_id,
+                    sorted(ext_cols, key=lambda t: t[1]),
+                    by_ext,
+                    fub_id in created_plans,
+                    progress_state,
+                    kind,
+                )
             if lp_errors:
                 ctx.failed_writes.append(_plan_failure(self._plan_name(fub_id), f"{len(lp_errors)} error(s)"))
             summary.append(line)
             added += len(lp_added)
             errors += len(lp_errors)
         return summary, added, errors
+
+    @contextlib.asynccontextmanager
+    async def _plan_restarted_on_error(self, api: Any, fub_id: int, is_fresh: bool) -> AsyncIterator[None]:
+        """Start a plan again that a pair write stopped and then left by raising before its finalization.
+
+        Otherwise a plan that ran stays stopped, and the next sync reads it as one that was off and
+        leaves it so. Started as the finalization would have: a fresh plan, or one that ran before
+        the write (a plan the cache does not know counts as running, as for the writers). The
+        write's error propagates; a failed start only logs (the plan watchdog then reports the
+        stopped plan). asyncio.CancelledError too: a cancelled sync (HA shutdown, entry reload, a
+        cancelled service call) would leave the plan stopped as well (Sourcery, review 2026-09-23).
+        """
+        start = is_fresh or api.get_fub_active(fub_id) is not False
+        try:
+            yield
+        except (Exception, asyncio.CancelledError) as err:
+            if start and api.get_fub_active(fub_id) is not True:
+                await self._start_plan_after_failed_write(api, fub_id, err)
+            raise
+
+    async def _start_plan_after_failed_write(self, api: Any, fub_id: int, err: BaseException) -> None:
+        """_plan_restarted_on_error's start, which must not replace the write's own error."""
+        try:
+            started = await api.function_plan_run_fup(fub_id)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] fub=%s stays stopped: its start after a failed pair write (%r) raised",
+                self.server_id,
+                fub_id,
+                err,
+            )
+            return
+        if started:
+            _LOGGER.warning("[%s] fub=%s started again after its pair write failed (%r)", self.server_id, fub_id, err)
+        else:
+            _LOGGER.error(
+                "[%s] fub=%s stays stopped: Comexio did not confirm its start after a failed pair write (%r)",
+                self.server_id,
+                fub_id,
+                err,
+            )
 
     def _plan_name(self, fub_id: int) -> str:
         """Live name of a plan, falling back to its fub_id when it isn't in the cache."""
@@ -3026,8 +3124,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     async def _sort_checked(self, ctx: _SyncContext, fub_id: int, plan_name: str, was_active: bool) -> str:
         """Sort one plan; a failed sort and a plan left stopped go to ctx.failed_writes.
 
-        async_sort_function_plan also returns None for a plan without elements, but a managed
-        plan always keeps its pinned template comment — None means it could not be loaded.
+        None means the plan could not be loaded; a skipped sort (a column plan without its IO
+        data or past its canvas) is a failed step too, with the reason the sort gave.
         Returns the summary-line note.
         """
         sort_res = await async_sort_function_plan(
@@ -3035,6 +3133,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
         if sort_res and sort_res["success"]:
             note = f", sorted in {sort_res['duration']:.1f}s"
+        elif sort_res and sort_res.get("skipped"):
+            ctx.failed_writes.append(_plan_failure(plan_name, f"sort skipped — {sort_res['skipped']}"))
+            note = f", {ICON_WARNING} sort skipped"
         else:
             ctx.failed_writes.append(_plan_failure(plan_name, "sort failed"))
             note = f", {ICON_WARNING} sort failed"
@@ -3044,37 +3145,58 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             note += _activation_note(ctx, plan_name, await ctx.api.function_plan_run_fup(fub_id))
         return note
 
+    def _stacked_origin_rows(self, fub_id: int, kind: IoPlanKind, exts: list[str]) -> dict[str, dict[str, int]]:
+        """{member: rows of it and of every member before it} in a stacked plan, as its origin derives from them.
+
+        They come from the last poll: api.function_plan_add_io_pairs checks them against the fresh config.
+        """
+        if not kind.stacked:
+            return {}
+        if not (plan := self.coordinator.managed_column_plan(fub_id)):
+            _LOGGER.debug(
+                "[%s] fub=%s is no managed %s plan: its origins go unchecked", self.server_id, fub_id, kind.label
+            )
+            return {}
+        members = plan[1]
+        rows = self.coordinator.io_member_rows(members, kind)
+        return {ext: {m: rows[m] for m in members[: members.index(ext) + 1]} for ext in exts if ext in members}
+
     async def _add_io_pairs_to_plan(
         self,
         ctx: _SyncContext,
         fub_id: int,
-        ext_cols: list[tuple[str, int]],
+        ext_cols: list[tuple[str, tuple[int, int]]],
         by_ext: dict[str, list[str]],
         is_fresh: bool,
         progress_state: dict,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
     ) -> tuple[str, list[str], list[str]]:
-        """Add the missing IO pairs of one or more extensions to one IO cluster plan.
+        """Add the missing IO pairs of one or more members (extensions / Quickbus devices) to one column plan.
 
-        Unlike marker plans there is never a sort pass: every IO pair lands in its
-        deterministic slot (see api.function_plan_add_io_pairs), so finalizing is just
-        reactivating the plan (fresh plans and plans that were active before the stop).
+        Every IO pair lands in its deterministic slot (see api.function_plan_add_io_pairs), so
+        finalizing is just reactivating the plan (fresh plans and plans that were active before
+        the stop) — except an existing stacked (Quickbus) plan, which gets a sort pass to keep
+        its members from overlapping once an earlier member's IO count changed.
         Returns (summary_line, added_labels, errors).
         """
         api = ctx.api
         plan_name = self._plan_name(fub_id)
-        stale_exts = [ext for ext, _ in ext_cols if not self.coordinator.io_cluster_plan_contains(plan_name, ext)]
-        if stale_exts:
+        if stale_exts := [
+            one_line(ext) for ext, _ in ext_cols if not self.coordinator.io_cluster_plan_contains(plan_name, ext, kind)
+        ]:
             _LOGGER.error(
-                "[%s] Aborting IO pair write to fub=%s: plan is now named '%s', no longer a managed IO "
+                "[%s] Aborting %s pair write to fub=%s: plan is now named '%s', no longer a managed %s "
                 "cluster plan for %s — it was renamed/repurposed since resolve_io_clusters() ran",
                 self.server_id,
+                kind.label,
                 fub_id,
                 one_line(plan_name),
+                kind.label,
                 stale_exts,
             )
             return (
                 f"{ICON_WARNING} fub {fub_id} ('{one_line(plan_name)}'): aborted — no longer matches "
-                f"expected IO cluster for {stale_exts}",
+                f"expected {kind.label} cluster for {stale_exts}",
                 [],
                 [_ERR_RENAMED_MID_SYNC.format(fub_id=fub_id)],
             )
@@ -3088,25 +3210,43 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             step_info="Function Plan: adding IO pairs",
         )
         await self.coordinator.async_function_plan_change_backup(
-            fub_id, f"add_io_pairs {[f'{ext}:{len(by_ext[ext])}' for ext, _ in ext_cols]}"
+            fub_id, f"add_io_pairs {[f'{one_line(ext)}:{len(by_ext[ext])}' for ext, _ in ext_cols]}"
         )
         await api.function_plan_stop_fup(fub_id)
 
         added: list[str] = []
         errors: list[str] = []
-        for ext, column in ext_cols:
+        origin_rows = self._stacked_origin_rows(fub_id, kind, [ext for ext, _ in ext_cols])
+        for ext, (column, row_offset) in ext_cols:
             lp_added, lp_errors = await api.function_plan_add_io_pairs(
                 fub_id,
                 ext,
                 by_ext[ext],
                 column_index=column,
                 progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
+                kind=kind,
+                row_offset=row_offset,
+                stacked_rows=origin_rows.get(ext),
             )
             progress_state["done"] += len(by_ext[ext])
-            added.extend(f"{ext} {ident}" for ident in lp_added)
+            label = one_line(kind.member_label(self.coordinator.data, ext))
+            added.extend(f"{label} {ident}" for ident in lp_added)
             errors.extend(lp_errors)
         if errors:
             _LOGGER.warning("[%s] function_plan_add_io_pairs errors: %s", self.server_id, errors)
+
+        if added and kind.stacked and not is_fresh:
+            # Stacked origins follow each member's current IO count, but pairs already in the plan
+            # stay where they were placed: a member above that lost or gained IOs since its pairs were
+            # placed leaves the new pairs overlapping old ones (a change since the last poll adds
+            # nothing, see stacked_rows). The sort restores the whole grid from one snapshot, headers
+            # included, and reactivates the plan.
+            note = await self._sort_and_reactivate(ctx, fub_id, plan_name, was_active)
+            return (
+                _plan_summary_line(plan_name, is_fresh, len(added), n_total, "IO pairs", t0, note, errors),
+                added,
+                errors,
+            )
 
         if added:
             n_headers = await async_resync_io_group_headers(self.coordinator, api, fub_id)
@@ -3144,31 +3284,39 @@ def _parse_source_id_from_webio_name(name: str, prefix: str) -> int | None:
     return None
 
 
-def _parse_io_from_webio_name(name: str, known_names: dict[str, tuple[str, str]]) -> tuple[str, str] | None:
-    """Extract (ext_name, identifier) from a Web-IO command name like 'HA IO UD1 Q3'.
+def _parse_io_from_webio_name(name: str, known_names: dict[str, _IoRef]) -> _IoRef | None:
+    """Extract (kind label, member, identifier) from a Web-IO command name like 'HA IO UD1 Q3'.
 
-    Tries an exact reverse lookup against the known (ext_name, identifier) pairs first, since
-    a positional `name.split()` misparses an extension name that itself contains spaces. Falls
-    back to the positional heuristic only for names with no known counterpart.
+    Tries an exact reverse lookup against the known IO and Quickbus commands first, since a
+    positional `name.split()` misparses an extension name that itself contains spaces (and
+    cannot tell a Quickbus device from its host extension). Falls back to the positional
+    heuristic only for IO names with no known counterpart.
     """
     if ref := known_names.get(name):
         return ref
     parts = name.split()
     if len(parts) >= 4 and parts[0] == "HA" and parts[1] == "IO":
-        return parts[2], parts[3]
+        return IO_PLAN_KIND_IO.label, parts[2], parts[3]
     return None
 
 
-def _merge_io_items(created_refs: list[tuple[str, str]], gap_items: list[dict], managed_exts: set[str]) -> list[dict]:
-    """Merge freshly created IO commands (managed extensions only) with audit gap items,
-    deduplicated by (ext_name, identifier)."""
-    merged: dict[tuple[str, str], dict] = {}
-    for ext, ident in created_refs:
-        if ext in managed_exts:
-            merged[(ext, ident)] = {"ext_name": ext, "identifier": ident}
+def _merge_io_items(
+    created_refs: list[_IoRef], gap_items: list[dict], managed_groups: set[tuple[str, str]]
+) -> list[_IoRef]:
+    """Merge freshly created IO / Quickbus commands and audit gap items of managed members,
+    deduplicated by (kind label, member, identifier)."""
+    merged = dict.fromkeys(ref for ref in created_refs if ref[:2] in managed_groups)
+    if unmanaged := [ref for ref in created_refs if ref[:2] not in managed_groups]:
+        _LOGGER.debug("Created IO commands not wired (member not managed): %s", unmanaged)
     for item in gap_items:
-        merged.setdefault((item["ext_name"], item["identifier"]), item)
-    return list(merged.values())
+        if (member := io_plan_item_member(item)) is None:
+            _LOGGER.warning("Function plan gap item without a column-plan member skipped: %s", item)
+        elif (member[0].label, member[1]) in managed_groups:
+            merged.setdefault((member[0].label, member[1], item["identifier"]))
+        else:
+            # Recorded by an earlier audit; the member was deselected or went offline since.
+            _LOGGER.debug("Function plan gap item not wired (member not managed any more): %s", item)
+    return list(merged)
 
 
 class ComexioMarkerTriggerButton(ComexioMarkerEntity, ButtonEntity):

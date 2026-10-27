@@ -17,6 +17,7 @@ import pytest
 from custom_components.comexio import button as button_module
 from custom_components.comexio.button import ComexioSyncButton, _SyncContext
 from custom_components.comexio.const import (
+    SYNC_DURATION_DELETE,
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
     WEBIO_CLASSES,
@@ -67,8 +68,12 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
             login=AsyncMock(return_value=True),
             get_webio_device_info=AsyncMock(return_value=dev_id),
             webio_device_delete_error=AsyncMock(return_value=None),
+            generate_webio_json=MagicMock(return_value='{"commands": [{"name": "HA M1"}]}'),
             fub_data={"7": {"Name": "Pumps"}},
         ),
+        webio_source_data=MagicMock(return_value={}),
+        ignored_marker_ids=set(),
+        ignored_knx_ids=set(),
         async_ha_address=AsyncMock(return_value=ha_address),
         ha_address=HaAddressResolver(MagicMock()),
         required_webio_classes=list(WEBIO_CLASSES),
@@ -436,6 +441,7 @@ def test_an_unexpected_error_still_logs_its_traceback() -> None:
 
 
 _FAST_TRACK_MISSING = [{}] * (SYNC_DURATION_RECREATE // SYNC_DURATION_WRITE + 1)  # ETA above the threshold
+_FAST_TRACK_ORPHANS = [{}] * (SYNC_DURATION_RECREATE // SYNC_DURATION_DELETE + 1)
 
 
 def test_no_fast_track_with_a_loopback_address() -> None:
@@ -462,6 +468,53 @@ def test_fast_track_with_a_reachable_address() -> None:
 
     assert action == "recreate"
     button.coordinator.api.webio_device_delete_error.assert_awaited_once_with("7")
+
+
+@pytest.mark.parametrize("cls", [WebioClass.QUICKBUS, WebioClass.KNX])
+def test_no_fast_track_for_a_class_with_no_wanted_command(cls: WebioClass) -> None:
+    """Quickbus with no device selected, every KNX object ignored: the device is synced (orphans
+    removed), never rebuilt from an empty template."""
+    button = _button(REACHABLE)
+    button.coordinator.api.generate_webio_json.return_value = '{"commands": []}'
+    ctx = _ctx(button, REACHABLE)
+    with patch.object(button_module, "webio_still_present", AsyncMock(return_value=None)):
+        action = asyncio.run(button._decide_effective_action(ctx, cls, "7", [], [], [], _FAST_TRACK_ORPHANS, False))
+
+    assert action == "full_sync"
+    button.coordinator.api.webio_device_delete_error.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("commands", "action"),
+    [("[]", button_module._ACTION_SKIP_CLASS), ('[{"name": "HA Q1"}]', "recreate")],
+    ids=["emptied", "wanted"],
+)
+def test_a_class_without_a_device_is_recreated_only_with_a_wanted_command(commands: str, action: str) -> None:
+    """(Sourcery) The sync picks its classes before the first write; emptied since (options saved
+    mid-sync), the class was recreated from an empty template, which gets no device on Comexio."""
+    button = _button(REACHABLE)
+    button.coordinator.api.generate_webio_json.return_value = f'{{"commands": {commands}}}'
+    ctx = _ctx(button, REACHABLE)
+
+    decided = asyncio.run(button._decide_effective_action(ctx, WebioClass.QUICKBUS, None, [{}], [], [], [], False))
+
+    assert decided == action
+
+
+def test_a_skipped_class_writes_and_counts_nothing() -> None:
+    button = _button(REACHABLE)
+    button.coordinator.api.generate_webio_json.return_value = '{"commands": []}'
+    button._recreate_class = AsyncMock()  # type: ignore[method-assign]
+    button._delta_sync_class = AsyncMock()  # type: ignore[method-assign]
+    ctx = _ctx(button, REACHABLE)
+
+    result = asyncio.run(
+        ComexioSyncButton._sync_class(button, ctx, WebioClass.QUICKBUS, None, [{}], [], [], [], [], False, 0, 100)
+    )
+
+    button._recreate_class.assert_not_awaited()
+    button._delta_sync_class.assert_not_awaited()
+    assert result == {**_CLASS_RESULT, "created_names": []}
 
 
 @pytest.mark.parametrize(
