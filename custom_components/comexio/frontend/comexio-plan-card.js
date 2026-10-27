@@ -35,12 +35,12 @@ import {
   isTextQuery,
   fmtTs,
   orphanPreviewMatch,
-} from "./comexio-plan-card-utils.js?v=0.9.54";
+} from "./comexio-plan-card-utils.js?v=0.9.55";
 
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.54";
+const CARD_VERSION = "0.9.55";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -1605,10 +1605,11 @@ ${warning}`;
     if (match === "unknown") {
       return "Achtung: Die Vorschau hat diese Auswahl (noch) nicht geladen — das Bild kann einen anderen Plan zeigen.";
     }
+    const liveSuffix = shown.source === "live" ? ", Live-Stand" : "";
     const what =
       match === "other_snapshot"
         ? `ein anderes Backup von „${shown.plan_name}“`
-        : `„${shown.plan_name}“ (ID ${shown.fub_id})${shown.source === "live" ? ", Live-Stand" : ""}`;
+        : `„${shown.plan_name}“ (ID ${shown.fub_id})${liveSuffix}`;
     return `Achtung: Die Vorschau zeigt nicht diese Auswahl, sondern ${what}. Bitte die Auswahl prüfen.`;
   }
 
