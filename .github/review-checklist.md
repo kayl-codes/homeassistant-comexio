@@ -181,7 +181,8 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   sort grid) come from the same config read; mixing cached coordinator data with a fresh reload lets one block
   overlap another when the data changed in between. A writer that reloads before it writes compares the row counts
   its origins were derived from with the fresh read and writes nothing for a member when they differ
-  (`stacked_rows` in `function_plan_add_io_pairs`) — the next sync polls first and lays out from one snapshot again.
+  (`stacked_rows` in `function_plan_add_io_pairs`) and reports it as not wired; a sync starts from the cached
+  coordinator data, so only a sync after the next poll lays that member out from one snapshot again.
   A member whose origin would move goes to the failures with its reason instead of being wired at the new origin
   over pairs already placed: a stacked member behind one left without rows (`const.io_plan_shifted`), a first
   member a shrunk canvas no longer holds (`io_plan_overflow(..., check_first=True)`). Flag positions computed from
@@ -216,11 +217,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   started or restored while an earlier plan's await ran keeps its confirmation (`_started_in_check`,
   `unless_restored`).
 - **Skip guards before the first write:** a list chosen up front (the classes a sync runs, the plans a repair
-  fixes) can be stale by the time an item's turn comes — an options save mid-sync can empty a class. The guard that
-  skips an item with nothing to do (an empty template, no wanted command) runs right before that item's first write
-  and ahead of every branch that writes, not inside one of them: `_decide_effective_action` checks
-  `_class_template_empty` before the no-device recreate as well as before Fast-Track. Flag a skip guard that only
-  one of several writing branches passes through, and an item written on the strength of a decision taken before
+  fixes) can be stale by the time an item's turn comes — an options save mid-sync can empty a class. The guard
+  against writing for nothing (an empty template, no wanted command) runs right before that item's first write and
+  covers every branch that would write it, not just one of them: `_decide_effective_action` checks
+  `_class_template_empty` before the no-device recreate (the class is skipped, Comexio creates no device for an
+  empty class) as well as before Fast-Track. What the guard prevents depends on the branch: a class that still has a
+  device is not skipped but delta-synced without Fast-Track, so the commands the changed selection dropped are
+  deleted on Comexio. Flag a guard that only one of several writing branches passes through, a guard that also
+  skips the cleanup an existing item still needs, and an item written on the strength of a decision taken before
   the loop (#220).
 - **Unload waits for running work:** `async_unload_entry` calls `coordinator.async_wait_before_unload()` before it
   unloads the platforms; the wait is bounded and polls — it never queues on a lock — for every operation that
