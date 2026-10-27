@@ -413,12 +413,21 @@ def test_orphaned_backup_options_plan_row_then_indented_snapshots() -> None:
         indent + backup_module.format_backup_label(backups[1]),
     ]
     identity = {"fub_id": 3, "plan_name": "Garage", "kept": True}
-    # The plan row shows the newest snapshot, whatever its kind.
+    # The plan row shows the newest snapshot, whatever its kind; captured_at names it across slot shifts.
     assert [choice for _label, choice in rows] == [
-        {**identity, "kind": "change", "slot": 0, "plan_row": True},
-        {**identity, "kind": "auto", "slot": 0, "plan_row": False},
-        {**identity, "kind": "change", "slot": 0, "plan_row": False},
+        {**identity, "kind": "change", "slot": 0, "captured_at": RECENT, "plan_row": True},
+        {**identity, "kind": "auto", "slot": 0, "captured_at": OLD, "plan_row": False},
+        {**identity, "kind": "change", "slot": 0, "captured_at": RECENT, "plan_row": False},
     ]
+
+
+def test_orphaned_backup_options_name_no_capture_time_for_an_undated_snapshot() -> None:
+    """An old snapshot without captured_at gets None — the plan card then never matches it (warns)."""
+    backups = [{"kind": "auto", "slot": 0}, {"kind": "auto", "slot": 1, "captured_at": OLD}]
+
+    rows = backup_module.build_orphaned_backup_options([_orphan(3, "Garage", backups)])
+
+    assert [(choice["slot"], choice["captured_at"]) for _label, choice in rows] == [(1, OLD), (0, None), (1, OLD)]
 
 
 def test_orphaned_backup_options_keep_labels_unique_across_plans() -> None:
