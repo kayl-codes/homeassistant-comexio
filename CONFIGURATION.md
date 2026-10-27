@@ -60,14 +60,26 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 |-------|-------------|
 | **Naming schema — Markers** | Template for entity names. Variables: `{MarkerId}`, `{MarkerTitle}` |
 | **Naming schema — IOs** | Template for entity names. Variables: `{ExtName}`, `{IoId}`, `{IoTitle}`. Default `{IoId} {IoTitle}` — the extension already appears via the device name. An IO without a description gets the title `#nn`. Entity IDs never depend on the schema. |
+| **Naming schema — KNX objects** | Template for entity names. Variables: `{KnxId}`, `{KnxTitle}`. See the [KNX Objects guide](KNX.md). |
 | **Create marker entities** | Enable/disable Marker import. |
 | **Create IO entities** | Enable/disable IO import. |
+| **Create KNX object entities** | Enable/disable KNX import (off by default), see the [KNX Objects guide](KNX.md). |
+| **Create Quickbus device entities** | Enable/disable the read-only Quickbus entities (on by default). |
 | **Polling interval** | Dropdown (1 – 1440 min). Prefer longer intervals — live values arrive via webhook. |
 | **Webhook address** | Where Comexio pushes live values. *Automatic*: HA's local address. *External HA URL*: host and port of the external URL from HA's network settings (`https` without a port means 443). *Custom address*: a URL entered in a second step (`http(s)://host[:port]`, no path). With an external or custom address the push leaves your network and goes over the internet. A plain `http://` address is therefore only accepted inside the local network (private IPs, single-label names, local domains such as `fritz.box` or `.local`); elsewhere use `https://`. If the external URL is missing or unusable, the integration falls back to the automatic address, logs a warning, and the Repair issue says that its fix writes the automatic address. After a change the Repair issue offers **Update HA Server Address (IP:Port)**, which rewrites only the address of the Web-IO devices. The Web-IO commands stay unchanged on HTTP, also for an `https://` address: Comexio picks HTTP or HTTPS itself. |
 | **Show sync notifications** | Display pop-up progress messages during WebIO sync. |
 | **Ignore Web-IO warnings** | Suppress the Repair issue when the Web-IO class is out of sync. |
 | **Show offline extension entities** | Show entities of offline modules as *Unavailable* instead of hiding them. |
 | **Cover detection keywords** | Comma-separated keywords; an analog marker whose name contains one becomes a 0–100 % number/sensor (default `rollo, jalousie, blind, markise, awning`). A marker name with `temp`, `setpoint`, `°C` or the word `Grad` becomes a °C temperature (−273 to 10,000); a bare `Soll` does not. |
+| **Name prefix for managed function plans** | Prefix of the cluster plans the integration creates and manages (default `HA`, e.g. `HA - Marker [1-100]`). |
+| **Max. pairs per managed function plan** | Web-IO + marker pairs per cluster plan before a new one is started. For IO and Quickbus plans 50 / 100 / 150 mean 1 / 2 / 3 columns. KNX plans always hold 50. |
+| **Extensions managed as IO cluster plans** | Extensions whose IOs are wired into a managed plan `HA - IO [<ext>,...]`, one column per extension. Offline extensions are not offered. |
+| **Quickbus devices managed as QB cluster plans** | Quickbus devices whose IOs are wired into a managed plan `HA - QB [<device id>,...]`; only these get Web-IO commands and report values. All devices until you change it. |
+| **Marker IDs / KNX object IDs to exclude** | IDs and ranges (`123, 456`, `M123`, `8-12`) that get no entity and no function plan wiring. Only described objects can be ignored. An ignored `[TRIG]` source also loses its trigger pair. A range stays as written and covers IDs created later; a single ID whose source is gone is removed, and so is a KNX bridge marker — those cannot be ignored. A category with no objects on the server and its import off hides its list; the saved list is kept. |
+| **Orphaned backup retention** | Months after which a repair asks whether to keep or delete the backups of a plan deleted in Comexio. Nothing is deleted without your confirmation. See the [Backup guide](BACKUPS.md). |
+| **Enable Bus-Load Watchdog** / **Allow automatic Comexio reboot** | On a sustained bus-load rise, restart the HA-managed cluster plans. The reboot option (off by default) reboots Comexio without asking when the load averages above 90 % for 5 minutes. |
+| **Function plan watchdog: push to** | Notify services that get a push when a watched plan stops or is deleted, and an urgent push when Comexio presents another TLS certificate. See [Function plan watchdog](README.md#function-plan-watchdog). |
+| **Function plan watchdog: also watch user plans** | User plans that should always run; they get the same repair, problem sensor and push as the HA plans. |
 
 ---
 
@@ -191,14 +203,26 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 |------|--------------|
 | **Namensschema — Merker** | Vorlage für Entity-Namen. Variablen: `{MarkerId}`, `{MarkerTitle}` |
 | **Namensschema — IOs** | Vorlage für Entity-Namen. Variablen: `{ExtName}`, `{IoId}`, `{IoTitle}`. Standard `{IoId} {IoTitle}` — die Extension steht bereits im Gerätenamen. Ein IO ohne Beschreibung erhält den Titel `#nn`. Entity-IDs hängen nie vom Schema ab. |
+| **Namensschema — KNX-Objekte** | Vorlage für Entity-Namen. Variablen: `{KnxId}`, `{KnxTitle}`. Siehe [KNX-Leitfaden](KNX.md). |
 | **Merker als Entitäten anlegen** | Merker-Import aktivieren/deaktivieren. |
 | **Ein- und Ausgänge anlegen** | IO-Import aktivieren/deaktivieren. |
+| **KNX-Objekte als Entitäten anlegen** | KNX-Import aktivieren/deaktivieren (Standard aus), siehe [KNX-Leitfaden](KNX.md). |
+| **Quickbus-Geräte als Entitäten anlegen** | Die Nur-Lese-Entitäten der Quickbus-Geräte aktivieren/deaktivieren (Standard an). |
 | **Abfrageintervall** | Dropdown (1 – 1440 min). Längere Intervalle bevorzugen — Live-Werte kommen per Webhook. |
 | **Webhook-Adresse** | Wohin Comexio die Live-Werte pusht. *Automatisch*: die lokale Adresse von HA. *Externe HA-URL*: Host und Port der externen URL aus den HA-Netzwerkeinstellungen (`https` ohne Port bedeutet 443). *Eigene Adresse*: eine URL, die in einem zweiten Schritt eingegeben wird (`http(s)://host[:port]`, ohne Pfad). Mit externer oder eigener Adresse verlässt der Push dein Netzwerk und läuft über das Internet. Eine reine `http://`-Adresse wird deshalb nur im lokalen Netz akzeptiert (private IPs, Namen ohne Punkt, lokale Domains wie `fritz.box` oder `.local`); sonst `https://` verwenden. Fehlt die externe URL oder ist sie nicht nutzbar, weicht die Integration auf die automatische Adresse aus, schreibt eine Warnung ins Log, und das Reparatur-Issue sagt, dass seine Korrektur die automatische Adresse schreibt. Nach einer Änderung bietet das Reparatur-Issue **HA Server-Adresse (IP:Port) aktualisieren** an; das schreibt nur die Adresse der Web-IO-Geräte neu. Die Web-IO-Befehle bleiben unverändert auf HTTP, auch bei einer `https://`-Adresse: Comexio wählt HTTP oder HTTPS selbst. |
 | **Fortschritts-Popups anzeigen** | Fortschrittsmeldungen während des WebIO-Syncs anzeigen. |
 | **Web-IO-Warnung ignorieren** | Reparatur-Issue unterdrücken, wenn die Web-IO-Klasse nicht synchron ist. |
 | **Offline-Extensions anzeigen** | Entitäten offline gegangener Module als *Nicht verfügbar* anzeigen statt ausblenden. |
 | **Schlüsselwörter Rollladen-Erkennung** | Kommaseparierte Liste; ein analoger Merker, dessen Name eines davon enthält, wird zur 0–100-%-Zahl bzw. zum %-Sensor (Standard `rollo, jalousie, blind, markise, awning`). Ein Merkername mit `temp`, `setpoint`, `°C` oder dem Wort `Grad` wird zur °C-Temperatur (−273 bis 10 000); ein bloßes `Soll` reicht dafür nicht. |
+| **Namenspräfix für verwaltete Logikpläne** | Präfix der Cluster-Pläne, die die Integration anlegt und verwaltet (Standard `HA`, z. B. `HA - Marker [1-100]`). |
+| **Max. Paare pro verwaltetem Logikplan** | Web-IO- + Merker-Paare pro Cluster-Plan, bevor ein neuer begonnen wird. Bei IO- und Quickbus-Plänen bedeuten 50 / 100 / 150 eine / zwei / drei Spalten. KNX-Pläne fassen immer 50. |
+| **Als IO-Cluster-Pläne verwaltete Erweiterungen** | Erweiterungen, deren IOs in einen verwalteten Plan `HA - IO [<Ext>,...]` verdrahtet werden, eine Spalte pro Erweiterung. Offline-Erweiterungen werden nicht angeboten. |
+| **Als QB-Cluster-Pläne verwaltete Quickbus-Geräte** | Quickbus-Geräte, deren IOs in einen verwalteten Plan `HA - QB [<Geräte-ID>,...]` verdrahtet werden; nur diese erhalten Web-IO-Befehle und melden Werte. Alle Geräte, bis du es änderst. |
+| **Merker-IDs / KNX-Objekt-IDs ausschließen** | IDs und Bereiche (`123, 456`, `M123`, `8-12`), die keine Entität und keine Logikplan-Verdrahtung erhalten. Nur Objekte mit Beschreibung lassen sich ignorieren. Eine ignorierte `[TRIG]`-Quelle verliert auch ihr Trigger-Paar. Ein Bereich bleibt wie eingegeben und erfasst auch später angelegte IDs; eine einzelne ID, deren Quelle verschwunden ist, wird entfernt, ebenso ein KNX-Brückenmerker — diese lassen sich nicht ignorieren. Eine Kategorie ohne Objekte auf dem Server und mit abgeschaltetem Import blendet ihre Liste aus; die gespeicherte Liste bleibt erhalten. |
+| **Aufbewahrung verwaister Backups** | Monate, nach denen eine Reparatur fragt, ob die Backups eines in Comexio gelöschten Plans behalten oder gelöscht werden. Ohne deine Bestätigung wird nichts gelöscht. Siehe [Backup-Leitfaden](BACKUPS.md). |
+| **Bus-Auslastungs-Watchdog aktivieren** / **Automatischen Comexio-Neustart erlauben** | Bei anhaltend steigender Busauslastung die von HA verwalteten Cluster-Pläne neu starten. Die Neustart-Option (Standard aus) startet Comexio ohne Rückfrage neu, wenn die Auslastung 5 Minuten lang im Mittel über 90 % liegt. |
+| **Logikplan-Watchdog: Push an** | Benachrichtigungsdienste, die einen Push erhalten, wenn ein überwachter Plan stoppt oder gelöscht wird, und einen dringenden Push, wenn Comexio ein anderes TLS-Zertifikat vorlegt. Siehe [Logikplan-Watchdog](README.md#logikplan-watchdog). |
+| **Logikplan-Watchdog: zusätzlich überwachte Pläne** | Benutzerpläne, die immer laufen sollen; sie erhalten dieselbe Reparatur, denselben Problem-Sensor und denselben Push wie die HA-Pläne. |
 
 ---
 

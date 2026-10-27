@@ -101,7 +101,7 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 > **Admin password changed in Comexio:** If Comexio rejects the stored admin credentials of an existing entry — when the integration starts or on a poll — Home Assistant shows a *Re-authenticate Comexio* prompt under *Settings → Devices & Services*. Enter the current username and password there. Until then, the configuration poll stops and the integration does not try the rejected credentials again — only a Home Assistant restart or a reload of the entry tries them once more, and asks for reauth again if Comexio still refuses them. While you are first adding the integration, rejected credentials show an error in the setup form instead.
 
 > [!NOTE]
-> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, webhook address, notifications, and cover detection keywords.
+> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, webhook address, notifications, cover detection keywords, managed function plans (prefix, size, IO extensions, Quickbus devices), ignore lists, backup retention, and the bus-load and function plan watchdogs.
 
 📖 **[Full configuration guide with screenshots →](CONFIGURATION.md)**
 
@@ -215,6 +215,8 @@ Function plans are backed up automatically — no configuration needed:
 ### 🧱 Managed Cluster Plans
 
 For large installations, marker/Web-IO pairs can be distributed across auto-managed plans named like `HA - Marker [1-100]`. The plan name prefix and the maximum number of marker pairs per plan are configurable in the integration options. Managed plans are labelled with a comment element inside Comexio so they are easy to recognise.
+
+The same applies to IOs and Quickbus devices: each extension picked under **Extensions managed as IO cluster plans** gets a column in a plan `HA - IO [<ext>,...]`, and the devices picked under **Quickbus devices managed as QB cluster plans** stack in the columns of a plan `HA - QB [<device id>,...]`. The pairs-per-plan setting gives the column count (50 / 100 / 150 → 1 / 2 / 3). KNX objects get plans of their own (`HA - KNX [...]`, always 50 pairs). Marker and KNX object IDs listed in the options' ignore lists get no entity and no wiring, see [CONFIGURATION.md](CONFIGURATION.md#3-settings).
 
 ## 🔌 KNX Objects
 
@@ -363,7 +365,7 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 > **Admin-Passwort in Comexio geändert:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten einer bestehenden Integration ab — beim Start der Integration oder bei einer Abfrage —, zeigt Home Assistant unter *Einstellungen → Geräte & Dienste* die Aufforderung *Comexio erneut anmelden*. Dort den aktuellen Benutzernamen und das Passwort eingeben. Bis dahin ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut — nur ein Neustart von Home Assistant oder ein Neuladen der Integration versucht sie noch einmal und fordert erneut zur Anmeldung auf, wenn Comexio sie weiter ablehnt. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
 
 > [!NOTE]
-> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Webhook-Adresse, Benachrichtigungen und Rollladen-Schlüsselwörter.
+> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Webhook-Adresse, Benachrichtigungen, Rollladen-Schlüsselwörter, verwaltete Logikpläne (Präfix, Größe, IO-Erweiterungen, Quickbus-Geräte), Ignorier-Listen, Aufbewahrung verwaister Backups sowie Busauslastungs- und Logikplan-Watchdog.
 
 📖 **[Vollständige Konfigurationsanleitung mit Screenshots →](CONFIGURATION.md)**
 
@@ -480,6 +482,8 @@ Funktionspläne werden automatisch gesichert — ganz ohne Konfiguration:
 ### 🧱 Verwaltete Cluster-Pläne
 
 Für große Installationen können Merker/Web-IO-Paare auf automatisch verwaltete Pläne mit Namen wie `HA - Marker [1-100]` verteilt werden. Präfix und maximale Paar-Anzahl je Plan sind in den Integrations-Optionen einstellbar. Verwaltete Pläne werden in Comexio mit einem Kommentar-Element gekennzeichnet und sind so leicht erkennbar.
+
+Dasselbe gilt für IOs und Quickbus-Geräte: Jede unter **Als IO-Cluster-Pläne verwaltete Erweiterungen** gewählte Erweiterung erhält eine Spalte in einem Plan `HA - IO [<Ext>,...]`, und die unter **Als QB-Cluster-Pläne verwaltete Quickbus-Geräte** gewählten Geräte stapeln sich in den Spalten eines Plans `HA - QB [<Geräte-ID>,...]`. Die Einstellung Paare pro Plan bestimmt die Spaltenzahl (50 / 100 / 150 → 1 / 2 / 3). KNX-Objekte erhalten eigene Pläne (`HA - KNX [...]`, immer 50 Paare). In den Ignorier-Listen der Optionen eingetragene Merker- und KNX-Objekt-IDs erhalten keine Entität und keine Verdrahtung, siehe [CONFIGURATION.md](CONFIGURATION.md#3-einstellungen).
 
 ## 🔌 KNX-Objekte
 
